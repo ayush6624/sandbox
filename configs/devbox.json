@@ -1,0 +1,15 @@
+{
+  "firecracker_bin": "/usr/local/bin/firecracker",
+  "kernel_image": "/opt/fc/vmlinux",
+  "rootfs_path": "/opt/fc/devbox-rootfs.ext4",
+  "kernel_args": "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0",
+  "vcpus": 2,
+  "mem_mib": 1024,
+  "socket_path": "",
+  "state_path": "/tmp/websandbox-state.json",
+  "tap_device": "tap0",
+  "mac_address": "AA:FC:00:00:00:01",
+  "guest_cidr": "172.16.0.2/24",
+  "gateway_ip": "172.16.0.1",
+  "nameservers": "8.8.8.8"
+}
