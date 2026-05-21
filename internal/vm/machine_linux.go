@@ -123,7 +123,7 @@ func buildNetworkInterface(o RunOptions) (fcsdk.NetworkInterface, error) {
 	}, nil
 }
 
-func buildCommand(ctx context.Context, fcCfg fcsdk.Config, fcBin string) *exec.Cmd {
+func buildCommand(ctx context.Context, fcCfg fcsdk.Config, fcBin, logDir string) *exec.Cmd {
 	builder := fcsdk.VMCommandBuilder{}.
 		WithBin(fcBin).
 		WithSocketPath(fcCfg.SocketPath).
@@ -133,7 +133,14 @@ func buildCommand(ctx context.Context, fcCfg fcsdk.Config, fcBin string) *exec.C
 	} else if len(fcCfg.Seccomp.Filter) > 0 {
 		builder = builder.AddArgs("--seccomp-filter", fcCfg.Seccomp.Filter)
 	}
-	return builder.Build(ctx)
+	cmd := builder.Build(ctx)
+	// Capture firecracker's stdout/stderr so we can debug early-exit crashes.
+	logPath := filepath.Join(logDir, fmt.Sprintf("firecracker-%s.log", fcCfg.VMID))
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		cmd.Stdout = f
+		cmd.Stderr = f
+	}
+	return cmd
 }
 
 func silentLog() *logrus.Entry {
@@ -151,7 +158,7 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 	}
 	fcCfg.DisableValidation = disableValidation
 
-	cmd := buildCommand(ctx, fcCfg, opts.FirecrackerBin)
+	cmd := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir)
 	m, err := fcsdk.NewMachine(ctx, fcCfg, fcsdk.WithProcessRunner(cmd), fcsdk.WithLogger(silentLog()))
 	if err != nil {
 		return nil, RuntimeConfig{}, err

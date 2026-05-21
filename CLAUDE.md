@@ -2,43 +2,55 @@
 
 ## Project overview
 
-Firecracker-based microVM devboxes for frontend development. Spins up an Ubuntu
-24.04 VM with Node 22, pnpm, TypeScript, and a Vite React-TS project
-pre-installed (`node_modules` baked into the rootfs, Vite started by systemd on
-boot). Lovable / e2b style — but self-hosted, on bare metal.
+Firecracker-based microVM sandboxes for frontend development, exposed via a
+local HTTP API over a Unix socket. Each sandbox boots Ubuntu 24.04 with Node 22,
+pnpm, TypeScript, and a Vite React-TS project (Vite started by systemd on boot).
+Lovable / e2b style — but self-hosted, on bare metal.
+
+Multi-sandbox: each one gets its own tap, IP, host port, and rootfs copy.
+State is in SQLite at `/var/lib/websandbox/registry.db`. The server (`websandbox serve`)
+owns all running VMs in-process.
 
 ## Build & run
 
 ```bash
 make build            # Local build (uses stub on macOS — Firecracker calls return ErrLinuxOnly)
-make build-linux      # Cross-compile bin/websandbox for linux/amd64
+make build-linux      # Cross-compile bin/websandbox for linux/amd64 (pure-Go SQLite, CGO disabled)
 ```
 
-Firecracker requires Linux with `/dev/kvm`. macOS is dev-only.
+Server + CLI (on a Linux host; both need root):
 
 ```bash
-sudo ./websandbox doctor --config configs/devbox.json
-sudo ./websandbox up    --config configs/devbox.json   # blocks until Ctrl+C or `down`
-sudo ./websandbox down  --config configs/devbox.json   # from another shell
+sudo ./websandbox serve --config configs/devbox.json    # daemon-ish; listens on /run/websandbox.sock
+sudo ./websandbox doctor --config configs/devbox.json   # env validation
+sudo ./websandbox up                                    # POST /sandboxes → prints JSON + URL
+sudo ./websandbox list                                  # GET /sandboxes
+sudo ./websandbox down <id>                             # DELETE /sandboxes/<id>
 ```
+
+The `up`, `down`, and `list` commands are thin HTTP clients over the Unix socket.
+They need `sudo` because the socket is mode 0600 and the binary needs the
+NOPASSWD sudoers rule below.
+
+To stop the server: `sudo pkill websandbox` — SIGTERM triggers a graceful
+shutdown that tears down every running sandbox.
 
 ## Remote deployment
 
-The Makefile defaults to `REMOTE_USER=ayush REMOTE_HOST=machine REMOTE_DIR=web-sandbox`.
-
 ```bash
-make sync                 # build-linux + rsync bin/websandbox + Makefile + configs + scripts
-make remote-doctor        # ssh + run doctor
-make remote-up            # ssh + run up (blocks)
-make remote-down          # ssh + run down
+make sync                              # build-linux + rsync bin/websandbox + Makefile + configs + scripts
+make remote-doctor                     # ssh + run doctor
+make remote-serve                      # ssh + run server (blocks)
+make remote-up                         # ssh + create a sandbox
+make remote-list                       # ssh + list
+make remote-down SANDBOX=<id>          # ssh + destroy one
 ```
 
-Note: `sync` rsyncs `bin/websandbox` so the binary lands at `~/web-sandbox/websandbox`
+`sync` rsyncs `bin/websandbox` so the binary lands at `~/web-sandbox/websandbox`
 (not `~/web-sandbox/bin/websandbox`). All `remote-*` targets and the README use
 `./websandbox`. Don't reintroduce `./bin/websandbox` in remote commands.
 
-For driving up/down from automation (e.g. CI or a Claude session), set up
-passwordless sudo scoped to the binary:
+NOPASSWD sudoers (one-time, lets the CLI/server run as root without prompting):
 
 ```
 ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/websandbox
@@ -52,69 +64,93 @@ in `/etc/sudoers.d/websandbox` with mode `0440`.
 sudo bash scripts/setup-firecracker.sh      # install firecracker binary
 sudo bash scripts/setup-kernel.sh           # download Firecracker-compatible kernel
 sudo bash scripts/build-devbox-rootfs.sh    # build /opt/fc/devbox-rootfs.ext4 (resumable, ~5 min)
-sudo bash scripts/setup-network.sh          # create tap0, NAT, port-forward 5173 (idempotent)
+sudo bash scripts/setup-network.sh          # create br-fc, NAT, sysctls
 ```
 
-`setup-network.sh` is the only one that's NOT one-time per host: tap0 and iptables
-rules don't survive a reboot, so it must be re-run after every host restart
-(only the sysctl `net.ipv4.ip_forward=1` persists, via `/etc/sysctl.d/99-firecracker.conf`).
+`setup-network.sh` is NOT one-time per host: the bridge and iptables rules don't
+survive a reboot (only the sysctls persist via `/etc/sysctl.d/99-firecracker.conf`).
+Re-run after every host restart.
+
+It sets these critical host-wide knobs:
+- `net.ipv4.ip_forward=1`
+- `net.ipv4.conf.all.route_localnet=1` — **required**: lets DNAT'd packets with src=127.0.0.1
+  route out non-loopback interfaces (otherwise `curl localhost:<host_port>` hangs)
+- `iptables -t nat -A POSTROUTING -o br-fc -j MASQUERADE` — **required**: rewrites
+  host→guest source to the bridge IP so the guest can reply (otherwise it tries to
+  reply to 127.0.0.1 and the connection times out)
+
+If you change these, host:port → guest:5173 forwarding silently breaks.
 
 ## Code layout
 
 ```
 cmd/websandbox/
-  main.go              Root cobra command (wires up/down/doctor)
-  up.go                Boot VM, save state with PID, wait for signal OR VM exit, clean shutdown
-  down.go              Read state, SIGTERM the firecracker PID, remove state
-  doctor.go            Colored env checks (Linux, KVM, firecracker, kernel, rootfs, tap, ip_forward)
-  helpers.go           Shared flags (--config, --firecracker, --kernel, --rootfs, --socket,
-                       --vcpus, --mem-mib, --no-validate) and config-+-flags merge
-internal/config/config.go    JSON config with Defaults() — DisallowUnknownFields
-internal/state/state.go      VMState {PID, SocketPath, VMID} JSON persistence
+  main.go              Root cobra command (wires serve/up/down/list/doctor)
+  serve.go             Boots the API server (daemon-ish)
+  up.go                Thin client: POST /sandboxes
+  down.go              Thin client: DELETE /sandboxes/<id>
+  list.go              Thin client: GET /sandboxes (tabwriter output)
+  doctor.go            Colored env checks (Linux, KVM, firecracker, kernel, rootfs, bridge, ip_fwd, API socket)
+  helpers.go           Shared cfg/socket flags and Client constructor
+internal/config/config.go         JSON config + Defaults(); DisallowUnknownFields
+internal/client/client.go         Unix-socket HTTP client (Create/List/Get/Destroy)
+internal/server/server.go         http.ServeMux on Unix socket; owns map[id]*vm.Machine; vmCtx lifetime
+internal/registry/registry.go     SQLite-backed registry; resource allocation (tap/IP/port from pools)
+internal/provisioner/provisioner.go  Host-side ops: rootfs cp, tap create/delete, iptables DNAT
 internal/vm/
-  machine_linux.go     Firecracker SDK integration, networking, snapshot-less for now
-  machine_stub.go      Non-Linux stub matching the Linux signatures
-  options.go           RunOptions (paths + networking) and RuntimeConfig
-configs/devbox.json    Default config (tap0, 172.16.0.2/24, 2 vCPU, 1 GiB, Vite on :5173)
-scripts/               Host setup shell scripts
+  machine_linux.go    Firecracker SDK integration; ShutdownGuest, Wait, PID; captures stderr to firecracker-<vmid>.log
+  machine_stub.go     Non-Linux stub matching the Linux signatures
+  options.go          RunOptions + RuntimeConfig
+configs/devbox.json   Default config (pools, bridge, paths, vCPUs/mem)
+scripts/              Host setup shell scripts
 ```
 
 ## Architecture notes
 
-- **Build tags**: `//go:build linux` for SDK code, `//go:build !linux` for the stub.
-  Keep `Machine` and the public functions (`NewMachine`, `Start`, `StopForce`,
-  `ShutdownGuest`, `Wait`, `PID`) signature-identical in both files.
-- **Shutdown path**: `up` waits in a `select` on either `ctx.Done()` (signal) or
-  `vm.Wait` completing (firecracker died — e.g. `down` SIGTERMed it). Signal path
-  calls `ShutdownGuest` (ACPI), then `vm.Wait` with timeout, then `StopForce` as fallback.
-  VM-exit path skips straight to state cleanup. Don't drop the VM-exit case
-  — without it, `down` orphans the `up` process.
-- **State file** at `/tmp/websandbox-state.json` (configurable). Single-VM only —
-  the path is global, the tap is `tap0`, the guest IP is hardcoded in `devbox.json`.
-  Multi-VM support is not implemented.
-- **Rootfs is mutable**. Writes inside the guest persist to `/opt/fc/devbox-rootfs.ext4`.
-  Running two VMs from the same image will corrupt it. For parallel VMs you need
-  to copy the rootfs (or use `cp --reflink=always` on btrfs/XFS).
-- **`disableValidation` arg on `NewMachine`** lets you build the SDK config on
-  non-Linux for dry runs. The `--no-validate` flag wires this up.
+- **Single long-running server.** `serve` owns every `*vm.Machine` in `machines sync.Map`.
+  If the server crashes, firecracker children become orphaned and we can no longer ACPI-shutdown
+  via the SDK — recovery on next start is NOT implemented; stale taps/rootfs/DB rows must be
+  cleaned manually. Acceptable for v1.
+- **`vmCtx` ≠ request ctx.** `handleCreate` must pass `s.vmCtx` (server-scoped) to `vm.NewMachine`
+  and `vm.Start`, NOT `r.Context()` — the request ctx cancels when the handler returns, and the
+  firecracker SDK SIGTERMs the VM when its ctx cancels. This was an early bug that wasted hours.
+- **Pools allocated atomically via SQLite.** `registry.Create` runs INSERT inside a TX with
+  partial unique indexes (`uniq_tap_running` etc.) guaranteeing no two running sandboxes share
+  a tap/IP/port. Concurrent creates that race lose to UNIQUE constraint and surface as 500.
+- **Per-VM rootfs is a full `cp --sparse=always`.** Slow on ext4 (~2 GB-sparse copy in ~1 s,
+  but I/O scales linearly with N). On btrfs/XFS, switching to `--reflink=auto` would make it
+  instant. Don't share the rootfs between VMs — ext4 corrupts under concurrent mount.
+- **Build tags**: `//go:build linux` for SDK code, `//go:build !linux` for the stub. Keep the
+  signatures identical in both files.
+- **`disableValidation` arg on `NewMachine`** lets you build the SDK config on non-Linux for
+  dry runs. Server passes `false`.
+- **Firecracker stderr/stdout is captured** to `firecracker-<vmid>.log` in the server's cwd.
+  After `/logger` is bootstrapped, firecracker writes most logs to its log FIFO (drained by
+  the SDK, never persisted). For deep-dive debugging, switch `LogFifo` to a regular file path.
 
 ## Conventions
 
-- Config merging: JSON file < CLI flags. Implemented in `cmd/websandbox/helpers.go:loadAndMerge`.
+- Config merging: JSON file < CLI flags. Only `--config` and `--socket` flags exist now;
+  per-VM overrides are not yet exposed in `POST /sandboxes`.
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
 - Commits: short imperative subject lines (see `git log`). No co-author trailer.
-- Don't add unused snapshot/benchmark APIs — they were considered and explicitly dropped;
-  this project is for running devboxes, not measuring them.
+- Use `modernc.org/sqlite` (pure-Go) NOT `github.com/mattn/go-sqlite3` — we need
+  `CGO_ENABLED=0` to cross-compile from macOS.
 
 ## Not done yet
 
-- **`down` is single-VM** — relies on the global state file path.
-- **No CoW rootfs** / per-VM rootfs copy.
-- **No exec/SSH bridge** into the VM. Serial console only (root password `devbox`
-  per the rootfs build script).
-- **No dynamic port forwarding** — host:5173 → guest:5173 is hardcoded in `setup-network.sh`.
+- **No startup reconciliation.** If the server crashes, the DB has stale `running` rows and
+  the host has stale taps/rootfs/iptables. `pkill websandbox` then manual cleanup, or wipe
+  `/var/lib/websandbox/`. Should add: on `serve` startup, for each row, check PID alive →
+  if dead, run destroy() to release resources.
+- **No `stop-server` command.** `pkill websandbox` is the current way; SIGTERM is handled
+  gracefully via signal.NotifyContext.
+- **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
+- **No exec/SSH bridge into the guest.** Serial console only (root password `devbox`,
+  baked into the rootfs build script).
+- **No per-VM overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
+  template-wide. Body currently ignored.
 - **No tests.** Zero `_test.go` files.
-- **Doctor warning checks** (tap, ip_forward) are warnings rather than failures,
-  but `up` will still fail without them. Consider promoting to hard fails if it
-  causes confusion.
+- **API is local-only** (Unix socket, mode 0600). No auth, no TLS — for remote access
+  you'd tunnel over SSH or front it with something else.

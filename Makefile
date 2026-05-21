@@ -10,7 +10,7 @@ REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)
 REMOTE_BASE := ssh -o BatchMode=yes $(REMOTE)
 REMOTE_CD   := cd /home/$(REMOTE_USER)/$(REMOTE_DIR)
 
-.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-up remote-down remote-doctor
+.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-serve remote-up remote-down remote-list remote-doctor
 
 build:
 	go build ./...
@@ -55,10 +55,18 @@ remote-setup-devbox: sync
 	$(REMOTE_BASE) '$(REMOTE_CD) && sudo bash scripts/build-devbox-rootfs.sh'
 	$(REMOTE_BASE) '$(REMOTE_CD) && sudo bash scripts/setup-network.sh'
 
-# --- VM lifecycle ---
+# --- Server + sandbox lifecycle ---
+
+remote-serve: check-remote
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox serve --config configs/devbox.json'
 
 remote-up: check-remote
 	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox up --config configs/devbox.json'
 
+# Usage: make remote-down SANDBOX=<id>
 remote-down: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox down --config configs/devbox.json'
+	@test -n "$(SANDBOX)" || (echo "set SANDBOX=<id>"; exit 1)
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox down $(SANDBOX) --config configs/devbox.json'
+
+remote-list: check-remote
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox list --config configs/devbox.json'

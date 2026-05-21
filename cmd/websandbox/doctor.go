@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -16,23 +17,17 @@ import (
 func doctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Validate environment for running devbox VMs",
+		Short: "Validate environment for running the sandbox server",
 		RunE:  runDoctor,
 	}
-	cmd.Flags().StringVar(&cfgPath, "config", "", "path to JSON config (for path-aware checks)")
-	cmd.Flags().StringVar(&fcBin, "firecracker", "", "path to firecracker binary (default: search PATH + common locations)")
+	cmd.Flags().StringVar(&cfgPath, "config", "configs/devbox.json", "path to JSON config")
 	return cmd
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
-	var cfg *config.Config
-	if cfgPath != "" {
-		c, err := config.Load(cfgPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not load config %s: %v\n", cfgPath, err)
-		} else {
-			cfg = c
-		}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	pass, fail, warn := 0, 0, 0
@@ -82,52 +77,40 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Firecracker")
 	check("Binary", func() (string, error) {
-		bin := resolveFcBin(cfg)
-		if bin == "" {
-			return "", fmt.Errorf("not found in PATH or common locations")
+		if _, err := os.Stat(cfg.FirecrackerBin); err != nil {
+			return "", fmt.Errorf("not found at %s", cfg.FirecrackerBin)
 		}
-		return fmt.Sprintf(" (%s)", bin), nil
+		return fmt.Sprintf(" (%s)", cfg.FirecrackerBin), nil
 	})
 	warnCheck("Version", func() (string, error) {
-		bin := resolveFcBin(cfg)
-		if bin == "" {
-			return "", fmt.Errorf("skipped (no binary)")
-		}
-		out, err := exec.Command(bin, "--version").CombinedOutput()
+		out, err := exec.Command(cfg.FirecrackerBin, "--version").CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("could not determine")
 		}
-		return fmt.Sprintf(" (%s)", strings.TrimSpace(string(out))), nil
+		first := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+		return fmt.Sprintf(" (%s)", first), nil
 	})
 	fmt.Println()
 
 	fmt.Println("Guest assets")
-	warnCheck("Kernel", func() (string, error) {
-		p := pickPath(cfg, func(c *config.Config) string { return c.KernelImage },
-			"/opt/fc/vmlinux", "/var/lib/firecracker/vmlinux")
-		if p == "" {
-			return "", fmt.Errorf("not found at common paths (provide via --config)")
+	check("Kernel", func() (string, error) {
+		if _, err := os.Stat(cfg.KernelImage); err != nil {
+			return "", fmt.Errorf("not found at %s", cfg.KernelImage)
 		}
-		return fmt.Sprintf(" (%s)", p), nil
+		return fmt.Sprintf(" (%s)", cfg.KernelImage), nil
 	})
-	warnCheck("Rootfs", func() (string, error) {
-		p := pickPath(cfg, func(c *config.Config) string { return c.RootfsPath },
-			"/opt/fc/devbox-rootfs.ext4", "/opt/fc/rootfs.ext4", "/var/lib/firecracker/rootfs.ext4")
-		if p == "" {
-			return "", fmt.Errorf("not found at common paths — run build-devbox-rootfs.sh")
+	check("Base rootfs", func() (string, error) {
+		if _, err := os.Stat(cfg.RootfsBase); err != nil {
+			return "", fmt.Errorf("not found at %s — run build-devbox-rootfs.sh", cfg.RootfsBase)
 		}
-		return fmt.Sprintf(" (%s)", p), nil
+		return fmt.Sprintf(" (%s)", cfg.RootfsBase), nil
 	})
 	fmt.Println()
 
 	fmt.Println("Networking")
-	tap := "tap0"
-	if cfg != nil && cfg.TapDevice != "" {
-		tap = cfg.TapDevice
-	}
-	warnCheck(fmt.Sprintf("Tap device (%s)", tap), func() (string, error) {
-		if _, err := os.Stat("/sys/class/net/" + tap); err != nil {
-			return "", fmt.Errorf("%s not found — run setup-network.sh", tap)
+	check(fmt.Sprintf("Bridge (%s)", cfg.Bridge), func() (string, error) {
+		if _, err := os.Stat("/sys/class/net/" + cfg.Bridge); err != nil {
+			return "", fmt.Errorf("%s not found — run setup-network.sh", cfg.Bridge)
 		}
 		return "", nil
 	})
@@ -140,6 +123,20 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			return "", fmt.Errorf("disabled — run: sysctl -w net.ipv4.ip_forward=1")
 		}
 		return "", nil
+	})
+	fmt.Println()
+
+	fmt.Println("Server")
+	warnCheck("API socket", func() (string, error) {
+		if _, err := os.Stat(cfg.SocketPath); err != nil {
+			return "", fmt.Errorf("not present — server not running")
+		}
+		c, err := net.Dial("unix", cfg.SocketPath)
+		if err != nil {
+			return "", fmt.Errorf("cannot dial: %w", err)
+		}
+		c.Close()
+		return fmt.Sprintf(" (%s)", cfg.SocketPath), nil
 	})
 
 	fmt.Println()
@@ -157,42 +154,4 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s\n", green(fmt.Sprintf("All %d checks passed", pass)))
 	}
 	return nil
-}
-
-func resolveFcBin(cfg *config.Config) string {
-	if fcBin != "" {
-		if _, err := os.Stat(fcBin); err == nil {
-			return fcBin
-		}
-	}
-	if cfg != nil && cfg.FirecrackerBin != "" {
-		if _, err := os.Stat(cfg.FirecrackerBin); err == nil {
-			return cfg.FirecrackerBin
-		}
-	}
-	if p, err := exec.LookPath("firecracker"); err == nil {
-		return p
-	}
-	for _, p := range []string{"/usr/local/bin/firecracker", "/usr/bin/firecracker"} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
-}
-
-func pickPath(cfg *config.Config, field func(*config.Config) string, fallbacks ...string) string {
-	if cfg != nil {
-		if p := field(cfg); p != "" {
-			if _, err := os.Stat(p); err == nil {
-				return p
-			}
-		}
-	}
-	for _, p := range fallbacks {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
 }
