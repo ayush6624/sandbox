@@ -1,54 +1,51 @@
 # web-sandbox
 
-Firecracker-based microVM devboxes for frontend development. Spin up an isolated Ubuntu VM with a fully configured React/TypeScript environment in under a second.
+Firecracker-based microVM sandboxes for frontend development. Spin up isolated Ubuntu VMs — each with a fully configured React/TypeScript environment — in about two seconds, then run commands and edit files inside them over an HTTP API.
 
 Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hosted, on bare metal.
 
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Host (Linux + KVM)                                     │
-│                                                         │
-│  websandbox up                                          │
-│       │                                                 │
-│       ▼                                                 │
-│  ┌──────────────────────────────────────────────┐       │
-│  │  Firecracker microVM              172.16.0.2 │       │
-│  │                                              │       │
-│  │  Ubuntu 24.04 (Noble)                        │       │
-│  │  Node.js 22 LTS + pnpm + TypeScript          │       │
-│  │  Vite React-TS project (pre-installed)       │       │
-│  │                                              │       │
-│  │  systemd → vite-dev.service                  │       │
-│  │            └─ vite --host 0.0.0.0 :5173      │       │
-│  └────────────────┬─────────────────────────────┘       │
-│                   │ tap0                                 │
-│                   │ NAT + port forward                   │
-│              host:5173 → 172.16.0.2:5173                │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  Host (Linux + KVM)                                            │
+│                                                                │
+│  websandbox serve  ──── /run/websandbox.sock (HTTP API)        │
+│       │                                                        │
+│       │ POST /sandboxes                                        │
+│       ▼                                                        │
+│  ┌───────────────────────────┐  ┌───────────────────────────┐  │
+│  │ microVM #1    172.16.0.10 │  │ microVM #2    172.16.0.11 │  │
+│  │                           │  │                           │  │
+│  │ Ubuntu 24.04 + Node 22    │  │ Ubuntu 24.04 + Node 22    │  │
+│  │ Vite React-TS app  :5173  │  │ Vite React-TS app  :5173  │  │
+│  │ sandboxd agent     :8090  │  │ sandboxd agent     :8090  │  │
+│  └───────────┬───────────────┘  └───────────┬───────────────┘  │
+│              │ fc0                          │ fc1              │
+│              └──────────┬───────────────────┘                  │
+│                       br-fc (bridge, NAT)                      │
+│                                                                │
+│  host:5200 → VM#1:5173        host:5201 → VM#2:5173            │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-Each VM boots from a pre-built ext4 rootfs image with everything already installed — Node.js, pnpm, TypeScript, a scaffolded Vite React-TS project, and all `node_modules`. The Vite dev server starts automatically via systemd on boot. No cold-start npm install, no waiting.
+A single long-running server (`websandbox serve`) owns all VMs. Each sandbox gets its own tap device, guest IP, host port, and rootfs copy, allocated atomically from pools in a SQLite registry. Every VM runs `sandboxd`, a small in-guest agent that the host proxies to for command execution and file I/O — so `create` returns only once the sandbox is actually ready to use.
 
-Firecracker provides hardware-level isolation (KVM) with ~125ms boot times and ~5MB memory overhead. Each devbox gets its own kernel, filesystem, and network stack.
+Firecracker provides hardware-level isolation (KVM) with ~125ms boot times and ~5MB memory overhead. Each sandbox gets its own kernel, filesystem, and network stack.
 
 ## Requirements
 
 - Linux host with **KVM** support (`/dev/kvm` must exist)
 - Root access (Firecracker requires it)
-- ~4.5 GB disk per devbox (rootfs + kernel + firecracker binary)
+- ~4.5 GB disk for shared assets, plus one sparse rootfs copy per sandbox
 
 ## Quick start
 
 ### 1. Build and sync to a remote Linux machine
 
 ```bash
-# Clone and build
 git clone https://github.com/ayush6624/web-sandbox.git
 cd web-sandbox
-
-# Build the Linux binary and push everything to your server
 make sync REMOTE_HOST=your-server
 ```
 
@@ -66,161 +63,133 @@ sudo bash scripts/setup-kernel.sh
 sudo apt-get install -y debootstrap
 sudo bash scripts/build-devbox-rootfs.sh
 
-# Configure host networking (tap device, NAT, port forwarding)
-sudo bash scripts/setup-network.sh
+# Bake the sandboxd guest agent into the rootfs
+sudo ./websandbox install-agent --agent ./sandboxd
 ```
 
-### 3. Boot a devbox
+Host networking (bridge, NAT, sysctls) is ensured automatically every time the server starts — no separate network setup step, and nothing to re-run after a reboot.
+
+### 3. Start the server
 
 ```bash
-sudo ./websandbox up --config configs/devbox.json
+sudo ./websandbox serve --config configs/devbox.json
 ```
 
-### 4. Verify
+On startup the server also reconciles state left over from a crash or reboot: orphaned firecracker processes are killed and stale taps, rootfs copies, DNAT rules, and registry rows are cleaned up.
 
-From another terminal:
-
-```bash
-curl http://172.16.0.2:5173
-# Returns the Vite React app HTML
-```
-
-### 5. Stop
+### 4. Use sandboxes
 
 ```bash
-sudo ./websandbox down --config configs/devbox.json
+sudo ./websandbox up
+# sandbox 890691a8-… ready → http://localhost:5200
+
+sudo ./websandbox list
+sudo ./websandbox exec 890691a8 -- "node --version"
+echo 'export const x = 1' | sudo ./websandbox write 890691a8 /home/sandbox/app/src/x.ts
+sudo ./websandbox read 890691a8 /home/sandbox/app/src/x.ts
+sudo ./websandbox ls 890691a8 /home/sandbox/app/src
+curl http://localhost:5200          # the Vite app, live
+
+sudo ./websandbox down 890691a8
+sudo ./websandbox stop-server       # graceful: tears down all sandboxes
 ```
 
 ## CLI
 
 ```
-websandbox up      Boot a devbox VM
-websandbox down    Stop the running VM
-websandbox doctor  Validate the environment (KVM, firecracker, rootfs, networking)
+websandbox serve          Run the API server (owns all VMs)
+websandbox up             Create a sandbox; blocks until the agent is ready
+websandbox down <id>      Destroy a sandbox
+websandbox list           List running sandboxes
+websandbox exec <id> -- <cmd>   Run a shell command inside a sandbox
+websandbox read <id> <path>     Read a file from a sandbox to stdout
+websandbox write <id> <path>    Write stdin (or --from file) into a sandbox
+websandbox ls <id> [path]       List a directory inside a sandbox
+websandbox install-agent  Bake/refresh sandboxd inside the base rootfs
+websandbox stop-server    Stop the server (SIGTERM; --force for SIGKILL)
+websandbox doctor         Validate the environment
 ```
 
-### Flags
+`up`, `down`, `list`, `exec`, `read`, `write`, and `ls` are thin HTTP clients over the server's Unix socket.
 
-| Flag | Description |
-|------|-------------|
-| `--config` | Path to JSON config file (required) |
-| `--firecracker` | Override firecracker binary path |
-| `--kernel` | Override kernel image path |
-| `--rootfs` | Override rootfs image path |
-| `--vcpus` | Override vCPU count |
-| `--mem-mib` | Override memory in MiB |
-| `--socket` | Override Firecracker API socket path |
+## HTTP API
 
-### Doctor
+The server listens on a Unix socket (`/run/websandbox.sock`, mode 0600):
 
-`websandbox doctor` checks everything needed before booting:
+| Method & path | Description |
+|---|---|
+| `POST /sandboxes` | Create a sandbox; returns when the in-guest agent is healthy |
+| `GET /sandboxes` | List running sandboxes |
+| `GET /sandboxes/{id}` | Get one sandbox |
+| `DELETE /sandboxes/{id}` | Graceful guest shutdown + resource cleanup |
+| `POST /sandboxes/{id}/exec` | `{"cmd": "...", "cwd": "...", "timeout_sec": 60}` → `{stdout, stderr, exit_code, timed_out, duration_ms}` |
+| `GET /sandboxes/{id}/files?path=` | Read a file (raw bytes) |
+| `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
+| `GET /sandboxes/{id}/dir?path=` | Directory listing (JSON) |
 
-```
-$ sudo ./websandbox doctor --config configs/devbox.json
-[✓] /dev/kvm exists
-[✓] firecracker binary: /usr/local/bin/firecracker
-[✓] rootfs: /opt/fc/devbox-rootfs.ext4
-[✓] tap device: tap0
-[✓] ip forwarding: enabled
-```
+The exec/file endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM.
 
 ## Configuration
 
-Default config at `configs/devbox.json`:
+Default config at `configs/devbox.json`. Anything omitted falls back to defaults:
 
-```json
-{
-  "firecracker_bin": "/usr/local/bin/firecracker",
-  "kernel_image":    "/opt/fc/vmlinux",
-  "rootfs_path":     "/opt/fc/devbox-rootfs.ext4",
-  "kernel_args":     "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0",
-  "vcpus":           2,
-  "mem_mib":         1024,
-  "socket_path":     "",
-  "state_path":      "/tmp/websandbox-state.json",
-  "tap_device":      "tap0",
-  "mac_address":     "AA:FC:00:00:00:01",
-  "guest_cidr":      "172.16.0.2/24",
-  "gateway_ip":      "172.16.0.1",
-  "nameservers":     "8.8.8.8"
-}
-```
-
-| Field | Description |
-|-------|-------------|
-| `firecracker_bin` | Path to the Firecracker binary |
-| `kernel_image` | Path to the Firecracker-compatible Linux kernel |
-| `rootfs_path` | Path to the ext4 rootfs image |
-| `kernel_args` | Kernel boot parameters |
-| `vcpus` | Number of virtual CPUs |
-| `mem_mib` | Memory allocation in MiB |
-| `socket_path` | Firecracker API socket (auto-generated if empty) |
-| `state_path` | Where to persist VM state for `down` command |
-| `tap_device` | TAP network interface name |
-| `mac_address` | Guest MAC address |
-| `guest_cidr` | Guest IP address in CIDR notation |
-| `gateway_ip` | Gateway IP (host side of tap) |
-| `nameservers` | DNS servers for the guest |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `socket_path` | `/run/websandbox.sock` | API Unix socket |
+| `db_path` | `/var/lib/websandbox/registry.db` | SQLite registry |
+| `rootfs_base` | `/opt/fc/devbox-rootfs.ext4` | Immutable base image |
+| `rootfs_dir` | `/var/lib/websandbox/rootfs` | Per-sandbox copies |
+| `bridge` | `br-fc` | Host bridge for tap devices |
+| `gateway_ip` | `172.16.0.1` | Bridge IP / guest default gateway |
+| `guest_port` | `5173` | In-guest app port that gets forwarded |
+| `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | Resource pools |
+| `vcpus`, `mem_mib` | 2, 1024 | Per-VM resources (template-wide) |
+| `firecracker_bin`, `kernel_image`, `kernel_args` | … | VM template |
 
 ## Networking
 
-The VM connects to the host via a TAP device with static IP configuration:
-
 ```
-Guest (172.16.0.2) ←──tap0──→ Host (172.16.0.1) ←──NAT──→ Internet
+Guest (172.16.0.x) ←──fcN──→ br-fc (172.16.0.1) ←──NAT──→ Internet
 ```
 
-- **Guest → Internet**: iptables masquerade through the host's default interface
-- **Host → Guest**: Direct access via `172.16.0.2`
-- **External → Guest**: Port forwarding rule maps `host:5173` → `172.16.0.2:5173`
+- **Guest → Internet**: iptables MASQUERADE through the host's default interface
+- **Host → Guest**: direct via the bridge (this is how exec/files reach sandboxd)
+- **External → Guest**: per-sandbox DNAT maps `host:520N` → `guestIP:5173`
 
-The guest's IP is set via the kernel `ip=` boot parameter — no DHCP, no delay. DNS is a static `/etc/resolv.conf` pointing to `8.8.8.8`.
-
-`scripts/setup-network.sh` handles all of this. Run it once per host.
+Guest IPs are set via the kernel `ip=` boot parameter — no DHCP. The server ensures the bridge, sysctls (`ip_forward`, `route_localnet`), and NAT rules on every startup, so a host reboot needs nothing more than restarting `websandbox serve`.
 
 ## What's in the rootfs
 
-The devbox rootfs is a 4 GB ext4 image built by `scripts/build-devbox-rootfs.sh`:
+The base rootfs is a 4 GB sparse ext4 image built by `scripts/build-devbox-rootfs.sh`:
 
 | Layer | Details |
 |-------|---------|
 | **Base OS** | Ubuntu 24.04 (Noble) via debootstrap |
-| **Runtime** | Node.js 22 LTS, npm |
-| **Tools** | pnpm, TypeScript |
-| **Project** | Vite React-TS template at `/home/sandbox/app` |
-| **Dependencies** | `node_modules` pre-installed (zero cold-start) |
-| **Service** | `vite-dev.service` — starts Vite on boot, listens on `0.0.0.0:5173` |
-| **Debug** | Root password `devbox`, serial console enabled on `ttyS0` |
+| **Runtime** | Node.js 22 LTS, npm, pnpm, TypeScript |
+| **Project** | Vite React-TS template at `/home/sandbox/app`, `node_modules` pre-installed |
+| **Services** | `vite-dev.service` (Vite on `0.0.0.0:5173`), `sandboxd.service` (agent on `:8090`) |
+| **Debug** | Root password `devbox`, serial console on `ttyS0` |
 
-Actual disk usage is ~600-800 MB. The image is 4 GB sparse (only allocates blocks as needed).
-
-The build script is **resumable** — if interrupted, re-run it and completed steps are skipped.
+Each sandbox boots from its own sparse copy of this image; writes never touch the base. The build script is resumable, and `websandbox install-agent` updates the agent in-place without a rebuild.
 
 ## Project structure
 
 ```
 web-sandbox/
-├── cmd/websandbox/
-│   ├── main.go              CLI entry point (cobra): up, down, doctor
-│   └── helpers.go           Config loading + flag wiring
+├── cmd/
+│   ├── websandbox/          CLI + server entry point (cobra)
+│   └── sandboxd/            In-guest agent (exec + file HTTP API)
 ├── internal/
-│   ├── config/
-│   │   └── config.go        JSON config parsing with defaults
-│   ├── state/
-│   │   └── state.go         VM state persistence (socket path, VMID)
-│   └── vm/
-│       ├── options.go        RunOptions struct
-│       ├── machine_linux.go  Firecracker SDK integration + networking
-│       └── machine_stub.go   Non-Linux stub (returns ErrLinuxOnly)
-├── configs/
-│   └── devbox.json          Default VM configuration
-├── scripts/
-│   ├── setup-firecracker.sh Install Firecracker binary
-│   ├── setup-kernel.sh      Download Firecracker-compatible kernel
-│   ├── setup-network.sh     Host networking (tap, NAT, port forwarding)
-│   └── build-devbox-rootfs.sh  Build the devbox ext4 image
-├── Makefile                 Build, sync, remote deployment targets
-└── go.mod
+│   ├── agentapi/            Shared host↔guest protocol types
+│   ├── client/              Unix-socket HTTP client for the CLI
+│   ├── config/              JSON config with defaults
+│   ├── provisioner/         Host ops: rootfs copies, taps, iptables, EnsureNetwork
+│   ├── registry/            SQLite registry + resource pool allocation
+│   ├── server/              HTTP API, VM ownership, startup reconciliation
+│   └── vm/                  Firecracker SDK wrapper (+ non-Linux stub)
+├── configs/devbox.json      Default configuration
+├── scripts/                 Host setup (firecracker, kernel, rootfs, network)
+└── Makefile                 Build, sync, remote targets
 ```
 
 ## Makefile targets
@@ -228,25 +197,23 @@ web-sandbox/
 | Target | Description |
 |--------|-------------|
 | `make build` | Compile locally (uses stub on macOS) |
-| `make build-linux` | Cross-compile Linux amd64 binary |
-| `make sync` | Build + rsync binary, configs, scripts to remote |
-| `make sync-all` | Rsync entire project to remote |
-| `make remote-shell` | SSH into the remote machine |
-| `make remote-doctor` | Run `websandbox doctor` on remote |
+| `make build-linux` | Cross-compile `websandbox` + `sandboxd` for linux/amd64 |
+| `make sync` | Build + rsync binaries, configs, scripts to remote |
 | `make remote-setup` | Install Firecracker + kernel on remote |
-| `make remote-setup-devbox` | Build rootfs + setup networking on remote |
-| `make remote-up` | Boot the devbox VM on remote |
-| `make remote-down` | Stop the devbox VM on remote |
+| `make remote-setup-devbox` | Build rootfs + network setup on remote |
+| `make remote-install-agent` | Sync + bake sandboxd into the base rootfs |
+| `make remote-serve` | Run the server on remote (blocks) |
+| `make remote-up` / `remote-list` / `remote-down SANDBOX=<id>` | Sandbox lifecycle |
+| `make remote-doctor` | Validate the remote environment |
 
 Override the remote target: `make sync REMOTE_USER=you REMOTE_HOST=your-server`
 
 ## Developing locally
 
-The project compiles on macOS/Windows via a build stub — all Firecracker calls return `ErrLinuxOnly`. This lets you work on the CLI, config parsing, and state management without a Linux machine:
+The project compiles on macOS/Windows via a build stub — all Firecracker calls return `ErrLinuxOnly`. This lets you work on the CLI, server, registry, and config without a Linux machine:
 
 ```bash
 go build ./...          # compiles fine on macOS
-go test ./...           # tests run (VM operations are stubbed)
 ```
 
 To actually run VMs, you need Linux with KVM. Use `make sync` to push to a remote machine.
@@ -263,20 +230,6 @@ To actually run VMs, you need Linux with KVM. Use `make sync` to push to a remot
 | **Attack surface** | Minimal (reduced device model) | Broad (shared kernel) | Broad (full device model) |
 
 Firecracker was built by AWS for Lambda and Fargate. It strips the virtual device model down to the bare minimum — no USB, no GPU, no PCI — giving you VM-level security at container-like speed.
-
-## Portability
-
-To run this setup on a different machine, you need 3 files:
-
-| File | Path | Size |
-|------|------|------|
-| Firecracker binary | `/usr/local/bin/firecracker` | ~5 MB |
-| Linux kernel | `/opt/fc/vmlinux` | ~25 MB |
-| Rootfs image | `/opt/fc/devbox-rootfs.ext4` | ~4 GB (sparse) |
-
-Copy them to any Linux host with KVM, run `setup-network.sh`, and `websandbox up`.
-
-> **Note:** The rootfs is mutable — writes inside the VM persist to the ext4 file. To run multiple independent VMs from the same base, copy the rootfs per VM or use a copy-on-write approach (`cp --reflink=always` on btrfs/XFS).
 
 ## License
 
