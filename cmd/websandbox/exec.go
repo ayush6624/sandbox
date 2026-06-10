@@ -14,6 +14,7 @@ import (
 func execCmd() *cobra.Command {
 	var cwd string
 	var timeoutSec int
+	var stream bool
 	cmd := &cobra.Command{
 		Use:   "exec <id> -- <command...>",
 		Short: "Run a shell command inside a sandbox",
@@ -23,16 +24,36 @@ func execCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Exec(context.Background(), args[0], agentapi.ExecRequest{
+			req := agentapi.ExecRequest{
 				Cmd:        strings.Join(args[1:], " "),
 				Cwd:        cwd,
 				TimeoutSec: timeoutSec,
-			})
-			if err != nil {
-				return err
 			}
-			fmt.Fprint(os.Stdout, res.Stdout)
-			fmt.Fprint(os.Stderr, res.Stderr)
+
+			var res agentapi.ExecResult
+			if stream {
+				// Output is printed as it arrives; the accumulated copy in
+				// res is ignored.
+				res, err = c.ExecStream(context.Background(), args[0], req, func(ev agentapi.ExecEvent) {
+					switch ev.Type {
+					case agentapi.EventStdout:
+						fmt.Fprint(os.Stdout, ev.Data)
+					case agentapi.EventStderr:
+						fmt.Fprint(os.Stderr, ev.Data)
+					}
+				})
+				if err != nil {
+					return err
+				}
+			} else {
+				res, err = c.Exec(context.Background(), args[0], req)
+				if err != nil {
+					return err
+				}
+				fmt.Fprint(os.Stdout, res.Stdout)
+				fmt.Fprint(os.Stderr, res.Stderr)
+			}
+
 			if res.TimedOut {
 				fmt.Fprintln(os.Stderr, "(command timed out)")
 			}
@@ -47,5 +68,6 @@ func execCmd() *cobra.Command {
 	addClientFlags(cmd)
 	cmd.Flags().StringVar(&cwd, "cwd", "", "working directory inside the guest (default /home/sandbox/app)")
 	cmd.Flags().IntVar(&timeoutSec, "timeout", 0, "command timeout in seconds (default 60)")
+	cmd.Flags().BoolVar(&stream, "stream", false, "stream output as it arrives instead of waiting for completion")
 	return cmd
 }

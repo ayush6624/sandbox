@@ -152,10 +152,16 @@ func (p *Provisioner) DeleteTap(tap string) error {
 	return nil
 }
 
-// AddPortForward sets up host:hostPort → guestIP:GuestPort DNAT (both PREROUTING
-// for external clients and OUTPUT for loopback clients).
+// AddPortForward sets up host:hostPort → guestIP:GuestPort DNAT for the
+// primary (template-wide) guest port.
 func (p *Provisioner) AddPortForward(hostPort int, guestIP string) error {
-	target := guestIP + ":" + strconv.Itoa(p.Network.GuestPort)
+	return p.AddPortForwardTo(hostPort, guestIP, p.Network.GuestPort)
+}
+
+// AddPortForwardTo sets up host:hostPort → guestIP:guestPort DNAT (both
+// PREROUTING for external clients and OUTPUT for loopback clients).
+func (p *Provisioner) AddPortForwardTo(hostPort int, guestIP string, guestPort int) error {
+	target := guestIP + ":" + strconv.Itoa(guestPort)
 	rules := [][]string{
 		{"iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(hostPort), "-j", "DNAT", "--to-destination", target},
 		{"iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-d", "127.0.0.1", "--dport", strconv.Itoa(hostPort), "-j", "DNAT", "--to-destination", target},
@@ -170,7 +176,12 @@ func (p *Provisioner) AddPortForward(hostPort int, guestIP string) error {
 
 // RemovePortForward undoes AddPortForward (best-effort — rules may already be gone).
 func (p *Provisioner) RemovePortForward(hostPort int, guestIP string) {
-	target := guestIP + ":" + strconv.Itoa(p.Network.GuestPort)
+	p.RemovePortForwardTo(hostPort, guestIP, p.Network.GuestPort)
+}
+
+// RemovePortForwardTo undoes AddPortForwardTo (best-effort).
+func (p *Provisioner) RemovePortForwardTo(hostPort int, guestIP string, guestPort int) {
+	target := guestIP + ":" + strconv.Itoa(guestPort)
 	rules := [][]string{
 		{"iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(hostPort), "-j", "DNAT", "--to-destination", target},
 		{"iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-d", "127.0.0.1", "--dport", strconv.Itoa(hostPort), "-j", "DNAT", "--to-destination", target},

@@ -24,6 +24,14 @@ func (s *Server) reconcile(ctx context.Context) {
 		if isFirecrackerProc(sb.PID) {
 			killWithGrace(sb.PID, 5*time.Second)
 		}
+		// Read extra port mappings before reg.Destroy deletes their rows.
+		if ports, err := s.reg.Ports(ctx, sb.ID); err == nil {
+			for _, pm := range ports {
+				s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "reconcile: list extra ports for %s: %v\n", sb.ID, err)
+		}
 		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 		_ = s.cfg.Provisioner.CleanupRootfs(sb.ID)

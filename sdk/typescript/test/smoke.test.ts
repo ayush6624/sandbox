@@ -30,11 +30,23 @@ const sandboxRecord = {
 
 // In-memory fake API state
 const guestFiles = new Map<string, Buffer>()
+const exposedPorts = new Map<number, number>() // guest_port -> host_port
 let sandboxAlive = false
+let sandboxExpiresAt: string | undefined
 let lastExecBody: Record<string, unknown> | undefined
+let lastCreateBody: Record<string, unknown> | undefined
+let lastTimeoutBody: Record<string, unknown> | undefined
 
 let server: http.Server
 let apiUrl: string
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+function currentSandboxRecord(): Record<string, unknown> {
+  return sandboxExpiresAt !== undefined
+    ? { ...sandboxRecord, expires_at: sandboxExpiresAt }
+    : { ...sandboxRecord }
+}
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -60,13 +72,20 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (req.method === 'POST' && path === '/sandboxes') {
+    const raw = (await readBody(req)).toString()
+    lastCreateBody = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined
     sandboxAlive = true
-    sendJson(res, 201, sandboxRecord)
+    exposedPorts.clear()
+    sandboxExpiresAt =
+      typeof lastCreateBody?.timeout_sec === 'number' && lastCreateBody.timeout_sec > 0
+        ? '2026-06-10T12:05:00Z'
+        : undefined
+    sendJson(res, 201, currentSandboxRecord())
     return
   }
 
   if (req.method === 'GET' && path === '/sandboxes') {
-    sendJson(res, 200, sandboxAlive ? [sandboxRecord] : [])
+    sendJson(res, 200, sandboxAlive ? [currentSandboxRecord()] : [])
     return
   }
 
@@ -75,7 +94,70 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       sendJson(res, 404, { error: 'sandbox not found' })
       return
     }
-    sendJson(res, 200, sandboxRecord)
+    sendJson(res, 200, currentSandboxRecord())
+    return
+  }
+
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/timeout`) {
+    lastTimeoutBody = JSON.parse((await readBody(req)).toString()) as Record<string, unknown>
+    const sec = Number(lastTimeoutBody.timeout_sec ?? 0)
+    sandboxExpiresAt = sec > 0 ? '2026-06-10T12:30:00Z' : undefined
+    sendJson(res, 200, currentSandboxRecord())
+    return
+  }
+
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
+    const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
+    const guestPort = body.guest_port
+    if (guestPort === 5173) {
+      sendJson(res, 200, { guest_port: 5173, host_port: sandboxRecord.host_port })
+      return
+    }
+    let hostPort = exposedPorts.get(guestPort)
+    if (hostPort === undefined) {
+      hostPort = 5201 + exposedPorts.size
+      exposedPorts.set(guestPort, hostPort)
+    }
+    sendJson(res, 200, { guest_port: guestPort, host_port: hostPort })
+    return
+  }
+
+  if (req.method === 'GET' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
+    const mappings = [{ guest_port: 5173, host_port: sandboxRecord.host_port }]
+    for (const [guestPort, hostPort] of exposedPorts) {
+      mappings.push({ guest_port: guestPort, host_port: hostPort })
+    }
+    sendJson(res, 200, mappings)
+    return
+  }
+
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/exec/stream`) {
+    const body = JSON.parse((await readBody(req)).toString()) as Record<string, unknown>
+    lastExecBody = body
+    const cmd = String(body.cmd ?? '')
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson' })
+    if (cmd.includes('sleep-forever')) {
+      res.write('{"type":"stdout","data":"started\\n"}\n')
+      await sleep(5)
+      res.end('{"type":"exit","exit_code":-1,"timed_out":true,"duration_ms":5000}\n')
+      return
+    }
+    if (cmd.includes('exit 3')) {
+      res.write('{"type":"stdout","data":"partial output"}\n')
+      await sleep(5)
+      res.write('{"type":"stderr","data":"boom: it broke"}\n')
+      await sleep(5)
+      res.end('{"type":"exit","exit_code":3,"timed_out":false,"duration_ms":12}\n')
+      return
+    }
+    // Split one event across two chunks to exercise partial-line buffering.
+    res.write('{"type":"stdout","data":"hel')
+    await sleep(5)
+    res.write('lo "}\n{"type":"stdout","data":"world\\n"}\n')
+    await sleep(5)
+    res.write('{"type":"stderr","data":"warn\\n"}\n')
+    await sleep(5)
+    res.end('{"type":"exit","exit_code":0,"timed_out":false,"duration_ms":42}\n')
     return
   }
 
@@ -281,6 +363,106 @@ test('full lifecycle: create → exec → write/read/list → kill', async () =>
   await sbx.kill()
   const remaining = await Sandbox.list(opts())
   assert.equal(remaining.length, 0)
+})
+
+test('streaming exec: callbacks get chunks, result accumulates full output', async () => {
+  const sbx = await Sandbox.create(opts())
+
+  const outChunks: string[] = []
+  const errChunks: string[] = []
+  const result = await sbx.commands.run('stream-hello', {
+    onStdout: (d) => outChunks.push(d),
+    onStderr: (d) => errChunks.push(d),
+  })
+  // One event was split across two transport chunks; the parser must
+  // reassemble it into a single 'hello ' callback.
+  assert.deepEqual(outChunks, ['hello ', 'world\n'])
+  assert.deepEqual(errChunks, ['warn\n'])
+  assert.equal(result.stdout, 'hello world\n')
+  assert.equal(result.stderr, 'warn\n')
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.durationMs, 42)
+
+  // streaming non-zero exit keeps CommandExitError semantics
+  await assert.rejects(
+    () => sbx.commands.run('exit 3', { onStdout: () => {} }),
+    (err: unknown) => {
+      assert.ok(err instanceof CommandExitError)
+      assert.equal(err.exitCode, 3)
+      assert.equal(err.stdout, 'partial output')
+      assert.equal(err.stderr, 'boom: it broke')
+      return true
+    }
+  )
+
+  // streaming guest-side timeout keeps TimeoutError semantics
+  const seen: string[] = []
+  await assert.rejects(
+    () => sbx.commands.run('sleep-forever', { onStdout: (d) => seen.push(d) }),
+    (err: unknown) => err instanceof TimeoutError
+  )
+  assert.deepEqual(seen, ['started\n'])
+
+  await sbx.kill()
+})
+
+test('create with timeoutMs sends timeout_sec and surfaces expiresAt', async () => {
+  const sbx = await Sandbox.create({ ...opts(), timeoutMs: 300_500 })
+  assert.equal(lastCreateBody?.timeout_sec, 301) // ceil(300.5)
+  assert.ok(sbx.info.expiresAt instanceof Date)
+
+  // plain create sends no body and has no expiry
+  await sbx.kill()
+  const plain = await Sandbox.create(opts())
+  assert.equal(lastCreateBody, undefined)
+  assert.equal(plain.info.expiresAt, undefined)
+  await plain.kill()
+})
+
+test('setTimeout posts ceil(ms/1000) and updates expiresAt', async () => {
+  const sbx = await Sandbox.create(opts())
+  // Read through a function so assertions don't narrow the property type
+  // (setTimeout mutates it behind TS control-flow analysis's back).
+  const expiry = () => sbx.info.expiresAt
+  assert.equal(expiry(), undefined)
+
+  await sbx.setTimeout(2_500)
+  assert.equal(lastTimeoutBody?.timeout_sec, 3)
+  assert.ok(expiry() instanceof Date)
+
+  await sbx.setTimeout(0)
+  assert.equal(lastTimeoutBody?.timeout_sec, 0)
+  assert.equal(expiry(), undefined)
+
+  await sbx.kill()
+})
+
+test('exposePort allocates a host port and feeds the getHost cache', async () => {
+  const sbx = await Sandbox.create(opts())
+
+  // not exposed yet → sync getHost must throw with a pointer to exposePort
+  assert.throws(
+    () => sbx.getHost(8000),
+    (err: unknown) => err instanceof SandboxError && /exposePort\(8000\)/.test((err as Error).message)
+  )
+
+  const host = await sbx.exposePort(8000)
+  assert.equal(host, '127.0.0.1:5201')
+  assert.equal(sbx.getHost(8000), '127.0.0.1:5201')
+
+  // idempotent: same guest port → same host port
+  assert.equal(await sbx.exposePort(8000), '127.0.0.1:5201')
+
+  // exposing the primary port returns the existing primary mapping
+  assert.equal(await sbx.exposePort(5173), '127.0.0.1:5200')
+
+  const ports = await sbx.listPorts()
+  assert.deepEqual(ports, [
+    { guestPort: 5173, hostPort: 5200 },
+    { guestPort: 8000, hostPort: 5201 },
+  ])
+
+  await sbx.kill()
 })
 
 test('static kill destroys a sandbox by id', async () => {

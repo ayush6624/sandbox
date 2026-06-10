@@ -10,9 +10,11 @@ export {
 } from './errors.js'
 export type {
   SandboxOpts,
+  SandboxCreateOpts,
   SandboxInfo,
   CommandResult,
   CommandRunOpts,
+  PortMapping,
   EntryInfo,
   WriteInfo,
   ReadOpts,

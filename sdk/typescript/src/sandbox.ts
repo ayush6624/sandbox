@@ -3,10 +3,17 @@ import { Commands } from './commands.js'
 import { SandboxError } from './errors.js'
 import { Files } from './files.js'
 import { toSandboxInfo } from './types.js'
-import type { ApiSandbox, SandboxInfo, SandboxOpts } from './types.js'
+import type {
+  ApiPortMapping,
+  ApiSandbox,
+  PortMapping,
+  SandboxCreateOpts,
+  SandboxInfo,
+  SandboxOpts,
+} from './types.js'
 
-/** The only guest port forwarded to the host (the Vite dev server). */
-const FORWARDED_GUEST_PORT = 5173
+/** The guest port forwarded to the host at create time (the Vite dev server). */
+const PRIMARY_GUEST_PORT = 5173
 
 /**
  * A Firecracker microVM sandbox running Ubuntu 24.04 with Node 22, pnpm,
@@ -15,10 +22,11 @@ const FORWARDED_GUEST_PORT = 5173
  * Mirrors the e2b `Sandbox` API:
  *
  * ```ts
- * const sbx = await Sandbox.create()
+ * const sbx = await Sandbox.create({ timeoutMs: 300_000 })
  * await sbx.commands.run('node --version')
  * await sbx.files.write('/home/sandbox/app/src/App.tsx', code)
  * const host = sbx.getHost(5173)
+ * const api = await sbx.exposePort(8000)
  * await sbx.kill()
  * ```
  */
@@ -33,6 +41,8 @@ export class Sandbox {
   readonly info: SandboxInfo
 
   private readonly client: ApiClient
+  /** Known guest → host port mappings, used by the synchronous getHost(). */
+  private readonly portCache = new Map<number, number>()
 
   private constructor(client: ApiClient, info: SandboxInfo) {
     this.client = client
@@ -40,19 +50,24 @@ export class Sandbox {
     this.sandboxId = info.sandboxId
     this.commands = new Commands(client, info.sandboxId)
     this.files = new Files(client, info.sandboxId)
+    this.portCache.set(PRIMARY_GUEST_PORT, info.hostPort)
   }
 
   /**
    * Creates a new sandbox and waits until it is ready (the API blocks
    * for roughly two seconds while the VM boots).
    *
-   * @param opts API URL/key overrides; both default to the
-   *             `WEBSANDBOX_API_URL` / `WEBSANDBOX_API_KEY` environment variables.
+   * @param opts API URL/key overrides (default to the `WEBSANDBOX_API_URL` /
+   *             `WEBSANDBOX_API_KEY` environment variables) plus an optional
+   *             `timeoutMs` after which the sandbox is auto-destroyed.
    */
-  static async create(opts: SandboxOpts = {}): Promise<Sandbox> {
+  static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
     const res = await client.request('POST', '/sandboxes', {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
+      ...(opts.timeoutMs !== undefined
+        ? { json: { timeout_sec: Math.ceil(opts.timeoutMs / 1000) } }
+        : {}),
     })
     const raw = (await res.json()) as ApiSandbox
     return new Sandbox(client, toSandboxInfo(raw))
@@ -92,19 +107,67 @@ export class Sandbox {
    * Returns the `host:port` to reach a service running inside the sandbox
    * from the outside, e.g. `100.99.183.74:5200`.
    *
-   * Only guest port 5173 (the Vite dev server) is forwarded by the host.
+   * Synchronous: works for guest port 5173 (always forwarded) and for any
+   * port previously exposed through {@link exposePort} or seen via
+   * {@link listPorts} on this instance.
    *
    * @param port Guest port (default 5173).
-   * @throws {SandboxError} for any port other than 5173.
+   * @throws {SandboxError} when the port has not been exposed yet.
    */
-  getHost(port: number = FORWARDED_GUEST_PORT): string {
-    if (port !== FORWARDED_GUEST_PORT) {
+  getHost(port: number = PRIMARY_GUEST_PORT): string {
+    const hostPort = this.portCache.get(port)
+    if (hostPort === undefined) {
       throw new SandboxError(
-        `Only guest port ${FORWARDED_GUEST_PORT} (the Vite dev server) is forwarded to the host; ` +
-          `got port ${port}. Other ports are not reachable from outside the sandbox.`
+        `Guest port ${port} is not forwarded to the host. Call \`await sandbox.exposePort(${port})\` ` +
+          `first — only guest port ${PRIMARY_GUEST_PORT} (the Vite dev server) is forwarded automatically.`
       )
     }
-    return `${this.client.apiHostname}:${this.info.hostPort}`
+    return `${this.client.apiHostname}:${hostPort}`
+  }
+
+  /**
+   * Forwards a guest port to a dedicated host port (idempotent — exposing
+   * the same port again returns the existing mapping).
+   *
+   * @param guestPort Port a service listens on inside the sandbox.
+   * @returns The externally reachable `host:port` string.
+   */
+  async exposePort(guestPort: number): Promise<string> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/ports`, {
+      json: { guest_port: guestPort },
+    })
+    const raw = (await res.json()) as ApiPortMapping
+    this.portCache.set(raw.guest_port, raw.host_port)
+    return `${this.client.apiHostname}:${raw.host_port}`
+  }
+
+  /**
+   * Lists every forwarded port of this sandbox, including the always-present
+   * 5173 mapping. Also refreshes the cache used by {@link getHost}.
+   */
+  async listPorts(): Promise<PortMapping[]> {
+    const res = await this.client.request('GET', `/sandboxes/${this.sandboxId}/ports`)
+    const raw = (await res.json()) as ApiPortMapping[] | null
+    const mappings = (raw ?? []).map((m) => ({ guestPort: m.guest_port, hostPort: m.host_port }))
+    for (const m of mappings) {
+      this.portCache.set(m.guestPort, m.hostPort)
+    }
+    return mappings
+  }
+
+  /**
+   * Sets (or clears) the sandbox's auto-destroy timeout, e2b-style. The new
+   * timeout replaces any previous one and counts from now.
+   *
+   * @param timeoutMs Milliseconds until auto-destroy (rounded up to whole
+   *                  seconds); `0` removes the timeout.
+   */
+  async setTimeout(timeoutMs: number): Promise<void> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/timeout`, {
+      json: { timeout_sec: Math.ceil(timeoutMs / 1000) },
+    })
+    const raw = (await res.json()) as ApiSandbox
+    this.info.expiresAt = raw.expires_at ? new Date(raw.expires_at) : undefined
   }
 
   /**

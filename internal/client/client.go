@@ -1,14 +1,17 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/ayush6624/web-sandbox/internal/agentapi"
 	"github.com/ayush6624/web-sandbox/internal/registry"
@@ -30,10 +33,20 @@ func New(socketPath string) *Client {
 	return &Client{http: &http.Client{Transport: tr}}
 }
 
+// CreateOpts customizes sandbox creation.
+type CreateOpts struct {
+	// TimeoutSec auto-destroys the sandbox after this many seconds; 0 = no expiry.
+	TimeoutSec int `json:"timeout_sec,omitempty"`
+}
+
 // Create asks the server to provision a new sandbox.
-func (c *Client) Create(ctx context.Context) (registry.Sandbox, error) {
+func (c *Client) Create(ctx context.Context, opts CreateOpts) (registry.Sandbox, error) {
+	var body any
+	if opts.TimeoutSec > 0 {
+		body = opts
+	}
 	var sb registry.Sandbox
-	if err := c.do(ctx, "POST", "/sandboxes", nil, &sb); err != nil {
+	if err := c.do(ctx, "POST", "/sandboxes", body, &sb); err != nil {
 		return registry.Sandbox{}, err
 	}
 	return sb, nil
@@ -69,6 +82,81 @@ func (c *Client) Exec(ctx context.Context, id string, req agentapi.ExecRequest) 
 		return agentapi.ExecResult{}, err
 	}
 	return res, nil
+}
+
+// ExecStream runs a shell command via POST /exec/stream, invoking onEvent
+// (if non-nil) for every NDJSON event as it arrives. The returned ExecResult
+// carries the exit fields from the final event plus the full accumulated
+// stdout/stderr.
+func (c *Client) ExecStream(ctx context.Context, id string, req agentapi.ExecRequest, onEvent func(agentapi.ExecEvent)) (agentapi.ExecResult, error) {
+	b, err := json.Marshal(req)
+	if err != nil {
+		return agentapi.ExecResult{}, err
+	}
+	resp, err := c.doRaw(ctx, "POST", "/sandboxes/"+id+"/exec/stream", bytes.NewReader(b))
+	if err != nil {
+		return agentapi.ExecResult{}, err
+	}
+	defer resp.Body.Close()
+
+	var stdout, stderr strings.Builder
+	var res agentapi.ExecResult
+	sawExit := false
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev agentapi.ExecEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return res, fmt.Errorf("decode stream event: %w", err)
+		}
+		if onEvent != nil {
+			onEvent(ev)
+		}
+		switch ev.Type {
+		case agentapi.EventStdout:
+			stdout.WriteString(ev.Data)
+		case agentapi.EventStderr:
+			stderr.WriteString(ev.Data)
+		case agentapi.EventExit:
+			res.ExitCode = ev.ExitCode
+			res.TimedOut = ev.TimedOut
+			res.DurationMS = ev.DurationMS
+			sawExit = true
+		}
+	}
+	res.Stdout = stdout.String()
+	res.Stderr = stderr.String()
+	if err := sc.Err(); err != nil {
+		return res, fmt.Errorf("read stream: %w", err)
+	}
+	if !sawExit {
+		return res, errors.New("stream ended without exit event")
+	}
+	return res, nil
+}
+
+// ExposePort forwards an extra guest port to a host port (idempotent).
+func (c *Client) ExposePort(ctx context.Context, id string, guestPort int) (registry.PortMapping, error) {
+	var pm registry.PortMapping
+	body := map[string]int{"guest_port": guestPort}
+	if err := c.do(ctx, "POST", "/sandboxes/"+id+"/ports", body, &pm); err != nil {
+		return registry.PortMapping{}, err
+	}
+	return pm, nil
+}
+
+// ListPorts returns every forwarded port of a sandbox, including the primary one.
+func (c *Client) ListPorts(ctx context.Context, id string) ([]registry.PortMapping, error) {
+	var out []registry.PortMapping
+	if err := c.do(ctx, "GET", "/sandboxes/"+id+"/ports", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ReadFile streams a file out of the sandbox. The caller must Close the reader.

@@ -49,8 +49,28 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		// Flush as the agent produces data so streamed responses
+		// (e.g. /exec/stream NDJSON) reach the client immediately.
+		var out io.Writer = w
+		if f, ok := w.(http.Flusher); ok {
+			out = flushWriter{w: w, f: f}
+		}
+		_, _ = io.Copy(out, resp.Body)
 	}
+}
+
+// flushWriter flushes the ResponseWriter after every write.
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if err == nil {
+		fw.f.Flush()
+	}
+	return n, err
 }
 
 // waitForAgent polls the guest agent's /health until it responds or the

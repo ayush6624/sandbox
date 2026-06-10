@@ -41,6 +41,16 @@ const res = await sbx.commands.run('node --version', {
 })
 console.log(res.stdout, res.exitCode, res.durationMs)
 
+// Stream output as it is produced (e2b-style onStdout/onStderr).
+// Passing either callback switches to the streaming endpoint; the returned
+// CommandResult still carries the full accumulated output, and
+// CommandExitError / TimeoutError semantics are identical to the buffered path.
+await sbx.commands.run('pnpm install', {
+  onStdout: (chunk) => process.stdout.write(chunk),
+  onStderr: (chunk) => process.stderr.write(chunk),
+  timeoutMs: 120_000,
+})
+
 // Files
 await sbx.files.write('/home/sandbox/app/src/App.tsx', '...code...')
 const text = await sbx.files.read('/home/sandbox/app/src/App.tsx')
@@ -52,11 +62,34 @@ const entries = await sbx.files.list('/home/sandbox/app/src')
 const host = sbx.getHost(5173)                  // e.g. "100.99.183.74:5200"
 await fetch(`http://${host}/`)
 
+// Expose additional guest ports on demand. exposePort is idempotent and
+// returns the externally reachable "host:port"; afterwards the synchronous
+// getHost(port) works for that port too (it reads a per-instance cache —
+// for ports exposed elsewhere, call listPorts() first to refresh it).
+const api = await sbx.exposePort(8000)          // e.g. "100.99.183.74:5201"
+const ports = await sbx.listPorts()             // [{ guestPort: 5173, hostPort: 5200 }, { guestPort: 8000, hostPort: 5201 }]
+sbx.getHost(8000)                               // works now; throws for unexposed ports
+
 // Lifecycle
 const all = await Sandbox.list()
 const again = await Sandbox.connect(sbx.sandboxId)
 await sbx.kill()                                // or: await Sandbox.kill(id)
 ```
+
+### Auto-destroy (TTL)
+
+Sandboxes live until killed unless you give them a timeout. The server reaps
+expired sandboxes within ~10 seconds of their deadline.
+
+```ts
+const sbx = await Sandbox.create({ timeoutMs: 300_000 })  // auto-destroy in 5 min
+console.log(sbx.info.expiresAt)                           // Date | undefined
+
+await sbx.setTimeout(600_000)   // replace the timeout: now 10 min from now
+await sbx.setTimeout(0)         // remove the timeout entirely
+```
+
+`timeoutMs` is rounded up to whole seconds (the API speaks `timeout_sec`).
 
 ### Errors
 
@@ -74,23 +107,25 @@ All errors extend `SandboxError`:
 | e2b | websandbox |
 | --- | --- |
 | `import { Sandbox } from '@e2b/code-interpreter'` | `import { Sandbox } from 'websandbox'` |
-| `Sandbox.create('template', opts)` | `Sandbox.create(opts)` — single built-in Vite React-TS template |
+| `Sandbox.create('template', { timeoutMs })` | `Sandbox.create({ timeoutMs, ...opts })` — single built-in Vite React-TS template |
 | `Sandbox.connect(id)` | `Sandbox.connect(id)` |
 | `Sandbox.list()` | `Sandbox.list()` |
 | `Sandbox.kill(id)` | `Sandbox.kill(id)` |
 | `sbx.sandboxId` | `sbx.sandboxId` |
 | `sbx.commands.run(cmd, { cwd, envs, timeoutMs })` | `sbx.commands.run(cmd, { cwd, envs, timeoutMs })` |
+| `sbx.commands.run(cmd, { onStdout, onStderr })` | same — streams chunks, still returns the full result |
+| `sbx.setTimeout(ms)` | `sbx.setTimeout(ms)` — `0` clears the timeout |
 | `sbx.files.write(path, data)` | `sbx.files.write(path, data)` |
 | `sbx.files.read(path)` / `read(path, { format: 'bytes' })` | same |
 | `sbx.files.list(path)` | `sbx.files.list(path)` |
-| `sbx.getHost(port)` | `sbx.getHost(5173)` — only guest port 5173 is forwarded |
+| `sbx.getHost(port)` | `sbx.getHost(port)` — 5173 always works; other ports after `await sbx.exposePort(port)` |
+| — | `sbx.exposePort(guestPort)` / `sbx.listPorts()` |
 | `sbx.kill()` | `sbx.kill()` |
 | `E2B_API_KEY` env var | `WEBSANDBOX_API_KEY` (+ `WEBSANDBOX_API_URL`) |
 | `CommandExitError` / `TimeoutError` | same names and semantics |
 
-Not supported (yet): background/streaming commands (`commands.run(..., { background: true })`,
-`onStdout`/`onStderr`), PTYs, `files.watchDir`, sandbox metadata/templates, pause/resume,
-and per-sandbox timeouts — sandboxes live until killed.
+Not supported (yet): background commands (`commands.run(..., { background: true })`),
+PTYs, `files.watchDir`, sandbox metadata/templates, and pause/resume.
 
 ## Scripts
 

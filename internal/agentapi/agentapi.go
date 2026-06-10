@@ -31,6 +31,26 @@ type ExecResult struct {
 	DurationMS int64  `json:"duration_ms"`
 }
 
+// ExecEvent types (the Type field of ExecEvent).
+const (
+	EventStdout = "stdout"
+	EventStderr = "stderr"
+	EventExit   = "exit"
+)
+
+// ExecEvent is one NDJSON line of a streaming exec response (POST /exec/stream).
+// Output events carry Type stdout/stderr plus Data; the stream ends with
+// exactly one exit event carrying ExitCode/TimedOut/DurationMS. All non-Type
+// fields are omitempty, so decoders must treat absent fields as zero values
+// (e.g. a successful exit may arrive as {"type":"exit","duration_ms":12}).
+type ExecEvent struct {
+	Type       string `json:"type"`
+	Data       string `json:"data,omitempty"`
+	ExitCode   int    `json:"exit_code,omitempty"`
+	TimedOut   bool   `json:"timed_out,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+}
+
 // DirEntry is one row of a directory listing.
 type DirEntry struct {
 	Name  string    `json:"name"`

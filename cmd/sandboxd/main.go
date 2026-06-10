@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /exec", handleExec)
+	mux.HandleFunc("POST /exec/stream", handleExecStream)
 	mux.HandleFunc("GET /files", handleReadFile)
 	mux.HandleFunc("PUT /files", handleWriteFile)
 	mux.HandleFunc("GET /dir", handleListDir)
@@ -53,25 +55,9 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	timeout := agentapi.DefaultTimeout
-	if req.TimeoutSec > 0 {
-		timeout = time.Duration(req.TimeoutSec) * time.Second
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), execTimeout(req))
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-lc", req.Cmd)
-	cmd.Dir = workingDir(req.Cwd)
-	cmd.Env = os.Environ()
-	for k, v := range req.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-	// Run in its own process group and kill the whole group on timeout, so
-	// children spawned by the shell don't outlive the request.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	cmd := buildCmd(ctx, req)
 
 	var stdout, stderr cappedBuffer
 	cmd.Stdout = &stdout
@@ -95,6 +81,122 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, res)
+}
+
+// handleExecStream runs a command like handleExec but streams output as it
+// arrives: NDJSON lines of agentapi.ExecEvent, flushed per event, ending with
+// exactly one exit event.
+func handleExecStream(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.ExecRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if req.Cmd == "" {
+		httpError(w, 400, errors.New("cmd is required"))
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpError(w, 500, errors.New("response writer does not support streaming"))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), execTimeout(req))
+	defer cancel()
+	cmd := buildCmd(ctx, req)
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		httpError(w, 500, fmt.Errorf("start command: %w", err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(200)
+	flusher.Flush()
+
+	// One encoder shared by both reader goroutines; the mutex keeps event
+	// lines from interleaving mid-object.
+	var mu sync.Mutex
+	enc := json.NewEncoder(w)
+	emit := func(ev agentapi.ExecEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = enc.Encode(ev)
+		flusher.Flush()
+	}
+
+	var wg sync.WaitGroup
+	stream := func(rd io.Reader, typ string) {
+		defer wg.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := rd.Read(buf)
+			if n > 0 {
+				emit(agentapi.ExecEvent{Type: typ, Data: string(buf[:n])})
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+	wg.Add(2)
+	go stream(stdoutPipe, agentapi.EventStdout)
+	go stream(stderrPipe, agentapi.EventStderr)
+	wg.Wait() // drain the pipes before Wait closes them
+
+	err = cmd.Wait()
+	exit := agentapi.ExecEvent{
+		Type:       agentapi.EventExit,
+		TimedOut:   errors.Is(ctx.Err(), context.DeadlineExceeded),
+		DurationMS: time.Since(start).Milliseconds(),
+	}
+	switch {
+	case err == nil:
+		exit.ExitCode = 0
+	case cmd.ProcessState != nil:
+		exit.ExitCode = cmd.ProcessState.ExitCode()
+	default:
+		exit.ExitCode = -1
+	}
+	emit(exit)
+}
+
+// execTimeout returns the command time budget for req.
+func execTimeout(req agentapi.ExecRequest) time.Duration {
+	if req.TimeoutSec > 0 {
+		return time.Duration(req.TimeoutSec) * time.Second
+	}
+	return agentapi.DefaultTimeout
+}
+
+// buildCmd constructs the bash invocation shared by /exec and /exec/stream.
+// The command runs in its own process group and the whole group is killed on
+// timeout, so children spawned by the shell don't outlive the request.
+func buildCmd(ctx context.Context, req agentapi.ExecRequest) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "/bin/bash", "-lc", req.Cmd)
+	cmd.Dir = workingDir(req.Cwd)
+	cmd.Env = os.Environ()
+	for k, v := range req.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	return cmd
 }
 
 func handleReadFile(w http.ResponseWriter, r *http.Request) {

@@ -98,13 +98,15 @@ sudo ./websandbox stop-server       # graceful: tears down all sandboxes
 
 ```
 websandbox serve          Run the API server (owns all VMs)
-websandbox up             Create a sandbox; blocks until the agent is ready
+websandbox up [--ttl s]   Create a sandbox; blocks until the agent is ready
 websandbox down <id>      Destroy a sandbox
 websandbox list           List running sandboxes
-websandbox exec <id> -- <cmd>   Run a shell command inside a sandbox
+websandbox exec [--stream] <id> -- <cmd>   Run a shell command inside a sandbox
 websandbox read <id> <path>     Read a file from a sandbox to stdout
 websandbox write <id> <path>    Write stdin (or --from file) into a sandbox
 websandbox ls <id> [path]       List a directory inside a sandbox
+websandbox expose <id> <port>   Forward an extra guest port to a host port
+websandbox ports <id>           List a sandbox's forwarded ports
 websandbox install-agent  Bake/refresh sandboxd inside the base rootfs
 websandbox stop-server    Stop the server (SIGTERM; --force for SIGKILL)
 websandbox doctor         Validate the environment
@@ -127,11 +129,15 @@ Endpoints (both listeners):
 
 | Method & path | Description |
 |---|---|
-| `POST /sandboxes` | Create a sandbox; returns when the in-guest agent is healthy |
+| `POST /sandboxes` | Create a sandbox; optional `{"timeout_sec": N}` body sets an auto-destroy TTL. Returns when the in-guest agent is healthy |
 | `GET /sandboxes` | List running sandboxes |
 | `GET /sandboxes/{id}` | Get one sandbox |
 | `DELETE /sandboxes/{id}` | Graceful guest shutdown + resource cleanup |
 | `POST /sandboxes/{id}/exec` | `{"cmd": "...", "cwd": "...", "timeout_sec": 60}` → `{stdout, stderr, exit_code, timed_out, duration_ms}` |
+| `POST /sandboxes/{id}/exec/stream` | Same body; NDJSON stream of `{"type":"stdout"\|"stderr","data":…}` events ending with a `{"type":"exit",…}` event |
+| `POST /sandboxes/{id}/timeout` | `{"timeout_sec": N}` resets the TTL (0 clears); a reaper destroys expired sandboxes |
+| `POST /sandboxes/{id}/ports` | `{"guest_port": 8000}` → DNATs an extra guest port to a pool-allocated host port (idempotent) |
+| `GET /sandboxes/{id}/ports` | All forwarded ports, including the primary 5173 mapping |
 | `GET /sandboxes/{id}/files?path=` | Read a file (raw bytes) |
 | `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
 | `GET /sandboxes/{id}/dir?path=` | Directory listing (JSON) |

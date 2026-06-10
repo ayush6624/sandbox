@@ -17,6 +17,6 @@ func rootCmd() *cobra.Command {
 		Use:   "websandbox",
 		Short: "Firecracker microVM sandboxes for React/TS apps",
 	}
-	root.AddCommand(serveCmd(), upCmd(), downCmd(), listCmd(), doctorCmd(), execCmd(), readCmd(), writeCmd(), lsCmd(), installAgentCmd(), stopServerCmd())
+	root.AddCommand(serveCmd(), upCmd(), downCmd(), listCmd(), doctorCmd(), execCmd(), readCmd(), writeCmd(), lsCmd(), exposeCmd(), portsCmd(), installAgentCmd(), stopServerCmd())
 	return root
 }

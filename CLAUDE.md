@@ -145,6 +145,16 @@ scripts/              Host setup shell scripts
 - **exec kills whole process groups.** sandboxd runs commands with `Setpgid` and kills
   `-pgid` on timeout so shell children don't outlive the request. stdout/stderr are capped
   at 2 MiB each (`agentapi.MaxOutputBytes`).
+- **Streaming exec is NDJSON, not SSE.** `POST .../exec/stream` emits
+  `agentapi.ExecEvent` lines (stdout/stderr/exit); the server proxy wraps the
+  ResponseWriter in a flush-on-write writer so chunks pass through immediately. All
+  non-Type ExecEvent fields are omitempty — decoders must treat absent fields as zero.
+- **TTL reaper.** `POST /sandboxes` accepts optional `{"timeout_sec":N}`; a 10 s ticker
+  goroutine in `Serve` destroys rows whose `expires_at` passed. `POST .../timeout`
+  resets (0 clears). No default TTL — absent means live forever.
+- **Extra port mappings** live in the `sandbox_ports` table and draw host ports from the
+  same pool as primary ports (`loadUsed` reads both tables). destroy() and reconcile()
+  must remove their DNAT rules — read mappings before deleting rows.
 - **`vmCtx` ≠ request ctx.** `handleCreate` must pass `s.vmCtx` (server-scoped) to `vm.NewMachine`
   and `vm.Start`, NOT `r.Context()` — the request ctx cancels when the handler returns, and the
   firecracker SDK SIGTERMs the VM when its ctx cancels. This was an early bug that wasted hours.
@@ -177,10 +187,7 @@ scripts/              Host setup shell scripts
 - **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
 - **No per-VM overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
   template-wide. Body currently ignored.
-- **No sandbox TTL / auto-destroy.** Sandboxes live until `down` or server shutdown.
-- **No streaming exec.** `/exec` buffers output and returns once the command exits;
-  no SSE/websocket for long-running processes (e.g. tailing Vite logs).
-- **No tests.** Zero `_test.go` files.
+- **No tests on the Go side.** Zero `_test.go` files (the TS SDK has a mock-server suite).
 - **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
   the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
   transport security. Don't bind it to a public interface. The Unix socket stays auth-free

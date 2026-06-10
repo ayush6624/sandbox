@@ -12,6 +12,16 @@ export interface SandboxOpts {
   requestTimeoutMs?: number
 }
 
+/** Options for {@link Sandbox.create}. */
+export interface SandboxCreateOpts extends SandboxOpts {
+  /**
+   * Auto-destroy the sandbox after this many milliseconds (rounded up to
+   * whole seconds). Omit for no expiry. Can be changed later with
+   * `sandbox.setTimeout(ms)`.
+   */
+  timeoutMs?: number
+}
+
 /** Raw sandbox object as returned by the REST API (snake_case). */
 export interface ApiSandbox {
   id: string
@@ -24,6 +34,21 @@ export interface ApiSandbox {
   rootfs_path: string
   status: string
   created_at: string
+  expires_at?: string
+}
+
+/** Raw port mapping as returned by the REST API (snake_case). */
+export interface ApiPortMapping {
+  guest_port: number
+  host_port: number
+}
+
+/** One forwarded port: guest port → host port. */
+export interface PortMapping {
+  /** Port inside the guest. */
+  guestPort: number
+  /** Host port forwarding to it. */
+  hostPort: number
 }
 
 /** Information about a sandbox, as returned by {@link Sandbox.list}. */
@@ -48,6 +73,8 @@ export interface SandboxInfo {
   status: string
   /** Creation time. */
   createdAt: Date
+  /** When the sandbox will be auto-destroyed; absent when it has no TTL. */
+  expiresAt?: Date
 }
 
 /** Result of a command executed via `sandbox.commands.run()`. */
@@ -70,6 +97,14 @@ export interface CommandRunOpts {
   envs?: Record<string, string>
   /** Time budget for the command in milliseconds (default 60 000). */
   timeoutMs?: number
+  /**
+   * Called with each stdout chunk as the command produces it. Providing
+   * `onStdout` or `onStderr` switches to the streaming exec endpoint; the
+   * returned {@link CommandResult} still carries the full output.
+   */
+  onStdout?: (data: string) => void
+  /** Called with each stderr chunk as the command produces it. */
+  onStderr?: (data: string) => void
 }
 
 /** A directory entry returned by `sandbox.files.list()`. */
@@ -102,7 +137,7 @@ export interface ReadOpts {
 
 /** Converts a raw API sandbox object to the public {@link SandboxInfo} shape. */
 export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
-  return {
+  const info: SandboxInfo = {
     sandboxId: raw.id,
     pid: raw.pid,
     vmId: raw.vm_id,
@@ -114,4 +149,6 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
     status: raw.status,
     createdAt: new Date(raw.created_at),
   }
+  if (raw.expires_at) info.expiresAt = new Date(raw.expires_at)
+  return info
 }

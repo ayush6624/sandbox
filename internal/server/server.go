@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -51,6 +52,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.vmCtx = ctx
 
 	s.reconcile(ctx)
+	go s.reapExpired(ctx)
 
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o755); err != nil {
 		return err
@@ -68,7 +70,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes", s.handleList)
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)
 	mux.HandleFunc("DELETE /sandboxes/{id}", s.handleDestroy)
+	mux.HandleFunc("POST /sandboxes/{id}/timeout", s.handleSetTimeout)
+	mux.HandleFunc("POST /sandboxes/{id}/ports", s.handleExposePort)
+	mux.HandleFunc("GET /sandboxes/{id}/ports", s.handleListPorts)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.handleAgentProxy("exec"))
+	mux.HandleFunc("POST /sandboxes/{id}/exec/stream", s.handleAgentProxy("exec/stream"))
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.handleAgentProxy("files"))
 	mux.HandleFunc("PUT /sandboxes/{id}/files", s.handleAgentProxy("files"))
 	mux.HandleFunc("GET /sandboxes/{id}/dir", s.handleAgentProxy("dir"))
@@ -143,13 +149,31 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := uuid.NewString()
 
+	// The body is optional (older clients send none); tolerate EOF.
+	var body struct {
+		TimeoutSec int `json:"timeout_sec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if body.TimeoutSec < 0 {
+		httpError(w, 400, errors.New("timeout_sec must be >= 0"))
+		return
+	}
+	var expiresAt *time.Time
+	if body.TimeoutSec > 0 {
+		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
+		expiresAt = &t
+	}
+
 	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
 	if err != nil {
 		httpError(w, 500, fmt.Errorf("prepare rootfs: %w", err))
 		return
 	}
 
-	sb, err := s.reg.Create(ctx, id, rootfsPath)
+	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt)
 	if err != nil {
 		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		httpError(w, 500, fmt.Errorf("registry create: %w", err))
@@ -274,6 +298,11 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("get sandbox: %w", err)
 	}
+	// Read extra port mappings before reg.Destroy deletes their rows.
+	ports, err := s.reg.Ports(ctx, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] list extra ports: %v\n", id, err)
+	}
 
 	if v, ok := s.machines.LoadAndDelete(id); ok {
 		m := v.(*vm.Machine)
@@ -293,6 +322,9 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		}
 	}
 
+	for _, pm := range ports {
+		s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+	}
 	s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 	_ = s.cfg.Provisioner.CleanupRootfs(id)
