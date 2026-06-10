@@ -1,0 +1,32 @@
+{
+  "name": "websandbox",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the websandbox Firecracker microVM sandbox API. Mirrors the e2b JavaScript SDK surface.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "example": "tsx examples/demo.ts",
+    "test": "tsx --test test/smoke.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

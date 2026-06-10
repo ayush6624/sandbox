@@ -114,7 +114,16 @@ websandbox doctor         Validate the environment
 
 ## HTTP API
 
-The server listens on a Unix socket (`/run/websandbox.sock`, mode 0600):
+The server listens on a Unix socket (`/run/websandbox.sock`, mode 0600). It can
+additionally serve TCP — e.g. on a Tailscale address for SDK access from other
+machines — with bearer-token auth:
+
+```bash
+sudo ./websandbox serve --listen <tailnet-ip>:8080 --token $(openssl rand -hex 24)
+# clients send: Authorization: Bearer <token>
+```
+
+Endpoints (both listeners):
 
 | Method & path | Description |
 |---|---|

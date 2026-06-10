@@ -181,5 +181,7 @@ scripts/              Host setup shell scripts
 - **No streaming exec.** `/exec` buffers output and returns once the command exits;
   no SSE/websocket for long-running processes (e.g. tailing Vite logs).
 - **No tests.** Zero `_test.go` files.
-- **API is local-only** (Unix socket, mode 0600). No auth, no TLS — for remote access
-  you'd tunnel over SSH or front it with something else.
+- **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
+  the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
+  transport security. Don't bind it to a public interface. The Unix socket stays auth-free
+  (mode 0600). The local token for the dev machine lives in `.websandbox-token` (gitignored).
