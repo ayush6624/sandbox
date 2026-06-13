@@ -57,7 +57,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("websandbox doctor")
+	fmt.Println("sandbox doctor")
 	fmt.Println()
 
 	fmt.Println("Platform")

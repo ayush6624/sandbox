@@ -1,6 +1,6 @@
-# websandbox (TypeScript SDK)
+# sandbox (TypeScript SDK)
 
-TypeScript client for the websandbox API — self-hosted Firecracker microVM
+TypeScript client for the sandbox API — self-hosted Firecracker microVM
 sandboxes for frontend development. The API surface mirrors the
 [e2b](https://e2b.dev) JavaScript SDK so it works as a near drop-in replacement.
 
@@ -12,7 +12,7 @@ sandboxes for frontend development. The API surface mirrors the
 ```bash
 npm install            # from this directory, for development
 # or, once published / via a file path:
-npm install websandbox
+npm install sandbox
 ```
 
 ## Configuration
@@ -21,14 +21,14 @@ The SDK reads two environment variables (both can also be passed
 programmatically via the `opts` argument on every entry point):
 
 ```bash
-export WEBSANDBOX_API_URL=http://100.99.183.74:8080
-export WEBSANDBOX_API_KEY=<your-key>
+export SANDBOX_API_URL=http://100.99.183.74:8080
+export SANDBOX_API_KEY=<your-key>
 ```
 
 ## Usage
 
 ```ts
-import { Sandbox } from 'websandbox'
+import { Sandbox } from 'sandbox'
 
 const sbx = await Sandbox.create()              // boots a microVM, ~2s
 console.log(sbx.sandboxId)
@@ -104,9 +104,9 @@ All errors extend `SandboxError`:
 
 ## Migrating from e2b
 
-| e2b | websandbox |
+| e2b | sandbox |
 | --- | --- |
-| `import { Sandbox } from '@e2b/code-interpreter'` | `import { Sandbox } from 'websandbox'` |
+| `import { Sandbox } from '@e2b/code-interpreter'` | `import { Sandbox } from 'sandbox'` |
 | `Sandbox.create('template', { timeoutMs })` | `Sandbox.create({ timeoutMs, ...opts })` — single built-in Node + Python template |
 | `Sandbox.connect(id)` | `Sandbox.connect(id)` |
 | `Sandbox.list()` | `Sandbox.list()` |
@@ -121,7 +121,7 @@ All errors extend `SandboxError`:
 | `sbx.getHost(port)` | `sbx.getHost(port)` — 3000 always works; other ports after `await sbx.exposePort(port)` |
 | — | `sbx.exposePort(guestPort)` / `sbx.listPorts()` |
 | `sbx.kill()` | `sbx.kill()` |
-| `E2B_API_KEY` env var | `WEBSANDBOX_API_KEY` (+ `WEBSANDBOX_API_URL`) |
+| `E2B_API_KEY` env var | `SANDBOX_API_KEY` (+ `SANDBOX_API_URL`) |
 | `CommandExitError` / `TimeoutError` | same names and semantics |
 
 Not supported (yet): background commands (`commands.run(..., { background: true })`),
@@ -139,7 +139,7 @@ npm run example     # run examples/demo.ts against a live server
 ## Examples
 
 Each script in `examples/` runs against a live server; all read the
-`WEBSANDBOX_API_URL` / `WEBSANDBOX_API_KEY` env vars:
+`SANDBOX_API_URL` / `SANDBOX_API_KEY` env vars:
 
 | Script | Shows |
 | --- | --- |
@@ -149,7 +149,7 @@ Each script in `examples/` runs against a live server; all read the
 | `npm run example:lifecycle` | `create({ timeoutMs })`, `setTimeout`, `Sandbox.list`, `Sandbox.connect` by id, `kill` |
 
 ```bash
-export WEBSANDBOX_API_URL=http://<host>:8080
-export WEBSANDBOX_API_KEY=<key>
+export SANDBOX_API_URL=http://<host>:8080
+export SANDBOX_API_KEY=<key>
 npm run example:ports
 ```

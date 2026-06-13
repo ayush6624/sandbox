@@ -33,7 +33,7 @@ func (o *RunOptions) applyDefaults() error {
 		if err != nil {
 			return err
 		}
-		o.SocketPath = filepath.Join(os.TempDir(), fmt.Sprintf("websandbox-%s.sock", id.String()))
+		o.SocketPath = filepath.Join(os.TempDir(), fmt.Sprintf("sandbox-%s.sock", id.String()))
 	}
 	if o.LogDir == "" {
 		o.LogDir = os.TempDir()
@@ -50,7 +50,7 @@ func (o RunOptions) fcConfig() (fcsdk.Config, error) {
 	if err != nil {
 		return fcsdk.Config{}, err
 	}
-	logFIFO := filepath.Join(o.LogDir, fmt.Sprintf("websandbox-log-%s.fifo", uid.String()))
+	logFIFO := filepath.Join(o.LogDir, fmt.Sprintf("sandbox-log-%s.fifo", uid.String()))
 
 	vmID, err := uuid.NewRandom()
 	if err != nil {

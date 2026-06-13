@@ -10,7 +10,7 @@ forwarded to a host port for whatever you start there. e2b style — but
 self-hosted, on bare metal.
 
 Multi-sandbox: each one gets its own tap, IP, host port, and rootfs copy.
-State is in SQLite at `/var/lib/websandbox/registry.db`. The server (`websandbox serve`)
+State is in SQLite at `/var/lib/sandbox/registry.db`. The server (`sandbox serve`)
 owns all running VMs in-process.
 
 Every VM also runs `sandboxd` (cmd/sandboxd), a small in-guest HTTP agent on
@@ -23,24 +23,24 @@ immediately usable.
 
 ```bash
 make build            # Local build (uses stub on macOS — Firecracker calls return ErrLinuxOnly)
-make build-linux      # Cross-compile bin/websandbox for linux/amd64 (pure-Go SQLite, CGO disabled)
+make build-linux      # Cross-compile bin/sandbox for linux/amd64 (pure-Go SQLite, CGO disabled)
 ```
 
 Server + CLI (on a Linux host; both need root):
 
 ```bash
-sudo ./websandbox serve --config configs/devbox.json    # daemon-ish; listens on /run/websandbox.sock
-sudo ./websandbox doctor --config configs/devbox.json   # env validation
-sudo ./websandbox up                                    # POST /sandboxes → prints JSON + URL
-sudo ./websandbox list                                  # GET /sandboxes
-sudo ./websandbox down <id>                             # DELETE /sandboxes/<id>
-sudo ./websandbox exec <id> -- "node --version"         # run a command in the guest
-sudo ./websandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest
-sudo ./websandbox read <id> /path                       # file out of the guest → stdout
-sudo ./websandbox write <id> /path [--from local]       # stdin/local file → guest
-sudo ./websandbox ls <id> [/path]                       # list a guest directory
-sudo ./websandbox install-agent --agent ./sandboxd      # bake sandboxd into base rootfs
-sudo ./websandbox stop-server [--force]                 # SIGTERM (graceful) / SIGKILL the server
+sudo ./sandbox serve --config configs/devbox.json    # daemon-ish; listens on /run/sandbox.sock
+sudo ./sandbox doctor --config configs/devbox.json   # env validation
+sudo ./sandbox up                                    # POST /sandboxes → prints JSON + URL
+sudo ./sandbox list                                  # GET /sandboxes
+sudo ./sandbox down <id>                             # DELETE /sandboxes/<id>
+sudo ./sandbox exec <id> -- "node --version"         # run a command in the guest
+sudo ./sandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest
+sudo ./sandbox read <id> /path                       # file out of the guest → stdout
+sudo ./sandbox write <id> /path [--from local]       # stdin/local file → guest
+sudo ./sandbox ls <id> [/path]                       # list a guest directory
+sudo ./sandbox install-agent --agent ./sandboxd      # bake sandboxd into base rootfs
+sudo ./sandbox stop-server [--force]                 # SIGTERM (graceful) / SIGKILL the server
 ```
 
 The non-serve commands are thin HTTP clients over the Unix socket. They need
@@ -55,7 +55,7 @@ firecracker processes, removes stale taps/rootfs/DNAT/DB rows).
 ## Remote deployment
 
 ```bash
-make sync                              # build-linux + rsync bin/{websandbox,sandboxd} + Makefile + configs + scripts
+make sync                              # build-linux + rsync bin/{sandbox,sandboxd} + Makefile + configs + scripts
 make remote-install-agent              # sync + bake sandboxd into the base rootfs
 make remote-doctor                     # ssh + run doctor
 make remote-serve                      # ssh + run server (blocks)
@@ -64,17 +64,17 @@ make remote-list                       # ssh + list
 make remote-down SANDBOX=<id>          # ssh + destroy one
 ```
 
-`sync` rsyncs the binaries so they land at `~/web-sandbox/websandbox` and
+`sync` rsyncs the binaries so they land at `~/web-sandbox/sandbox` and
 `~/web-sandbox/sandboxd` (not under `bin/`). All `remote-*` targets and the
-README use `./websandbox`. Don't reintroduce `./bin/websandbox` in remote commands.
+README use `./sandbox`. Don't reintroduce `./bin/sandbox` in remote commands.
 
 NOPASSWD sudoers (one-time, lets the CLI/server run as root without prompting):
 
 ```
-ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/websandbox
+ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/sandbox
 ```
 
-in `/etc/sudoers.d/websandbox` with mode `0440`.
+in `/etc/sudoers.d/sandbox` with mode `0440`.
 
 ## One-time host setup
 
@@ -82,7 +82,7 @@ in `/etc/sudoers.d/websandbox` with mode `0440`.
 sudo bash scripts/setup-firecracker.sh      # install firecracker binary
 sudo bash scripts/setup-kernel.sh           # download Firecracker-compatible kernel
 sudo bash scripts/build-devbox-rootfs.sh    # build /opt/fc/devbox-rootfs.ext4 (resumable, ~5 min)
-sudo ./websandbox install-agent             # bake sandboxd into the rootfs (loop-mount, fast)
+sudo ./sandbox install-agent             # bake sandboxd into the rootfs (loop-mount, fast)
 ```
 
 `setup-network.sh` still exists but is no longer required: `serve` runs
@@ -103,7 +103,7 @@ If you change these, host:port → guest:3000 forwarding silently breaks.
 ## Code layout
 
 ```
-cmd/websandbox/
+cmd/sandbox/
   main.go              Root cobra command (wires all subcommands)
   serve.go             Boots the API server (EnsureNetwork + reconcile + listen)
   up.go                Thin client: POST /sandboxes
@@ -113,7 +113,7 @@ cmd/websandbox/
   shell.go             Interactive PTY: raw-mode stdin ↔ WebSocket /shell; relays SIGWINCH resizes
   files.go             Thin clients: read/write/ls over /files and /dir
   installagent.go      Loop-mounts the base rootfs, installs sandboxd + systemd unit
-  stopserver.go        Finds `websandbox serve` PIDs via /proc, SIGTERM/SIGKILL
+  stopserver.go        Finds `sandbox serve` PIDs via /proc, SIGTERM/SIGKILL
   doctor.go            Colored env checks (Linux, KVM, firecracker, kernel, rootfs, bridge, ip_fwd, API socket)
   helpers.go           Shared cfg/socket flags and Client constructor
 cmd/sandboxd/main.go   In-guest agent: /health, /exec, /files (GET/PUT), /dir, /shell (PTY WebSocket) on :8090
@@ -203,4 +203,4 @@ scripts/              Host setup shell scripts
 - **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
   the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
   transport security. Don't bind it to a public interface. The Unix socket stays auth-free
-  (mode 0600). The local token for the dev machine lives in `.websandbox-token` (gitignored).
+  (mode 0600). The local token for the dev machine lives in `.sandbox-token` (gitignored).

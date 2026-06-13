@@ -1,6 +1,6 @@
 [
   {
-    "provider": "websandbox",
+    "provider": "sandbox",
     "sandbox_id": "356cd518-ccee-42c7-8f04-2f328535730f",
     "specs": {
       "actual_cpus": 2,

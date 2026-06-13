@@ -17,7 +17,7 @@ build:
 
 build-linux:
 	mkdir -p bin
-	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/websandbox ./cmd/websandbox
+	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandbox ./cmd/sandbox
 	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandboxd ./cmd/sandboxd
 
 check-remote:
@@ -27,7 +27,7 @@ check-remote:
 
 sync: check-remote build-linux
 	rsync -avz -e ssh \
-		bin/websandbox \
+		bin/sandbox \
 		bin/sandboxd \
 		Makefile \
 		configs \
@@ -45,7 +45,7 @@ remote-shell: check-remote
 	ssh $(REMOTE)
 
 remote-doctor: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && ./websandbox doctor --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && ./sandbox doctor --config configs/devbox.json'
 
 # --- One-time setup ---
 
@@ -59,20 +59,20 @@ remote-setup-devbox: sync
 
 # Install/update the sandboxd guest agent inside the base rootfs.
 remote-install-agent: sync
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox install-agent --agent ./sandboxd'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./sandbox install-agent --agent ./sandboxd'
 
 # --- Server + sandbox lifecycle ---
 
 remote-serve: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox serve --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./sandbox serve --config configs/devbox.json'
 
 remote-up: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox up --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./sandbox up --config configs/devbox.json'
 
 # Usage: make remote-down SANDBOX=<id>
 remote-down: check-remote
 	@test -n "$(SANDBOX)" || (echo "set SANDBOX=<id>"; exit 1)
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox down $(SANDBOX) --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./sandbox down $(SANDBOX) --config configs/devbox.json'
 
 remote-list: check-remote
-	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./websandbox list --config configs/devbox.json'
+	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./sandbox list --config configs/devbox.json'

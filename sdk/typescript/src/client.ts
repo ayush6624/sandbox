@@ -26,7 +26,7 @@ export interface RequestOpts {
 }
 
 /**
- * Minimal HTTP plumbing for the websandbox REST API.
+ * Minimal HTTP plumbing for the sandbox REST API.
  * Zero dependencies — uses the global `fetch` available in Node 18+.
  */
 export class ApiClient {
@@ -38,16 +38,16 @@ export class ApiClient {
   private readonly requestTimeoutMs: number
 
   constructor(opts: SandboxOpts = {}) {
-    const apiUrl = opts.apiUrl ?? process.env.WEBSANDBOX_API_URL
+    const apiUrl = opts.apiUrl ?? process.env.SANDBOX_API_URL
     if (!apiUrl) {
       throw new SandboxError(
-        'Missing API URL: set the WEBSANDBOX_API_URL environment variable (e.g. http://100.99.183.74:8080) or pass { apiUrl } explicitly.'
+        'Missing API URL: set the SANDBOX_API_URL environment variable (e.g. http://100.99.183.74:8080) or pass { apiUrl } explicitly.'
       )
     }
-    const apiKey = opts.apiKey ?? process.env.WEBSANDBOX_API_KEY
+    const apiKey = opts.apiKey ?? process.env.SANDBOX_API_KEY
     if (!apiKey) {
       throw new AuthenticationError(
-        'Missing API key: set the WEBSANDBOX_API_KEY environment variable or pass { apiKey } explicitly.'
+        'Missing API key: set the SANDBOX_API_KEY environment variable or pass { apiKey } explicitly.'
       )
     }
 

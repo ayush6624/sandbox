@@ -19,7 +19,7 @@ import (
 	"github.com/ayush6624/web-sandbox/internal/registry"
 )
 
-// Client is a thin HTTP client that talks to the websandbox server over a Unix socket.
+// Client is a thin HTTP client that talks to the sandbox server over a Unix socket.
 type Client struct {
 	http *http.Client
 }
@@ -155,13 +155,13 @@ func (c *Client) DialShell(ctx context.Context, id string, cols, rows uint16) (*
 	}
 	// The host is ignored — c.http's transport dials the configured socket — but
 	// must be present for a valid ws:// URL.
-	u := "ws://websandbox/sandboxes/" + id + "/shell"
+	u := "ws://sandbox/sandboxes/" + id + "/shell"
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}
 	conn, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: c.http})
 	if err != nil {
-		return nil, fmt.Errorf("dial shell (is `websandbox serve` running?): %w", err)
+		return nil, fmt.Errorf("dial shell (is `sandbox serve` running?): %w", err)
 	}
 	conn.SetReadLimit(1 << 20)
 	return conn, nil
@@ -230,7 +230,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body io.Reader)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("dial server (is `websandbox serve` running?): %w", err)
+		return nil, fmt.Errorf("dial server (is `sandbox serve` running?): %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
@@ -261,7 +261,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("dial server (is `websandbox serve` running?): %w", err)
+		return fmt.Errorf("dial server (is `sandbox serve` running?): %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {

@@ -1,7 +1,7 @@
 import type { CommandResult } from './types.js'
 
 /**
- * Base class for all errors thrown by the websandbox SDK.
+ * Base class for all errors thrown by the sandbox SDK.
  */
 export class SandboxError extends Error {
   constructor(message: string) {

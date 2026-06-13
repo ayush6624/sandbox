@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time host networking setup for Firecracker sandboxes (multi-VM bridge model).
 # Creates br-fc, assigns the gateway IP, enables IP forwarding, sets up NAT.
-# Per-sandbox tap devices and port forwards are managed by the websandbox server.
+# Per-sandbox tap devices and port forwards are managed by the sandbox server.
 set -euo pipefail
 
 BRIDGE="${BRIDGE:-br-fc}"
@@ -62,8 +62,8 @@ if ! sudo iptables -C FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT 2>/dev/null; t
   sudo iptables -A FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT
 fi
 
-# Ensure /var/lib/websandbox exists for the registry + rootfs copies
-sudo mkdir -p /var/lib/websandbox/rootfs
+# Ensure /var/lib/sandbox exists for the registry + rootfs copies
+sudo mkdir -p /var/lib/sandbox/rootfs
 
 echo ""
 echo "==> Networking ready"

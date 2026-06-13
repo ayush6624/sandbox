@@ -1,8 +1,8 @@
 {
-  "socket_path":     "/run/websandbox.sock",
-  "db_path":         "/var/lib/websandbox/registry.db",
+  "socket_path":     "/run/sandbox.sock",
+  "db_path":         "/var/lib/sandbox/registry.db",
   "rootfs_base":     "/opt/fc/devbox-rootfs.ext4",
-  "rootfs_dir":      "/var/lib/websandbox/rootfs",
+  "rootfs_dir":      "/var/lib/sandbox/rootfs",
   "bridge":          "br-fc",
   "gateway_ip":      "172.16.0.1",
   "nameservers":     "185.12.64.1,185.12.64.2",

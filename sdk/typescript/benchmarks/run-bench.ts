@@ -1,8 +1,8 @@
 /**
- * websandbox benchmark orchestrator (host side).
+ * sandbox benchmark orchestrator (host side).
  *
  * Our own version of tensorlakeai/sandbox-sqlite-bench's `run_benchmarks.py`,
- * driving a websandbox microVM through this SDK. Unlike the upstream runner
+ * driving a sandbox microVM through this SDK. Unlike the upstream runner
  * (which shells out to each provider's CLI and runs a Python workload), this is
  * pure TypeScript end to end: it ships `benchmark.ts` into the guest and runs it
  * on the guest's own Node 22 via type-stripping — no Python, no extra installs.
@@ -11,7 +11,7 @@
  * → `node benchmark.ts` → parse the JSON it prints → tear the sandbox down.
  *
  * Usage:
- *   WEBSANDBOX_API_URL=http://<host>:8080 WEBSANDBOX_API_KEY=<key> \
+ *   SANDBOX_API_URL=http://<host>:8080 SANDBOX_API_KEY=<key> \
  *     tsx benchmarks/run-bench.ts [--mode default|fsync|large] [--iterations N] [--output file.json]
  *
  *   npm run bench -- --mode large --iterations 3
@@ -126,11 +126,11 @@ function parseBenchmarkJson(output: string): Record<string, unknown> {
 
 async function runBenchmark(args: Args): Promise<ProviderResult> {
   console.log(`\n${'='.repeat(60)}`)
-  console.log('  WEBSANDBOX')
+  console.log('  SANDBOX')
   console.log('='.repeat(60))
 
   const createStart = Date.now()
-  console.log('  Creating websandbox microVM...')
+  console.log('  Creating sandbox microVM...')
   // Generous TTL so a long --mode large run can't be reaped mid-benchmark;
   // killed explicitly in the finally block regardless.
   const sbx = await Sandbox.create({ timeoutMs: 30 * 60_000 })
@@ -160,7 +160,7 @@ async function runBenchmark(args: Args): Promise<ProviderResult> {
     const benchResults = parseBenchmarkJson(res.stdout)
 
     return {
-      provider: 'websandbox',
+      provider: 'sandbox',
       sandbox_id: sbx.sandboxId,
       specs,
       sandbox_creation_time: createTime,
@@ -170,7 +170,7 @@ async function runBenchmark(args: Args): Promise<ProviderResult> {
       wall_time: wallTime,
     }
   } finally {
-    console.log('  Cleaning up websandbox sandbox...')
+    console.log('  Cleaning up sandbox sandbox...')
     try {
       await sbx.kill()
     } catch {

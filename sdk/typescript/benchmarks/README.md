@@ -1,7 +1,7 @@
-# websandbox benchmark (all-TypeScript)
+# sandbox benchmark (all-TypeScript)
 
 Our own version of [tensorlakeai/sandbox-sqlite-bench](https://github.com/tensorlakeai/sandbox-sqlite-bench),
-rebuilt end-to-end in TypeScript for what websandbox sandboxes actually run:
+rebuilt end-to-end in TypeScript for what sandbox sandboxes actually run:
 **Node 22 with the built-in `node:sqlite` module and `node:worker_threads`** —
 zero npm dependencies, no Python, no native addons.
 
@@ -11,7 +11,7 @@ zero npm dependencies, no Python, no native addons.
   file directly via type-stripping (`node --no-warnings benchmark.ts`), so it
   needs no build step or `tsx` inside the guest.
 - **`run-bench.ts`** — the host orchestrator (a TS rewrite of upstream's
-  `run_benchmarks.py`). It drives a websandbox microVM through this SDK:
+  `run_benchmarks.py`). It drives a sandbox microVM through this SDK:
   **create → detect specs → copy `benchmark.ts` into the guest → run it → parse
   its JSON → tear down.**
 
@@ -42,8 +42,8 @@ the event loop, so workers are the only way to get true parallelism.)
 cd sdk/typescript
 npm install
 
-export WEBSANDBOX_API_URL=http://<host>:8080
-export WEBSANDBOX_API_KEY=<key>
+export SANDBOX_API_URL=http://<host>:8080
+export SANDBOX_API_KEY=<key>
 
 npm run bench                              # default mode, 3 iterations
 npm run bench -- --mode fsync              # synchronous=FULL, stresses fsync
@@ -70,8 +70,8 @@ earlier Python run:
   guest's Python `sqlite3` is 3.45.x.
 - The filesystem ops have no upstream counterpart at all.
 
-So treat this as a **websandbox-native** benchmark — most meaningful for
-comparing websandbox against itself across configs (RAM, vCPU, modes) and over
+So treat this as a **sandbox-native** benchmark — most meaningful for
+comparing sandbox against itself across configs (RAM, vCPU, modes) and over
 time. For a cross-provider comparison you'd run the same binding everywhere.
 
 ## Output

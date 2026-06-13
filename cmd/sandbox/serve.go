@@ -85,6 +85,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("websandbox server listening on %s\n", cfg.SocketPath)
+	fmt.Printf("sandbox server listening on %s\n", cfg.SocketPath)
 	return srv.Serve(ctx)
 }

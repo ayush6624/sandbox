@@ -1,16 +1,16 @@
 /**
- * End-to-end demo of the websandbox SDK — the broad tour. See the sibling
+ * End-to-end demo of the sandbox SDK — the broad tour. See the sibling
  * examples for focused features: streaming.ts, ports.ts, lifecycle.ts.
  *
  * Run with: npm run example
  */
-// When installed from npm this would be: import { Sandbox } from 'websandbox'
+// When installed from npm this would be: import { Sandbox } from 'sandbox'
 import { Sandbox } from '../src/index.js'
 import { ensureCreds, runExample, step } from './shared.js'
 
 const SCRIPT_PY = `import sys
 
-print(f"Hello from websandbox, running Python {sys.version.split()[0]}")
+print(f"Hello from sandbox, running Python {sys.version.split()[0]}")
 print("This script was written into the microVM via the SDK.")
 `
 

@@ -11,15 +11,15 @@ but self-hosted, on bare metal.
 
 ```bash
 make build            # Local build (uses stub on macOS — Firecracker calls return ErrLinuxOnly)
-make build-linux      # Cross-compile bin/websandbox for linux/amd64
+make build-linux      # Cross-compile bin/sandbox for linux/amd64
 ```
 
 Firecracker requires Linux with `/dev/kvm`. macOS is dev-only.
 
 ```bash
-sudo ./websandbox doctor --config configs/devbox.json
-sudo ./websandbox up    --config configs/devbox.json   # blocks until Ctrl+C or `down`
-sudo ./websandbox down  --config configs/devbox.json   # from another shell
+sudo ./sandbox doctor --config configs/devbox.json
+sudo ./sandbox up    --config configs/devbox.json   # blocks until Ctrl+C or `down`
+sudo ./sandbox down  --config configs/devbox.json   # from another shell
 ```
 
 ## Remote deployment
@@ -27,24 +27,24 @@ sudo ./websandbox down  --config configs/devbox.json   # from another shell
 The Makefile defaults to `REMOTE_USER=ayush REMOTE_HOST=machine REMOTE_DIR=web-sandbox`.
 
 ```bash
-make sync                 # build-linux + rsync bin/websandbox + Makefile + configs + scripts
+make sync                 # build-linux + rsync bin/sandbox + Makefile + configs + scripts
 make remote-doctor        # ssh + run doctor
 make remote-up            # ssh + run up (blocks)
 make remote-down          # ssh + run down
 ```
 
-Note: `sync` rsyncs `bin/websandbox` so the binary lands at `~/web-sandbox/websandbox`
-(not `~/web-sandbox/bin/websandbox`). All `remote-*` targets and the README use
-`./websandbox`. Don't reintroduce `./bin/websandbox` in remote commands.
+Note: `sync` rsyncs `bin/sandbox` so the binary lands at `~/web-sandbox/sandbox`
+(not `~/web-sandbox/bin/sandbox`). All `remote-*` targets and the README use
+`./sandbox`. Don't reintroduce `./bin/sandbox` in remote commands.
 
 For driving up/down from automation (e.g. CI or a Codex session), set up
 passwordless sudo scoped to the binary:
 
 ```
-ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/websandbox
+ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/sandbox
 ```
 
-in `/etc/sudoers.d/websandbox` with mode `0440`.
+in `/etc/sudoers.d/sandbox` with mode `0440`.
 
 ## One-time host setup
 
@@ -62,7 +62,7 @@ rules don't survive a reboot, so it must be re-run after every host restart
 ## Code layout
 
 ```
-cmd/websandbox/
+cmd/sandbox/
   main.go              Root cobra command (wires up/down/doctor)
   up.go                Boot VM, save state with PID, wait for signal OR VM exit, clean shutdown
   down.go              Read state, SIGTERM the firecracker PID, remove state
@@ -89,7 +89,7 @@ scripts/               Host setup shell scripts
   calls `ShutdownGuest` (ACPI), then `vm.Wait` with timeout, then `StopForce` as fallback.
   VM-exit path skips straight to state cleanup. Don't drop the VM-exit case
   — without it, `down` orphans the `up` process.
-- **State file** at `/tmp/websandbox-state.json` (configurable). Single-VM only —
+- **State file** at `/tmp/sandbox-state.json` (configurable). Single-VM only —
   the path is global, the tap is `tap0`, the guest IP is hardcoded in `devbox.json`.
   Multi-VM support is not implemented.
 - **Rootfs is mutable**. Writes inside the guest persist to `/opt/fc/devbox-rootfs.ext4`.
@@ -100,7 +100,7 @@ scripts/               Host setup shell scripts
 
 ## Conventions
 
-- Config merging: JSON file < CLI flags. Implemented in `cmd/websandbox/helpers.go:loadAndMerge`.
+- Config merging: JSON file < CLI flags. Implemented in `cmd/sandbox/helpers.go:loadAndMerge`.
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
 - Commits: short imperative subject lines (see `git log`). No co-author trailer.

@@ -10,7 +10,7 @@ Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hoste
 ┌────────────────────────────────────────────────────────────────┐
 │  Host (Linux + KVM)                                            │
 │                                                                │
-│  websandbox serve  ──── /run/websandbox.sock (HTTP API)        │
+│  sandbox serve  ──── /run/sandbox.sock (HTTP API)        │
 │       │                                                        │
 │       │ POST /sandboxes                                        │
 │       ▼                                                        │
@@ -28,7 +28,7 @@ Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hoste
 └────────────────────────────────────────────────────────────────┘
 ```
 
-A single long-running server (`websandbox serve`) owns all VMs. Each sandbox gets its own tap device, guest IP, host port, and rootfs copy, allocated atomically from pools in a SQLite registry. Every VM runs `sandboxd`, a small in-guest agent that the host proxies to for command execution and file I/O — so `create` returns only once the sandbox is actually ready to use.
+A single long-running server (`sandbox serve`) owns all VMs. Each sandbox gets its own tap device, guest IP, host port, and rootfs copy, allocated atomically from pools in a SQLite registry. Every VM runs `sandboxd`, a small in-guest agent that the host proxies to for command execution and file I/O — so `create` returns only once the sandbox is actually ready to use.
 
 Firecracker provides hardware-level isolation (KVM) with ~125ms boot times and ~5MB memory overhead. Each sandbox gets its own kernel, filesystem, and network stack.
 
@@ -63,7 +63,7 @@ sudo apt-get install -y debootstrap
 sudo bash scripts/build-devbox-rootfs.sh
 
 # Bake the sandboxd guest agent into the rootfs
-sudo ./websandbox install-agent --agent ./sandboxd
+sudo ./sandbox install-agent --agent ./sandboxd
 ```
 
 Host networking (bridge, NAT, sysctls) is ensured automatically every time the server starts — no separate network setup step, and nothing to re-run after a reboot.
@@ -71,7 +71,7 @@ Host networking (bridge, NAT, sysctls) is ensured automatically every time the s
 ### 3. Start the server
 
 ```bash
-sudo ./websandbox serve --config configs/devbox.json
+sudo ./sandbox serve --config configs/devbox.json
 ```
 
 On startup the server also reconciles state left over from a crash or reboot: orphaned firecracker processes are killed and stale taps, rootfs copies, DNAT rules, and registry rows are cleaned up.
@@ -79,49 +79,49 @@ On startup the server also reconciles state left over from a crash or reboot: or
 ### 4. Use sandboxes
 
 ```bash
-sudo ./websandbox up
+sudo ./sandbox up
 # sandbox 890691a8-… ready → http://localhost:5200
 
-sudo ./websandbox list
-sudo ./websandbox exec 890691a8 -- "node --version && python3 --version"
-echo 'export const x = 1' | sudo ./websandbox write 890691a8 /home/sandbox/x.ts
-sudo ./websandbox read 890691a8 /home/sandbox/x.ts
-sudo ./websandbox ls 890691a8 /home/sandbox
+sudo ./sandbox list
+sudo ./sandbox exec 890691a8 -- "node --version && python3 --version"
+echo 'export const x = 1' | sudo ./sandbox write 890691a8 /home/sandbox/x.ts
+sudo ./sandbox read 890691a8 /home/sandbox/x.ts
+sudo ./sandbox ls 890691a8 /home/sandbox
 curl http://localhost:5200          # whatever you've started on guest :3000
 
-sudo ./websandbox down 890691a8
-sudo ./websandbox stop-server       # graceful: tears down all sandboxes
+sudo ./sandbox down 890691a8
+sudo ./sandbox stop-server       # graceful: tears down all sandboxes
 ```
 
 ## CLI
 
 ```
-websandbox serve          Run the API server (owns all VMs)
-websandbox up [--ttl s]   Create a sandbox; blocks until the agent is ready
-websandbox down <id>      Destroy a sandbox
-websandbox list           List running sandboxes
-websandbox exec [--stream] <id> -- <cmd>   Run a shell command inside a sandbox
-websandbox shell <id>           Open an interactive PTY shell inside a sandbox
-websandbox read <id> <path>     Read a file from a sandbox to stdout
-websandbox write <id> <path>    Write stdin (or --from file) into a sandbox
-websandbox ls <id> [path]       List a directory inside a sandbox
-websandbox expose <id> <port>   Forward an extra guest port to a host port
-websandbox ports <id>           List a sandbox's forwarded ports
-websandbox install-agent  Bake/refresh sandboxd inside the base rootfs
-websandbox stop-server    Stop the server (SIGTERM; --force for SIGKILL)
-websandbox doctor         Validate the environment
+sandbox serve          Run the API server (owns all VMs)
+sandbox up [--ttl s]   Create a sandbox; blocks until the agent is ready
+sandbox down <id>      Destroy a sandbox
+sandbox list           List running sandboxes
+sandbox exec [--stream] <id> -- <cmd>   Run a shell command inside a sandbox
+sandbox shell <id>           Open an interactive PTY shell inside a sandbox
+sandbox read <id> <path>     Read a file from a sandbox to stdout
+sandbox write <id> <path>    Write stdin (or --from file) into a sandbox
+sandbox ls <id> [path]       List a directory inside a sandbox
+sandbox expose <id> <port>   Forward an extra guest port to a host port
+sandbox ports <id>           List a sandbox's forwarded ports
+sandbox install-agent  Bake/refresh sandboxd inside the base rootfs
+sandbox stop-server    Stop the server (SIGTERM; --force for SIGKILL)
+sandbox doctor         Validate the environment
 ```
 
 `up`, `down`, `list`, `exec`, `read`, `write`, and `ls` are thin HTTP clients over the server's Unix socket.
 
 ## HTTP API
 
-The server listens on a Unix socket (`/run/websandbox.sock`, mode 0600). It can
+The server listens on a Unix socket (`/run/sandbox.sock`, mode 0600). It can
 additionally serve TCP — e.g. on a Tailscale address for SDK access from other
 machines — with bearer-token auth:
 
 ```bash
-sudo ./websandbox serve --listen <tailnet-ip>:8080 --token $(openssl rand -hex 24)
+sudo ./sandbox serve --listen <tailnet-ip>:8080 --token $(openssl rand -hex 24)
 # clients send: Authorization: Bearer <token>
 ```
 
@@ -151,10 +151,10 @@ Default config at `configs/devbox.json`. Anything omitted falls back to defaults
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `socket_path` | `/run/websandbox.sock` | API Unix socket |
-| `db_path` | `/var/lib/websandbox/registry.db` | SQLite registry |
+| `socket_path` | `/run/sandbox.sock` | API Unix socket |
+| `db_path` | `/var/lib/sandbox/registry.db` | SQLite registry |
 | `rootfs_base` | `/opt/fc/devbox-rootfs.ext4` | Immutable base image |
-| `rootfs_dir` | `/var/lib/websandbox/rootfs` | Per-sandbox copies |
+| `rootfs_dir` | `/var/lib/sandbox/rootfs` | Per-sandbox copies |
 | `bridge` | `br-fc` | Host bridge for tap devices |
 | `gateway_ip` | `172.16.0.1` | Bridge IP / guest default gateway |
 | `guest_port` | `3000` | In-guest app port that gets forwarded |
@@ -172,7 +172,7 @@ Guest (172.16.0.x) ←──fcN──→ br-fc (172.16.0.1) ←──NAT──�
 - **Host → Guest**: direct via the bridge (this is how exec/files reach sandboxd)
 - **External → Guest**: per-sandbox DNAT maps `host:520N` → `guestIP:3000`
 
-Guest IPs are set via the kernel `ip=` boot parameter — no DHCP. The server ensures the bridge, sysctls (`ip_forward`, `route_localnet`), and NAT rules on every startup, so a host reboot needs nothing more than restarting `websandbox serve`.
+Guest IPs are set via the kernel `ip=` boot parameter — no DHCP. The server ensures the bridge, sysctls (`ip_forward`, `route_localnet`), and NAT rules on every startup, so a host reboot needs nothing more than restarting `sandbox serve`.
 
 ## What's in the rootfs
 
@@ -187,7 +187,7 @@ The base rootfs is a 10 GB sparse ext4 image built by `scripts/build-devbox-root
 | **Services** | `sandboxd.service` (agent on `:8090`) — no app server runs by default |
 | **Debug** | Root password `devbox`, serial console on `ttyS0` |
 
-Each sandbox boots from its own sparse copy of this image; writes never touch the base. The build script is resumable, and `websandbox install-agent` updates the agent in-place without a rebuild.
+Each sandbox boots from its own sparse copy of this image; writes never touch the base. The build script is resumable, and `sandbox install-agent` updates the agent in-place without a rebuild.
 
 To avoid rebuilding on every host, package the built image once and stash it in object storage (e.g. R2):
 
@@ -207,7 +207,7 @@ On a fresh host, the pull helper does the whole restore — download, verify the
 
 ```bash
 sudo bash scripts/fetch-rootfs.sh https://sandbox.ayushgoyal.dev/images/devbox-rootfs.tar.zst
-sudo ./websandbox serve --config configs/devbox.json
+sudo ./sandbox serve --config configs/devbox.json
 ```
 
 The tarball is sparse-aware, so it carries only real content (~1–1.5 GB) rather than the full 10 GB. The cached image holds no agent — `fetch-rootfs.sh` runs `install-agent` (a fast loop-mount) after download, so the `sandboxd` binary you ship stays updatable independently of the OS layer.
@@ -217,7 +217,7 @@ The tarball is sparse-aware, so it carries only real content (~1–1.5 GB) rathe
 ```
 web-sandbox/
 ├── cmd/
-│   ├── websandbox/          CLI + server entry point (cobra)
+│   ├── sandbox/          CLI + server entry point (cobra)
 │   └── sandboxd/            In-guest agent (exec + file HTTP API)
 ├── internal/
 │   ├── agentapi/            Shared host↔guest protocol types
@@ -237,7 +237,7 @@ web-sandbox/
 | Target | Description |
 |--------|-------------|
 | `make build` | Compile locally (uses stub on macOS) |
-| `make build-linux` | Cross-compile `websandbox` + `sandboxd` for linux/amd64 |
+| `make build-linux` | Cross-compile `sandbox` + `sandboxd` for linux/amd64 |
 | `make sync` | Build + rsync binaries, configs, scripts to remote |
 | `make remote-setup` | Install Firecracker + kernel on remote |
 | `make remote-setup-devbox` | Build rootfs + network setup on remote |

@@ -58,8 +58,8 @@ export class Sandbox {
    * Creates a new sandbox and waits until it is ready (the API blocks
    * for roughly two seconds while the VM boots).
    *
-   * @param opts API URL/key overrides (default to the `WEBSANDBOX_API_URL` /
-   *             `WEBSANDBOX_API_KEY` environment variables) plus an optional
+   * @param opts API URL/key overrides (default to the `SANDBOX_API_URL` /
+   *             `SANDBOX_API_KEY` environment variables) plus an optional
    *             `timeoutMs` after which the sandbox is auto-destroyed.
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {

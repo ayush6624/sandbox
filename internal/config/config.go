@@ -41,16 +41,16 @@ type Config struct {
 // Defaults fills zero values with conservative defaults.
 func (c *Config) Defaults() {
 	if c.SocketPath == "" {
-		c.SocketPath = "/run/websandbox.sock"
+		c.SocketPath = "/run/sandbox.sock"
 	}
 	if c.DBPath == "" {
-		c.DBPath = "/var/lib/websandbox/registry.db"
+		c.DBPath = "/var/lib/sandbox/registry.db"
 	}
 	if c.RootfsBase == "" {
 		c.RootfsBase = "/opt/fc/devbox-rootfs.ext4"
 	}
 	if c.RootfsDir == "" {
-		c.RootfsDir = "/var/lib/websandbox/rootfs"
+		c.RootfsDir = "/var/lib/sandbox/rootfs"
 	}
 	if c.Bridge == "" {
 		c.Bridge = "br-fc"

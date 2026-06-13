@@ -1,4 +1,4 @@
 bin/
 Makefile.local
 *.ext4
-bin/websandbox.websandbox-token
+bin/sandbox.sandbox-token

@@ -2,7 +2,7 @@
 # Fetch a prebuilt rootfs tarball from a URL and turn it into a ready-to-serve
 # base image: download -> verify -> sparse-extract into /opt/fc -> bake the
 # sandboxd agent in. No local rebuild. Run on the target host (Linux) as root,
-# from the repo root (so ./websandbox and ./sandboxd resolve).
+# from the repo root (so ./sandbox and ./sandboxd resolve).
 #
 #   sudo bash scripts/fetch-rootfs.sh                   # pulls the published image
 #   sudo bash scripts/fetch-rootfs.sh https://<bucket>/devbox-rootfs.tar.zst
@@ -10,7 +10,7 @@
 #
 # Env overrides:
 #   AGENT=./sandboxd              sandboxd binary to bake in
-#   WEBSANDBOX=./websandbox       websandbox binary used for install-agent
+#   SANDBOX=./sandbox       sandbox binary used for install-agent
 #   CONFIG=configs/devbox.json    config (resolves rootfs_base for install-agent)
 #   ASSET_DIR=/opt/fc             where the image is extracted
 set -euo pipefail
@@ -19,7 +19,7 @@ ROOTFS_URL="${ROOTFS_URL:-${1:-https://sandbox.ayushgoyal.dev/images/devbox-root
 ASSET_DIR="${ASSET_DIR:-/opt/fc}"
 ROOTFS_PATH="${ROOTFS_PATH:-${ASSET_DIR}/devbox-rootfs.ext4}"
 AGENT="${AGENT:-./sandboxd}"
-WEBSANDBOX="${WEBSANDBOX:-./websandbox}"
+SANDBOX="${SANDBOX:-./sandbox}"
 CONFIG="${CONFIG:-configs/devbox.json}"
 
 if [ -z "$ROOTFS_URL" ]; then
@@ -43,8 +43,8 @@ if [ ! -f "$AGENT" ]; then
   echo "ERROR: agent binary not found at ${AGENT} (set AGENT=/path/to/sandboxd, or run 'make sync' first)" >&2
   exit 1
 fi
-if [ ! -f "$WEBSANDBOX" ]; then
-  echo "ERROR: websandbox binary not found at ${WEBSANDBOX} (set WEBSANDBOX=/path, or run 'make sync' first)" >&2
+if [ ! -f "$SANDBOX" ]; then
+  echo "ERROR: sandbox binary not found at ${SANDBOX} (set SANDBOX=/path, or run 'make sync' first)" >&2
   exit 1
 fi
 
@@ -83,10 +83,10 @@ if [ ! -f "$ROOTFS_PATH" ]; then
 fi
 
 echo "==> Baking the sandboxd agent in"
-"$WEBSANDBOX" install-agent --config "$CONFIG" --agent "$AGENT"
+"$SANDBOX" install-agent --config "$CONFIG" --agent "$AGENT"
 
 echo ""
 echo "==> Ready: ${ROOTFS_PATH}"
 ls -lh "$ROOTFS_PATH"
 echo ""
-echo "Start the server: sudo ${WEBSANDBOX} serve --config ${CONFIG}"
+echo "Start the server: sudo ${SANDBOX} serve --config ${CONFIG}"

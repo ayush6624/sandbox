@@ -8,7 +8,7 @@
 #
 # Restore on a fresh host (recreates the sparse holes), then bake the agent:
 #   tar --sparse -I 'zstd -T0' -xf devbox-rootfs.tar.zst -C /opt/fc
-#   sudo ./websandbox install-agent --agent ./sandboxd
+#   sudo ./sandbox install-agent --agent ./sandboxd
 set -euo pipefail
 
 ASSET_DIR="${ASSET_DIR:-/opt/fc}"

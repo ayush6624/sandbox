@@ -1,12 +1,12 @@
 /**
  * Options accepted by every SDK entry point ({@link Sandbox.create},
  * {@link Sandbox.connect}, ...). Values fall back to the
- * `WEBSANDBOX_API_URL` / `WEBSANDBOX_API_KEY` environment variables.
+ * `SANDBOX_API_URL` / `SANDBOX_API_KEY` environment variables.
  */
 export interface SandboxOpts {
-  /** Base URL of the websandbox API, e.g. `http://100.99.183.74:8080`. Defaults to `WEBSANDBOX_API_URL`. */
+  /** Base URL of the sandbox API, e.g. `http://100.99.183.74:8080`. Defaults to `SANDBOX_API_URL`. */
   apiUrl?: string
-  /** API key sent as `Authorization: Bearer <key>`. Defaults to `WEBSANDBOX_API_KEY`. */
+  /** API key sent as `Authorization: Bearer <key>`. Defaults to `SANDBOX_API_KEY`. */
   apiKey?: string
   /** Default per-request timeout in milliseconds (default 30 000; sandbox creation uses 90 000). */
   requestTimeoutMs?: number

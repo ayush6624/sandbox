@@ -1,8 +1,8 @@
 /**
- * websandbox SQLite + filesystem benchmark — runs *inside* the guest.
+ * sandbox SQLite + filesystem benchmark — runs *inside* the guest.
  *
  * A TypeScript reimagining of tensorlakeai/sandbox-sqlite-bench's `benchmark.py`,
- * built for what websandbox sandboxes actually ship: Node 22 with the built-in
+ * built for what sandbox sandboxes actually ship: Node 22 with the built-in
  * `node:sqlite` module (SQLite 3.51.x) and `node:worker_threads`. Zero npm
  * dependencies, no Python, no native addons — Node runs this `.ts` file directly
  * via type-stripping (`node --no-warnings benchmark.ts ...`).
@@ -20,7 +20,7 @@
  *
  * NOTE: numbers are NOT 1:1 comparable to the Python suite — different language
  * binding and a newer bundled SQLite (3.51.x vs 3.45.x). Comparisons are most
- * meaningful websandbox-vs-websandbox across configs.
+ * meaningful sandbox-vs-sandbox across configs.
  *
  * Usage (inside the guest):
  *   node --no-warnings benchmark.ts [--mode default|fsync|large] [--iterations N]

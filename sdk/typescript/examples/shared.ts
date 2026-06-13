@@ -1,20 +1,20 @@
 /**
  * Shared helpers for the example scripts. Every example talks to a running
- * websandbox API server via the SDK's default env vars:
+ * sandbox API server via the SDK's default env vars:
  *
- *   export WEBSANDBOX_API_URL=http://<host>:8080
- *   export WEBSANDBOX_API_KEY=<key>
+ *   export SANDBOX_API_URL=http://<host>:8080
+ *   export SANDBOX_API_KEY=<key>
  */
 
 /** Exits with a helpful message unless both API env vars are set. */
 export function ensureCreds(): void {
-  for (const name of ['WEBSANDBOX_API_URL', 'WEBSANDBOX_API_KEY']) {
+  for (const name of ['SANDBOX_API_URL', 'SANDBOX_API_KEY']) {
     if (!process.env[name]) {
       console.error(
         `Missing required environment variable ${name}.\n` +
           `Example:\n` +
-          `  export WEBSANDBOX_API_URL=http://100.99.183.74:8080\n` +
-          `  export WEBSANDBOX_API_KEY=<your-key>`
+          `  export SANDBOX_API_URL=http://100.99.183.74:8080\n` +
+          `  export SANDBOX_API_KEY=<your-key>`
       )
       process.exit(1)
     }

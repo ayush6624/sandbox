@@ -15,14 +15,14 @@ func stopServerCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "stop-server",
-		Short: "Stop the running websandbox server (SIGTERM; graceful teardown of all sandboxes)",
+		Short: "Stop the running sandbox server (SIGTERM; graceful teardown of all sandboxes)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pids, err := findServerPIDs()
 			if err != nil {
 				return err
 			}
 			if len(pids) == 0 {
-				fmt.Println("no websandbox server running")
+				fmt.Println("no sandbox server running")
 				return nil
 			}
 			sig := syscall.SIGTERM
@@ -42,7 +42,7 @@ func stopServerCmd() *cobra.Command {
 	return cmd
 }
 
-// findServerPIDs scans /proc for `websandbox serve` processes other than ourselves.
+// findServerPIDs scans /proc for `sandbox serve` processes other than ourselves.
 func findServerPIDs() ([]int, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -60,7 +60,7 @@ func findServerPIDs() ([]int, error) {
 			continue
 		}
 		argv := strings.Split(string(cmdline), "\x00")
-		if len(argv) >= 2 && strings.HasSuffix(argv[0], "websandbox") && argv[1] == "serve" {
+		if len(argv) >= 2 && strings.HasSuffix(argv[0], "sandbox") && argv[1] == "serve" {
 			pids = append(pids, pid)
 		}
 	}

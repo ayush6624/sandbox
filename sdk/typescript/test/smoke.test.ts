@@ -491,23 +491,23 @@ test('bad API key throws AuthenticationError', async () => {
 })
 
 test('missing apiUrl/apiKey fail fast with helpful messages', async () => {
-  const savedUrl = process.env.WEBSANDBOX_API_URL
-  const savedKey = process.env.WEBSANDBOX_API_KEY
-  delete process.env.WEBSANDBOX_API_URL
-  delete process.env.WEBSANDBOX_API_KEY
+  const savedUrl = process.env.SANDBOX_API_URL
+  const savedKey = process.env.SANDBOX_API_KEY
+  delete process.env.SANDBOX_API_URL
+  delete process.env.SANDBOX_API_KEY
   try {
     await assert.rejects(
       () => Sandbox.list(),
       (err: unknown) =>
-        err instanceof SandboxError && /WEBSANDBOX_API_URL/.test((err as Error).message)
+        err instanceof SandboxError && /SANDBOX_API_URL/.test((err as Error).message)
     )
     await assert.rejects(
       () => Sandbox.list({ apiUrl }),
       (err: unknown) =>
-        err instanceof AuthenticationError && /WEBSANDBOX_API_KEY/.test((err as Error).message)
+        err instanceof AuthenticationError && /SANDBOX_API_KEY/.test((err as Error).message)
     )
   } finally {
-    if (savedUrl !== undefined) process.env.WEBSANDBOX_API_URL = savedUrl
-    if (savedKey !== undefined) process.env.WEBSANDBOX_API_KEY = savedKey
+    if (savedUrl !== undefined) process.env.SANDBOX_API_URL = savedUrl
+    if (savedKey !== undefined) process.env.SANDBOX_API_KEY = savedKey
   }
 })
