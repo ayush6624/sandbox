@@ -102,6 +102,7 @@ websandbox up [--ttl s]   Create a sandbox; blocks until the agent is ready
 websandbox down <id>      Destroy a sandbox
 websandbox list           List running sandboxes
 websandbox exec [--stream] <id> -- <cmd>   Run a shell command inside a sandbox
+websandbox shell <id>           Open an interactive PTY shell inside a sandbox
 websandbox read <id> <path>     Read a file from a sandbox to stdout
 websandbox write <id> <path>    Write stdin (or --from file) into a sandbox
 websandbox ls <id> [path]       List a directory inside a sandbox
@@ -141,8 +142,9 @@ Endpoints (both listeners):
 | `GET /sandboxes/{id}/files?path=` | Read a file (raw bytes) |
 | `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
 | `GET /sandboxes/{id}/dir?path=` | Directory listing (JSON) |
+| `GET /sandboxes/{id}/shell?cols=&rows=&cwd=` | WebSocket upgrade → interactive `bash -l` on a pty. Binary frames carry raw terminal bytes; text frames carry `{"type":"resize","cols":…,"rows":…}`. Closes with reason `exit:<code>` |
 
-The exec/file endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM.
+The exec/file/shell endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM.
 
 ## Configuration
 

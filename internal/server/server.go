@@ -78,6 +78,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.handleAgentProxy("files"))
 	mux.HandleFunc("PUT /sandboxes/{id}/files", s.handleAgentProxy("files"))
 	mux.HandleFunc("GET /sandboxes/{id}/dir", s.handleAgentProxy("dir"))
+	mux.HandleFunc("GET /sandboxes/{id}/shell", s.handleShellProxy())
 
 	servers := []*http.Server{{Handler: mux}}
 	srvErr := make(chan error, 2)

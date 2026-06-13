@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/coder/websocket"
+
 	"github.com/ayush6624/web-sandbox/internal/agentapi"
 	"github.com/ayush6624/web-sandbox/internal/registry"
 )
@@ -138,6 +140,31 @@ func (c *Client) ExecStream(ctx context.Context, id string, req agentapi.ExecReq
 		return res, errors.New("stream ended without exit event")
 	}
 	return res, nil
+}
+
+// DialShell opens an interactive PTY WebSocket to the sandbox's shell. The
+// caller owns the returned connection and must Close it. cols/rows seed the
+// initial window size (0 lets the agent default to 80x24).
+func (c *Client) DialShell(ctx context.Context, id string, cols, rows uint16) (*websocket.Conn, error) {
+	q := url.Values{}
+	if cols > 0 {
+		q.Set("cols", fmt.Sprint(cols))
+	}
+	if rows > 0 {
+		q.Set("rows", fmt.Sprint(rows))
+	}
+	// The host is ignored — c.http's transport dials the configured socket — but
+	// must be present for a valid ws:// URL.
+	u := "ws://websandbox/sandboxes/" + id + "/shell"
+	if enc := q.Encode(); enc != "" {
+		u += "?" + enc
+	}
+	conn, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: c.http})
+	if err != nil {
+		return nil, fmt.Errorf("dial shell (is `websandbox serve` running?): %w", err)
+	}
+	conn.SetReadLimit(1 << 20)
+	return conn, nil
 }
 
 // ExposePort forwards an extra guest port to a host port (idempotent).

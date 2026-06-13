@@ -33,6 +33,7 @@ sudo ./websandbox up                                    # POST /sandboxes → pr
 sudo ./websandbox list                                  # GET /sandboxes
 sudo ./websandbox down <id>                             # DELETE /sandboxes/<id>
 sudo ./websandbox exec <id> -- "node --version"         # run a command in the guest
+sudo ./websandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest
 sudo ./websandbox read <id> /path                       # file out of the guest → stdout
 sudo ./websandbox write <id> /path [--from local]       # stdin/local file → guest
 sudo ./websandbox ls <id> [/path]                       # list a guest directory
@@ -107,18 +108,19 @@ cmd/websandbox/
   down.go              Thin client: DELETE /sandboxes/<id>
   list.go              Thin client: GET /sandboxes (tabwriter output)
   exec.go              Thin client: POST /sandboxes/<id>/exec; exits with the command's exit code
+  shell.go             Interactive PTY: raw-mode stdin ↔ WebSocket /shell; relays SIGWINCH resizes
   files.go             Thin clients: read/write/ls over /files and /dir
   installagent.go      Loop-mounts the base rootfs, installs sandboxd + systemd unit
   stopserver.go        Finds `websandbox serve` PIDs via /proc, SIGTERM/SIGKILL
   doctor.go            Colored env checks (Linux, KVM, firecracker, kernel, rootfs, bridge, ip_fwd, API socket)
   helpers.go           Shared cfg/socket flags and Client constructor
-cmd/sandboxd/main.go   In-guest agent: /health, /exec, /files (GET/PUT), /dir on :8090
+cmd/sandboxd/main.go   In-guest agent: /health, /exec, /files (GET/PUT), /dir, /shell (PTY WebSocket) on :8090
 internal/agentapi/agentapi.go     Shared host↔guest protocol types + port constant
 internal/config/config.go         JSON config + Defaults(); DisallowUnknownFields
-internal/client/client.go         Unix-socket HTTP client (Create/List/Get/Destroy/Exec/ReadFile/WriteFile/ListDir)
+internal/client/client.go         Unix-socket HTTP client (Create/List/Get/Destroy/Exec/DialShell/ReadFile/WriteFile/ListDir)
 internal/server/
   server.go           http.ServeMux on Unix socket; owns map[id]*vm.Machine; vmCtx lifetime
-  proxy.go            Reverse-proxy to sandboxd + waitForAgent readiness poll
+  proxy.go            Reverse-proxy to sandboxd (incl. /shell WebSocket via httputil) + waitForAgent readiness poll
   reconcile.go        Startup cleanup of stale rows/taps/rootfs/orphan firecrackers
 internal/registry/registry.go     SQLite-backed registry; resource allocation (tap/IP/port from pools)
 internal/provisioner/provisioner.go  Host-side ops: EnsureNetwork, rootfs cp, tap create/delete, iptables DNAT
@@ -149,6 +151,14 @@ scripts/              Host setup shell scripts
   `agentapi.ExecEvent` lines (stdout/stderr/exit); the server proxy wraps the
   ResponseWriter in a flush-on-write writer so chunks pass through immediately. All
   non-Type ExecEvent fields are omitempty — decoders must treat absent fields as zero.
+- **Interactive shell is a WebSocket PTY.** `GET /sandboxes/{id}/shell` upgrades and
+  `handleShellProxy` reverse-proxies it to the guest's `/shell` via `httputil.ReverseProxy`
+  (Go handles the Upgrade handshake + raw byte copy natively, so the host needs no
+  WebSocket lib and it works over both the Unix socket and the TCP listener). In the guest,
+  sandboxd runs `bash -l` on a real pty (`creack/pty`): binary frames are raw terminal bytes
+  both ways, text frames are JSON `agentapi.ShellControl` resizes. Clean exit closes the
+  socket with reason `exit:<code>`; client disconnect kills the shell's process group. See
+  the protocol doc-comment in `agentapi`.
 - **TTL reaper.** `POST /sandboxes` accepts optional `{"timeout_sec":N}`; a 10 s ticker
   goroutine in `Serve` destroys rows whose `expires_at` passed. `POST .../timeout`
   resets (0 clears). No default TTL — absent means live forever.

@@ -15,9 +15,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/creack/pty"
 
 	"github.com/ayush6624/web-sandbox/internal/agentapi"
 )
@@ -35,6 +39,7 @@ func main() {
 	mux.HandleFunc("GET /files", handleReadFile)
 	mux.HandleFunc("PUT /files", handleWriteFile)
 	mux.HandleFunc("GET /dir", handleListDir)
+	mux.HandleFunc("GET /shell", handleShell)
 
 	log.Printf("sandboxd listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
@@ -197,6 +202,120 @@ func buildCmd(ctx context.Context, req agentapi.ExecRequest) *exec.Cmd {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	return cmd
+}
+
+// handleShell upgrades the connection to a WebSocket and attaches it to an
+// interactive login shell running on a pty. Binary frames are raw terminal
+// bytes (client→pty stdin, pty→client output); text frames are JSON
+// agentapi.ShellControl messages (window resize). See agentapi for the wire
+// contract. The shell's process group is killed when either side goes away.
+func handleShell(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		// sandboxd is only reachable via the host proxy on the private bridge,
+		// so there is no meaningful Origin to verify.
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return // Accept already wrote the handshake error
+	}
+	defer conn.CloseNow()
+	// Output can dwarf the default 32 KiB read limit (control frames are tiny,
+	// but be generous); raise the cap so a burst of input isn't rejected.
+	conn.SetReadLimit(1 << 20)
+
+	q := r.URL.Query()
+	cmd := exec.Command("/bin/bash", "-l")
+	cmd.Dir = workingDir(q.Get("cwd"))
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Cols: parseDim(q.Get("cols"), 80),
+		Rows: parseDim(q.Get("rows"), 24),
+	})
+	if err != nil {
+		conn.Close(websocket.StatusInternalError, "start shell")
+		return
+	}
+	// pty.Start calls setsid, so the shell leads its own session/process group
+	// (pgid == pid); kill the whole group so children don't outlive the session.
+	defer func() {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		_ = ptmx.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// pty output → client. Ends when the pty closes (shell exited) or the
+	// write fails (client gone). outputDone lets the exit path flush the last
+	// of the shell's output before sending the close frame.
+	outputDone := make(chan struct{})
+	go func() {
+		defer close(outputDone)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				if werr := conn.Write(ctx, websocket.MessageBinary, buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// client → pty: binary frames are stdin, text frames are control messages.
+	// A read error means the client disconnected — kill the shell.
+	clientGone := make(chan struct{})
+	go func() {
+		defer close(clientGone)
+		for {
+			typ, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			switch typ {
+			case websocket.MessageBinary:
+				if _, err := ptmx.Write(data); err != nil {
+					return
+				}
+			case websocket.MessageText:
+				var ctl agentapi.ShellControl
+				if json.Unmarshal(data, &ctl) == nil && ctl.Type == agentapi.ShellResize {
+					_ = pty.Setsize(ptmx, &pty.Winsize{Cols: ctl.Cols, Rows: ctl.Rows})
+				}
+			}
+		}
+	}()
+
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+
+	select {
+	case <-clientGone:
+		// Client disconnected first; the deferred kill + CloseNow tear down the
+		// pty and reap the shell.
+	case <-waitErr:
+		// Shell exited cleanly: drain its remaining output, then report the code.
+		<-outputDone
+		code := 0
+		if cmd.ProcessState != nil {
+			code = cmd.ProcessState.ExitCode()
+		}
+		conn.Close(websocket.StatusNormalClosure, agentapi.ShellExitPrefix+strconv.Itoa(code))
+	}
+}
+
+// parseDim parses a positive terminal dimension, falling back to def.
+func parseDim(s string, def uint16) uint16 {
+	if n, err := strconv.Atoi(s); err == nil && n > 0 && n < 1<<16 {
+		return uint16(n)
+	}
+	return def
 }
 
 func handleReadFile(w http.ResponseWriter, r *http.Request) {

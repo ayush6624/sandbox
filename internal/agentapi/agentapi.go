@@ -51,6 +51,33 @@ type ExecEvent struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
+// Shell is the WebSocket sub-protocol for interactive PTY sessions: GET /shell
+// on the agent, proxied as GET /sandboxes/{id}/shell on the host. Once the
+// connection is upgraded the two sides exchange:
+//
+//   - Binary frames: raw terminal bytes. Client→guest frames are written to the
+//     pty (stdin); guest→client frames are pty output (stdout+stderr combined).
+//   - Text frames: JSON ShellControl messages (currently only window resize).
+//
+// Initial window size and working directory ride on the handshake URL as query
+// params: ?cols=<n>&rows=<n>&cwd=<path>. The guest closes the WebSocket when the
+// shell process exits, carrying the exit code in the close reason as "exit:<n>".
+const (
+	// ShellResize is the Type of a ShellControl message that resizes the pty.
+	ShellResize = "resize"
+	// ShellExitPrefix prefixes the WebSocket close reason on a clean shell exit,
+	// e.g. "exit:0". Clients parse the trailing integer for the exit code.
+	ShellExitPrefix = "exit:"
+)
+
+// ShellControl is a JSON control message sent as a WebSocket text frame on a
+// /shell connection.
+type ShellControl struct {
+	Type string `json:"type"`           // currently only ShellResize
+	Cols uint16 `json:"cols,omitempty"` // terminal width in columns
+	Rows uint16 `json:"rows,omitempty"` // terminal height in rows
+}
+
 // DirEntry is one row of a directory listing.
 type DirEntry struct {
 	Name  string    `json:"name"`

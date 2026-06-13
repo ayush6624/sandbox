@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"time"
 
 	"github.com/ayush6624/web-sandbox/internal/agentapi"
@@ -56,6 +58,35 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 			out = flushWriter{w: w, f: f}
 		}
 		_, _ = io.Copy(out, resp.Body)
+	}
+}
+
+// handleShellProxy reverse-proxies the /shell WebSocket to the sandbox's
+// in-guest agent. httputil.ReverseProxy transparently handles the Upgrade
+// handshake and then streams raw bytes both ways, so the interactive pty works
+// over either the Unix socket or the bearer-auth'd TCP listener unchanged.
+func (s *Server) handleShellProxy() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		sb, err := s.reg.Get(r.Context(), id)
+		if err != nil {
+			httpError(w, 404, err)
+			return
+		}
+		target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", sb.GuestIP, agentapi.Port)}
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		// NewSingleHostReverseProxy joins paths; rewrite to the agent's /shell
+		// (the incoming path is /sandboxes/{id}/shell) while preserving the
+		// cols/rows/cwd query string.
+		base := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			base(req)
+			req.URL.Path = "/shell"
+		}
+		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+			httpError(w, http.StatusBadGateway, fmt.Errorf("agent unreachable: %w", err))
+		}
+		proxy.ServeHTTP(w, r)
 	}
 }
 
