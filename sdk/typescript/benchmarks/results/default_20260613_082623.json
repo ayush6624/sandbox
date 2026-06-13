@@ -1,0 +1,43 @@
+[
+  {
+    "provider": "websandbox",
+    "sandbox_id": "356cd518-ccee-42c7-8f04-2f328535730f",
+    "specs": {
+      "actual_cpus": 2,
+      "actual_memory_mb": 985,
+      "node_version": "v22.22.3"
+    },
+    "sandbox_creation_time": 2.9,
+    "mode": "default",
+    "iterations": 1,
+    "results": {
+      "sequential_inserts": 0.0281,
+      "batch_inserts": 0.3771,
+      "select_count": 0,
+      "row_count": 60000,
+      "range_queries": 0.0726,
+      "like_queries": 0.6181,
+      "updates": 0.0099,
+      "deletes": 0.0043,
+      "transaction_inserts": 0.0186,
+      "aggregates": 0.0111,
+      "join_query": 0.0013,
+      "concurrent_reads_wall": 0.355,
+      "concurrent_reads_total_queries": 2000,
+      "db_size_mb": 8.7,
+      "fs_write_many": 0.2077,
+      "fs_read_many": 0.0083,
+      "fs_large_write": 0.0981,
+      "fs_large_read": 0.0669,
+      "fs_small_files": 1000,
+      "fs_large_file_mb": 64,
+      "total_time": 1.8771,
+      "mode": "default",
+      "mode_label": "Default (WAL, small dataset)",
+      "sqlite_version": "3.51.3",
+      "node_version": "v22.22.3",
+      "engine": "node:sqlite"
+    },
+    "wall_time": 2.27
+  }
+]
