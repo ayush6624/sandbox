@@ -1,14 +1,12 @@
 /**
- * End-to-end demo of the websandbox SDK.
- *
- * Requires a running websandbox API server plus:
- *   export WEBSANDBOX_API_URL=http://<host>:8080
- *   export WEBSANDBOX_API_KEY=<key>
+ * End-to-end demo of the websandbox SDK — the broad tour. See the sibling
+ * examples for focused features: streaming.ts, ports.ts, lifecycle.ts.
  *
  * Run with: npm run example
  */
 // When installed from npm this would be: import { Sandbox } from 'websandbox'
 import { Sandbox } from '../src/index.js'
+import { ensureCreds, runExample, step } from './shared.js'
 
 const SCRIPT_PY = `import sys
 
@@ -16,25 +14,8 @@ print(f"Hello from websandbox, running Python {sys.version.split()[0]}")
 print("This script was written into the microVM via the SDK.")
 `
 
-function requireEnv(name: string): void {
-  if (!process.env[name]) {
-    console.error(
-      `Missing required environment variable ${name}.\n` +
-        `Example:\n` +
-        `  export WEBSANDBOX_API_URL=http://100.99.183.74:8080\n` +
-        `  export WEBSANDBOX_API_KEY=<your-key>`
-    )
-    process.exit(1)
-  }
-}
-
-function step(msg: string): void {
-  console.log(`\n==> ${msg}`)
-}
-
 async function main(): Promise<void> {
-  requireEnv('WEBSANDBOX_API_URL')
-  requireEnv('WEBSANDBOX_API_KEY')
+  ensureCreds()
 
   step('Creating sandbox (boots a Firecracker microVM, ~2s)...')
   const sbx = await Sandbox.create()
@@ -78,7 +59,4 @@ async function main(): Promise<void> {
   console.log('\nDemo complete.')
 }
 
-main().catch((err) => {
-  console.error('\nDemo failed:', err)
-  process.exit(1)
-})
+runExample(main)

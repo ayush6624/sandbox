@@ -22,6 +22,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "example": "tsx examples/demo.ts",
+    "example:streaming": "tsx examples/streaming.ts",
+    "example:ports": "tsx examples/ports.ts",
+    "example:lifecycle": "tsx examples/lifecycle.ts",
     "bench": "tsx benchmarks/run-bench.ts",
     "test": "tsx --test test/smoke.test.ts"
   },

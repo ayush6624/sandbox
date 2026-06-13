@@ -136,12 +136,20 @@ npm test            # mock-server smoke test (node:test via tsx)
 npm run example     # run examples/demo.ts against a live server
 ```
 
-## Example
+## Examples
 
-`examples/demo.ts` exercises the full loop: create a sandbox, check
-`node`/`pnpm`/`python3` versions, write a Python script into the sandbox, read
-it back, run it, list the home directory, list sandboxes, and kill the sandbox.
+Each script in `examples/` runs against a live server; all read the
+`WEBSANDBOX_API_URL` / `WEBSANDBOX_API_KEY` env vars:
+
+| Script | Shows |
+| --- | --- |
+| `npm run example` | The broad tour: create, exec, write/read/list files, list, kill |
+| `npm run example:streaming` | Streaming exec (`onStdout`/`onStderr` chunks) and `CommandExitError` on non-zero exit |
+| `npm run example:ports` | Start a server in the guest, `exposePort`, reach it via `getHost`, `listPorts` |
+| `npm run example:lifecycle` | `create({ timeoutMs })`, `setTimeout`, `Sandbox.list`, `Sandbox.connect` by id, `kill` |
 
 ```bash
-WEBSANDBOX_API_URL=http://<host>:8080 WEBSANDBOX_API_KEY=<key> npm run example
+export WEBSANDBOX_API_URL=http://<host>:8080
+export WEBSANDBOX_API_KEY=<key>
+npm run example:ports
 ```
