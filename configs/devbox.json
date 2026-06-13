@@ -5,7 +5,7 @@
   "rootfs_dir":      "/var/lib/websandbox/rootfs",
   "bridge":          "br-fc",
   "gateway_ip":      "172.16.0.1",
-  "nameservers":     "8.8.8.8",
+  "nameservers":     "185.12.64.1,185.12.64.2",
   "guest_port":      3000,
   "firecracker_bin": "/usr/local/bin/firecracker",
   "kernel_image":    "/opt/fc/vmlinux",
