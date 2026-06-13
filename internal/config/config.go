@@ -25,7 +25,7 @@ type Config struct {
 	Bridge      string `json:"bridge"`       // e.g. "br-fc"
 	GatewayIP   string `json:"gateway_ip"`   // bridge IP, used as guest default gateway
 	Nameservers string `json:"nameservers"`  // comma-separated DNS for the guest
-	GuestPort   int    `json:"guest_port"`   // port the in-guest app listens on (5173 for Vite)
+	GuestPort   int    `json:"guest_port"`   // port the in-guest app listens on, forwarded to a host port
 
 	// --- Resource pools ---
 	Pools registry.Pools `json:"pools"`
@@ -62,7 +62,7 @@ func (c *Config) Defaults() {
 		c.Nameservers = "8.8.8.8"
 	}
 	if c.GuestPort == 0 {
-		c.GuestPort = 5173
+		c.GuestPort = 3000
 	}
 	if c.KernelArgs == "" {
 		c.KernelArgs = "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0"

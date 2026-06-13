@@ -2,10 +2,12 @@
 
 ## Project overview
 
-Firecracker-based microVM sandboxes for frontend development, exposed via a
+Firecracker-based microVM sandboxes for development, exposed via a
 local HTTP API over a Unix socket. Each sandbox boots Ubuntu 24.04 with Node 22,
-pnpm, TypeScript, and a Vite React-TS project (Vite started by systemd on boot).
-Lovable / e2b style — but self-hosted, on bare metal.
+pnpm, TypeScript, Python 3, and common build tooling (build-essential, git). It's
+a bare sandbox — no app server runs on boot; the primary guest port (3000) is
+forwarded to a host port for whatever you start there. e2b style — but
+self-hosted, on bare metal.
 
 Multi-sandbox: each one gets its own tap, IP, host port, and rootfs copy.
 State is in SQLite at `/var/lib/websandbox/registry.db`. The server (`websandbox serve`)
@@ -95,7 +97,7 @@ EnsureNetwork sets these critical host-wide knobs:
   host→guest source to the bridge IP so the guest can reply (otherwise it tries to
   reply to 127.0.0.1 and the connection times out)
 
-If you change these, host:port → guest:5173 forwarding silently breaks.
+If you change these, host:port → guest:3000 forwarding silently breaks.
 
 ## Code layout
 

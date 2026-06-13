@@ -15,7 +15,7 @@ import (
 type Network struct {
 	Bridge      string // e.g. "br-fc" — tap devices attach here
 	GatewayCIDR string // e.g. "172.16.0.1/24" — bridge address; subnet derived from it
-	GuestPort   int    // e.g. 5173 — port the in-guest app listens on
+	GuestPort   int    // e.g. 3000 — port the in-guest app listens on
 }
 
 // Provisioner performs host-side setup/teardown for sandboxes:

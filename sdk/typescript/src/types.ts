@@ -63,7 +63,7 @@ export interface SandboxInfo {
   tapDevice: string
   /** IP of the guest on the sandbox bridge. */
   guestIp: string
-  /** Host port forwarding to guest port 5173 (the Vite dev server). */
+  /** Host port forwarding to the primary guest port (3000). */
   hostPort: number
   /** Path of the per-VM rootfs copy on the host. */
   rootfsPath: string

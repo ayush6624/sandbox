@@ -109,8 +109,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
     const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
     const guestPort = body.guest_port
-    if (guestPort === 5173) {
-      sendJson(res, 200, { guest_port: 5173, host_port: sandboxRecord.host_port })
+    if (guestPort === 3000) {
+      sendJson(res, 200, { guest_port: 3000, host_port: sandboxRecord.host_port })
       return
     }
     let hostPort = exposedPorts.get(guestPort)
@@ -123,7 +123,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (req.method === 'GET' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
-    const mappings = [{ guest_port: 5173, host_port: sandboxRecord.host_port }]
+    const mappings = [{ guest_port: 3000, host_port: sandboxRecord.host_port }]
     for (const [guestPort, hostPort] of exposedPorts) {
       mappings.push({ guest_port: guestPort, host_port: hostPort })
     }
@@ -343,11 +343,11 @@ test('full lifecycle: create → exec → write/read/list → kill', async () =>
   assert.equal(entries[0]!.size, 120)
 
   // getHost
-  assert.equal(sbx.getHost(5173), '127.0.0.1:5200')
+  assert.equal(sbx.getHost(3000), '127.0.0.1:5200')
   assert.equal(sbx.getHost(), '127.0.0.1:5200')
   assert.throws(
-    () => sbx.getHost(3000),
-    (err: unknown) => err instanceof SandboxError && /5173/.test((err as Error).message)
+    () => sbx.getHost(9999),
+    (err: unknown) => err instanceof SandboxError && /3000/.test((err as Error).message)
   )
 
   // static list + connect while running
@@ -454,11 +454,11 @@ test('exposePort allocates a host port and feeds the getHost cache', async () =>
   assert.equal(await sbx.exposePort(8000), '127.0.0.1:5201')
 
   // exposing the primary port returns the existing primary mapping
-  assert.equal(await sbx.exposePort(5173), '127.0.0.1:5200')
+  assert.equal(await sbx.exposePort(3000), '127.0.0.1:5200')
 
   const ports = await sbx.listPorts()
   assert.deepEqual(ports, [
-    { guestPort: 5173, hostPort: 5200 },
+    { guestPort: 3000, hostPort: 5200 },
     { guestPort: 8000, hostPort: 5201 },
   ])
 

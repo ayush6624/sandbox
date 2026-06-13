@@ -2,10 +2,10 @@
 
 ## Project overview
 
-Firecracker-based microVM devboxes for frontend development. Spins up an Ubuntu
-24.04 VM with Node 22, pnpm, TypeScript, and a Vite React-TS project
-pre-installed (`node_modules` baked into the rootfs, Vite started by systemd on
-boot). Lovable / e2b style — but self-hosted, on bare metal.
+Firecracker-based microVM devboxes for development. Spins up an Ubuntu
+24.04 VM with Node 22, pnpm, TypeScript, Python 3, and common build tooling
+baked into the rootfs. A bare sandbox — no app server runs on boot. e2b style —
+but self-hosted, on bare metal.
 
 ## Build & run
 
@@ -75,7 +75,7 @@ internal/vm/
   machine_linux.go     Firecracker SDK integration, networking, snapshot-less for now
   machine_stub.go      Non-Linux stub matching the Linux signatures
   options.go           RunOptions (paths + networking) and RuntimeConfig
-configs/devbox.json    Default config (tap0, 172.16.0.2/24, 2 vCPU, 1 GiB, Vite on :5173)
+configs/devbox.json    Default config (tap0, 172.16.0.2/24, 2 vCPU, 1 GiB, primary port :3000)
 scripts/               Host setup shell scripts
 ```
 

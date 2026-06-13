@@ -65,7 +65,7 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListPorts returns every forwarded port of a sandbox, including the
-// implicit primary mapping (guest 5173 → the sandbox's host_port).
+// implicit primary mapping (the primary guest port → the sandbox's host_port).
 func (s *Server) handleListPorts(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sb, err := s.reg.Get(r.Context(), id)

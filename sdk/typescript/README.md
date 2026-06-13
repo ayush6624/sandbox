@@ -52,14 +52,14 @@ await sbx.commands.run('pnpm install', {
 })
 
 // Files
-await sbx.files.write('/home/sandbox/app/src/App.tsx', '...code...')
-const text = await sbx.files.read('/home/sandbox/app/src/App.tsx')
-const bytes = await sbx.files.read('/home/sandbox/app/logo.png', { format: 'bytes' })
-const entries = await sbx.files.list('/home/sandbox/app/src')
+await sbx.files.write('/home/sandbox/server.js', '...code...')
+const text = await sbx.files.read('/home/sandbox/server.js')
+const bytes = await sbx.files.read('/home/sandbox/logo.png', { format: 'bytes' })
+const entries = await sbx.files.list('/home/sandbox')
 
-// Each sandbox serves a Vite dev server on guest port 5173,
-// forwarded to a dedicated port on the API host:
-const host = sbx.getHost(5173)                  // e.g. "100.99.183.74:5200"
+// Guest port 3000 is forwarded to a dedicated port on the API host at create
+// time; start a server there (nothing runs by default) and reach it via:
+const host = sbx.getHost(3000)                  // e.g. "100.99.183.74:5200"
 await fetch(`http://${host}/`)
 
 // Expose additional guest ports on demand. exposePort is idempotent and
@@ -67,7 +67,7 @@ await fetch(`http://${host}/`)
 // getHost(port) works for that port too (it reads a per-instance cache —
 // for ports exposed elsewhere, call listPorts() first to refresh it).
 const api = await sbx.exposePort(8000)          // e.g. "100.99.183.74:5201"
-const ports = await sbx.listPorts()             // [{ guestPort: 5173, hostPort: 5200 }, { guestPort: 8000, hostPort: 5201 }]
+const ports = await sbx.listPorts()             // [{ guestPort: 3000, hostPort: 5200 }, { guestPort: 8000, hostPort: 5201 }]
 sbx.getHost(8000)                               // works now; throws for unexposed ports
 
 // Lifecycle
@@ -107,7 +107,7 @@ All errors extend `SandboxError`:
 | e2b | websandbox |
 | --- | --- |
 | `import { Sandbox } from '@e2b/code-interpreter'` | `import { Sandbox } from 'websandbox'` |
-| `Sandbox.create('template', { timeoutMs })` | `Sandbox.create({ timeoutMs, ...opts })` — single built-in Vite React-TS template |
+| `Sandbox.create('template', { timeoutMs })` | `Sandbox.create({ timeoutMs, ...opts })` — single built-in Node + Python template |
 | `Sandbox.connect(id)` | `Sandbox.connect(id)` |
 | `Sandbox.list()` | `Sandbox.list()` |
 | `Sandbox.kill(id)` | `Sandbox.kill(id)` |
@@ -118,7 +118,7 @@ All errors extend `SandboxError`:
 | `sbx.files.write(path, data)` | `sbx.files.write(path, data)` |
 | `sbx.files.read(path)` / `read(path, { format: 'bytes' })` | same |
 | `sbx.files.list(path)` | `sbx.files.list(path)` |
-| `sbx.getHost(port)` | `sbx.getHost(port)` — 5173 always works; other ports after `await sbx.exposePort(port)` |
+| `sbx.getHost(port)` | `sbx.getHost(port)` — 3000 always works; other ports after `await sbx.exposePort(port)` |
 | — | `sbx.exposePort(guestPort)` / `sbx.listPorts()` |
 | `sbx.kill()` | `sbx.kill()` |
 | `E2B_API_KEY` env var | `WEBSANDBOX_API_KEY` (+ `WEBSANDBOX_API_URL`) |
@@ -139,9 +139,8 @@ npm run example     # run examples/demo.ts against a live server
 ## Example
 
 `examples/demo.ts` exercises the full loop: create a sandbox, check
-`node`/`pnpm` versions, write a React component into the Vite app, read it
-back, list the src directory, poll the forwarded Vite dev server until it
-serves HTML, list sandboxes, and kill the sandbox.
+`node`/`pnpm`/`python3` versions, write a Python script into the sandbox, read
+it back, run it, list the home directory, list sandboxes, and kill the sandbox.
 
 ```bash
 WEBSANDBOX_API_URL=http://<host>:8080 WEBSANDBOX_API_KEY=<key> npm run example

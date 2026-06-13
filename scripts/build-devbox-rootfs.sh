@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Build a custom rootfs with Node.js, pnpm, TypeScript, and a Vite React template.
-# Must run on Linux as root (uses debootstrap + chroot).
+# Build a custom rootfs with Node.js, Python, and common build tooling.
+# A bare sandbox — no app server is started on boot; use exec/files (sandboxd)
+# to run whatever you like. Must run on Linux as root (uses debootstrap + chroot).
 # Supports resuming — re-run the script and it skips completed steps.
 set -euo pipefail
 
 ASSET_DIR="${ASSET_DIR:-/opt/fc}"
 ROOTFS_PATH="${ASSET_DIR}/devbox-rootfs.ext4"
-ROOTFS_SIZE="${ROOTFS_SIZE:-4G}"
+ROOTFS_SIZE="${ROOTFS_SIZE:-10G}"
 BUILD_DIR="/opt/fc/rootfs-build"
 
 if [ -f "$ROOTFS_PATH" ]; then
@@ -35,6 +36,7 @@ else
   echo ""
   echo "==> [1/6] Debootstrap Ubuntu 24.04 (noble)..."
   sudo debootstrap \
+    --components=main,universe \
     --include=systemd,systemd-sysv,curl,ca-certificates,iproute2,dbus \
     noble "$BUILD_DIR" http://archive.ubuntu.com/ubuntu
   sudo touch "$BUILD_DIR/.step1-done"
@@ -69,50 +71,42 @@ else
   sudo touch "$BUILD_DIR/.step3-done"
 fi
 
-# --- Step 4: Scaffold Vite React-TS template ---
+# --- Step 4: Install Python + build tooling ---
 if [ -f "$BUILD_DIR/.step4-done" ]; then
-  echo "==> [4/6] Vite project already scaffolded, skipping"
+  echo "==> [4/6] Python + build tooling already installed, skipping"
 else
   echo ""
-  echo "==> [4/6] Scaffolding Vite React-TS project..."
+  echo "==> [4/6] Installing Python 3, pip, venv, and build tooling..."
+
+  # debootstrap only enables "main"; python3-pip/venv live in "universe".
+  # Write a full sources.list (main + universe, with the updates/security
+  # pockets) so the package set — and the resulting image — has them.
+  sudo tee "$BUILD_DIR/etc/apt/sources.list" > /dev/null <<'APT'
+deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+APT
+
   sudo chroot "$BUILD_DIR" bash -c '
-    mkdir -p /home/sandbox
-    cd /home/sandbox
-    yes | pnpm create vite app --template react-ts
-    cd app
-    pnpm install --frozen-lockfile 2>/dev/null || pnpm install
-    echo "Installed $(ls node_modules | wc -l) packages"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y python3 python3-pip python3-venv build-essential git make
+    python3 --version
+    pip3 --version
+    gcc --version | head -1
+    git --version
   '
+  # Create the working directory used by exec/files (HOME=/home/sandbox).
+  sudo chroot "$BUILD_DIR" bash -c 'mkdir -p /home/sandbox'
   sudo touch "$BUILD_DIR/.step4-done"
 fi
 
-# --- Step 5: Configure systemd service + system settings ---
+# --- Step 5: Configure system settings (no app server — bare sandbox) ---
 if [ -f "$BUILD_DIR/.step5-done" ]; then
-  echo "==> [5/6] Systemd already configured, skipping"
+  echo "==> [5/6] System already configured, skipping"
 else
   echo ""
-  echo "==> [5/6] Configuring systemd services..."
-
-  # Vite dev server service
-  sudo tee "$BUILD_DIR/etc/systemd/system/vite-dev.service" > /dev/null <<'UNIT'
-[Unit]
-Description=Vite Dev Server
-After=multi-user.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/sandbox/app
-ExecStart=/usr/bin/npx vite --host 0.0.0.0
-Restart=on-failure
-RestartSec=2
-Environment=HOME=/home/sandbox
-Environment=NODE_ENV=development
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  sudo chroot "$BUILD_DIR" systemctl enable vite-dev.service
+  echo "==> [5/6] Configuring system settings..."
 
   # DNS — write a static resolv.conf (kernel ip= param doesn't always populate /etc/resolv.conf)
   sudo tee "$BUILD_DIR/etc/resolv.conf" > /dev/null <<'DNS'
@@ -155,5 +149,6 @@ echo ""
 echo "==> Devbox rootfs ready!"
 ls -lh "$ROOTFS_PATH"
 echo ""
+echo "Don't forget to bake in the agent: sudo ./websandbox install-agent --agent ./sandboxd"
 echo "Config should have:"
 echo "  \"rootfs_path\": \"${ROOTFS_PATH}\""
