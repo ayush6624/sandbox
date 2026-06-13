@@ -187,6 +187,29 @@ The base rootfs is a 10 GB sparse ext4 image built by `scripts/build-devbox-root
 
 Each sandbox boots from its own sparse copy of this image; writes never touch the base. The build script is resumable, and `websandbox install-agent` updates the agent in-place without a rebuild.
 
+To avoid rebuilding on every host, package the built image once and stash it in object storage (e.g. R2):
+
+```bash
+sudo bash scripts/package-rootfs.sh          # -> ./dist/devbox-rootfs.tar.zst (+ .sha256)
+# upload dist/* to your bucket
+```
+
+A prebuilt image is published, so you can skip the build entirely:
+
+```
+https://sandbox.ayushgoyal.dev/images/devbox-rootfs.tar.zst
+https://sandbox.ayushgoyal.dev/images/devbox-rootfs.tar.zst.sha256
+```
+
+On a fresh host, the pull helper does the whole restore — download, verify the checksum, sparse-extract into `/opt/fc`, and bake the agent in:
+
+```bash
+sudo bash scripts/fetch-rootfs.sh https://sandbox.ayushgoyal.dev/images/devbox-rootfs.tar.zst
+sudo ./websandbox serve --config configs/devbox.json
+```
+
+The tarball is sparse-aware, so it carries only real content (~1–1.5 GB) rather than the full 10 GB. The cached image holds no agent — `fetch-rootfs.sh` runs `install-agent` (a fast loop-mount) after download, so the `sandboxd` binary you ship stays updatable independently of the OS layer.
+
 ## Project structure
 
 ```
