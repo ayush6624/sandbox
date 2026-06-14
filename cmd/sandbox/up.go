@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ayush6624/web-sandbox/internal/client"
+	"github.com/ayush6624/sandbox/internal/client"
 )
 
 func upCmd() *cobra.Command {

@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/ayush6624/web-sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/agentapi"
 )
 
 // agentClient talks to in-guest sandboxd agents. No overall timeout — exec

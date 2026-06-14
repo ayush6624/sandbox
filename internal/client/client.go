@@ -15,8 +15,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ayush6624/web-sandbox/internal/agentapi"
-	"github.com/ayush6624/web-sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // Client is a thin HTTP client that talks to the sandbox server over a Unix socket.

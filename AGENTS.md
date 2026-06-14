@@ -24,7 +24,7 @@ sudo ./sandbox down  --config configs/devbox.json   # from another shell
 
 ## Remote deployment
 
-The Makefile defaults to `REMOTE_USER=ayush REMOTE_HOST=machine REMOTE_DIR=web-sandbox`.
+The Makefile defaults to `REMOTE_USER=ayush REMOTE_HOST=machine REMOTE_DIR=sandbox`.
 
 ```bash
 make sync                 # build-linux + rsync bin/sandbox + Makefile + configs + scripts
@@ -33,15 +33,15 @@ make remote-up            # ssh + run up (blocks)
 make remote-down          # ssh + run down
 ```
 
-Note: `sync` rsyncs `bin/sandbox` so the binary lands at `~/web-sandbox/sandbox`
-(not `~/web-sandbox/bin/sandbox`). All `remote-*` targets and the README use
+Note: `sync` rsyncs `bin/sandbox` so the binary lands at `~/sandbox/sandbox`
+(not `~/sandbox/bin/sandbox`). All `remote-*` targets and the README use
 `./sandbox`. Don't reintroduce `./bin/sandbox` in remote commands.
 
 For driving up/down from automation (e.g. CI or a Codex session), set up
 passwordless sudo scoped to the binary:
 
 ```
-ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/sandbox
+ayush ALL=(ALL) NOPASSWD: /home/ayush/sandbox/sandbox
 ```
 
 in `/etc/sudoers.d/sandbox` with mode `0440`.

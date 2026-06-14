@@ -18,9 +18,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ayush6624/web-sandbox/internal/provisioner"
-	"github.com/ayush6624/web-sandbox/internal/registry"
-	"github.com/ayush6624/web-sandbox/internal/vm"
+	"github.com/ayush6624/sandbox/internal/provisioner"
+	"github.com/ayush6624/sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/vm"
 )
 
 // Config bundles everything the server needs at startup.
@@ -29,15 +29,15 @@ type Config struct {
 	ListenAddr  string // optional TCP listener (e.g. tailnet IP:port); requires APIToken
 	APIToken    string // bearer token enforced on the TCP listener only
 	Provisioner *provisioner.Provisioner
-	GatewayIP   string         // bridge IP; used as the guest's default gateway
-	VMTemplate  vm.RunOptions  // base options (firecracker bin, kernel, args, vcpus, mem, dns)
+	GatewayIP   string        // bridge IP; used as the guest's default gateway
+	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
 }
 
 // Server holds runtime state for the sandbox API.
 type Server struct {
 	cfg      Config
 	reg      *registry.Registry
-	machines sync.Map // map[string]*vm.Machine
+	machines sync.Map        // map[string]*vm.Machine
 	vmCtx    context.Context // long-lived; tied to Serve's ctx, NOT request ctx
 }
 

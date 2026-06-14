@@ -64,14 +64,14 @@ make remote-list                       # ssh + list
 make remote-down SANDBOX=<id>          # ssh + destroy one
 ```
 
-`sync` rsyncs the binaries so they land at `~/web-sandbox/sandbox` and
-`~/web-sandbox/sandboxd` (not under `bin/`). All `remote-*` targets and the
+`sync` rsyncs the binaries so they land at `~/sandbox/sandbox` and
+`~/sandbox/sandboxd` (not under `bin/`). All `remote-*` targets and the
 README use `./sandbox`. Don't reintroduce `./bin/sandbox` in remote commands.
 
 NOPASSWD sudoers (one-time, lets the CLI/server run as root without prompting):
 
 ```
-ayush ALL=(ALL) NOPASSWD: /home/ayush/web-sandbox/sandbox
+ayush ALL=(ALL) NOPASSWD: /home/ayush/sandbox/sandbox
 ```
 
 in `/etc/sudoers.d/sandbox` with mode `0440`.

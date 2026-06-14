@@ -3,7 +3,7 @@
 
 REMOTE_USER ?= ayush
 REMOTE_HOST ?= machine
-REMOTE_DIR  ?= web-sandbox
+REMOTE_DIR  ?= sandbox
 GOARCH      ?= amd64
 
 REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)

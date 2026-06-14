@@ -1,4 +1,4 @@
-module github.com/ayush6624/web-sandbox
+module github.com/ayush6624/sandbox
 
 go 1.25.3
 

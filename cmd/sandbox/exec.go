@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ayush6624/web-sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/agentapi"
 )
 
 func execCmd() *cobra.Command {

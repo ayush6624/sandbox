@@ -15,8 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/ayush6624/web-sandbox/internal/agentapi"
-	"github.com/ayush6624/web-sandbox/internal/client"
+	"github.com/ayush6624/sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/client"
 )
 
 func shellCmd() *cobra.Command {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ayush6624/web-sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // Config is the on-disk JSON describing the host's sandbox runtime.
@@ -22,10 +22,10 @@ type Config struct {
 	RootfsDir  string `json:"rootfs_dir"`  // per-sandbox rootfs copies live here
 
 	// --- Networking ---
-	Bridge      string `json:"bridge"`       // e.g. "br-fc"
-	GatewayIP   string `json:"gateway_ip"`   // bridge IP, used as guest default gateway
-	Nameservers string `json:"nameservers"`  // comma-separated DNS for the guest
-	GuestPort   int    `json:"guest_port"`   // port the in-guest app listens on, forwarded to a host port
+	Bridge      string `json:"bridge"`      // e.g. "br-fc"
+	GatewayIP   string `json:"gateway_ip"`  // bridge IP, used as guest default gateway
+	Nameservers string `json:"nameservers"` // comma-separated DNS for the guest
+	GuestPort   int    `json:"guest_port"`  // port the in-guest app listens on, forwarded to a host port
 
 	// --- Resource pools ---
 	Pools registry.Pools `json:"pools"`

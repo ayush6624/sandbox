@@ -8,11 +8,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ayush6624/web-sandbox/internal/config"
-	"github.com/ayush6624/web-sandbox/internal/provisioner"
-	"github.com/ayush6624/web-sandbox/internal/registry"
-	"github.com/ayush6624/web-sandbox/internal/server"
-	"github.com/ayush6624/web-sandbox/internal/vm"
+	"github.com/ayush6624/sandbox/internal/config"
+	"github.com/ayush6624/sandbox/internal/provisioner"
+	"github.com/ayush6624/sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/server"
+	"github.com/ayush6624/sandbox/internal/vm"
 )
 
 var (

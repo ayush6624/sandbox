@@ -23,7 +23,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/creack/pty"
 
-	"github.com/ayush6624/web-sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/agentapi"
 )
 
 const defaultCwd = "/home/sandbox/app"

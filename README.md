@@ -1,4 +1,4 @@
-# web-sandbox
+# sandbox
 
 Firecracker-based microVM sandboxes for development. Spin up isolated Ubuntu VMs — each with Node 22, Python 3, and common build tooling — in about two seconds, then run commands and edit files inside them over an HTTP API.
 
@@ -43,8 +43,8 @@ Firecracker provides hardware-level isolation (KVM) with ~125ms boot times and ~
 ### 1. Build and sync to a remote Linux machine
 
 ```bash
-git clone https://github.com/ayush6624/web-sandbox.git
-cd web-sandbox
+git clone https://github.com/ayush6624/sandbox.git
+cd sandbox
 make sync REMOTE_HOST=your-server
 ```
 
@@ -52,7 +52,7 @@ make sync REMOTE_HOST=your-server
 
 ```bash
 ssh you@your-server
-cd ~/web-sandbox
+cd ~/sandbox
 
 # Install Firecracker + kernel
 sudo bash scripts/setup-firecracker.sh
@@ -215,7 +215,7 @@ The tarball is sparse-aware, so it carries only real content (~1–1.5 GB) rathe
 ## Project structure
 
 ```
-web-sandbox/
+sandbox/
 ├── cmd/
 │   ├── sandbox/          CLI + server entry point (cobra)
 │   └── sandboxd/            In-guest agent (exec + file HTTP API)

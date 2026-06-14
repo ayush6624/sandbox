@@ -11,7 +11,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/ayush6624/web-sandbox/internal/config"
+	"github.com/ayush6624/sandbox/internal/config"
 )
 
 func doctorCmd() *cobra.Command {

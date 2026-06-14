@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/ayush6624/web-sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // handleExposePort forwards an extra guest port to a freshly allocated host
