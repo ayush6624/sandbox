@@ -19,12 +19,17 @@ import (
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
-// Client is a thin HTTP client that talks to the sandbox server over a Unix socket.
+// Client is a thin HTTP client for the sandbox API. It talks either to a local
+// `sandbox serve` over a Unix socket, or to a `sandbox serve`/`sandbox gateway`
+// over TCP with a bearer token.
 type Client struct {
-	http *http.Client
+	http    *http.Client
+	baseURL string // e.g. "http://unix" or "http://100.64.0.1:9090"
+	wsURL   string // e.g. "ws://sandbox"  or "ws://100.64.0.1:9090"
+	token   string // optional bearer; empty for the Unix socket
 }
 
-// New returns a client that dials socketPath.
+// New returns a client that dials socketPath (no auth — the socket is mode 0600).
 func New(socketPath string) *Client {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -32,7 +37,19 @@ func New(socketPath string) *Client {
 			return d.DialContext(ctx, "unix", socketPath)
 		},
 	}
-	return &Client{http: &http.Client{Transport: tr}}
+	return &Client{http: &http.Client{Transport: tr}, baseURL: "http://unix", wsURL: "ws://sandbox"}
+}
+
+// NewHTTP returns a client that talks to addr (host:port) over TCP, presenting
+// token as a bearer on every request. Used by the CLI to reach a gateway and by
+// the gateway to reach hosts.
+func NewHTTP(addr, token string) *Client {
+	return &Client{
+		http:    &http.Client{},
+		baseURL: "http://" + addr,
+		wsURL:   "ws://" + addr,
+		token:   token,
+	}
 }
 
 // CreateOpts customizes sandbox creation.
@@ -153,13 +170,17 @@ func (c *Client) DialShell(ctx context.Context, id string, cols, rows uint16) (*
 	if rows > 0 {
 		q.Set("rows", fmt.Sprint(rows))
 	}
-	// The host is ignored — c.http's transport dials the configured socket — but
-	// must be present for a valid ws:// URL.
-	u := "ws://sandbox/sandboxes/" + id + "/shell"
+	// For the Unix socket the host is ignored (c.http's transport dials the
+	// socket) but must be present for a valid ws:// URL; for TCP it's the addr.
+	u := c.wsURL + "/sandboxes/" + id + "/shell"
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}
-	conn, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: c.http})
+	opts := &websocket.DialOptions{HTTPClient: c.http}
+	if c.token != "" {
+		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + c.token}}
+	}
+	conn, _, err := websocket.Dial(ctx, u, opts)
 	if err != nil {
 		return nil, fmt.Errorf("dial shell (is `sandbox serve` running?): %w", err)
 	}
@@ -224,9 +245,12 @@ func filePath(id, endpoint, path string) string {
 
 // doRaw issues a request with a raw body and returns the response on 2xx.
 func (c *Client) doRaw(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -255,9 +279,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		rdr = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, rdr)
 	if err != nil {
 		return err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

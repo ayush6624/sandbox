@@ -31,6 +31,15 @@ type Config struct {
 	Provisioner *provisioner.Provisioner
 	GatewayIP   string        // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
+
+	// --- Gateway registration (optional; Phase-1 multi-host) ---
+	// When GatewayURL is set, the server periodically heartbeats to the gateway
+	// so it can route requests to this host. Requires ListenAddr (the gateway
+	// dials back over TCP using APIToken).
+	GatewayURL    string // e.g. "http://100.x.y.z:9090"; empty disables registration
+	GatewayToken  string // bearer the host presents to the gateway
+	AdvertiseAddr string // addr the gateway should dial back; defaults to ListenAddr
+	HostID        string // stable host identity; defaults to hostname
 }
 
 // Server holds runtime state for the sandbox API.
@@ -53,6 +62,9 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	s.reconcile(ctx)
 	go s.reapExpired(ctx)
+	if s.cfg.GatewayURL != "" {
+		go s.heartbeat(ctx)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o755); err != nil {
 		return err

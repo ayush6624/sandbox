@@ -1,0 +1,23 @@
+{
+  "socket_path":     "/run/sandbox.sock",
+  "db_path":         "/var/lib/sandbox/registry.db",
+  "rootfs_base":     "/opt/fc/devbox-rootfs.ext4",
+  "rootfs_dir":      "/var/lib/sandbox/rootfs",
+  "bridge":          "br-fc",
+  "gateway_ip":      "172.16.0.1",
+  "nameservers":     "8.8.8.8,8.8.4.4",
+  "guest_port":      3000,
+  "firecracker_bin": "/usr/local/bin/firecracker",
+  "kernel_image":    "/opt/fc/vmlinux",
+  "kernel_args":     "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0",
+  "vcpus":           2,
+  "mem_mib":         1024,
+  "pools": {
+    "TapPrefix":  "fc",
+    "TapMax":     64,
+    "GuestIPMin": "172.16.0.10",
+    "GuestIPMax": "172.16.0.73",
+    "PortMin":    5200,
+    "PortMax":    5263
+  }
+}

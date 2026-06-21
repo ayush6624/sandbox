@@ -105,7 +105,8 @@ If you change these, host:port → guest:3000 forwarding silently breaks.
 ```
 cmd/sandbox/
   main.go              Root cobra command (wires all subcommands)
-  serve.go             Boots the API server (EnsureNetwork + reconcile + listen)
+  serve.go             Boots the API server (EnsureNetwork + reconcile + listen); --gateway opts into fleet registration
+  gateway.go           Boots the multi-host control plane (sandbox gateway)
   up.go                Thin client: POST /sandboxes
   down.go              Thin client: DELETE /sandboxes/<id>
   list.go              Thin client: GET /sandboxes (tabwriter output)
@@ -119,10 +120,13 @@ cmd/sandbox/
 cmd/sandboxd/main.go   In-guest agent: /health, /exec, /files (GET/PUT), /dir, /shell (PTY WebSocket) on :8090
 internal/agentapi/agentapi.go     Shared host↔guest protocol types + port constant
 internal/config/config.go         JSON config + Defaults(); DisallowUnknownFields
-internal/client/client.go         Unix-socket HTTP client (Create/List/Get/Destroy/Exec/DialShell/ReadFile/WriteFile/ListDir)
+internal/client/client.go         HTTP client: New(socket) for the local socket, NewHTTP(addr,token) for TCP+bearer (gateway/host)
+internal/cluster/cluster.go       Host→gateway heartbeat protocol type
+internal/gateway/gateway.go       Multi-host control plane: host registry, derived routing, placement, reverse-proxy, scatter-gather
 internal/server/
   server.go           http.ServeMux on Unix socket; owns map[id]*vm.Machine; vmCtx lifetime
   proxy.go            Reverse-proxy to sandboxd (incl. /shell WebSocket via httputil) + waitForAgent readiness poll
+  heartbeat.go        When --gateway is set, periodically registers this host with the gateway
   reconcile.go        Startup cleanup of stale rows/taps/rootfs/orphan firecrackers
 internal/registry/registry.go     SQLite-backed registry; resource allocation (tap/IP/port from pools)
 internal/provisioner/provisioner.go  Host-side ops: EnsureNetwork, rootfs cp, tap create/delete, iptables DNAT
@@ -142,6 +146,18 @@ scripts/              Host setup shell scripts
   `/proc/<pid>/comm` is `firecracker` for each registry row (guards against PID reuse), then
   releases DNAT rules, tap, rootfs copy, and the row itself. Every row is stale by definition
   at startup, since VMs only live inside a running server.
+- **Multi-host is a gateway in front, not shared state.** `sandbox gateway` fronts the same
+  API and fans out across hosts. Each host keeps its own SQLite + pools + `reconcile()`
+  unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
+  opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
+  and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, sandbox_ids}` to
+  the gateway every 5 s. The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
+  its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
+  each host reports. `POST /sandboxes` places on the least-loaded live host (flip to bin-pack
+  for Phase-2 autoscaling); id-scoped requests (incl. `/exec/stream` + `/shell`) are
+  reverse-proxied to the owning host with the host's token injected; `GET /sandboxes`
+  scatter-gathers. Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The
+  whole roadmap (incl. Phase-2 elastic/Nomad) is in `~/.claude/plans/i-know-the-agent-abundant-starfish.md`.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —

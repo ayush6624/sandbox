@@ -51,6 +51,28 @@ type Pools struct {
 	PortMax    int    // host port range end (inclusive), e.g. 5263
 }
 
+// Slots returns the host's effective sandbox capacity: the smallest of the
+// three pools, since every sandbox consumes one tap, one IP, and one primary
+// host port. (Extra exposed ports draw from the same port pool, so this is an
+// upper bound on concurrently-running sandboxes, good enough for placement.)
+func (p Pools) Slots() int {
+	n := p.TapMax
+	if c := p.PortMax - p.PortMin + 1; c < n {
+		n = c
+	}
+	if minIP, err := ipToUint32(p.GuestIPMin); err == nil {
+		if maxIP, err := ipToUint32(p.GuestIPMax); err == nil {
+			if c := int(maxIP-minIP) + 1; c < n {
+				n = c
+			}
+		}
+	}
+	if n < 0 {
+		n = 0
+	}
+	return n
+}
+
 // Registry wraps the SQLite-backed sandbox state.
 type Registry struct {
 	db    *sql.DB
@@ -67,6 +89,15 @@ func Open(dbPath string, pools Pools) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Serialize on a single connection. Create() runs SELECTs then an INSERT in
+	// one transaction; with multiple connections, concurrent creates (e.g. a
+	// burst of POST /sandboxes placed on the same host) deadlock on the
+	// write-lock upgrade and fail with SQLITE_BUSY — busy_timeout can't resolve a
+	// lock-upgrade conflict. One connection makes registry ops queue instead.
+	// They're sub-millisecond and creates are bottlenecked on rootfs copy + VM
+	// boot, so this isn't a throughput concern; cross-host parallelism is
+	// unaffected (each host has its own DB).
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
