@@ -16,10 +16,17 @@ type Config struct {
 	ListenAddr string `json:"listen_addr"` // optional TCP listener, e.g. "100.99.183.74:8080" (tailnet); requires api_token
 	APIToken   string `json:"api_token"`   // bearer token required on the TCP listener
 
+	// --- Gateway registration (optional; multi-host) ---
+	GatewayURL    string `json:"gateway_url"`    // register/heartbeat target, e.g. "http://100.x:9090"; requires listen_addr
+	GatewayToken  string `json:"gateway_token"`  // bearer presented to the gateway
+	AdvertiseAddr string `json:"advertise_addr"` // addr the gateway dials back; defaults to listen_addr
+	HostID        string `json:"host_id"`        // stable host identity; defaults to hostname
+
 	// --- Storage ---
-	DBPath     string `json:"db_path"`     // SQLite registry
-	RootfsBase string `json:"rootfs_base"` // immutable base rootfs image
-	RootfsDir  string `json:"rootfs_dir"`  // per-sandbox rootfs copies live here
+	DBPath      string `json:"db_path"`      // SQLite registry
+	RootfsBase  string `json:"rootfs_base"`  // immutable base rootfs image
+	RootfsDir   string `json:"rootfs_dir"`   // per-sandbox rootfs copies live here
+	SnapshotDir string `json:"snapshot_dir"` // per-snapshot artifacts (mem/state/rootfs) live here
 
 	// --- Networking ---
 	Bridge      string `json:"bridge"`      // e.g. "br-fc"
@@ -51,6 +58,9 @@ func (c *Config) Defaults() {
 	}
 	if c.RootfsDir == "" {
 		c.RootfsDir = "/var/lib/sandbox/rootfs"
+	}
+	if c.SnapshotDir == "" {
+		c.SnapshotDir = "/var/lib/sandbox/snapshots"
 	}
 	if c.Bridge == "" {
 		c.Bridge = "br-fc"

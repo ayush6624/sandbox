@@ -16,8 +16,12 @@ import (
 )
 
 var (
-	listenAddr string
-	apiToken   string
+	listenAddr    string
+	apiToken      string
+	gatewayURL    string
+	gatewayToken  string
+	advertiseAddr string
+	hostID        string
 )
 
 func serveCmd() *cobra.Command {
@@ -29,6 +33,10 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfgPath, "config", "configs/devbox.json", "path to JSON config")
 	cmd.Flags().StringVar(&listenAddr, "listen", "", "also serve the API on this TCP address (requires --token); overrides config listen_addr")
 	cmd.Flags().StringVar(&apiToken, "token", "", "bearer token for the TCP listener; overrides config api_token")
+	cmd.Flags().StringVar(&gatewayURL, "gateway", "", "register with this gateway URL and heartbeat (requires --listen); overrides config gateway_url")
+	cmd.Flags().StringVar(&gatewayToken, "gateway-token", "", "bearer token presented to the gateway; overrides config gateway_token")
+	cmd.Flags().StringVar(&advertiseAddr, "advertise", "", "address the gateway should dial back; defaults to --listen")
+	cmd.Flags().StringVar(&hostID, "host-id", "", "stable host identity reported to the gateway; defaults to hostname")
 	return cmd
 }
 
@@ -43,6 +51,21 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if apiToken != "" {
 		cfg.APIToken = apiToken
 	}
+	if gatewayURL != "" {
+		cfg.GatewayURL = gatewayURL
+	}
+	if gatewayToken != "" {
+		cfg.GatewayToken = gatewayToken
+	}
+	if advertiseAddr != "" {
+		cfg.AdvertiseAddr = advertiseAddr
+	}
+	if hostID != "" {
+		cfg.HostID = hostID
+	}
+	if cfg.GatewayURL != "" && cfg.ListenAddr == "" {
+		return fmt.Errorf("--gateway requires --listen (the gateway dials back over TCP)")
+	}
 
 	reg, err := registry.Open(cfg.DBPath, cfg.Pools)
 	if err != nil {
@@ -56,8 +79,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 			GatewayCIDR: cfg.GatewayIP + "/24",
 			GuestPort:   cfg.GuestPort,
 		},
-		RootfsBase: cfg.RootfsBase,
-		RootfsDir:  cfg.RootfsDir,
+		RootfsBase:  cfg.RootfsBase,
+		RootfsDir:   cfg.RootfsDir,
+		SnapshotDir: cfg.SnapshotDir,
 	}
 
 	if err := prov.EnsureNetwork(); err != nil {
@@ -74,12 +98,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		SocketPath:  cfg.SocketPath,
-		ListenAddr:  cfg.ListenAddr,
-		APIToken:    cfg.APIToken,
-		Provisioner: prov,
-		GatewayIP:   cfg.GatewayIP,
-		VMTemplate:  tmpl,
+		SocketPath:    cfg.SocketPath,
+		ListenAddr:    cfg.ListenAddr,
+		APIToken:      cfg.APIToken,
+		Provisioner:   prov,
+		GatewayIP:     cfg.GatewayIP,
+		VMTemplate:    tmpl,
+		GatewayURL:    cfg.GatewayURL,
+		GatewayToken:  cfg.GatewayToken,
+		AdvertiseAddr: cfg.AdvertiseAddr,
+		HostID:        cfg.HostID,
 	}, reg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

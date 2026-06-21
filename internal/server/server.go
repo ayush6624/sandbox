@@ -91,6 +91,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("PUT /sandboxes/{id}/files", s.handleAgentProxy("files"))
 	mux.HandleFunc("GET /sandboxes/{id}/dir", s.handleAgentProxy("dir"))
 	mux.HandleFunc("GET /sandboxes/{id}/shell", s.handleShellProxy())
+	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
+	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
+	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
 
 	servers := []*http.Server{{Handler: mux}}
 	srvErr := make(chan error, 2)
@@ -301,7 +305,7 @@ func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rollbackPreVM(id string, sb registry.Sandbox) {
 	ctx := context.Background()
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
-	_ = s.cfg.Provisioner.CleanupRootfs(id)
+	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 	_ = s.reg.Destroy(ctx, id)
 }
 
@@ -340,7 +344,7 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	}
 	s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
-	_ = s.cfg.Provisioner.CleanupRootfs(id)
+	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 	return s.reg.Destroy(ctx, id)
 }
 

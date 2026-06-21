@@ -34,7 +34,7 @@ func (s *Server) reconcile(ctx context.Context) {
 		}
 		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
-		_ = s.cfg.Provisioner.CleanupRootfs(sb.ID)
+		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 		if err := s.reg.Destroy(ctx, sb.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "reconcile: destroy row %s: %v\n", sb.ID, err)
 			continue

@@ -21,9 +21,10 @@ type Network struct {
 // Provisioner performs host-side setup/teardown for sandboxes:
 // rootfs copies, tap devices, iptables port-forwards.
 type Provisioner struct {
-	Network    Network
-	RootfsBase string // path to immutable base rootfs (e.g. /opt/fc/devbox-rootfs.ext4)
-	RootfsDir  string // directory to hold per-sandbox copies
+	Network     Network
+	RootfsBase  string // path to immutable base rootfs (e.g. /opt/fc/devbox-rootfs.ext4)
+	RootfsDir   string // directory to hold per-sandbox copies
+	SnapshotDir string // directory to hold per-snapshot artifacts (mem/state/rootfs)
 }
 
 // EnsureNetwork idempotently brings up the host networking the sandboxes need:
@@ -126,6 +127,47 @@ func (p *Provisioner) rootfsPath(id string) string {
 // CleanupRootfs deletes the per-sandbox rootfs file (best-effort).
 func (p *Provisioner) CleanupRootfs(sandboxID string) error {
 	return os.Remove(p.rootfsPath(sandboxID))
+}
+
+// RemoveRootfs deletes a rootfs file by its exact path (best-effort). Used when
+// the rootfs doesn't live at the default per-id path — e.g. a restored sandbox,
+// whose disk sits at the source's original path (baked into the snapshot).
+func (p *Provisioner) RemoveRootfs(path string) error {
+	if path == "" {
+		return nil
+	}
+	return os.Remove(path)
+}
+
+// SnapshotPaths returns the on-disk locations for a snapshot's artifacts and
+// ensures the containing directory exists.
+func (p *Provisioner) SnapshotPaths(snapshotID string) (mem, state, rootfs string, err error) {
+	dir := filepath.Join(p.SnapshotDir, snapshotID)
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", "", err
+	}
+	return filepath.Join(dir, "mem.bin"),
+		filepath.Join(dir, "state.bin"),
+		filepath.Join(dir, "rootfs.ext4"),
+		nil
+}
+
+// CopyFileSparse copies a single file sparsely, creating the destination's
+// parent directory if needed. Used to freeze a sandbox's rootfs into a snapshot
+// directory, and to lay a snapshot's frozen rootfs back down for a restore.
+func (p *Provisioner) CopyFileSparse(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if out, err := exec.Command("cp", "--sparse=always", src, dst).CombinedOutput(); err != nil {
+		return fmt.Errorf("cp %s -> %s: %w: %s", src, dst, err, out)
+	}
+	return nil
+}
+
+// CleanupSnapshot removes a snapshot's artifact directory (best-effort).
+func (p *Provisioner) CleanupSnapshot(snapshotID string) error {
+	return os.RemoveAll(filepath.Join(p.SnapshotDir, snapshotID))
 }
 
 // CreateTap creates a tap device and attaches it to the configured bridge.
