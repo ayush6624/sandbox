@@ -26,6 +26,7 @@
     "example:ports": "tsx examples/ports.ts",
     "example:lifecycle": "tsx examples/lifecycle.ts",
     "bench": "tsx benchmarks/run-bench.ts",
+    "bench:restore": "tsx benchmarks/restore-bench.ts",
     "test": "tsx --test test/smoke.test.ts"
   },
   "devDependencies": {
