@@ -132,6 +132,36 @@ export class Sandbox {
   }
 
   /**
+   * Fans out N identity-neutral clones from a single snapshot, concurrently.
+   * Unlike {@link Sandbox.restore} (which reuses the snapshot's baked guest IP
+   * and is therefore strictly 1-at-a-time), each clone is allocated a fresh
+   * IP/tap/host-port from the pool and reidentifies itself from MMDS on resume,
+   * so many clones of one snapshot run side by side. Each gets its own
+   * copy-on-write rootfs, so writes are isolated.
+   *
+   * The source sandbox the snapshot was taken from must no longer be running.
+   *
+   * @param snapshotId Id returned by {@link Sandbox#snapshot}.
+   * @param count Number of clones to start (>= 1).
+   * @param opts API overrides plus an optional `timeoutMs` auto-destroy applied to every clone.
+   * @returns One {@link Sandbox} per clone that came up successfully.
+   */
+  static async fanout(snapshotId: string, count: number, opts: SandboxCreateOpts = {}): Promise<Sandbox[]> {
+    if (!Number.isInteger(count) || count < 1) throw new Error('count must be a positive integer')
+    const client = new ApiClient(opts)
+    const res = await client.request('POST', `/snapshots/${snapshotId}/fanout`, {
+      // The server holds the request open until every clone is up; scale with count.
+      timeoutMs: opts.requestTimeoutMs ?? Math.max(CREATE_REQUEST_TIMEOUT_MS, count * 3_000),
+      json: {
+        count,
+        ...(opts.timeoutMs !== undefined ? { timeout_sec: Math.ceil(opts.timeoutMs / 1000) } : {}),
+      },
+    })
+    const raw = (await res.json()) as ApiSandbox[]
+    return raw.map((r) => new Sandbox(client, toSandboxInfo(r)))
+  }
+
+  /**
    * Lists all saved snapshots on the host.
    */
   static async listSnapshots(opts: SandboxOpts = {}): Promise<SnapshotInfo[]> {
