@@ -370,13 +370,16 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, fmt.Errorf("firecracker API never came up: %w", err)
 	}
 
-	// 1. Load the snapshot without resuming, remapping the host tap.
+	// 1. Load the snapshot without resuming, remapping the host tap. The iface_id
+	// must match what the source VM registered: the SDK names interfaces by index
+	// but 1-based (createNetworkInterfaces calls createNetworkInterface with id+1),
+	// so our single boot NIC is "1" — NOT "0" and NOT the guest name "eth0".
 	load := map[string]any{
 		"snapshot_path":         c.StatePath,
 		"mem_backend":           map[string]any{"backend_type": "File", "backend_path": c.MemPath},
 		"enable_diff_snapshots": false,
 		"resume_vm":             false,
-		"network_overrides":     []map[string]any{{"iface_id": "eth0", "host_dev_name": c.TapDevice}},
+		"network_overrides":     []map[string]any{{"iface_id": "1", "host_dev_name": c.TapDevice}},
 	}
 	if err = fcAPI(ctx, client, "PUT", "/snapshot/load", load); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("load snapshot: %w", err)

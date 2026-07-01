@@ -274,6 +274,21 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 
 	t0 := time.Now()
 
+	// Firecracker opens the snapshot's baked rootfs path during LoadSnapshot —
+	// before our per-clone PATCH /drives relocates it — so that path must exist
+	// and be openable. The source's own rootfs was deleted when it was killed, so
+	// stage the frozen rootfs there once (reflink, instant); remove it after all
+	// clones have loaded+resumed onto their own CoW copies. Unlinking is safe even
+	// if a 1:1 restore is running on it: open fds survive unlink on Linux.
+	stagedBaked := false
+	if _, statErr := os.Stat(snap.SourceRootfsPath); statErr != nil {
+		if err := s.cfg.Provisioner.CopyFileSparse(snap.RootfsPath, snap.SourceRootfsPath); err != nil {
+			httpError(w, 500, fmt.Errorf("stage snapshot rootfs at baked path: %w", err))
+			return
+		}
+		stagedBaked = true
+	}
+
 	// Phase 1 (parallel): bring each clone up on an UNBRIDGED tap and resume it.
 	// After resume the in-guest thaw agent reconfigures eth0 to the fresh IP/MAC
 	// off MMDS — no host contact and no bridge needed for that step.
@@ -291,6 +306,12 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
+	// All clones have loaded+resumed onto their own CoW rootfs; the staged baked
+	// file is no longer needed (unlink is safe w.r.t. any still-open fds).
+	if stagedBaked {
+		_ = s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath)
+	}
+
 	// Give guests a moment to finish reidentifying before any tap is bridged.
 	// (The thaw agent polls MMDS every ~200ms; this is a generous margin. A
 	// vsock/ARP readiness signal would make this exact — deferred to M3.)
@@ -301,6 +322,9 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	var mu sync.Mutex
 	for _, c := range clones {
 		if c == nil || c.err != nil {
+			if c != nil && c.err != nil {
+				fmt.Fprintf(os.Stderr, "[fanout %s] clone bring-up failed: %v\n", snapID, c.err)
+			}
 			continue
 		}
 		wg.Add(1)
