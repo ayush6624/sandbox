@@ -10,7 +10,7 @@ REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)
 REMOTE_BASE := ssh -o BatchMode=yes $(REMOTE)
 REMOTE_CD   := cd /home/$(REMOTE_USER)/$(REMOTE_DIR)
 
-.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor
+.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status
 
 build:
 	go build ./...
@@ -76,3 +76,12 @@ remote-down: check-remote
 
 remote-list: check-remote
 	$(REMOTE_BASE) '$(REMOTE_CD) && sudo ./sandbox list --config configs/devbox.json'
+
+# --- GCP fleet (testvm-1/2): build + bootstrap every host + install systemd units ---
+# Distinct from the single-host remote-* targets above (those target REMOTE_HOST).
+# See infra/gcp/fleet-deploy.sh and memory gcp-sandbox-fleet.
+gcp-fleet-deploy:
+	bash infra/gcp/fleet-deploy.sh deploy
+
+gcp-fleet-status:
+	bash infra/gcp/fleet-deploy.sh status
