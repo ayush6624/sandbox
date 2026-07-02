@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -18,13 +20,21 @@ const (
 	mmdsIface = "eth0"
 )
 
-// cloneIdentity is the document the host writes into MMDS for a clone.
+// cloneIdentity is the document the host writes into MMDS for a clone. A 1:1
+// restore keeps its identity (Gen empty/unchanged) but still gets EpochMS so
+// the stale guest clock can be stepped.
 type cloneIdentity struct {
 	IP     string `json:"ip"`
 	MAC    string `json:"mac"`
 	GW     string `json:"gw"`
 	Prefix string `json:"prefix"`
 	Gen    string `json:"gen"`
+	// EpochMS is the host's wall clock (Unix ms) at resume. A restored guest
+	// wakes with its clock frozen at snapshot time; left alone, NTP eventually
+	// steps it forward minutes at once, which stalls in-flight timers (both
+	// kernel sleeps and Go timers) mid-request. Stepping it here, immediately
+	// at thaw, keeps that correction out of user execs.
+	EpochMS string `json:"epoch_ms"`
 }
 
 // runThawAgent polls MMDS and reconfigures eth0 whenever the identity generation
@@ -33,7 +43,7 @@ type cloneIdentity struct {
 // after resume, to adopt the fresh IP/MAC. It runs for the lifetime of sandboxd.
 func runThawAgent() {
 	client := &http.Client{Timeout: 1 * time.Second}
-	var lastGen string
+	var lastGen, lastEpoch string
 	for {
 		ensureMMDSRoute()
 		id, err := fetchIdentity(client)
@@ -50,8 +60,29 @@ func runThawAgent() {
 				}
 			}
 		}
+		if err == nil && id.EpochMS != "" && id.EpochMS != lastEpoch {
+			if err := applyClock(id.EpochMS); err != nil {
+				log.Printf("thaw: set clock failed: %v", err)
+			} else {
+				log.Printf("thaw: stepped clock to epoch_ms=%s", id.EpochMS)
+				lastEpoch = id.EpochMS
+			}
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// applyClock steps CLOCK_REALTIME to the host-provided epoch (Unix ms).
+func applyClock(epochMS string) error {
+	ms, err := strconv.ParseInt(epochMS, 10, 64)
+	if err != nil {
+		return fmt.Errorf("bad epoch_ms %q: %w", epochMS, err)
+	}
+	arg := fmt.Sprintf("@%d.%03d", ms/1000, ms%1000)
+	if out, err := exec.Command("date", "-u", "-s", arg).CombinedOutput(); err != nil {
+		return fmt.Errorf("date -s %s: %w: %s", arg, err, out)
+	}
+	return nil
 }
 
 // fetchIdentity reads the clone identity from MMDS (V2: token, then JSON GET).

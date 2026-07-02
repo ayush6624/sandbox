@@ -220,6 +220,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "[%s] restored VM exited: %v\n", id, err)
 	}(id)
 
+	// Let the thaw agent step the guest's snapshot-stale wall clock now,
+	// instead of NTP stepping it minutes forward later mid-exec.
+	if err := vm.PushEpoch(ctx, rt.SocketPath); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] push epoch to mmds: %v\n", id, err)
+	}
+
 	// The agent is restored already-running in guest memory; it just needs the
 	// network to settle (gratuitous ARP on the new tap). This is the win over
 	// cold boot, where the agent has to start from scratch.

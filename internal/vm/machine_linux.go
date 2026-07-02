@@ -302,9 +302,17 @@ func PID(m *Machine) (int, error) {
 	return m.Machine.PID()
 }
 
-// Pause freezes the guest's vCPUs (required before CreateSnapshot).
+// Pause freezes the guest's vCPUs (required before CreateSnapshot). Raw clone
+// machines — which every hot-created sandbox is — are driven over the FC
+// socket directly; the SDK path covers cold boots and 1:1 restores.
 func Pause(ctx context.Context, m *Machine) error {
-	if m == nil || m.Machine == nil {
+	if m == nil {
+		return fmt.Errorf("nil machine")
+	}
+	if m.raw != nil {
+		return fcAPI(ctx, unixClient(m.raw.sock), "PATCH", "/vm", map[string]any{"state": "Paused"})
+	}
+	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
 	return m.Machine.PauseVM(ctx)
@@ -312,16 +320,34 @@ func Pause(ctx context.Context, m *Machine) error {
 
 // Resume unfreezes the guest's vCPUs after a snapshot.
 func Resume(ctx context.Context, m *Machine) error {
-	if m == nil || m.Machine == nil {
+	if m == nil {
+		return fmt.Errorf("nil machine")
+	}
+	if m.raw != nil {
+		return fcAPI(ctx, unixClient(m.raw.sock), "PATCH", "/vm", map[string]any{"state": "Resumed"})
+	}
+	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
 	return m.Machine.ResumeVM(ctx)
 }
 
 // Snapshot writes a full VM snapshot (memory + device state) to the given
-// paths. The VM must be paused first.
+// paths. The VM must be paused first. For a raw clone machine the snapshot
+// bakes the clone's CURRENT config — its own CoW rootfs path, tap, and
+// reidentified IP/MAC — which is exactly what the registry records for it.
 func Snapshot(ctx context.Context, m *Machine, memPath, statePath string) error {
-	if m == nil || m.Machine == nil {
+	if m == nil {
+		return fmt.Errorf("nil machine")
+	}
+	if m.raw != nil {
+		return fcAPI(ctx, unixClient(m.raw.sock), "PUT", "/snapshot/create", map[string]any{
+			"snapshot_type": "Full",
+			"snapshot_path": statePath,
+			"mem_file_path": memPath,
+		})
+	}
+	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
 	return m.Machine.CreateSnapshot(ctx, memPath, statePath)
@@ -389,12 +415,15 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, fmt.Errorf("relocate rootfs: %w", err)
 	}
 	// 3. Push the clone's fresh identity into MMDS for the guest thaw agent.
+	// epoch_ms lets the guest step its snapshot-stale wall clock at thaw,
+	// instead of NTP stepping it minutes forward later, mid-exec.
 	mmds := map[string]any{
-		"ip":     c.GuestIP,
-		"mac":    c.MacAddress,
-		"gw":     c.GatewayIP,
-		"prefix": strconv.Itoa(c.Prefix),
-		"gen":    c.Gen,
+		"ip":       c.GuestIP,
+		"mac":      c.MacAddress,
+		"gw":       c.GatewayIP,
+		"prefix":   strconv.Itoa(c.Prefix),
+		"gen":      c.Gen,
+		"epoch_ms": strconv.FormatInt(time.Now().UnixMilli(), 10),
 	}
 	if err = fcAPI(ctx, client, "PUT", "/mmds", mmds); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("set mmds: %w", err)
@@ -405,6 +434,16 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	}
 
 	return &Machine{raw: rm}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+}
+
+// PushEpoch writes the host's current wall clock into a VM's MMDS store so
+// the in-guest thaw agent can step the guest's snapshot-stale clock. Used by
+// the 1:1 restore path — clones get epoch_ms in their identity doc from
+// StartClone. Replaces the MMDS store, which is empty on a restored VM.
+func PushEpoch(ctx context.Context, sockPath string) error {
+	return fcAPI(ctx, unixClient(sockPath), "PUT", "/mmds", map[string]any{
+		"epoch_ms": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	})
 }
 
 // unixClient builds an HTTP client that talks to a Firecracker API unix socket.
