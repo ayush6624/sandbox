@@ -1,0 +1,21 @@
+{
+  "name": "sandbox-tests",
+  "private": true,
+  "version": "0.1.0",
+  "description": "End-to-end stress and correctness tests for the sandbox API, driven through the TypeScript SDK against a live server or fleet gateway.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "tsx run.ts",
+    "test:quick": "tsx run.ts lifecycle exec files",
+    "test:stress": "tsx run.ts concurrency churn load",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
