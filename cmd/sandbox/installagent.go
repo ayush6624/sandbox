@@ -80,6 +80,11 @@ func installAgent(rootfs, agentBin string) error {
 	if err := os.MkdirAll(wants, 0o755); err != nil {
 		return err
 	}
+	// The default exec cwd (sandboxd falls back to / when it's missing) —
+	// creating it here heals base images built before the rootfs script did.
+	if err := os.MkdirAll(filepath.Join(mnt, "home/sandbox/app"), 0o755); err != nil {
+		return fmt.Errorf("create app dir: %w", err)
+	}
 	link := filepath.Join(wants, "sandboxd.service")
 	_ = os.Remove(link)
 	if err := os.Symlink("../sandboxd.service", link); err != nil {

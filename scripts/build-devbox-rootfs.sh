@@ -96,8 +96,9 @@ APT
     gcc --version | head -1
     git --version
   '
-  # Create the working directory used by exec/files (HOME=/home/sandbox).
-  sudo chroot "$BUILD_DIR" bash -c 'mkdir -p /home/sandbox'
+  # Create the working directory used by exec/files (HOME=/home/sandbox,
+  # default exec cwd /home/sandbox/app — sandboxd falls back to / without it).
+  sudo chroot "$BUILD_DIR" bash -c 'mkdir -p /home/sandbox/app'
   sudo touch "$BUILD_DIR/.step4-done"
 fi
 

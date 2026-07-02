@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -317,6 +318,10 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.destroy(r.Context(), id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			httpError(w, 404, fmt.Errorf("sandbox %s not found", id))
+			return
+		}
 		httpError(w, 500, err)
 		return
 	}
