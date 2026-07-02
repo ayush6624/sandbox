@@ -171,6 +171,13 @@ scripts/              Host setup shell scripts
   mtime+size; a rebuilt base (e.g. `install-agent`) invalidates it on the next server
   restart — restart `serve` after changing the base image. Opt out with
   `"disable_hot_create": true` in the config.
+- **Clone reidentify is signaled by gratuitous ARP.** A fan-out/hot-create clone resumes on
+  an UNBRIDGED tap still carrying the snapshot's baked IP; the in-guest thaw agent adopts the
+  fresh identity from MMDS then broadcasts GARPs (`cmd/sandboxd/garp_linux.go`). The host
+  opens `provisioner.ListenARP` on the tap **before resume** and `finishClone` bridges the
+  moment the announce arrives (~200-400ms); timeout after 1.5 s falls back to bridging anyway
+  (matches snapshots whose baked agent predates the announce). New sandboxd must be baked via
+  `install-agent` for the fast path.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
