@@ -5,8 +5,9 @@ guests 2 vCPU / 1 GB, Firecracker v1.15.0, rootfs/snapshots on XFS reflink
 storage. Single-host runs on testvm-1; throughput via the gateway across both
 hosts. "Latency" = time until the in-guest agent answers (time to a usable box).
 
-Interactive report: [`snapshot-fanout-bench-report.html`](./snapshot-fanout-bench-report.html).
-Raw JSON: [`../sdk/typescript/benchmarks/results/extensive/`](../sdk/typescript/benchmarks/results/extensive/).
+Interactive report: [`snapshot-fanout-bench-report.html`](./snapshot-fanout-bench-report.html)
+(all numbers below are embedded in it). Raw per-run JSON lands in
+`sdk/typescript/benchmarks/results/` (gitignored — regenerate with the command below).
 
 ## Headline
 
