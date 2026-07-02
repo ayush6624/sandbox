@@ -163,9 +163,15 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 	wg.Add(2)
 	go stream(stdoutPipe, agentapi.EventStdout)
 	go stream(stderrPipe, agentapi.EventStderr)
-	wg.Wait() // drain the pipes before Wait closes them
 
-	err = cmd.Wait()
+	// Wait must run CONCURRENTLY with the readers: it owns the pipes and
+	// force-closes them WaitDelay after the shell exits, which is what
+	// unblocks the readers when a background child still holds the write
+	// ends (draining before Wait would deadlock on such children).
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	wg.Wait()
+	err = <-waitCh
 	exit := agentapi.ExecEvent{
 		Type:       agentapi.EventExit,
 		TimedOut:   errors.Is(ctx.Err(), context.DeadlineExceeded),
@@ -204,6 +210,12 @@ func buildCmd(ctx context.Context, req agentapi.ExecRequest) *exec.Cmd {
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	// Background children inherit the exec pipes, and without a bound Wait
+	// blocks until the LAST descendant exits — `server & sleep 0.5` would hang
+	// the request until the server dies. WaitDelay force-closes lingering pipes
+	// shortly after the shell itself exits: exec returns when the shell
+	// returns, and surviving children keep running.
+	cmd.WaitDelay = 500 * time.Millisecond
 	return cmd
 }
 
