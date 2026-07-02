@@ -30,7 +30,7 @@ export SANDBOX_API_KEY=<your-key>
 ```ts
 import { Sandbox } from 'sandbox'
 
-const sbx = await Sandbox.create()              // boots a microVM, ~2s
+const sbx = await Sandbox.create()              // ready in a few hundred ms
 console.log(sbx.sandboxId)
 
 // Run commands (bash -lc, cwd defaults to /home/sandbox/app)
@@ -91,6 +91,47 @@ await sbx.setTimeout(0)         // remove the timeout entirely
 
 `timeoutMs` is rounded up to whole seconds (the API speaks `timeout_sec`).
 
+### Snapshots, restore, and fan-out
+
+A snapshot captures a running sandbox completely — memory, running processes,
+and disk. Restoring one brings all of that back in a new sandbox in a few
+hundred milliseconds: a dev server that took a minute of `pnpm install` to
+reach is ready instantly, mid-request-handler if that's when you snapshotted.
+
+```ts
+// Prepare state once...
+const base = await Sandbox.create()
+await base.commands.run('git clone https://github.com/you/app && cd app && pnpm install')
+const snap = await base.snapshot()      // pauses briefly, then keeps running
+await base.kill()                       // source must be gone before restoring
+
+// ...restore it whenever you need it back (1:1, at most one at a time)
+const sbx = await Sandbox.restore(snap.snapshotId)
+
+// ...or fan out N independent clones of it, concurrently
+const clones = await Sandbox.fanout(snap.snapshotId, 32, { timeoutMs: 600_000 })
+// each clone: own IP/ports, copy-on-write disk — writes are isolated
+
+// Housekeeping
+const snaps = await Sandbox.listSnapshots()
+await Sandbox.deleteSnapshot(snap.snapshotId)
+```
+
+`restore` reuses the network identity baked into the snapshot, so only one
+restore of a given snapshot can run at a time. `fanout` gives every clone a
+fresh identity, so any number can run side by side (measured: 32 clones in
+~2.7 s, sharing memory/disk state, isolated writes).
+
+Note: you don't need snapshots just to make `create` fast — the server keeps
+a golden snapshot of a freshly booted sandbox and serves plain `create` from
+it automatically. Snapshots are for capturing *your* prepared state.
+
+**Multi-host caveat:** when `SANDBOX_API_URL` points at a gateway (fleet
+mode), `sbx.snapshot()` works (it's routed to the sandbox's host), but
+`restore` / `fanout` / `listSnapshots` / `deleteSnapshot` are host-local —
+point the SDK at the host's own address to use them. Gateway routing for
+snapshots is on the roadmap.
+
 ### Errors
 
 All errors extend `SandboxError`:
@@ -123,9 +164,12 @@ All errors extend `SandboxError`:
 | `sbx.kill()` | `sbx.kill()` |
 | `E2B_API_KEY` env var | `SANDBOX_API_KEY` (+ `SANDBOX_API_URL`) |
 | `CommandExitError` / `TimeoutError` | same names and semantics |
+| `sbx.betaPause()` / resume | `sbx.snapshot()` + `Sandbox.restore(snapshotId)` — full memory+disk capture |
+| — | `Sandbox.fanout(snapshotId, n)` — N live clones of one snapshot |
 
 Not supported (yet): background commands (`commands.run(..., { background: true })`),
-PTYs, `files.watchDir`, sandbox metadata/templates, and pause/resume.
+PTYs from the SDK (`sandbox shell <id>` in the CLI covers interactive use),
+`files.watchDir`, and sandbox metadata/templates.
 
 ## Scripts
 

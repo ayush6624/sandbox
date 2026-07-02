@@ -57,8 +57,10 @@ export class Sandbox {
   }
 
   /**
-   * Creates a new sandbox and waits until it is ready (the API blocks
-   * for roughly two seconds while the VM boots).
+   * Creates a new sandbox and waits until it is ready to use. The server
+   * normally serves this from a pre-booted golden snapshot (a few hundred
+   * milliseconds); it falls back to a full cold boot (~2-3 s) when no
+   * snapshot is available yet, e.g. right after a server restart.
    *
    * @param opts API URL/key overrides (default to the `SANDBOX_API_URL` /
    *             `SANDBOX_API_KEY` environment variables) plus an optional
@@ -108,13 +110,15 @@ export class Sandbox {
 
   /**
    * Restores a brand-new sandbox from a snapshot, resuming it from the saved
-   * memory + device state instead of cold booting. Far faster than
-   * {@link Sandbox.create} because it skips kernel boot, init, and agent
-   * startup.
+   * memory + device state — running processes, memory contents, and disk all
+   * come back exactly as they were at snapshot time. Use this (or
+   * {@link Sandbox.fanout}) to resume prepared state; for a blank sandbox,
+   * plain {@link Sandbox.create} is already snapshot-fast.
    *
    * The source sandbox the snapshot was taken from must no longer be running:
    * the snapshot reuses its guest IP and tap device, which would otherwise
-   * collide.
+   * collide. To run many restores of one snapshot side by side, use
+   * {@link Sandbox.fanout} instead.
    *
    * @param snapshotId Id returned by {@link Sandbox#snapshot}.
    * @param opts API overrides plus an optional `timeoutMs` auto-destroy.

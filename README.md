@@ -1,8 +1,15 @@
 # sandbox
 
-Firecracker-based microVM sandboxes for development. Spin up isolated Ubuntu VMs — each with Node 22, Python 3, and common build tooling — in about two seconds, then run commands and edit files inside them over an HTTP API.
+Firecracker-based microVM sandboxes for development. Spin up isolated Ubuntu VMs — each with Node 22, Python 3, and common build tooling — in a few hundred milliseconds, then run commands and edit files inside them over an HTTP API or the TypeScript SDK.
 
 Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hosted, on bare metal.
+
+**Docs:** [Quickstart](docs/quickstart.md) · [Concepts](docs/concepts.md) · [HTTP API](docs/http-api.md) · [Self-hosting](docs/self-hosting.md) · [TypeScript SDK](sdk/typescript/README.md)
+
+- **Fast creates** — every `POST /sandboxes` clones a pre-booted golden snapshot (~0.5 s end-to-end; automatic cold-boot fallback).
+- **Snapshots & fan-out** — capture a running sandbox (memory + processes + disk), restore it 1:1, or fan out N copy-on-write clones (32 clones in ~2.7 s).
+- **Multi-host** — a stateless gateway fronts N hosts with the same API: least-loaded placement, per-sandbox routing, merged listing.
+- **e2b-style SDK** — `Sandbox.create()`, `commands.run` (buffered or streaming), `files`, ports, TTLs.
 
 ## How it works
 
@@ -30,7 +37,9 @@ Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hoste
 
 A single long-running server (`sandbox serve`) owns all VMs. Each sandbox gets its own tap device, guest IP, host port, and rootfs copy, allocated atomically from pools in a SQLite registry. Every VM runs `sandboxd`, a small in-guest agent that the host proxies to for command execution and file I/O — so `create` returns only once the sandbox is actually ready to use.
 
-Firecracker provides hardware-level isolation (KVM) with ~125ms boot times and ~5MB memory overhead. Each sandbox gets its own kernel, filesystem, and network stack.
+At startup the server boots one pristine sandbox, snapshots it, and serves every subsequent create by cloning that **golden snapshot** — memory and all — instead of cold-booting. To scale past one machine, `sandbox gateway` fronts any number of hosts with the same API ([concepts](docs/concepts.md#multi-host-fleet-mode)).
+
+Firecracker provides hardware-level isolation (KVM) with ~5MB memory overhead. Each sandbox gets its own kernel, filesystem, and network stack.
 
 ## Requirements
 
@@ -93,6 +102,22 @@ sudo ./sandbox down 890691a8
 sudo ./sandbox stop-server       # graceful: tears down all sandboxes
 ```
 
+### 5. Or use the TypeScript SDK
+
+Expose the API over TCP (`serve --listen <private-ip>:8080 --token <tok>`), then from any machine that can reach it:
+
+```ts
+import { Sandbox } from 'sandbox'   // sdk/typescript
+
+const sbx = await Sandbox.create({ timeoutMs: 600_000 })
+await sbx.commands.run('pnpm create vite my-app')
+await sbx.files.write('/home/sandbox/app/index.js', code)
+const host = sbx.getHost(3000)      // "your-server:5200"
+await sbx.kill()
+```
+
+See the [SDK README](sdk/typescript/README.md) for streaming exec, snapshots & fan-out, ports, and e2b migration.
+
 ## CLI
 
 ```
@@ -107,12 +132,13 @@ sandbox write <id> <path>    Write stdin (or --from file) into a sandbox
 sandbox ls <id> [path]       List a directory inside a sandbox
 sandbox expose <id> <port>   Forward an extra guest port to a host port
 sandbox ports <id>           List a sandbox's forwarded ports
+sandbox gateway        Run the multi-host gateway (control plane, no root needed)
 sandbox install-agent  Bake/refresh sandboxd inside the base rootfs
 sandbox stop-server    Stop the server (SIGTERM; --force for SIGKILL)
 sandbox doctor         Validate the environment
 ```
 
-`up`, `down`, `list`, `exec`, `read`, `write`, and `ls` are thin HTTP clients over the server's Unix socket.
+`up`, `down`, `list`, `exec`, `read`, `write`, and `ls` are thin HTTP clients over the server's Unix socket. Add `--gateway <addr:port> --gateway-token <tok>` to any of them to drive a fleet gateway over TCP instead (no sudo needed).
 
 ## HTTP API
 
@@ -142,8 +168,14 @@ Endpoints (both listeners):
 | `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
 | `GET /sandboxes/{id}/dir?path=` | Directory listing (JSON) |
 | `GET /sandboxes/{id}/shell?cols=&rows=&cwd=` | WebSocket upgrade → interactive `bash -l` on a pty. Binary frames carry raw terminal bytes; text frames carry `{"type":"resize","cols":…,"rows":…}`. Closes with reason `exit:<code>` |
+| `POST /sandboxes/{id}/snapshot` | Capture the running sandbox (memory + processes + disk); it pauses ~1 s and keeps running |
+| `POST /snapshots/{id}/restore` | Boot a new sandbox resuming the snapshot 1:1 (source must be dead) |
+| `POST /snapshots/{id}/fanout` | `{"count": N}` → N identity-neutral clones, each with fresh IP/ports and CoW disk |
+| `GET /snapshots` / `DELETE /snapshots/{id}` | List / delete saved snapshots |
 
-The exec/file/shell endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM.
+The exec/file/shell endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM. Full request/response shapes, errors, and limits: [HTTP API reference](docs/http-api.md).
+
+**Multi-host:** `sandbox gateway --listen <ip>:9090 --token <tok>` fronts N hosts with this same API (hosts join with `serve --gateway …`); it adds `GET /hosts` for fleet state and routes id-scoped requests to the owning host. See [Self-hosting](docs/self-hosting.md#multi-host-fleet).
 
 ## Configuration
 
@@ -152,9 +184,13 @@ Default config at `configs/devbox.json`. Anything omitted falls back to defaults
 | Field | Default | Description |
 |-------|---------|-------------|
 | `socket_path` | `/run/sandbox.sock` | API Unix socket |
+| `listen_addr` / `api_token` | — | Optional TCP listener with bearer auth |
+| `gateway_url` / `gateway_token` | — | Register this host with a fleet gateway |
 | `db_path` | `/var/lib/sandbox/registry.db` | SQLite registry |
 | `rootfs_base` | `/opt/fc/devbox-rootfs.ext4` | Immutable base image |
-| `rootfs_dir` | `/var/lib/sandbox/rootfs` | Per-sandbox copies |
+| `rootfs_dir` | `/var/lib/sandbox/rootfs` | Per-sandbox copies (XFS/btrfs → instant reflink clones) |
+| `snapshot_dir` | `/var/lib/sandbox/snapshots` | Snapshot artifacts (memory + state + frozen rootfs) |
+| `disable_hot_create` | `false` | `true` = always cold-boot creates instead of cloning the golden snapshot |
 | `bridge` | `br-fc` | Host bridge for tap devices |
 | `gateway_ip` | `172.16.0.1` | Bridge IP / guest default gateway |
 | `guest_port` | `3000` | In-guest app port that gets forwarded |
@@ -217,18 +253,22 @@ The tarball is sparse-aware, so it carries only real content (~1–1.5 GB) rathe
 ```
 sandbox/
 ├── cmd/
-│   ├── sandbox/          CLI + server entry point (cobra)
-│   └── sandboxd/            In-guest agent (exec + file HTTP API)
+│   ├── sandbox/             CLI + server + gateway entry point (cobra)
+│   └── sandboxd/            In-guest agent (exec, files, PTY shell, thaw/reidentify)
 ├── internal/
 │   ├── agentapi/            Shared host↔guest protocol types
-│   ├── client/              Unix-socket HTTP client for the CLI
+│   ├── client/              HTTP client for the CLI (Unix socket or TCP+token)
 │   ├── config/              JSON config with defaults
-│   ├── provisioner/         Host ops: rootfs copies, taps, iptables, EnsureNetwork
-│   ├── registry/            SQLite registry + resource pool allocation
-│   ├── server/              HTTP API, VM ownership, startup reconciliation
-│   └── vm/                  Firecracker SDK wrapper (+ non-Linux stub)
+│   ├── gateway/             Multi-host control plane (placement, routing, scatter-gather)
+│   ├── provisioner/         Host ops: rootfs copies, taps, iptables, ARP listener
+│   ├── registry/            SQLite registry + resource pool allocation + snapshots
+│   ├── server/              HTTP API, VM ownership, golden snapshot, reconciliation
+│   └── vm/                  Firecracker integration: boot, snapshot, clone (+ stub)
+├── sdk/typescript/          TypeScript SDK (e2b-style) + examples + benchmarks
+├── docs/                    Quickstart, concepts, API reference, self-hosting
+├── infra/gcp/               Reference fleet deployment (GCP VMs + systemd units)
 ├── configs/devbox.json      Default configuration
-├── scripts/                 Host setup (firecracker, kernel, rootfs, network)
+├── scripts/                 Host setup (firecracker, kernel, rootfs, bootstrap)
 └── Makefile                 Build, sync, remote targets
 ```
 
