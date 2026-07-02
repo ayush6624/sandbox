@@ -33,6 +33,10 @@ type Sandbox struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	StoppedAt  *time.Time `json:"stopped_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"` // nil = no auto-destroy
+	// HostAddr is set by the GATEWAY only (never stored): the owning host's
+	// address, so clients reach forwarded ports on the host that holds the
+	// DNAT rules rather than on the gateway.
+	HostAddr string `json:"host_addr,omitempty"`
 }
 
 // PortMapping is one exposed guest port → host port pair.

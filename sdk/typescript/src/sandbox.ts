@@ -202,7 +202,15 @@ export class Sandbox {
           `first — only guest port ${PRIMARY_GUEST_PORT} (the primary app port) is forwarded automatically.`
       )
     }
-    return `${this.client.apiHostname}:${hostPort}`
+    return `${this.hostname}:${hostPort}`
+  }
+
+  /**
+   * Hostname where this sandbox's forwarded ports live: the owning host in
+   * fleet mode (the gateway annotates responses with it), else the API host.
+   */
+  private get hostname(): string {
+    return this.info.hostAddr ?? this.client.apiHostname
   }
 
   /**
@@ -218,7 +226,7 @@ export class Sandbox {
     })
     const raw = (await res.json()) as ApiPortMapping
     this.portCache.set(raw.guest_port, raw.host_port)
-    return `${this.client.apiHostname}:${raw.host_port}`
+    return `${this.hostname}:${raw.host_port}`
   }
 
   /**

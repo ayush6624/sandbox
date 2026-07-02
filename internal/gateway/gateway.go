@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -18,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -173,7 +176,17 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	g.mu.Unlock()
 
+	sb.HostAddr = hostOnly(h.addr)
 	writeJSON(w, http.StatusCreated, sb)
+}
+
+// hostOnly strips the port from an addr, so clients can pair it with a
+// sandbox's forwarded ports (which live on the host, not the gateway).
+func hostOnly(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
 }
 
 // pickHost returns a snapshot of the live host with the most free slots, or nil.
@@ -215,6 +228,9 @@ func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "gateway: list from host %s: %v\n", h.id, err)
 			continue
 		}
+		for i := range sandboxes {
+			sandboxes[i].HostAddr = hostOnly(h.addr)
+		}
 		out = append(out, sandboxes...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -254,6 +270,30 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		httpError(w, http.StatusBadGateway, fmt.Errorf("host %s unreachable: %w", snap.id, err))
+	}
+	// Annotate plain GET /sandboxes/{id} responses (the SDK connect path) with
+	// the owning host's address, like create/list do. Everything else —
+	// exec streams, file bytes, WebSockets — passes through untouched.
+	if r.Method == http.MethodGet && r.PathValue("rest") == "" {
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			if resp.StatusCode != http.StatusOK {
+				return nil
+			}
+			var sb registry.Sandbox
+			if err := json.NewDecoder(resp.Body).Decode(&sb); err != nil {
+				return err
+			}
+			resp.Body.Close()
+			sb.HostAddr = hostOnly(snap.addr)
+			b, err := json.Marshal(sb)
+			if err != nil {
+				return err
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(b))
+			resp.ContentLength = int64(len(b))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(b)))
+			return nil
+		}
 	}
 	proxy.ServeHTTP(w, r)
 }

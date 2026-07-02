@@ -35,6 +35,7 @@ export interface ApiSandbox {
   status: string
   created_at: string
   expires_at?: string
+  host_addr?: string
 }
 
 /** Raw port mapping as returned by the REST API (snake_case). */
@@ -97,6 +98,12 @@ export interface SandboxInfo {
   createdAt: Date
   /** When the sandbox will be auto-destroyed; absent when it has no TTL. */
   expiresAt?: Date
+  /**
+   * Address of the machine hosting this sandbox. Set when talking to a fleet
+   * gateway (forwarded ports live on the host, not the gateway); absent when
+   * talking to a host directly, where the API hostname already is the host.
+   */
+  hostAddr?: string
 }
 
 /** Result of a command executed via `sandbox.commands.run()`. */
@@ -181,5 +188,6 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
     createdAt: new Date(raw.created_at),
   }
   if (raw.expires_at) info.expiresAt = new Date(raw.expires_at)
+  if (raw.host_addr) info.hostAddr = raw.host_addr
   return info
 }
