@@ -60,6 +60,14 @@ type Snapshot struct {
 	// the block device.
 	SourceRootfsPath string    `json:"source_rootfs_path"`
 	CreatedAt        time.Time `json:"created_at"`
+	// Golden marks the server-managed pristine snapshot that POST /sandboxes
+	// clones from. At most one snapshot is golden (partial unique index).
+	Golden bool `json:"golden,omitempty"`
+	// BaseMtime/BaseSize record the base rootfs stat at snapshot time, so a
+	// rebuilt base image (e.g. after install-agent) invalidates a golden
+	// snapshot on the next server startup.
+	BaseMtime int64 `json:"-"`
+	BaseSize  int64 `json:"-"`
 }
 
 // Pools defines the resource ranges from which sandboxes draw on creation.
@@ -172,7 +180,10 @@ func (r *Registry) migrate() error {
 		state_path         TEXT NOT NULL,
 		rootfs_path        TEXT NOT NULL,
 		source_rootfs_path TEXT NOT NULL DEFAULT '',
-		created_at         INTEGER NOT NULL
+		created_at         INTEGER NOT NULL,
+		golden             INTEGER NOT NULL DEFAULT 0,
+		base_mtime         INTEGER NOT NULL DEFAULT 0,
+		base_size          INTEGER NOT NULL DEFAULT 0
 	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
@@ -187,6 +198,20 @@ func (r *Registry) migrate() error {
 	// IF NOT EXISTS, so ignore the duplicate-column error on migrated DBs.
 	if _, err := r.db.Exec(`ALTER TABLE sandboxes ADD COLUMN expires_at INTEGER`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	// golden/base_mtime/base_size were added with hot create.
+	for _, col := range []string{
+		`ALTER TABLE snapshots ADD COLUMN golden INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE snapshots ADD COLUMN base_mtime INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE snapshots ADD COLUMN base_size INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	// After the ALTERs so it can be created on pre-golden databases too.
+	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_golden_snapshot ON snapshots(golden) WHERE golden = 1`); err != nil {
 		return err
 	}
 	return nil
@@ -432,19 +457,29 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at`
+const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
 func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
+	golden := 0
+	if s.Golden {
+		golden = 1
+	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix())
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize)
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
 	return nil
+}
+
+// GoldenSnapshot returns the snapshot marked golden (sql.ErrNoRows if none).
+func (r *Registry) GoldenSnapshot(ctx context.Context) (Snapshot, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=1`)
+	return scanSnapshot(row)
 }
 
 // GetSnapshot returns a snapshot by id.
@@ -487,11 +522,13 @@ func (r *Registry) DeleteSnapshot(ctx context.Context, id string) error {
 func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var s Snapshot
 	var createdAt int64
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt)
+	var golden int
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize)
 	if err != nil {
 		return s, err
 	}
 	s.CreatedAt = time.Unix(createdAt, 0)
+	s.Golden = golden == 1
 	return s, nil
 }
 

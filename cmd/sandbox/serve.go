@@ -104,6 +104,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		Provisioner:   prov,
 		GatewayIP:     cfg.GatewayIP,
 		VMTemplate:    tmpl,
+		HotCreate:     !cfg.DisableHotCreate,
 		GatewayURL:    cfg.GatewayURL,
 		GatewayToken:  cfg.GatewayToken,
 		AdvertiseAddr: cfg.AdvertiseAddr,

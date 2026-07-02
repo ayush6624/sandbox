@@ -34,6 +34,12 @@ type Config struct {
 	Nameservers string `json:"nameservers"` // comma-separated DNS for the guest
 	GuestPort   int    `json:"guest_port"`  // port the in-guest app listens on, forwarded to a host port
 
+	// --- Behavior ---
+	// Hot create is on by default: the server maintains a golden snapshot of a
+	// pristine booted sandbox and serves POST /sandboxes by cloning it (fan-out
+	// mechanism), falling back to cold boot. Set true to always cold-boot.
+	DisableHotCreate bool `json:"disable_hot_create"`
+
 	// --- Resource pools ---
 	Pools registry.Pools `json:"pools"`
 

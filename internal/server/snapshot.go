@@ -26,33 +26,38 @@ import (
 // the snapshot bakes in the guest IP and tap name, so a restore reuses both and
 // would collide with the still-running source.
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	id := r.PathValue("id")
+	snap, status, err := s.snapshotSandbox(r.Context(), r.PathValue("id"), false)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, 201, snap)
+}
 
+// snapshotSandbox does the actual pause → snapshot → freeze rootfs → resume
+// dance and records the row. golden marks the row as the server's golden
+// snapshot (see golden.go). Returns the HTTP status to use on error.
+func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (registry.Snapshot, int, error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
-		httpError(w, 404, err)
-		return
+		return registry.Snapshot{}, 404, err
 	}
 	v, ok := s.machines.Load(id)
 	if !ok {
-		httpError(w, 409, fmt.Errorf("sandbox %s is not running in this server", id))
-		return
+		return registry.Snapshot{}, 409, fmt.Errorf("sandbox %s is not running in this server", id)
 	}
 	m := v.(*vm.Machine)
 
 	snapID := uuid.NewString()
 	memPath, statePath, rootfsPath, err := s.cfg.Provisioner.SnapshotPaths(snapID)
 	if err != nil {
-		httpError(w, 500, fmt.Errorf("snapshot dir: %w", err))
-		return
+		return registry.Snapshot{}, 500, fmt.Errorf("snapshot dir: %w", err)
 	}
 
-	// Pause → snapshot → freeze rootfs → resume. Resume on every exit path so a
-	// failed snapshot doesn't leave the source sandbox frozen.
+	// Resume on every exit path so a failed snapshot doesn't leave the source
+	// sandbox frozen.
 	if err := vm.Pause(ctx, m); err != nil {
-		httpError(w, 500, fmt.Errorf("pause: %w", err))
-		return
+		return registry.Snapshot{}, 500, fmt.Errorf("pause: %w", err)
 	}
 	resumed := false
 	resume := func() {
@@ -68,18 +73,23 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	if err := vm.Snapshot(ctx, m, memPath, statePath); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
-		httpError(w, 500, fmt.Errorf("create snapshot: %w", err))
-		return
+		return registry.Snapshot{}, 500, fmt.Errorf("create snapshot: %w", err)
 	}
 	// Copy the rootfs while the VM is paused so the disk matches the snapshot's
 	// view of it. The source keeps writing to its own rootfs after resume.
 	if err := s.cfg.Provisioner.CopyFileSparse(sb.RootfsPath, rootfsPath); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
-		httpError(w, 500, fmt.Errorf("freeze rootfs: %w", err))
-		return
+		return registry.Snapshot{}, 500, fmt.Errorf("freeze rootfs: %w", err)
 	}
 	resume()
 	fmt.Fprintf(os.Stderr, "[%s] snapshot %s written in %s\n", id, snapID, time.Since(t0).Round(time.Millisecond))
+
+	// Stamp the base rootfs so a rebuilt base (e.g. install-agent) invalidates
+	// a golden snapshot on the next startup.
+	var baseMtime, baseSize int64
+	if fi, err := os.Stat(s.cfg.Provisioner.RootfsBase); err == nil {
+		baseMtime, baseSize = fi.ModTime().Unix(), fi.Size()
+	}
 
 	snap := registry.Snapshot{
 		ID:               snapID,
@@ -91,13 +101,15 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		RootfsPath:       rootfsPath,
 		SourceRootfsPath: sb.RootfsPath,
 		CreatedAt:        time.Now(),
+		Golden:           golden,
+		BaseMtime:        baseMtime,
+		BaseSize:         baseSize,
 	}
 	if err := s.reg.CreateSnapshot(ctx, snap); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
-		httpError(w, 500, fmt.Errorf("record snapshot: %w", err))
-		return
+		return registry.Snapshot{}, 500, fmt.Errorf("record snapshot: %w", err)
 	}
-	writeJSON(w, 201, snap)
+	return snap, 201, nil
 }
 
 // handleRestore boots a brand-new sandbox from a snapshot by loading its memory
@@ -438,6 +450,11 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	if err := s.reg.DeleteSnapshot(r.Context(), id); err != nil {
 		httpError(w, 404, err)
 		return
+	}
+	// If the golden snapshot was deleted, stop hot-creating from it. Creates
+	// cold-boot until the next server restart rebuilds a golden snapshot.
+	if g := s.golden.Load(); g != nil && g.ID == id {
+		s.golden.Store(nil)
 	}
 	_ = s.cfg.Provisioner.CleanupSnapshot(id)
 	w.WriteHeader(http.StatusNoContent)

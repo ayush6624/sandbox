@@ -128,6 +128,8 @@ internal/server/
   proxy.go            Reverse-proxy to sandboxd (incl. /shell WebSocket via httputil) + waitForAgent readiness poll
   heartbeat.go        When --gateway is set, periodically registers this host with the gateway
   reconcile.go        Startup cleanup of stale rows/taps/rootfs/orphan firecrackers
+  snapshot.go         Snapshot/restore/fan-out handlers (pause+snapshot, 1:1 restore, N clones)
+  golden.go           Golden snapshot: built at startup, POST /sandboxes clones it (hot create)
 internal/registry/registry.go     SQLite-backed registry; resource allocation (tap/IP/port from pools)
 internal/provisioner/provisioner.go  Host-side ops: EnsureNetwork, rootfs cp, tap create/delete, iptables DNAT
 internal/vm/
@@ -158,6 +160,17 @@ scripts/              Host setup shell scripts
   reverse-proxied to the owning host with the host's token injected; `GET /sandboxes`
   scatter-gathers. Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The
   whole roadmap (incl. Phase-2 elastic/Nomad) is in `~/.claude/plans/i-know-the-agent-abundant-starfish.md`.
+- **Creates are hot by default (golden snapshot).** On startup (`ensureGolden` in
+  `internal/server/golden.go`) the server adopts or builds a **golden snapshot**: it
+  cold-boots a throwaway pristine sandbox, snapshots it (marked `golden=1`, at most one via
+  partial unique index), destroys the source, and keeps the snapshot's baked rootfs staged
+  at `SourceRootfsPath` permanently (Firecracker opens that path during every LoadSnapshot).
+  `POST /sandboxes` then clones it — the identity-neutral fan-out mechanism with N=1 — and
+  **falls back to cold boot** on any failure (no golden yet, snapshot deleted, clone error),
+  so clients see the same API either way. The golden snapshot records the base rootfs
+  mtime+size; a rebuilt base (e.g. `install-agent`) invalidates it on the next server
+  restart — restart `serve` after changing the base image. Opt out with
+  `"disable_hot_create": true` in the config.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —

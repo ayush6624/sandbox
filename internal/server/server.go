@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,7 @@ type Config struct {
 	Provisioner *provisioner.Provisioner
 	GatewayIP   string        // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
+	HotCreate   bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
 
 	// --- Gateway registration (optional; Phase-1 multi-host) ---
 	// When GatewayURL is set, the server periodically heartbeats to the gateway
@@ -48,6 +50,11 @@ type Server struct {
 	reg      *registry.Registry
 	machines sync.Map        // map[string]*vm.Machine
 	vmCtx    context.Context // long-lived; tied to Serve's ctx, NOT request ctx
+
+	// golden is the snapshot POST /sandboxes clones from when hot create is on.
+	// nil until ensureGolden adopts or builds one; cleared if it's deleted.
+	golden  atomic.Pointer[registry.Snapshot]
+	stageMu sync.Mutex // serializes re-staging the golden snapshot's baked rootfs
 }
 
 func New(cfg Config, reg *registry.Registry) *Server {
@@ -62,6 +69,9 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	s.reconcile(ctx)
 	go s.reapExpired(ctx)
+	if s.cfg.HotCreate {
+		go s.ensureGolden(ctx)
+	}
 	if s.cfg.GatewayURL != "" {
 		go s.heartbeat(ctx)
 	}
@@ -165,7 +175,6 @@ func (s *Server) shutdownAll() {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := uuid.NewString()
 
 	// The body is optional (older clients send none); tolerate EOF.
 	var body struct {
@@ -185,23 +194,45 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
+	// Hot path: clone the golden snapshot when one is ready. Any failure falls
+	// back to a cold boot, so a create is never worse off than before.
+	if snap := s.golden.Load(); snap != nil {
+		sb, err := s.createFromSnapshot(ctx, *snap, expiresAt)
+		if err == nil {
+			writeJSON(w, 201, sb)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
+	}
+
+	sb, err := s.createCold(ctx, expiresAt)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, 201, sb)
+}
+
+// createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
+// kernel boot, and agent startup. It blocks until the in-guest agent answers,
+// so callers can exec/write files the moment it returns.
+func (s *Server) createCold(ctx context.Context, expiresAt *time.Time) (registry.Sandbox, error) {
+	id := uuid.NewString()
+
 	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
 	if err != nil {
-		httpError(w, 500, fmt.Errorf("prepare rootfs: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
 	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt)
 	if err != nil {
 		_ = s.cfg.Provisioner.CleanupRootfs(id)
-		httpError(w, 500, fmt.Errorf("registry create: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
 	}
 
 	if err := s.cfg.Provisioner.CreateTap(sb.TapDevice); err != nil {
 		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("create tap: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("create tap: %w", err)
 	}
 
 	opts := s.cfg.VMTemplate
@@ -215,36 +246,31 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	m, rt, err := vm.NewMachine(s.vmCtx, opts, false)
 	if err != nil {
 		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("new machine: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("new machine: %w", err)
 	}
 	if err := vm.Start(s.vmCtx, m); err != nil {
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("start: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("start: %w", err)
 	}
 	pid, err := vm.PID(m)
 	if err != nil {
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("pid: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("pid: %w", err)
 	}
 
 	if err := s.cfg.Provisioner.AddPortForward(sb.HostPort, sb.GuestIP); err != nil {
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("port forward: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("port forward: %w", err)
 	}
 
 	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
 		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("finish start: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("finish start: %w", err)
 	}
 
 	s.machines.Store(id, m)
@@ -255,18 +281,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "[%s] VM exited: %v\n", id, err)
 	}(id)
 
-	// Block until the in-guest agent answers, so callers can exec/write files
-	// the moment create returns. Tear the sandbox down if it never comes up.
 	if err := waitForAgent(ctx, sb.GuestIP, 60*time.Second); err != nil {
 		_ = s.destroy(context.Background(), id)
-		httpError(w, 500, fmt.Errorf("sandbox booted but agent never became ready: %w", err))
-		return
+		return registry.Sandbox{}, fmt.Errorf("sandbox booted but agent never became ready: %w", err)
 	}
 
 	sb.PID = pid
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
-	writeJSON(w, 201, sb)
+	return sb, nil
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
