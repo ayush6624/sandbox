@@ -67,6 +67,9 @@ Returns the updated sandbox. A reaper destroys expired sandboxes within ~10 s.
 - `timeout_sec` defaults to 60. On timeout the whole process group is killed
   and `timed_out` is true.
 - stdout/stderr are each capped at 2 MiB.
+- The request returns when the **shell** exits — background children
+  (`my-server & sleep 0.5`) keep running inside the sandbox afterwards; their
+  output is captured only until shortly after the shell exits.
 
 ```json
 200 {"stdout": "…", "stderr": "", "exit_code": 0, "timed_out": false, "duration_ms": 288}
@@ -176,6 +179,7 @@ The gateway fronts N hosts with the same API, plus:
 | `POST /sandboxes` | Placed on the least-loaded live host |
 | `GET /sandboxes` | Merged across all hosts |
 | `/sandboxes/{id}/…` | Proxied to the owning host (includes exec, files, `/shell`, `/snapshot`) |
+| `host_addr` | Sandbox objects gain `"host_addr"`: the owning host's address. Use it (not the gateway's) to reach forwarded ports — the SDK's `getHost()` does this automatically |
 | `/snapshots/*` | **Not routed** — restore/fan-out/list/delete are host-local; call the owning host directly |
 
 ## Errors and limits

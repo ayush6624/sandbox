@@ -25,6 +25,8 @@
     "example:streaming": "tsx examples/streaming.ts",
     "example:ports": "tsx examples/ports.ts",
     "example:lifecycle": "tsx examples/lifecycle.ts",
+    "example:speed": "tsx examples/speed.ts",
+    "example:fanout": "tsx examples/fanout.ts",
     "bench": "tsx benchmarks/run-bench.ts",
     "bench:restore": "tsx benchmarks/restore-bench.ts",
     "bench:fanout": "tsx benchmarks/fanout-bench.ts",

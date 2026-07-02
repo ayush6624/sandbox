@@ -191,6 +191,8 @@ Each script in `examples/` runs against a live server; all read the
 | `npm run example:streaming` | Streaming exec (`onStdout`/`onStderr` chunks) and `CommandExitError` on non-zero exit |
 | `npm run example:ports` | Start a server in the guest, `exposePort`, reach it via `getHost`, `listPorts` |
 | `npm run example:lifecycle` | `create({ timeoutMs })`, `setTimeout`, `Sandbox.list`, `Sandbox.connect` by id, `kill` |
+| `npm run example:speed` | Hot-create latency: sequential + concurrent creates, first exec round-trip |
+| `npm run example:fanout` | Snapshot → fan out N clones: shared prepared state, surviving processes, isolated writes (needs a host URL, not a gateway) |
 
 ```bash
 export SANDBOX_API_URL=http://<host>:8080
