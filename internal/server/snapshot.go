@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
 )
@@ -243,8 +244,15 @@ type clone struct {
 	sb         registry.Sandbox
 	m          *vm.Machine
 	vmID, sock string
+	arp        *provisioner.ARPListener // opened on the unbridged tap before resume; nil = fixed-sleep fallback
 	err        error
 }
+
+// reidentifyMargin bounds how long finishClone waits for the guest's
+// gratuitous-ARP announce before bridging anyway. It doubles as the fallback
+// sleep when no listener could be opened (or the snapshot predates the
+// announcing agent), so the worst case equals the old fixed sleep.
+const reidentifyMargin = 1500 * time.Millisecond
 
 // handleFanout restores N identity-neutral clones from one snapshot concurrently.
 // Each clone gets a fresh tap/IP/port from the pool (like a cold create) and its
@@ -324,12 +332,9 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 		_ = s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath)
 	}
 
-	// Give guests a moment to finish reidentifying before any tap is bridged.
-	// (The thaw agent polls MMDS every ~200ms; this is a generous margin. A
-	// vsock/ARP readiness signal would make this exact — deferred to M3.)
-	time.Sleep(1500 * time.Millisecond)
-
-	// Phase 2 (parallel): bridge each live clone's tap, DNAT, wait for its agent.
+	// Phase 2 (parallel): wait for each clone's reidentify announce, bridge its
+	// tap, DNAT, wait for its agent. The announce wait is per-clone inside
+	// finishClone, so fast clones bridge without waiting on slow ones.
 	live := make([]registry.Sandbox, 0, body.Count)
 	var mu sync.Mutex
 	for _, c := range clones {
@@ -342,7 +347,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(c *clone) {
 			defer wg.Done()
-			if err := s.finishClone(ctx, c.sb, c.m, c.vmID, c.sock); err != nil {
+			if err := s.finishClone(ctx, c); err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] fanout clone finish failed: %v\n", c.sb.ID, err)
 				_ = s.destroy(context.Background(), c.sb.ID)
 				return
@@ -380,6 +385,13 @@ func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time) *clo
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("create tap: %w", err)}
 	}
+	// Listen for the guest's reidentify announce BEFORE resuming, so it can't
+	// be missed. Failure is non-fatal: finishClone falls back to a fixed sleep.
+	arp, err := provisioner.ListenARP(sb.TapDevice)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] arp listener on %s failed (will sleep instead): %v\n", id, sb.TapDevice, err)
+		arp = nil
+	}
 	opts := s.cfg.VMTemplate
 	opts.SocketPath = ""
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
@@ -394,15 +406,35 @@ func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time) *clo
 		Gen:             id,
 	})
 	if err != nil {
+		if arp != nil {
+			_ = arp.Close()
+		}
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", err)}
 	}
-	return &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath}
+	return &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp}
 }
 
-// finishClone bridges a resumed clone's tap, sets up port forwarding, records it,
-// and waits for its agent on the (now reidentified) fresh IP.
-func (s *Server) finishClone(ctx context.Context, sb registry.Sandbox, m *vm.Machine, vmID, sock string) error {
+// finishClone waits for the guest's reidentify announce, then bridges the
+// clone's tap, sets up port forwarding, records it, and waits for its agent on
+// the fresh IP.
+func (s *Server) finishClone(ctx context.Context, c *clone) error {
+	sb, m := c.sb, c.m
+
+	// The tap must stay off the bridge until the guest sheds the snapshot's
+	// baked IP. Normally the thaw agent's gratuitous ARP tells us the moment
+	// that happens (~200-400ms); the timeout covers agents that predate the
+	// announce, matching the old fixed sleep.
+	if c.arp != nil {
+		if err := c.arp.WaitForSenderIP(sb.GuestIP, reidentifyMargin); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] no reidentify announce (agent in snapshot predates GARP?): %v\n", sb.ID, err)
+		}
+		_ = c.arp.Close()
+		c.arp = nil
+	} else {
+		time.Sleep(reidentifyMargin)
+	}
+
 	pid, err := vm.PID(m)
 	if err != nil {
 		_ = vm.StopForce(m)
@@ -416,7 +448,7 @@ func (s *Server) finishClone(ctx context.Context, sb registry.Sandbox, m *vm.Mac
 		_ = vm.StopForce(m)
 		return fmt.Errorf("port forward: %w", err)
 	}
-	if err := s.reg.FinishStart(ctx, sb.ID, pid, vmID, sock); err != nil {
+	if err := s.reg.FinishStart(ctx, sb.ID, pid, c.vmID, c.sock); err != nil {
 		_ = vm.StopForce(m)
 		return fmt.Errorf("finish start: %w", err)
 	}

@@ -105,11 +105,9 @@ func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot,
 		return registry.Sandbox{}, c.err
 	}
 
-	// Same reidentify margin as fan-out: the guest must drop the baked IP
-	// before its tap joins the shared bridge.
-	time.Sleep(1500 * time.Millisecond)
-
-	if err := s.finishClone(ctx, c.sb, c.m, c.vmID, c.sock); err != nil {
+	// finishClone waits for the guest's reidentify announce (or the fixed
+	// margin, for pre-announce agents) before bridging the tap.
+	if err := s.finishClone(ctx, c); err != nil {
 		_ = s.destroy(context.Background(), c.sb.ID)
 		return registry.Sandbox{}, err
 	}

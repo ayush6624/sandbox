@@ -43,6 +43,11 @@ func runThawAgent() {
 			} else {
 				log.Printf("thaw: reconfigured %s -> ip=%s mac=%s gen=%s", mmdsIface, id.IP, id.MAC, id.Gen)
 				lastGen = id.Gen
+				// Tell the host we shed the baked identity, so it can bridge
+				// the tap now instead of sleeping a fixed margin.
+				if err := announceIdentity(mmdsIface, id.IP, id.MAC); err != nil {
+					log.Printf("thaw: garp announce failed: %v", err)
+				}
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
