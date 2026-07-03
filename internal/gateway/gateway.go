@@ -287,6 +287,34 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		httpError(w, http.StatusBadGateway, fmt.Errorf("host %s unreachable: %w", snap.id, err))
 	}
+	// Record a freshly created snapshot's location immediately — its id only
+	// reaches heartbeats after up to one interval, and a restore issued in
+	// that window would otherwise fall back to the wrong host.
+	if r.Method == http.MethodPost && r.PathValue("rest") == "snapshot" {
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			if resp.StatusCode != http.StatusCreated {
+				return nil
+			}
+			var sn registry.Snapshot
+			if err := json.NewDecoder(resp.Body).Decode(&sn); err != nil {
+				return err
+			}
+			resp.Body.Close()
+			if sn.ID != "" {
+				g.mu.Lock()
+				g.snapRoute[sn.ID] = snap.id
+				g.mu.Unlock()
+			}
+			b, err := json.Marshal(sn)
+			if err != nil {
+				return err
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(b))
+			resp.ContentLength = int64(len(b))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(b)))
+			return nil
+		}
+	}
 	// Annotate plain GET /sandboxes/{id} responses (the SDK connect path) with
 	// the owning host's address, like create/list do. Everything else —
 	// exec streams, file bytes, WebSockets — passes through untouched.
