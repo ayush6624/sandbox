@@ -56,19 +56,21 @@ type Gateway struct {
 	token string        // bearer required on all inbound requests
 	ttl   time.Duration // a host not seen within ttl is considered dead
 
-	mu    sync.RWMutex
-	hosts map[string]*host  // host id → host
-	route map[string]string // sandbox id → host id (derived from heartbeats)
+	mu        sync.RWMutex
+	hosts     map[string]*host  // host id → host
+	route     map[string]string // sandbox id → host id (derived from heartbeats)
+	snapRoute map[string]string // snapshot id → host id (derived from heartbeats)
 }
 
 // New returns a Gateway. token gates all inbound requests (clients and host
 // registration alike); ttl is the stale-host cutoff.
 func New(token string, ttl time.Duration) *Gateway {
 	return &Gateway{
-		token: token,
-		ttl:   ttl,
-		hosts: map[string]*host{},
-		route: map[string]string{},
+		token:     token,
+		ttl:       ttl,
+		hosts:     map[string]*host{},
+		route:     map[string]string{},
+		snapRoute: map[string]string{},
 	}
 }
 
@@ -86,6 +88,12 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	// /exec/stream NDJSON stream) is reverse-proxied to the owning host.
 	mux.HandleFunc("/sandboxes/{id}", g.handleProxyByID)
 	mux.HandleFunc("/sandboxes/{id}/{rest...}", g.handleProxyByID)
+	// Snapshot operations route to the host holding the snapshot; when that
+	// host is gone, any live host can serve them by pulling from GCS.
+	mux.HandleFunc("GET /snapshots", g.handleListSnapshots)
+	mux.HandleFunc("POST /snapshots/{id}/restore", g.handleSnapshotOp)
+	mux.HandleFunc("POST /snapshots/{id}/fanout", g.handleSnapshotOp)
+	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
 
 	srv := &http.Server{Addr: addr, Handler: bearerAuth(g.token, mux)}
 	errc := make(chan error, 1)
@@ -138,6 +146,14 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, sid := range hb.SandboxIDs {
 		g.route[sid] = hb.HostID
+	}
+	for sid, hid := range g.snapRoute {
+		if hid == hb.HostID {
+			delete(g.snapRoute, sid)
+		}
+	}
+	for _, sid := range hb.SnapshotIDs {
+		g.snapRoute[sid] = hb.HostID
 	}
 	g.mu.Unlock()
 
@@ -342,6 +358,11 @@ func (g *Gateway) pruneLoop(ctx context.Context) {
 					for sid, hid := range g.route {
 						if hid == id {
 							delete(g.route, sid)
+						}
+					}
+					for sid, hid := range g.snapRoute {
+						if hid == id {
+							delete(g.snapRoute, sid)
 						}
 					}
 				}

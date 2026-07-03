@@ -38,6 +38,13 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 // snapshotSandbox does the actual pause → snapshot → freeze rootfs → resume
 // dance and records the row. golden marks the row as the server's golden
 // snapshot (see golden.go). Returns the HTTP status to use on error.
+//
+// When the sandbox is a golden clone with dirty-page tracking (every
+// hot-created sandbox), the snapshot is stored as a DIFF against its golden
+// base: the mem file holds only pages dirtied since clone, and the GCS upload
+// sends only rootfs extents that diverged from the base. Everything else
+// (cold boots, restores, user fan-out clones, the golden build itself) is a
+// self-contained FULL snapshot.
 func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (registry.Snapshot, int, error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
@@ -48,6 +55,20 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (r
 		return registry.Snapshot{}, 409, fmt.Errorf("sandbox %s is not running in this server", id)
 	}
 	m := v.(*vm.Machine)
+
+	format, baseID := registry.FormatFull, ""
+	if !golden && sb.BaseSnapshotID != "" && vm.DiffCapable(m) {
+		// The base must still exist locally — it anchors the diff (and the
+		// upload path reads its artifacts). A rebuilt/deleted golden falls
+		// back to a full snapshot.
+		if base, err := s.reg.GetSnapshot(ctx, sb.BaseSnapshotID); err == nil && base.Golden {
+			format, baseID = registry.FormatDiff, base.ID
+		}
+	}
+	snapType := vm.SnapshotFull
+	if format == registry.FormatDiff {
+		snapType = vm.SnapshotDiff
+	}
 
 	snapID := uuid.NewString()
 	memPath, statePath, rootfsPath, err := s.cfg.Provisioner.SnapshotPaths(snapID)
@@ -72,7 +93,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (r
 	defer resume()
 
 	t0 := time.Now()
-	if err := vm.Snapshot(ctx, m, memPath, statePath); err != nil {
+	if err := vm.Snapshot(ctx, m, memPath, statePath, snapType); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, 500, fmt.Errorf("create snapshot: %w", err)
 	}
@@ -105,10 +126,17 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (r
 		Golden:           golden,
 		BaseMtime:        baseMtime,
 		BaseSize:         baseSize,
+		Format:           format,
+		BaseID:           baseID,
 	}
 	if err := s.reg.CreateSnapshot(ctx, snap); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, 500, fmt.Errorf("record snapshot: %w", err)
+	}
+	// Durability: ship the snapshot to GCS in the background. The caller gets
+	// its 201 now; until meta.json lands the snapshot is host-local only.
+	if !golden && s.blob != nil {
+		go s.uploadSnapshot(snap)
 	}
 	return snap, 201, nil
 }
@@ -121,9 +149,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	snapID := r.PathValue("id")
 
-	snap, err := s.reg.GetSnapshot(ctx, snapID)
+	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
-		httpError(w, 404, fmt.Errorf("snapshot %s not found", snapID))
+		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
+		return
+	}
+	// A diff snapshot's mem file holds only dirty pages; Firecracker needs the
+	// rebased full file.
+	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
+		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
 		return
 	}
 
@@ -270,9 +304,14 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	snapID := r.PathValue("id")
 
-	snap, err := s.reg.GetSnapshot(ctx, snapID)
+	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
-		httpError(w, 404, fmt.Errorf("snapshot %s not found", snapID))
+		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
+		return
+	}
+	// Rebase a diff snapshot's mem file once; every clone loads from it.
+	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
+		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
 		return
 	}
 
@@ -379,7 +418,13 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time) *clone {
 	id := uuid.NewString()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
-	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt)
+	// Clones of the golden snapshot record it as their diff base; clones of a
+	// user snapshot don't (no diff chains — their snapshots go full).
+	baseID := ""
+	if snap.Golden {
+		baseID = snap.ID
+	}
+	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt, baseID)
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
 	}
@@ -482,7 +527,9 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, snaps)
 }
 
-// handleDeleteSnapshot removes a snapshot's row and its artifact files.
+// handleDeleteSnapshot removes a snapshot's row, its artifact files, and (in
+// the background) its GCS objects. Base templates are never deleted — other
+// snapshots may still reference them.
 func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.reg.DeleteSnapshot(r.Context(), id); err != nil {
@@ -495,5 +542,8 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 		s.golden.Store(nil)
 	}
 	_ = s.cfg.Provisioner.CleanupSnapshot(id)
+	if s.blob != nil {
+		go s.deleteSnapshotObjects(id)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

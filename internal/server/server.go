@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ayush6624/sandbox/internal/gcsblob"
 	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
@@ -34,6 +35,10 @@ type Config struct {
 	GatewayIP   string        // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
 	HotCreate   bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
+	// SnapshotBucket enables GCS snapshot durability: user snapshots upload
+	// in the background and restore/fanout pull missing snapshots down from
+	// the bucket, so any host can serve them. Empty = host-local only.
+	SnapshotBucket string
 
 	// --- Gateway registration (optional; Phase-1 multi-host) ---
 	// When GatewayURL is set, the server periodically heartbeats to the gateway
@@ -56,10 +61,24 @@ type Server struct {
 	// nil until ensureGolden adopts or builds one; cleared if it's deleted.
 	golden  atomic.Pointer[registry.Snapshot]
 	stageMu sync.Mutex // serializes re-staging the golden snapshot's baked rootfs
+
+	// blob is the GCS client for snapshot durability; nil when disabled.
+	blob *gcsblob.Client
+	// baseUpMu/basesUploaded gate the once-per-base template upload.
+	baseUpMu      sync.Mutex
+	basesUploaded map[string]bool
+	// pullMu/pulls serialize concurrent GCS pulls of the same snapshot id.
+	pullMu sync.Mutex
+	pulls  map[string]*sync.Mutex
 }
 
 func New(cfg Config, reg *registry.Registry) *Server {
-	return &Server{cfg: cfg, reg: reg}
+	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{}}
+	if cfg.SnapshotBucket != "" {
+		s.blob = gcsblob.New(cfg.SnapshotBucket)
+		fmt.Fprintf(os.Stderr, "snapshot durability on: gs://%s\n", cfg.SnapshotBucket)
+	}
+	return s
 }
 
 // Serve listens on the configured Unix socket — and, if ListenAddr is set, on
@@ -225,7 +244,7 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time) (registry
 		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
-	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt)
+	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt, "")
 	if err != nil {
 		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)

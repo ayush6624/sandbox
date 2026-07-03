@@ -40,6 +40,15 @@ cmd_up() {
     echo "   (nested virtualization ON — required for Firecracker/KVM)"
   fi
 
+  # Service account: when SNAPSHOT_BUCKET is set, attach the fleet SA so hosts
+  # can read/write GCS snapshot artifacts (create it first: snapshot-store.sh
+  # init). Otherwise the VMs get no service account at all, as before.
+  local sa_args=(--no-service-account --no-scopes)
+  if [ -n "${SNAPSHOT_BUCKET:-}" ]; then
+    sa_args=(--service-account="sandbox-fleet-sa@${PROJECT}.iam.gserviceaccount.com" --scopes=storage-rw)
+    echo "   (service account sandbox-fleet-sa attached — GCS snapshot store)"
+  fi
+
   # One call creates all instances with identical config.
   "${GC[@]}" compute instances create "${NAMES[@]}" \
     --zone="$ZONE" \
@@ -49,8 +58,7 @@ cmd_up() {
     --boot-disk-size="$DISK_SIZE" \
     --boot-disk-type="$DISK_TYPE" \
     --create-disk="device-name=sandbox-xfs,size=${DATA_DISK_SIZE},type=${DATA_DISK_TYPE},auto-delete=yes" \
-    --no-service-account \
-    --no-scopes \
+    "${sa_args[@]}" \
     "${spot_args[@]}" \
     "${virt_args[@]}" \
     --metadata="$meta" \

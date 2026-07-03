@@ -98,17 +98,18 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		SocketPath:    cfg.SocketPath,
-		ListenAddr:    cfg.ListenAddr,
-		APIToken:      cfg.APIToken,
-		Provisioner:   prov,
-		GatewayIP:     cfg.GatewayIP,
-		VMTemplate:    tmpl,
-		HotCreate:     !cfg.DisableHotCreate,
-		GatewayURL:    cfg.GatewayURL,
-		GatewayToken:  cfg.GatewayToken,
-		AdvertiseAddr: cfg.AdvertiseAddr,
-		HostID:        cfg.HostID,
+		SocketPath:     cfg.SocketPath,
+		ListenAddr:     cfg.ListenAddr,
+		APIToken:       cfg.APIToken,
+		Provisioner:    prov,
+		GatewayIP:      cfg.GatewayIP,
+		VMTemplate:     tmpl,
+		HotCreate:      !cfg.DisableHotCreate,
+		SnapshotBucket: cfg.SnapshotBucket,
+		GatewayURL:     cfg.GatewayURL,
+		GatewayToken:   cfg.GatewayToken,
+		AdvertiseAddr:  cfg.AdvertiseAddr,
+		HostID:         cfg.HostID,
 	}, reg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

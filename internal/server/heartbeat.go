@@ -59,13 +59,24 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	for i, sb := range running {
 		ids[i] = sb.ID
 	}
+	var snapIDs []string
+	if snaps, err := s.reg.ListSnapshots(ctx); err == nil {
+		for _, sn := range snaps {
+			if !sn.Golden {
+				snapIDs = append(snapIDs, sn.ID)
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "heartbeat: list snapshots: %v\n", err)
+	}
 	hb := cluster.Heartbeat{
-		HostID:     hostID,
-		Addr:       advertise,
-		Token:      s.cfg.APIToken,
-		SlotsTotal: s.reg.Pools().Slots(),
-		SlotsUsed:  len(running),
-		SandboxIDs: ids,
+		HostID:      hostID,
+		Addr:        advertise,
+		Token:       s.cfg.APIToken,
+		SlotsTotal:  s.reg.Pools().Slots(),
+		SlotsUsed:   len(running),
+		SandboxIDs:  ids,
+		SnapshotIDs: snapIDs,
 	}
 	b, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))

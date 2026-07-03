@@ -33,6 +33,11 @@ type Sandbox struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	StoppedAt  *time.Time `json:"stopped_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"` // nil = no auto-destroy
+	// BaseSnapshotID is the golden snapshot this sandbox was cloned from
+	// (hot create). It makes the sandbox diff-snapshottable: a snapshot of it
+	// can be stored as a delta against that base. Empty for cold boots,
+	// restores, and user fan-out clones.
+	BaseSnapshotID string `json:"base_snapshot_id,omitempty"`
 	// HostAddr is set by the GATEWAY only (never stored): the owning host's
 	// address, so clients reach forwarded ports on the host that holds the
 	// DNAT rules rather than on the gateway.
@@ -72,7 +77,21 @@ type Snapshot struct {
 	// snapshot on the next server startup.
 	BaseMtime int64 `json:"-"`
 	BaseSize  int64 `json:"-"`
+	// Format is how the artifacts are stored: "full" (self-contained mem +
+	// rootfs) or "diff" (mem = dirty pages since the base snapshot, rootfs =
+	// changed extents vs the base's rootfs; both require the base to
+	// materialize). Empty on pre-migration rows — treat as "full".
+	Format string `json:"format,omitempty"`
+	// BaseID is the snapshot this diff is relative to (the golden snapshot
+	// the source sandbox was cloned from). Empty for format=full.
+	BaseID string `json:"base_id,omitempty"`
 }
+
+// Snapshot formats.
+const (
+	FormatFull = "full"
+	FormatDiff = "diff"
+)
 
 // Pools defines the resource ranges from which sandboxes draw on creation.
 type Pools struct {
@@ -163,7 +182,8 @@ func (r *Registry) migrate() error {
 		status      TEXT NOT NULL,
 		created_at  INTEGER NOT NULL,
 		stopped_at  INTEGER,
-		expires_at  INTEGER
+		expires_at  INTEGER,
+		base_snapshot_id TEXT NOT NULL DEFAULT ''
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status = 'running';
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status = 'running';
@@ -187,7 +207,9 @@ func (r *Registry) migrate() error {
 		created_at         INTEGER NOT NULL,
 		golden             INTEGER NOT NULL DEFAULT 0,
 		base_mtime         INTEGER NOT NULL DEFAULT 0,
-		base_size          INTEGER NOT NULL DEFAULT 0
+		base_size          INTEGER NOT NULL DEFAULT 0,
+		format             TEXT NOT NULL DEFAULT 'full',
+		base_id            TEXT NOT NULL DEFAULT ''
 	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
@@ -218,14 +240,27 @@ func (r *Registry) migrate() error {
 	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_golden_snapshot ON snapshots(golden) WHERE golden = 1`); err != nil {
 		return err
 	}
+	// format/base_id (snapshots) and base_snapshot_id (sandboxes) were added
+	// with diff-based GCS snapshot durability.
+	for _, col := range []string{
+		`ALTER TABLE snapshots ADD COLUMN format TEXT NOT NULL DEFAULT 'full'`,
+		`ALTER TABLE snapshots ADD COLUMN base_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sandboxes ADD COLUMN base_snapshot_id TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
 	return nil
 }
 
 // Create allocates a tap/IP/port from the pools and inserts a 'running' row
 // for the new sandbox. PID/VMID/SocketPath are filled in later via FinishStart
 // once firecracker is up. A non-nil expiresAt marks the sandbox for
-// auto-destroy by the server's reaper.
-func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt *time.Time) (Sandbox, error) {
+// auto-destroy by the server's reaper. baseSnapshotID records the golden
+// snapshot the sandbox is cloned from ("" for cold boots and user fan-outs) —
+// it makes the sandbox diff-snapshottable.
+func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt *time.Time, baseSnapshotID string) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -251,9 +286,9 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at)
-		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?)`,
-		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt))
+		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, base_snapshot_id)
+		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), baseSnapshotID)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
 	}
@@ -261,14 +296,15 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 		return Sandbox{}, err
 	}
 	return Sandbox{
-		ID:         id,
-		TapDevice:  tap,
-		GuestIP:    ip,
-		HostPort:   port,
-		RootfsPath: rootfsPath,
-		Status:     StatusRunning,
-		CreatedAt:  now,
-		ExpiresAt:  expiresAt,
+		ID:             id,
+		TapDevice:      tap,
+		GuestIP:        ip,
+		HostPort:       port,
+		RootfsPath:     rootfsPath,
+		Status:         StatusRunning,
+		CreatedAt:      now,
+		ExpiresAt:      expiresAt,
+		BaseSnapshotID: baseSnapshotID,
 	}, nil
 }
 
@@ -461,7 +497,7 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size`
+const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
@@ -470,10 +506,14 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 	if s.Golden {
 		golden = 1
 	}
+	format := s.Format
+	if format == "" {
+		format = FormatFull
+	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize)
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID)
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
@@ -527,17 +567,20 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var s Snapshot
 	var createdAt int64
 	var golden int
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize)
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID)
 	if err != nil {
 		return s, err
 	}
 	s.CreatedAt = time.Unix(createdAt, 0)
 	s.Golden = golden == 1
+	if s.Format == "" {
+		s.Format = FormatFull
+	}
 	return s, nil
 }
 
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
-const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at, expires_at`
+const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id`
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -577,7 +620,7 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 	var sb Sandbox
 	var createdAt int64
 	var stoppedAt, expiresAt sql.NullInt64
-	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.HostPort, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt)
+	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.HostPort, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID)
 	if err != nil {
 		return sb, err
 	}

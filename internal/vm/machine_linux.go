@@ -34,7 +34,16 @@ import (
 type Machine struct {
 	*fcsdk.Machine
 	raw *rawMachine
+	// diffCapable is set when the VM was loaded with dirty-page tracking
+	// enabled (StartClone), making Diff snapshots valid against the snapshot
+	// it was loaded from.
+	diffCapable bool
 }
+
+// DiffCapable reports whether Snapshot(..., SnapshotDiff) is valid for m —
+// i.e. the VM has tracked dirty pages since it was loaded from its base
+// snapshot.
+func DiffCapable(m *Machine) bool { return m != nil && m.diffCapable }
 
 // rawMachine is a Firecracker process we manage directly (clone path), driving
 // its API over the unix socket instead of through the SDK.
@@ -332,17 +341,23 @@ func Resume(ctx context.Context, m *Machine) error {
 	return m.Machine.ResumeVM(ctx)
 }
 
-// Snapshot writes a full VM snapshot (memory + device state) to the given
-// paths. The VM must be paused first. For a raw clone machine the snapshot
-// bakes the clone's CURRENT config — its own CoW rootfs path, tap, and
-// reidentified IP/MAC — which is exactly what the registry records for it.
-func Snapshot(ctx context.Context, m *Machine, memPath, statePath string) error {
+// Snapshot writes a VM snapshot (memory + device state) to the given paths.
+// The VM must be paused first. snapType is SnapshotFull or SnapshotDiff; Diff
+// writes only pages dirtied since load and requires DiffCapable(m) — the
+// resulting sparse mem file must be merged onto its base before a restore.
+// For a raw clone machine the snapshot bakes the clone's CURRENT config — its
+// own CoW rootfs path, tap, and reidentified IP/MAC — which is exactly what
+// the registry records for it.
+func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType string) error {
 	if m == nil {
 		return fmt.Errorf("nil machine")
 	}
+	if snapType == SnapshotDiff && !m.diffCapable {
+		return fmt.Errorf("diff snapshot requested but VM was not loaded with dirty-page tracking")
+	}
 	if m.raw != nil {
 		return fcAPI(ctx, unixClient(m.raw.sock), "PUT", "/snapshot/create", map[string]any{
-			"snapshot_type": "Full",
+			"snapshot_type": snapType,
 			"snapshot_path": statePath,
 			"mem_file_path": memPath,
 		})
@@ -350,6 +365,8 @@ func Snapshot(ctx context.Context, m *Machine, memPath, statePath string) error 
 	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
+	// SDK machines (cold boots, 1:1 restores) are never diffCapable, so this
+	// is always a Full snapshot — CreateSnapshot's default.
 	return m.Machine.CreateSnapshot(ctx, memPath, statePath)
 }
 
@@ -400,10 +417,13 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	// must match what the source VM registered: the SDK names interfaces by index
 	// but 1-based (createNetworkInterfaces calls createNetworkInterface with id+1),
 	// so our single boot NIC is "1" — NOT "0" and NOT the guest name "eth0".
+	// enable_diff_snapshots turns on dirty-page tracking from the moment of
+	// load, so a later PUT /snapshot/create with snapshot_type=Diff captures
+	// exactly this sandbox's delta over the snapshot it was cloned from.
 	load := map[string]any{
 		"snapshot_path":         c.StatePath,
 		"mem_backend":           map[string]any{"backend_type": "File", "backend_path": c.MemPath},
-		"enable_diff_snapshots": false,
+		"enable_diff_snapshots": true,
 		"resume_vm":             false,
 		"network_overrides":     []map[string]any{{"iface_id": "1", "host_dev_name": c.TapDevice}},
 	}
@@ -433,7 +453,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, fmt.Errorf("resume: %w", err)
 	}
 
-	return &Machine{raw: rm}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+	return &Machine{raw: rm, diffCapable: true}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
 }
 
 // PushEpoch writes the host's current wall clock into a VM's MMDS store so

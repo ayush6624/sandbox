@@ -27,6 +27,13 @@ type Provisioner struct {
 	SnapshotDir string // directory to hold per-snapshot artifacts (mem/state/rootfs)
 }
 
+// Range is a [Off, Off+Len) byte range of a file, produced by DiffExtents for
+// diff uploads.
+type Range struct {
+	Off int64
+	Len int64
+}
+
 // EnsureNetwork idempotently brings up the host networking the sandboxes need:
 // the bridge with its gateway IP, IP-forwarding sysctls, and NAT/FORWARD rules.
 // Bridges and iptables rules don't survive a reboot, so the server calls this

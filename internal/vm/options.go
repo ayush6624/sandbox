@@ -33,6 +33,14 @@ type RuntimeConfig struct {
 	VMID       string
 }
 
+// Snapshot types accepted by Snapshot(). Diff writes only the pages dirtied
+// since the machine was loaded with dirty-page tracking enabled (clones —
+// see StartClone) and is only valid on such machines; Full always works.
+const (
+	SnapshotFull = "Full"
+	SnapshotDiff = "Diff"
+)
+
 // CloneParams drives a single identity-neutral clone restored from a snapshot
 // (see StartClone). The rootfs is relocated to CloneRootfsPath, the host tap is
 // remapped to TapDevice via the snapshot-load network_overrides, and the new

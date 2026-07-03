@@ -27,6 +27,13 @@ type Config struct {
 	RootfsBase  string `json:"rootfs_base"`  // immutable base rootfs image
 	RootfsDir   string `json:"rootfs_dir"`   // per-sandbox rootfs copies live here
 	SnapshotDir string `json:"snapshot_dir"` // per-snapshot artifacts (mem/state/rootfs) live here
+	// SnapshotBucket is a GCS bucket that makes user snapshots durable and
+	// restorable on any host: snapshots upload in the background after
+	// creation, and a restore/fanout on a host that lacks the snapshot pulls
+	// it down. Requires a service account with storage access on the VM
+	// (metadata-server auth). Empty disables all GCS behavior — snapshots
+	// stay host-local exactly as before.
+	SnapshotBucket string `json:"snapshot_bucket"`
 
 	// --- Networking ---
 	Bridge      string `json:"bridge"`      // e.g. "br-fc"

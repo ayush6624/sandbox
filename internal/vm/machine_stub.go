@@ -32,5 +32,6 @@ func Wait(_ context.Context, _ *Machine) error          { return ErrLinuxOnly }
 func PID(_ *Machine) (int, error)                       { return 0, ErrLinuxOnly }
 func Pause(_ context.Context, _ *Machine) error         { return ErrLinuxOnly }
 func Resume(_ context.Context, _ *Machine) error        { return ErrLinuxOnly }
-func Snapshot(_ context.Context, _ *Machine, _, _ string) error { return ErrLinuxOnly }
+func Snapshot(_ context.Context, _ *Machine, _, _, _ string) error { return ErrLinuxOnly }
 func PushEpoch(_ context.Context, _ string) error       { return ErrLinuxOnly }
+func DiffCapable(_ *Machine) bool                       { return false }

@@ -4,6 +4,7 @@
   "rootfs_base":     "/mnt/sandbox-data/base/devbox-rootfs.ext4",
   "rootfs_dir":      "/mnt/sandbox-data/rootfs",
   "snapshot_dir":    "/mnt/sandbox-data/snapshots",
+  "snapshot_bucket": "ratio-experiments-sandbox-snapshots",
   "bridge":          "br-fc",
   "gateway_ip":      "172.16.0.1",
   "nameservers":     "8.8.8.8,8.8.4.4",

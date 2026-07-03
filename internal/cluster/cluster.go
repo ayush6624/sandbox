@@ -29,4 +29,9 @@ type Heartbeat struct {
 	// SandboxIDs are the IDs of the running sandboxes the host owns. The
 	// gateway derives its routing table from these.
 	SandboxIDs []string `json:"sandbox_ids"`
+	// SnapshotIDs are the IDs of the user snapshots stored on the host
+	// (golden snapshots excluded — they're per-host internals). The gateway
+	// derives its snapshot→host routing from these so restore/fanout/delete
+	// reach the host that has the artifacts locally.
+	SnapshotIDs []string `json:"snapshot_ids,omitempty"`
 }
