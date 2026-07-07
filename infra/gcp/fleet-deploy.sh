@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED for production. This provisions a STATIC fleet of hand-named VMs
+# (config.env NAMES). The autoscaling path — control VM + a Managed Instance
+# Group resized by the Nomad Autoscaler — supersedes it: bake-image.sh →
+# control.sh up/deploy → mig.sh init/up → make gcs-release → deploy-job.sh.
+# See infra/gcp/README.md. Kept for one-off debug fleets alongside vms.sh.
+#
 # Bootstrap + run the sandbox fleet on the GCP test VMs (testvm-1, testvm-2).
 #
 #   ./fleet-deploy.sh            # build, sync, bootstrap every host, install+start systemd units

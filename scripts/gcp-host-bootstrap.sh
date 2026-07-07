@@ -59,6 +59,13 @@ echo "==> [5/6] Build devbox rootfs (~5 min, resumable) into $BASE_ASSET_DIR"
 sudo ASSET_DIR="$BASE_ASSET_DIR" bash scripts/build-devbox-rootfs.sh
 
 echo "==> [6/6] Bake sandboxd agent into the rootfs"
-sudo ./sandbox install-agent --config configs/devbox-gcp.json --agent ./sandboxd
+# Image-bake (bake-image.sh) sets SKIP_INSTALL_AGENT=1: there's no data disk at
+# bake time so the config's rootfs_base path doesn't exist, and workers bake a
+# fresh sandboxd from GCS at Nomad job start anyway.
+if [ "${SKIP_INSTALL_AGENT:-0}" = "1" ]; then
+  echo "  SKIP_INSTALL_AGENT=1 — leaving agent install to job start"
+else
+  sudo ./sandbox install-agent --config configs/devbox-gcp.json --agent ./sandboxd
+fi
 
 echo "==> host bootstrap complete"

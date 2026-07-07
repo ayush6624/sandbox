@@ -10,7 +10,7 @@ REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)
 REMOTE_BASE := ssh -o BatchMode=yes $(REMOTE)
 REMOTE_CD   := cd /home/$(REMOTE_USER)/$(REMOTE_DIR)
 
-.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status
+.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status gcs-release
 
 build:
 	go build ./...
@@ -85,3 +85,15 @@ gcp-fleet-deploy:
 
 gcp-fleet-status:
 	bash infra/gcp/fleet-deploy.sh status
+
+# --- Autoscaling: publish binaries to GCS for the Nomad job to pull ---
+# Uploads bin/{sandbox,sandboxd} under a git-sha prefix. The Nomad system job's
+# artifact stanza fetches these; changing RELEASE_SHA in a deploy rolls the
+# fleet. RELEASE_BUCKET comes from infra/gcp/config.env (or the environment).
+RELEASE_BUCKET ?= $(shell . infra/gcp/config.env 2>/dev/null && echo $$RELEASE_BUCKET)
+RELEASE_SHA    := $(shell git rev-parse --short HEAD)
+
+gcs-release: build-linux
+	@test -n "$(RELEASE_BUCKET)" || (echo "set RELEASE_BUCKET (infra/gcp/config.env)"; exit 1)
+	gsutil -m cp bin/sandbox bin/sandboxd gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/
+	@echo ">> published gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/ — deploy with: infra/gcp/deploy-job.sh $(RELEASE_SHA)"
