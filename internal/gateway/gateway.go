@@ -81,6 +81,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", g.handleRegister)
 	mux.HandleFunc("GET /hosts", g.handleHosts)
+	mux.HandleFunc("GET /metrics", g.handleMetrics)
 	mux.HandleFunc("POST /sandboxes", g.handleCreate)
 	mux.HandleFunc("GET /sandboxes", g.handleList)
 	// Every id-scoped request (GET/DELETE /sandboxes/{id} and all
@@ -205,7 +206,14 @@ func hostOnly(addr string) string {
 	return addr
 }
 
-// pickHost returns a snapshot of the live host with the most free slots, or nil.
+// pickHost returns a snapshot of the live host to place a new sandbox on, or
+// nil if none has free capacity. It BIN-PACKS: among hosts with free slots it
+// picks the fullest (fewest free), tie-broken by smaller host id for
+// determinism. Packing onto the fullest host lets other hosts drain to empty,
+// which is what makes autoscaler scale-in safe — an empty host can be removed
+// without evicting running sandboxes. (This is the deliberate inverse of a
+// spread/least-loaded policy, which would keep every host partially full and
+// never releasable.)
 func (g *Gateway) pickHost() *host {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -214,7 +222,7 @@ func (g *Gateway) pickHost() *host {
 		if time.Since(h.lastSeen) > g.ttl || h.free() <= 0 {
 			continue
 		}
-		if best == nil || h.free() > best.free() {
+		if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
 			best = h
 		}
 	}

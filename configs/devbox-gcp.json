@@ -16,10 +16,10 @@
   "mem_mib":         1024,
   "pools": {
     "TapPrefix":  "fc",
-    "TapMax":     64,
+    "TapMax":     24,
     "GuestIPMin": "172.16.0.10",
-    "GuestIPMax": "172.16.0.73",
+    "GuestIPMax": "172.16.0.33",
     "PortMin":    5200,
-    "PortMax":    5263
+    "PortMax":    5223
   }
 }
