@@ -28,7 +28,16 @@ UBUNTU_PROJECT="${IMAGE_PROJECT:-ubuntu-os-cloud}"
 WORKER_FAMILY="${WORKER_IMAGE_FAMILY:-sandbox-worker}"   # family we PRODUCE
 NOMAD_VERSION="${NOMAD_VERSION:-1.7.7}"
 GC=(gcloud --project="$PROJECT")
-sshx() { "${GC[@]}" compute ssh "${SSH_USER}@${BAKE_VM}" --zone="$ZONE" --command="$1"; }
+
+# Drive the bake VM over direct SSH to its external IP with the configured
+# ed25519 key (SSH_PUBLIC_KEY): startup.sh rewrites authorized_keys to exactly
+# that key, which clobbers the key `gcloud compute ssh` provisions — so gcloud
+# ssh/scp race and fail. EXT_IP is filled once the VM is created.
+EXT_IP=""
+KNOWN_HOSTS="$(mktemp)"
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=10)
+sshx() { ssh "${SSH_OPTS[@]}" "${SSH_USER}@${EXT_IP}" "$1"; }
+trap 'rm -f "$KNOWN_HOSTS"' EXIT
 
 cmd_clean() {
   "${GC[@]}" compute instances delete "$BAKE_VM" --zone="$ZONE" --quiet 2>/dev/null || true
@@ -53,17 +62,21 @@ cmd_bake() {
     --metadata="ssh-user=${SSH_USER}${SSH_PUBLIC_KEY:+,ssh-pubkey=$SSH_PUBLIC_KEY}" \
     --metadata-from-file=startup-script="$DIR/startup.sh"
 
-  echo ">> waiting for SSH + first-boot user provisioning"
+  EXT_IP="$("${GC[@]}" compute instances describe "$BAKE_VM" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
+  echo ">> bake VM external IP $EXT_IP"
+
+  echo ">> waiting for SSH + first-boot user provisioning (startup.sh authorizes the key)"
   local tries=0
   until sshx 'true' 2>/dev/null; do
-    tries=$((tries + 1)); [ "$tries" -lt 40 ] || { echo "SSH never came up"; exit 1; }
+    tries=$((tries + 1)); [ "$tries" -lt 60 ] || { echo "SSH never came up"; exit 1; }
     sleep 5
   done
 
   echo ">> [2/6] copy repo bits (bin, configs, scripts) to the bake VM"
   local tar=/tmp/sandbox-bake-src.tgz
   ( cd "$REPO" && tar czf "$tar" bin configs scripts )
-  "${GC[@]}" compute scp --zone="$ZONE" "$tar" "${SSH_USER}@${BAKE_VM}:/tmp/src.tgz"
+  scp "${SSH_OPTS[@]}" "$tar" "${SSH_USER}@${EXT_IP}:/tmp/src.tgz"
   sshx 'mkdir -p ~/sandbox && tar xzf /tmp/src.tgz -C ~/sandbox && rm /tmp/src.tgz'
 
   echo ">> [3/6] host bootstrap (firecracker + kernel + rootfs, skip agent) — ~5 min"
@@ -75,7 +88,7 @@ cmd_bake() {
   echo ">> [5/6] cleanup (build artifacts, logs, ssh host keys, machine-id)"
   sshx 'sudo bash -s' <<'CLEANUP'
 set -e
-rm -rf /opt/fc/rootfs-build /tmp/src.tgz "$HOME"/sandbox/bin 2>/dev/null || true
+rm -rf /opt/fc/rootfs-build /tmp/src.tgz /home/*/sandbox/bin 2>/dev/null || true
 apt-get clean
 truncate -s0 /var/log/startup-script.log 2>/dev/null || true
 rm -f /etc/ssh/ssh_host_* 2>/dev/null || true
