@@ -60,7 +60,7 @@ create_template() {
   "${GC[@]}" compute instance-templates create "$tpl" \
     --machine-type="$MACHINE" \
     --image-family="$IMAGE_FAMILY" --image-project="$PROJECT" \
-    --boot-disk-size=64GB --boot-disk-type=pd-ssd \
+    --boot-disk-size="${WORKER_BOOT_DISK_SIZE:-256GB}" --boot-disk-type=pd-ssd \
     --create-disk="device-name=sandbox-xfs,size=${DATA_DISK},type=pd-ssd,auto-delete=yes" \
     --enable-nested-virtualization \
     --service-account="$SA_EMAIL" --scopes=storage-rw \

@@ -25,22 +25,26 @@ job "sandbox-serve" {
   }
 
   group "serve" {
-    # A worker either runs serve or it doesn't; no point rescheduling a
-    # per-host agent elsewhere.
-    reschedule { attempts = 0 unlimited = false }
-    restart { attempts = 3 interval = "5m" delay = "10s" mode = "delay" }
+    # System jobs have no reschedule policy (a per-host agent isn't movable).
+    # restart handles in-place recovery if serve exits.
+    restart {
+      attempts = 3
+      interval = "5m"
+      delay    = "10s"
+      mode     = "delay"
+    }
 
     task "serve" {
       driver = "raw_exec"
 
       artifact {
         source      = "gcs::https://www.googleapis.com/storage/v1/${var.bucket}/releases/${var.release}/sandbox"
-        destination = "local/bin"
+        destination = "local/bin/sandbox"
         mode        = "file"
       }
       artifact {
         source      = "gcs::https://www.googleapis.com/storage/v1/${var.bucket}/releases/${var.release}/sandboxd"
-        destination = "local/bin"
+        destination = "local/bin/sandboxd"
         mode        = "file"
       }
 

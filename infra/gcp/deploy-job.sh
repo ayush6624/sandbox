@@ -29,16 +29,15 @@ scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "$REPO/configs/devbox-gcp.j
   "${SSH_USER}@${CONTROL_NAME}:/tmp/"
 
 echo ">> nomad job run sandbox-serve (release=$RELEASE)"
-# Vars are passed via env on the remote to keep quoting simple; config_json is
-# read from the file we just copied.
-sshc "GW_URL='$GW_URL' GW_TOKEN='$GATEWAY_TOKEN' HOST_TOKEN='$HOST_TOKEN' \
-      RELEASE='$RELEASE' BUCKET='$RELEASE_BUCKET' \
-      nomad job run \
-        -var=gateway_url=\"\$GW_URL\" \
-        -var=gateway_token=\"\$GW_TOKEN\" \
-        -var=host_token=\"\$HOST_TOKEN\" \
-        -var=release=\"\$RELEASE\" \
-        -var=bucket=\"\$BUCKET\" \
+# Values are expanded locally into single-quoted -var args (tokens are hex, the
+# URL/paths have no quotes) — NOT passed via a remote env prefix, which wouldn't
+# be visible to the remote shell's own $VAR expansion on the same command line.
+sshc "nomad job run \
+        -var=gateway_url='$GW_URL' \
+        -var=gateway_token='$GATEWAY_TOKEN' \
+        -var=host_token='$HOST_TOKEN' \
+        -var=release='$RELEASE' \
+        -var=bucket='$RELEASE_BUCKET' \
         -var=config_path=/tmp/devbox-gcp.json \
         /tmp/serve.nomad.hcl"
 echo ">> submitted. Watch: ssh ${SSH_USER}@${CONTROL_NAME} 'nomad job status sandbox-serve'"
