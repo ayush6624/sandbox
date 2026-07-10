@@ -14,6 +14,10 @@
 # statistically the emptiest under bin-pack placement. Scale-in kills running
 # sandboxes on the chosen host by design (saved snapshots survive via GCS).
 scaling "sandbox_workers" {
+  # type=cluster scales NODES via a cluster target (gce-mig). Without it the
+  # policy defaults to type=horizontal (scale a Nomad job's task group) and the
+  # autoscaler silently never evaluates it against the MIG target.
+  type    = "cluster"
   enabled = true
   min     = ${MIG_MIN}
   max     = ${MIG_MAX}
