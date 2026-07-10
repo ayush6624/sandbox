@@ -1,7 +1,10 @@
 /**
- * Snapshot / restore / fan-out. These endpoints are host-local (the gateway
- * doesn't route them yet), so this suite talks to one host directly via
- * SANDBOX_HOST_URL / SANDBOX_HOST_KEY and is skipped when they're not set.
+ * Snapshot / restore / fan-out. The gateway routes these now
+ * (POST /snapshots/{id}/restore|fanout, DELETE /snapshots/{id}, GET
+ * /snapshots — with GCS-backed cross-host recovery), so this suite runs
+ * against the main SANDBOX_API_URL by default. Set SANDBOX_HOST_URL /
+ * SANDBOX_HOST_KEY to force it at one host directly instead (e.g. to isolate
+ * host-local behavior from gateway routing).
  *
  * What's verified:
  * - restore brings back disk state AND live memory state (a background
@@ -32,10 +35,12 @@ export const suite = new SuiteDef('snapshots')
 const FANOUT_N = envInt('STRESS_FANOUT_N', 8)
 
 function hostOpts(): SandboxCreateOpts {
-  const apiUrl = process.env.SANDBOX_HOST_URL
-  const apiKey = process.env.SANDBOX_HOST_KEY
+  // Prefer host-direct if explicitly set; otherwise use the main API target
+  // (the gateway routes snapshot ops now).
+  const apiUrl = process.env.SANDBOX_HOST_URL ?? process.env.SANDBOX_API_URL
+  const apiKey = process.env.SANDBOX_HOST_KEY ?? process.env.SANDBOX_API_KEY
   if (!apiUrl || !apiKey) {
-    throw new SkipSuite('set SANDBOX_HOST_URL + SANDBOX_HOST_KEY (host-direct) to run snapshot tests')
+    throw new SkipSuite('set SANDBOX_API_URL + SANDBOX_API_KEY (or SANDBOX_HOST_URL/_KEY)')
   }
   return { apiUrl, apiKey }
 }
