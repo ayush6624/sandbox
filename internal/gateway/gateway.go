@@ -40,15 +40,22 @@ type host struct {
 	addr       string // TCP API address the gateway dials
 	token      string // bearer presented when dialing addr
 	slotsTotal int
-	slotsUsed  int
-	lastSeen   time.Time
+	slotsUsed  int // running sandboxes, from the last heartbeat
+	// reserved counts creates dispatched to this host but not yet completed.
+	// Without it, a burst of concurrent creates all read the same stale
+	// slotsUsed (heartbeats lag by seconds) and pile onto one bin-pack target
+	// until its pool exhausts. Reserving at pick time makes concurrent picks
+	// see each other, so they spread and cleanly 503 at capacity instead.
+	reserved int
+	lastSeen time.Time
 }
 
 func (h *host) free() int {
-	if h.slotsTotal <= h.slotsUsed {
+	used := h.slotsUsed + h.reserved
+	if h.slotsTotal <= used {
 		return 0
 	}
-	return h.slotsTotal - h.slotsUsed
+	return h.slotsTotal - used
 }
 
 // Gateway routes the sandbox API across a fleet of hosts.
@@ -171,7 +178,7 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h := g.pickHost()
+	h := g.reserveHost()
 	if h == nil {
 		httpError(w, http.StatusServiceUnavailable, errors.New("no host with free capacity"))
 		return
@@ -180,21 +187,63 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 	c := client.NewHTTP(h.addr, h.token)
 	sb, err := c.Create(r.Context(), body)
 	if err != nil {
+		g.release(h.id, false) // create failed: free the reservation, host's pool untouched
 		httpError(w, http.StatusBadGateway, fmt.Errorf("create on host %s: %w", h.id, err))
 		return
 	}
 
-	// Record the route and optimistically charge a slot; the next heartbeat
-	// reconciles the exact count.
+	// Landed: convert the reservation into a used slot and record the route.
+	// The next heartbeat overwrites slotsUsed with the host's own count (which
+	// now includes this sandbox), so the +1 just bridges the heartbeat gap.
 	g.mu.Lock()
 	g.route[sb.ID] = h.id
-	if hh := g.hosts[h.id]; hh != nil {
-		hh.slotsUsed++
-	}
 	g.mu.Unlock()
+	g.release(h.id, true)
 
 	sb.HostAddr = hostOnly(h.addr)
 	writeJSON(w, http.StatusCreated, sb)
+}
+
+// reserveHost bin-packs (fullest host with free capacity, id tie-break) AND
+// reserves a slot on the chosen host atomically under the write lock, so
+// concurrent creates during a burst see the reservation. Returns a snapshot
+// copy, or nil if no host has capacity. The caller MUST release() exactly once.
+func (g *Gateway) reserveHost() *host {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var best *host
+	for _, h := range g.hosts {
+		if time.Since(h.lastSeen) > g.ttl || h.free() <= 0 {
+			continue
+		}
+		if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
+			best = h
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	best.reserved++
+	snap := *best
+	return &snap
+}
+
+// release ends a create's reservation. landed=true means the sandbox came up,
+// so the slot moves from reserved to slotsUsed; landed=false (create failed)
+// just frees the reservation.
+func (g *Gateway) release(hostID string, landed bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	h := g.hosts[hostID]
+	if h == nil {
+		return
+	}
+	if h.reserved > 0 {
+		h.reserved--
+	}
+	if landed {
+		h.slotsUsed++
+	}
 }
 
 // hostOnly strips the port from an addr, so clients can pair it with a

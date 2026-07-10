@@ -54,6 +54,41 @@ func TestPickHostSkipsFullAndStale(t *testing.T) {
 	}
 }
 
+func TestReserveHostCapsAtCapacity(t *testing.T) {
+	// Two hosts, 24 slots each = 48 total. Reserving 60 times (a burst larger
+	// than capacity) must hand out exactly 48 hosts then nil — no host is
+	// over-committed, because reservations count before creates complete.
+	g := liveGateway(
+		&host{id: "a", slotsTotal: 24, slotsUsed: 0},
+		&host{id: "b", slotsTotal: 24, slotsUsed: 0},
+	)
+	got := 0
+	for i := 0; i < 60; i++ {
+		if g.reserveHost() != nil {
+			got++
+		}
+	}
+	if got != 48 {
+		t.Fatalf("reserveHost should cap at 48 (2x24); got %d", got)
+	}
+	// Every reservation is accounted: both hosts full, zero free.
+	for _, h := range g.hosts {
+		if h.free() != 0 || h.reserved != 24 {
+			t.Fatalf("host %s: reserved=%d free=%d, want reserved=24 free=0", h.id, h.reserved, h.free())
+		}
+	}
+	// A failed create releases its reservation, freeing exactly one slot.
+	g.release("a", false)
+	if g.hosts["a"].free() != 1 {
+		t.Fatalf("after failed release, host a free=%d want 1", g.hosts["a"].free())
+	}
+	// A landed create moves reserved->used, free stays 0.
+	g.release("b", true)
+	if h := g.hosts["b"]; h.free() != 0 || h.slotsUsed != 1 || h.reserved != 23 {
+		t.Fatalf("after landed release, host b used=%d reserved=%d free=%d", h.slotsUsed, h.reserved, h.free())
+	}
+}
+
 func TestMetricsExposition(t *testing.T) {
 	g := liveGateway(
 		&host{id: "h1", slotsTotal: 24, slotsUsed: 10},
