@@ -90,9 +90,16 @@ EOT
       kill_signal  = "SIGTERM"   # serve tears down its VMs gracefully on SIGTERM
       kill_timeout = "120s"      # allow time to destroy up to a full host of VMs
 
+      # serve OWNS the whole host: it launches every firecracker guest as a
+      # child process, so the task's cgroup must fit all of them. Nomad (cgroups
+      # v2) sets memory.max from `memory`; too low a value OOM-kills the guests
+      # (a 512 MiB cap kills every 1 GiB microVM). Size to the host: 24 slots x
+      # ~1.15 GiB/guest + serve + headroom on an n2-standard-8 (32 GiB). CPU is
+      # shares-based (not a hard cap), set near the 8-core host so guests aren't
+      # throttled under contention.
       resources {
-        cpu    = 1000   # advisory only under raw_exec
-        memory = 512
+        cpu    = 7000
+        memory = 30000
       }
     }
   }
