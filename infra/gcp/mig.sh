@@ -4,8 +4,9 @@
 # control VM) owns the MIG's size — do NOT attach a GCE autoscaler.
 #
 #   ./mig.sh init      # release bucket + grant the fleet SA read on it; firewall check
-#   ./mig.sh up        # create instance template + MIG at MIG_MIN
+#   ./mig.sh up        # create instance template + MIG at MIG_MIN (+ standby pool)
 #   ./mig.sh roll       # new template from the current image + rolling replace
+#   ./mig.sh standby   # (re)apply the standby-pool policy to a live MIG
 #   ./mig.sh status    # MIG + managed instances
 #   ./mig.sh down       # delete the MIG (keeps templates)
 #
@@ -34,6 +35,20 @@ spot_args() {
     echo "--provisioning-model=SPOT --instance-termination-action=DELETE"
   else
     echo "--provisioning-model=STANDARD"
+  fi
+}
+
+# Standby pool: STANDBY_STOPPED_SIZE pre-created VMs kept STOPPED next to the
+# group. In scale-out-pool mode a resize (the Nomad Autoscaler's scale-up)
+# starts a stopped VM — tens of seconds to serving — instead of paying the full
+# create+boot path (minutes), then the MIG replenishes the pool in the
+# background. Stopped VMs cost only their disks. The initial delay gives
+# startup-worker.sh time to init the data disk + join Nomad before the VM is
+# stopped into the pool, so a wake-up is a plain reboot. 0 disables the pool.
+standby_args() {
+  local n="${STANDBY_STOPPED_SIZE:-0}"
+  if [ "$n" -gt 0 ]; then
+    echo "--stopped-size=$n --standby-policy-mode=scale-out-pool --standby-policy-initial-delay=${STANDBY_INITIAL_DELAY:-180}"
   fi
 }
 
@@ -73,9 +88,25 @@ cmd_up() {
   local tpl; tpl="$(template_name)"
   create_template "$tpl"
   echo ">> Create MIG $MIG_NAME at size ${MIG_MIN:-1} (Nomad Autoscaler owns size hereafter)"
+  # shellcheck disable=SC2046
   "${GC[@]}" compute instance-groups managed create "$MIG_NAME" \
-    --zone="$ZONE" --template="$tpl" --size="${MIG_MIN:-1}"
+    --zone="$ZONE" --template="$tpl" --size="${MIG_MIN:-1}" \
+    $(standby_args)
   echo ">> MIG up. The autoscaler resizes it from the sandbox:workers_desired signal."
+  if [ "${STANDBY_STOPPED_SIZE:-0}" -gt 0 ]; then
+    echo ">> Standby pool: ${STANDBY_STOPPED_SIZE} stopped VMs (scale-out-pool mode)."
+  fi
+}
+
+cmd_standby() {
+  echo ">> Apply standby policy to $MIG_NAME (stopped-size=${STANDBY_STOPPED_SIZE:-0})"
+  if [ "${STANDBY_STOPPED_SIZE:-0}" -gt 0 ]; then
+    # shellcheck disable=SC2046
+    "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" $(standby_args)
+  else
+    "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" \
+      --stopped-size=0 --standby-policy-mode=manual
+  fi
 }
 
 cmd_roll() {
@@ -88,7 +119,7 @@ cmd_roll() {
 
 cmd_status() {
   "${GC[@]}" compute instance-groups managed describe "$MIG_NAME" --zone="$ZONE" \
-    --format="value(name,targetSize)" 2>/dev/null || { echo "MIG $MIG_NAME not found"; return; }
+    --format="table(name,targetSize,targetStoppedSize,standbyPolicy.mode)" 2>/dev/null || { echo "MIG $MIG_NAME not found"; return; }
   "${GC[@]}" compute instance-groups managed list-instances "$MIG_NAME" --zone="$ZONE" \
     --format="table(instance.basename(),instanceStatus,currentAction)"
 }
@@ -99,10 +130,11 @@ cmd_down() {
 }
 
 case "${1:-}" in
-  init)   cmd_init ;;
-  up)     cmd_up ;;
-  roll)   cmd_roll ;;
-  status) cmd_status ;;
-  down)   cmd_down ;;
-  *) echo "usage: $0 {init|up|roll|status|down}" >&2; exit 1 ;;
+  init)    cmd_init ;;
+  up)      cmd_up ;;
+  roll)    cmd_roll ;;
+  standby) cmd_standby ;;
+  status)  cmd_status ;;
+  down)    cmd_down ;;
+  *) echo "usage: $0 {init|up|roll|standby|status|down}" >&2; exit 1 ;;
 esac

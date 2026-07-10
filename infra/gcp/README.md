@@ -67,10 +67,21 @@ make -C ../.. gcs-release && ./deploy-job.sh   # new sha rolls the system job fl
 **Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` (bounds + cost guardrail),
 `SLOTS_PER_HOST` (must match `configs/devbox-gcp.json` pools), `HEADROOM_SLOTS`
 (free slots kept ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must
-stay low before scale-in). Scale-up is immediate; scale-down waits out the
-window. **Scale-in kills running sandboxes on the removed host** (saved
-snapshots survive via GCS durability); bin-pack placement + the window minimize
-how often that hits an in-use host.
+stay low before scale-in), `STANDBY_STOPPED_SIZE` (pre-created stopped VMs the
+MIG starts on scale-up — tens of seconds to serving instead of the minutes a
+fresh create+boot takes; apply to a live MIG with `./mig.sh standby`).
+Scale-up is immediate; scale-down waits out the window. **Scale-in kills
+running sandboxes on the removed host** (saved snapshots survive via GCS
+durability); bin-pack placement + the window minimize how often that hits an
+in-use host.
+
+**Burst behavior** end to end: a burst first lands on `HEADROOM_SLOTS` of free
+capacity; overflow creates wait in the gateway's bounded queue (`sandbox
+gateway --queue-wait/--queue-max`) instead of 503ing, and the queue depth
+itself feeds `sandbox:workers_desired` so the autoscaler scales up
+immediately; the MIG serves that resize from the stopped standby pool in
+~30-60 s (falling back to fresh creates when the pool runs dry). Only a burst
+that outruns queue-wait + MIG_MAX sees 503s (with Retry-After).
 
 **Teardown:** `./mig.sh down` then `./control.sh down` (the reserved IP, SAs, and
 buckets persist — remove with `gcloud` if you're fully done).
