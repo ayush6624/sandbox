@@ -13,9 +13,11 @@ import (
 )
 
 var (
-	gwListen string
-	gwToken  string
-	gwTTL    time.Duration
+	gwListen    string
+	gwToken     string
+	gwTTL       time.Duration
+	gwQueueWait time.Duration
+	gwQueueMax  int
 )
 
 func gatewayCmd() *cobra.Command {
@@ -32,6 +34,8 @@ The gateway exposes the same API as a single server; point the CLI at it with
 	cmd.Flags().StringVar(&gwListen, "listen", "", "TCP address to listen on, e.g. 100.64.0.1:9090 (required)")
 	cmd.Flags().StringVar(&gwToken, "token", "", "bearer token required on all inbound requests (required)")
 	cmd.Flags().DurationVar(&gwTTL, "heartbeat-ttl", 20*time.Second, "drop a host not seen within this window")
+	cmd.Flags().DurationVar(&gwQueueWait, "queue-wait", 90*time.Second, "how long a create may wait for a free slot before 503 (0 disables queueing)")
+	cmd.Flags().IntVar(&gwQueueMax, "queue-max", 256, "max creates waiting at once; beyond this creates 503 immediately")
 	return cmd
 }
 
@@ -46,6 +50,6 @@ func runGateway(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	g := gateway.New(gwToken, gwTTL)
+	g := gateway.New(gwToken, gwTTL, gwQueueWait, gwQueueMax)
 	return g.Serve(ctx, gwListen)
 }

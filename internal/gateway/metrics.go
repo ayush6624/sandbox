@@ -58,6 +58,9 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_slots_used", "Used sandbox slots across live hosts.", usedSlots)
 	gauge("sandbox_slots_free", "Free sandbox slots across live hosts.", freeSlots)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
+	// Queued creates are demand without a slot — the recording rule adds this
+	// to slots_used so a burst pulls scale-up before any create lands.
+	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))
 
 	// Per-host series share one HELP/TYPE header block each.
 	fmt.Fprintf(&b, "# HELP sandbox_host_slots_total Total slots on a live host.\n# TYPE sandbox_host_slots_total gauge\n")

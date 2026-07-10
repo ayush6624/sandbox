@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/client"
@@ -63,6 +64,15 @@ type Gateway struct {
 	token string        // bearer required on all inbound requests
 	ttl   time.Duration // a host not seen within ttl is considered dead
 
+	// queueWait/queueMax bound the create wait queue: a create that finds no
+	// free slot waits up to queueWait for capacity (a destroy, a failed create,
+	// or — the burst case — the autoscaler bringing a new host up) instead of
+	// failing immediately. queueMax caps how many creates may wait at once;
+	// beyond it, or with queueWait<=0, creates 503 right away as before.
+	queueWait time.Duration
+	queueMax  int
+	queued    atomic.Int64 // creates currently waiting; exported as a metric
+
 	mu        sync.RWMutex
 	hosts     map[string]*host  // host id → host
 	route     map[string]string // sandbox id → host id (derived from heartbeats)
@@ -70,11 +80,14 @@ type Gateway struct {
 }
 
 // New returns a Gateway. token gates all inbound requests (clients and host
-// registration alike); ttl is the stale-host cutoff.
-func New(token string, ttl time.Duration) *Gateway {
+// registration alike); ttl is the stale-host cutoff. queueWait/queueMax
+// configure the create wait queue (queueWait 0 disables queueing).
+func New(token string, ttl time.Duration, queueWait time.Duration, queueMax int) *Gateway {
 	return &Gateway{
 		token:     token,
 		ttl:       ttl,
+		queueWait: queueWait,
+		queueMax:  queueMax,
 		hosts:     map[string]*host{},
 		route:     map[string]string{},
 		snapRoute: map[string]string{},
@@ -180,6 +193,14 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	h := g.reserveHost()
 	if h == nil {
+		// No free slot right now — wait for one instead of failing. During a
+		// burst the queue depth itself feeds the autoscaler's scaling signal
+		// (sandbox_create_queue_depth), so waiting here is what gives the new
+		// host time to boot and absorb the queue.
+		h = g.awaitHost(r.Context())
+	}
+	if h == nil {
+		w.Header().Set("Retry-After", "5")
 		httpError(w, http.StatusServiceUnavailable, errors.New("no host with free capacity"))
 		return
 	}
@@ -243,6 +264,43 @@ func (g *Gateway) release(hostID string, landed bool) {
 	}
 	if landed {
 		h.slotsUsed++
+	}
+}
+
+// queuePollInterval is how often a queued create re-tries placement. Capacity
+// appears via heartbeats (5 s cadence) or releases, so sub-second polling is
+// plenty; the cost is one map scan under the lock per waiter per tick.
+const queuePollInterval = 250 * time.Millisecond
+
+// awaitHost holds a create in the bounded wait queue, re-trying reserveHost
+// until a slot frees up or the deadline passes. Returns a reserved host
+// snapshot (caller MUST release() exactly once), or nil when queueing is
+// disabled, the queue is full, the wait times out, or the client goes away.
+func (g *Gateway) awaitHost(ctx context.Context) *host {
+	if g.queueWait <= 0 || g.queueMax <= 0 {
+		return nil
+	}
+	if g.queued.Add(1) > int64(g.queueMax) {
+		g.queued.Add(-1)
+		return nil
+	}
+	defer g.queued.Add(-1)
+
+	deadline := time.NewTimer(g.queueWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(queuePollInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-deadline.C:
+			return nil
+		case <-tick.C:
+			if h := g.reserveHost(); h != nil {
+				return h
+			}
+		}
 	}
 }
 

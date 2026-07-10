@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -8,8 +9,9 @@ import (
 )
 
 // liveGateway builds a gateway with the given hosts, all marked seen just now.
+// Queueing is disabled so placement tests see reserveHost's immediate answer.
 func liveGateway(hosts ...*host) *Gateway {
-	g := New("tok", 20*time.Second)
+	g := New("tok", 20*time.Second, 0, 0)
 	now := time.Now()
 	for _, h := range hosts {
 		h.lastSeen = now
@@ -89,6 +91,83 @@ func TestReserveHostCapsAtCapacity(t *testing.T) {
 	}
 }
 
+func TestAwaitHostReturnsWhenCapacityFrees(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 1, slotsUsed: 1})
+	g.queueWait, g.queueMax = 5*time.Second, 8
+
+	got := make(chan *host, 1)
+	go func() { got <- g.awaitHost(context.Background()) }()
+
+	// Free the slot after the waiter has queued; the next poll must pick it up.
+	time.Sleep(50 * time.Millisecond)
+	g.mu.Lock()
+	g.hosts["a"].slotsUsed = 0
+	g.mu.Unlock()
+
+	select {
+	case h := <-got:
+		if h == nil || h.id != "a" {
+			t.Fatalf("queued create should land on host a once freed; got %v", h)
+		}
+		if g.hosts["a"].reserved != 1 {
+			t.Fatalf("awaitHost must return a RESERVED host; reserved=%d", g.hosts["a"].reserved)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued create never picked up the freed slot")
+	}
+	if n := g.queued.Load(); n != 0 {
+		t.Fatalf("queue depth should drop back to 0, got %d", n)
+	}
+}
+
+func TestAwaitHostTimesOutAndRespectsCancel(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 1, slotsUsed: 1})
+	g.queueWait, g.queueMax = 300*time.Millisecond, 8
+
+	// Full host, nothing frees: the wait must end at the deadline, empty-handed.
+	if h := g.awaitHost(context.Background()); h != nil {
+		t.Fatalf("expected timeout nil, got %v", h)
+	}
+
+	// A cancelled client (disconnect) must not keep occupying the queue.
+	g.queueWait = time.Minute
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	start := time.Now()
+	if h := g.awaitHost(ctx); h != nil {
+		t.Fatalf("expected nil on client cancel, got %v", h)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("cancel should end the wait immediately, not at the deadline")
+	}
+	if n := g.queued.Load(); n != 0 {
+		t.Fatalf("queue depth should be 0 after exits, got %d", n)
+	}
+}
+
+func TestAwaitHostQueueBounds(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 1, slotsUsed: 1})
+
+	// Disabled queue: immediate nil.
+	if h := g.awaitHost(context.Background()); h != nil {
+		t.Fatalf("queueing disabled, want nil, got %v", h)
+	}
+
+	// Full queue: the waiter beyond queueMax is rejected immediately.
+	g.queueWait, g.queueMax = time.Minute, 1
+	g.queued.Store(1) // one waiter already queued
+	start := time.Now()
+	if h := g.awaitHost(context.Background()); h != nil {
+		t.Fatalf("queue full, want nil, got %v", h)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("full queue must reject immediately, not wait out the deadline")
+	}
+	if n := g.queued.Load(); n != 1 {
+		t.Fatalf("rejected waiter must not leak depth; got %d want 1", n)
+	}
+}
+
 func TestMetricsExposition(t *testing.T) {
 	g := liveGateway(
 		&host{id: "h1", slotsTotal: 24, slotsUsed: 10},
@@ -100,6 +179,7 @@ func TestMetricsExposition(t *testing.T) {
 	g.hosts["dead"] = stale
 	g.route["sb1"] = "h1"
 	g.route["sb2"] = "h2"
+	g.queued.Store(3)
 
 	rr := httptest.NewRecorder()
 	g.handleMetrics(rr, httptest.NewRequest("GET", "/metrics", nil))
@@ -111,6 +191,7 @@ func TestMetricsExposition(t *testing.T) {
 		"sandbox_slots_used 15",
 		"sandbox_slots_free 33",
 		"sandbox_routes 2",
+		"sandbox_create_queue_depth 3",
 		`sandbox_host_slots_used{host="h1"} 10`,
 		`sandbox_host_slots_total{host="h2"} 24`,
 	}
