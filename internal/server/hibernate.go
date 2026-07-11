@@ -19,15 +19,17 @@ import (
 // the density lever that lets a host's slot count absorb bursts. A sandbox
 // idle for cfg.HibernateAfter is paused, full-snapshotted (memory + device
 // state; its rootfs file simply stays where it is — the frozen VM can't write
-// to it), and killed. The row flips to status=hibernated and its tap/IP/port
-// return to the pools. Hibernated sandboxes survive server restarts.
+// to it), and killed. The row flips to status=hibernated and its tap/IP
+// return to the pools; its host port(s) stay reserved, because the userspace
+// port-forward listeners (portproxy.go) stay bound across the freeze.
+// Hibernated sandboxes survive server restarts.
 //
-// Any agent-bound request (exec, files, dir, shell, expose-port) wakes it:
-// a plain snapshot restore when its old tap+IP are still free (the common
-// case — the pool pickers avoid hibernated identities), else the
-// identity-neutral clone path (fresh tap/IP + MMDS reidentify + GARP, exactly
-// like fan-out). Only network traffic to forwarded host ports does NOT count
-// as activity and does NOT wake — the DNAT path bypasses the server.
+// Any agent-bound request (exec, files, dir, shell) wakes it: a plain
+// snapshot restore when its old tap+IP are still free (the common case — the
+// pool pickers avoid hibernated identities), else the identity-neutral clone
+// path (fresh tap/IP + MMDS reidentify + GARP, exactly like fan-out). A
+// connection to a forwarded host port wakes it too — the proxy counts every
+// connection as activity and dials the guest only after ensureRunning.
 
 // hibID names the snapshot-dir entry holding a sandbox's hibernation
 // artifacts (mem + device state; the rootfs needs no frozen copy).
@@ -206,14 +208,8 @@ func (s *Server) hibernate(ctx context.Context, id string) error {
 	s.machines.Delete(id)
 	_ = vm.StopForce(m)
 
-	// Release host-side resources. Extra-port DNAT rules go too; their rows
-	// stay, and wake re-adds the rules (against the possibly-new guest IP).
-	if ports, err := s.reg.Ports(ctx, id); err == nil {
-		for _, pm := range ports {
-			s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
-		}
-	}
-	s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
+	// Release host-side resources. The port-forward listeners deliberately
+	// stay bound: a connection to any of them wakes the sandbox.
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 
 	if err := s.reg.Hibernate(context.Background(), id); err != nil {
@@ -288,13 +284,11 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 		return sb, fmt.Errorf("wake %s: %w", id, err)
 	}
 
-	// Re-add extra-port DNAT rules against the (possibly new) guest IP.
-	if ports, perr := s.reg.Ports(ctx, id); perr == nil {
-		for _, pm := range ports {
-			if aerr := s.cfg.Provisioner.AddPortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort); aerr != nil {
-				fmt.Fprintf(os.Stderr, "[%s] wake: re-add port %d->%d: %v\n", id, pm.HostPort, pm.GuestPort, aerr)
-			}
-		}
+	// The port listeners persisted through hibernation (that's what routed the
+	// waking connection here); this re-sync only repairs drift, e.g. a bind
+	// that failed transiently at startup.
+	if serr := s.syncSandboxPorts(ctx, sb); serr != nil {
+		fmt.Fprintf(os.Stderr, "[%s] wake: sync port listeners: %v\n", id, serr)
 	}
 
 	// The frozen memory was consumed into the live VM; drop the artifacts.
@@ -307,12 +301,12 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 
 // rollbackWake undoes a failed wake attempt: kills any half-started VM,
 // removes whatever host-side resources were added, and flips the row back to
-// hibernated. Best-effort throughout — the artifacts on disk stay intact.
+// hibernated. Best-effort throughout — the artifacts on disk stay intact, and
+// the port listeners stay bound (the sandbox remains wakeable).
 func (s *Server) rollbackWake(sb registry.Sandbox) {
 	if v, ok := s.machines.LoadAndDelete(sb.ID); ok {
 		_ = vm.StopForce(v.(*vm.Machine))
 	}
-	s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 	if err := s.reg.Hibernate(context.Background(), sb.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] rollback to hibernated failed: %v\n", sb.ID, err)
@@ -343,10 +337,7 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 		_ = vm.StopForce(m)
 		return fmt.Errorf("pid: %w", err)
 	}
-	if err := s.cfg.Provisioner.AddPortForward(sb.HostPort, sb.GuestIP); err != nil {
-		_ = vm.StopForce(m)
-		return fmt.Errorf("port forward: %w", err)
-	}
+	// No port work: the listeners stayed bound throughout hibernation.
 	if err := s.reg.FinishStart(ctx, sb.ID, pid, rt.VMID, rt.SocketPath); err != nil {
 		_ = vm.StopForce(m)
 		return fmt.Errorf("finish start: %w", err)

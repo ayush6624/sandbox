@@ -19,7 +19,10 @@ type Network struct {
 }
 
 // Provisioner performs host-side setup/teardown for sandboxes:
-// rootfs copies, tap devices, iptables port-forwards.
+// rootfs copies, tap devices, bridge/NAT networking. (Port forwarding itself
+// is a userspace TCP proxy in the server — see internal/server/portproxy.go;
+// only legacy DNAT *removal* remains here, for hosts upgrading from the old
+// DNAT scheme.)
 type Provisioner struct {
 	Network     Network
 	RootfsBase  string // path to immutable base rootfs (e.g. /opt/fc/devbox-rootfs.ext4)
@@ -266,34 +269,18 @@ func (p *Provisioner) DeleteTap(tap string) error {
 	return nil
 }
 
-// AddPortForward sets up host:hostPort → guestIP:GuestPort DNAT for the
-// primary (template-wide) guest port.
-func (p *Provisioner) AddPortForward(hostPort int, guestIP string) error {
-	return p.AddPortForwardTo(hostPort, guestIP, p.Network.GuestPort)
-}
-
-// AddPortForwardTo sets up host:hostPort → guestIP:guestPort DNAT (both
-// PREROUTING for external clients and OUTPUT for loopback clients).
-func (p *Provisioner) AddPortForwardTo(hostPort int, guestIP string, guestPort int) error {
-	target := guestIP + ":" + strconv.Itoa(guestPort)
-	rules := [][]string{
-		{"iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(hostPort), "-j", "DNAT", "--to-destination", target},
-		{"iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-d", "127.0.0.1", "--dport", strconv.Itoa(hostPort), "-j", "DNAT", "--to-destination", target},
-	}
-	for _, args := range rules {
-		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%v: %w: %s", args, err, out)
-		}
-	}
-	return nil
-}
-
-// RemovePortForward undoes AddPortForward (best-effort — rules may already be gone).
+// RemovePortForward removes the legacy primary-port DNAT rules of a sandbox
+// (best-effort — on hosts that never ran the DNAT scheme the rules simply
+// don't exist and the deletes are no-ops).
 func (p *Provisioner) RemovePortForward(hostPort int, guestIP string) {
 	p.RemovePortForwardTo(hostPort, guestIP, p.Network.GuestPort)
 }
 
-// RemovePortForwardTo undoes AddPortForwardTo (best-effort).
+// RemovePortForwardTo removes legacy host:hostPort → guestIP:guestPort DNAT
+// rules (both the PREROUTING rule for external clients and the OUTPUT rule
+// for loopback clients). Best-effort: kept only so hosts upgrading from the
+// DNAT port-forwarding scheme get their stale rules cleaned up by
+// destroy/reconcile — new sandboxes never install DNAT.
 func (p *Provisioner) RemovePortForwardTo(hostPort int, guestIP string, guestPort int) {
 	target := guestIP + ":" + strconv.Itoa(guestPort)
 	rules := [][]string{

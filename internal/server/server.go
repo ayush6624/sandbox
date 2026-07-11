@@ -80,11 +80,17 @@ type Server struct {
 	act     *activityTracker
 	wakesMu sync.Mutex
 	wakes   map[string]*sync.Mutex
+
+	// pf owns the userspace host-port → guest-port TCP proxies (see
+	// portproxy.go). Its listeners persist through hibernation so a connection
+	// to a frozen sandbox's port wakes it.
+	pf *portForwarder
 }
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
 		act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
+	s.pf = newPortForwarder(s.dialGuest, s.act.begin)
 	if cfg.SnapshotBucket != "" {
 		s.blob = gcsblob.New(cfg.SnapshotBucket)
 		fmt.Fprintf(os.Stderr, "snapshot durability on: gs://%s\n", cfg.SnapshotBucket)
@@ -99,6 +105,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.vmCtx = ctx
 
 	s.reconcile(ctx)
+	// Hibernated sandboxes survived reconcile; re-bind their port-forward
+	// listeners or wake-on-connect breaks after a server restart.
+	s.reopenPortListeners(ctx)
 	go s.reapExpired(ctx)
 	if s.cfg.HotCreate {
 		go s.ensureGolden(ctx)
@@ -171,6 +180,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		cancel()
 		s.shutdownAll()
+		s.pf.CloseAll() // hibernated sandboxes' listeners; reopened next startup
 		return nil
 	case err := <-srvErr:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -303,14 +313,14 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernate
 		return registry.Sandbox{}, fmt.Errorf("pid: %w", err)
 	}
 
-	if err := s.cfg.Provisioner.AddPortForward(sb.HostPort, sb.GuestIP); err != nil {
+	if err := s.pf.Open(id, sb.HostPort, s.cfg.Provisioner.Network.GuestPort); err != nil {
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
 		return registry.Sandbox{}, fmt.Errorf("port forward: %w", err)
 	}
 
 	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
-		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
+		s.pf.CloseSandbox(id)
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
 		return registry.Sandbox{}, fmt.Errorf("finish start: %w", err)
@@ -397,8 +407,10 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		return fmt.Errorf("get sandbox: %w", err)
 	}
 
-	// A hibernated sandbox has no VM, tap, or DNAT — just artifacts and rows.
+	// A hibernated sandbox has no VM or tap — just its port listeners,
+	// artifacts, and rows.
 	if sb.Status == registry.StatusHibernated {
+		s.pf.CloseSandbox(id)
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 		return s.reg.Destroy(ctx, id)
@@ -428,6 +440,10 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		}
 	}
 
+	s.pf.CloseSandbox(id)
+	// Legacy DNAT cleanup: port forwarding is a userspace proxy now, but hosts
+	// upgrading from the DNAT scheme may still carry rules for this sandbox.
+	// Removing a nonexistent rule is harmless.
 	for _, pm := range ports {
 		s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
 	}

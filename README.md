@@ -83,7 +83,7 @@ Host networking (bridge, NAT, sysctls) is ensured automatically every time the s
 sudo ./sandbox serve --config configs/devbox.json
 ```
 
-On startup the server also reconciles state left over from a crash or reboot: orphaned firecracker processes are killed and stale taps, rootfs copies, DNAT rules, and registry rows are cleaned up.
+On startup the server also reconciles state left over from a crash or reboot: orphaned firecracker processes are killed and stale taps, rootfs copies, legacy DNAT rules, and registry rows are cleaned up; the port-forward listeners of hibernated sandboxes are re-bound.
 
 ### 4. Use sandboxes
 
@@ -162,7 +162,7 @@ Endpoints (both listeners):
 | `POST /sandboxes/{id}/exec` | `{"cmd": "...", "cwd": "...", "timeout_sec": 60}` → `{stdout, stderr, exit_code, timed_out, duration_ms}` |
 | `POST /sandboxes/{id}/exec/stream` | Same body; NDJSON stream of `{"type":"stdout"\|"stderr","data":…}` events ending with a `{"type":"exit",…}` event |
 | `POST /sandboxes/{id}/timeout` | `{"timeout_sec": N}` resets the TTL (0 clears); a reaper destroys expired sandboxes |
-| `POST /sandboxes/{id}/ports` | `{"guest_port": 8000}` → DNATs an extra guest port to a pool-allocated host port (idempotent) |
+| `POST /sandboxes/{id}/ports` | `{"guest_port": 8000}` → forwards an extra guest port from a pool-allocated host port (idempotent) |
 | `GET /sandboxes/{id}/ports` | All forwarded ports, including the primary 3000 mapping |
 | `GET /sandboxes/{id}/files?path=` | Read a file (raw bytes) |
 | `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
@@ -206,7 +206,7 @@ Guest (172.16.0.x) ←──fcN──→ br-fc (172.16.0.1) ←──NAT──�
 
 - **Guest → Internet**: iptables MASQUERADE through the host's default interface
 - **Host → Guest**: direct via the bridge (this is how exec/files reach sandboxd)
-- **External → Guest**: per-sandbox DNAT maps `host:520N` → `guestIP:3000`
+- **External → Guest**: the server proxies `host:520N` → `guestIP:3000` in userspace — each connection counts as sandbox activity and transparently wakes a hibernated sandbox
 
 Guest IPs are set via the kernel `ip=` boot parameter — no DHCP. The server ensures the bridge, sysctls (`ip_forward`, `route_localnet`), and NAT rules on every startup, so a host reboot needs nothing more than restarting `sandbox serve`.
 

@@ -50,8 +50,9 @@ sudoers rule below. `install-agent` and `stop-server` are subcommands (not
 scripts) specifically so they're covered by that NOPASSWD rule.
 
 `serve` is self-healing on startup: it runs `EnsureNetwork` (bridge, sysctls,
-NAT — survives host reboots) and reconciles stale state (kills orphaned
-firecracker processes, removes stale taps/rootfs/DNAT/DB rows).
+NAT — survives host reboots), reconciles stale state (kills orphaned
+firecracker processes, removes stale taps/rootfs/legacy-DNAT/DB rows), and
+re-binds the port-proxy listeners of hibernated sandboxes.
 
 ## Remote deployment
 
@@ -92,14 +93,17 @@ bridge, sets the sysctls, and adds the NAT/FORWARD rules. A host reboot just
 needs `serve` restarted.
 
 EnsureNetwork sets these critical host-wide knobs:
-- `net.ipv4.ip_forward=1`
-- `net.ipv4.conf.all.route_localnet=1` — **required**: lets DNAT'd packets with src=127.0.0.1
-  route out non-loopback interfaces (otherwise `curl localhost:<host_port>` hangs)
-- `iptables -t nat -A POSTROUTING -o br-fc -j MASQUERADE` — **required**: rewrites
-  host→guest source to the bridge IP so the guest can reply (otherwise it tries to
-  reply to 127.0.0.1 and the connection times out)
+- `net.ipv4.ip_forward=1` — **required**: guest egress to the internet is routed + MASQUERADEd
+- `iptables -t nat -A POSTROUTING -s <subnet> -o <host-iface> -j MASQUERADE` — **required**
+  for guest egress (the guests' 172.16.x addresses aren't routable outside the host)
+- `net.ipv4.conf.all.route_localnet=1` and the `-o br-fc MASQUERADE` rule — kept for
+  back-compat with the retired DNAT port-forwarding scheme; harmless
 
-If you change these, host:port → guest:3000 forwarding silently breaks.
+Host:port → guest:port forwarding is NOT iptables DNAT anymore: it's a userspace TCP
+proxy inside the server (`internal/server/portproxy.go`). The server binds each mapped
+host port itself; every accepted connection counts as sandbox activity (resets the
+idle-hibernation clock, pins the sandbox while open) and transparently wakes a
+hibernated sandbox before dialing the guest (wake-on-connect).
 
 ## Code layout
 
@@ -127,13 +131,14 @@ internal/gateway/gateway.go       Multi-host control plane: host registry, deriv
 internal/server/
   server.go           http.ServeMux on Unix socket; owns map[id]*vm.Machine; vmCtx lifetime
   proxy.go            Reverse-proxy to sandboxd (incl. /shell WebSocket via httputil) + waitForAgent readiness poll
+  portproxy.go        Userspace host-port→guest-port TCP proxy: activity-tracking, wake-on-connect, listeners persist through hibernation
   heartbeat.go        When --gateway is set, periodically registers this host with the gateway
   reconcile.go        Startup cleanup of stale rows/taps/rootfs/orphan firecrackers (skips hibernated)
   hibernate.go        Idle hibernation: activity tracking, freeze-to-disk reaper, wake-on-access
   snapshot.go         Snapshot/restore/fan-out handlers (pause+snapshot, 1:1 restore, N clones)
   golden.go           Golden snapshot: built at startup, POST /sandboxes clones it (hot create)
 internal/registry/registry.go     SQLite-backed registry; resource allocation (tap/IP/port from pools)
-internal/provisioner/provisioner.go  Host-side ops: EnsureNetwork, rootfs cp, tap create/delete, iptables DNAT
+internal/provisioner/provisioner.go  Host-side ops: EnsureNetwork, rootfs cp, tap create/delete (+ legacy DNAT removal)
 internal/vm/
   machine_linux.go    Firecracker SDK integration; ShutdownGuest, Wait, PID; captures stderr to firecracker-<vmid>.log
   machine_stub.go     Non-Linux stub matching the Linux signatures
@@ -148,8 +153,9 @@ scripts/              Host setup shell scripts
   If the server crashes, firecracker children become orphaned and we can no longer ACPI-shutdown
   via the SDK. On the next `serve` startup, `reconcile()` kills any process whose
   `/proc/<pid>/comm` is `firecracker` for each registry row (guards against PID reuse), then
-  releases DNAT rules, tap, rootfs copy, and the row itself. Every row is stale by definition
-  at startup, since VMs only live inside a running server.
+  releases tap, rootfs copy, legacy DNAT rules (pre-proxy hosts), and the row itself. Every
+  row is stale by definition at startup, since VMs only live inside a running server —
+  except hibernated rows, which reconcile skips and whose port listeners are then re-bound.
 - **Multi-host is a gateway in front, not shared state.** `sandbox gateway` fronts the same
   API and fans out across hosts. Each host keeps its own SQLite + pools + `reconcile()`
   unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
@@ -221,26 +227,43 @@ scripts/              Host setup shell scripts
   restore/fanout bodies and SDK `hibernateAfterMs`). Sandboxes idle past their window
   are paused + full-snapshotted
   (mem/state under `snapshots/hib-<id>`; the rootfs file just stays put), the VM killed,
-  and the row flipped to `status=hibernated` — releasing tap/IP/port back to the pools
-  (the partial unique indexes only bind `running`), so hibernated sandboxes hold no slot
-  and survive server restarts (reconcile skips them). Any agent-bound request
-  (exec/files/dir/shell/expose) wakes transparently via `ensureRunning`: same-identity
-  plain restore when the old tap+IP are free — the common case, because the pool pickers
-  soft-avoid hibernated identities — else the fan-out clone path (fresh identity, MMDS
-  reidentify with a fresh Gen, GARP). Manual trigger: `POST .../hibernate` /
-  `sandbox hibernate <id>`. Activity = API traffic only; in-flight requests (open
-  shells, exec streams) pin the sandbox running. **Forwarded-port traffic does NOT
-  reset the idle clock or wake** — the DNAT path bypasses the server. Heartbeats
-  report hibernated ids for routing but exclude them from `slots_used`.
+  and the row flipped to `status=hibernated` — releasing tap/IP back to the pools
+  (their partial unique indexes only bind `running`), so hibernated sandboxes hold no
+  slot and survive server restarts (reconcile skips them). Host ports are the exception:
+  they stay hard-reserved (`uniq_port_held` covers hibernated rows, `loadUsed` counts
+  them as used) because the port-proxy listeners stay bound across the freeze. Any
+  agent-bound request (exec/files/dir/shell) wakes transparently via `ensureRunning`:
+  same-identity plain restore when the old tap+IP are free — the common case, because
+  the pool pickers soft-avoid hibernated taps/IPs — else the fan-out clone path (fresh
+  identity, MMDS reidentify with a fresh Gen, GARP). Manual trigger: `POST .../hibernate`
+  / `sandbox hibernate <id>`. Activity = API traffic AND forwarded-port traffic:
+  in-flight requests (open shells, exec streams) and open forwarded-port connections
+  pin the sandbox running, and **a connection to a forwarded host port wakes a
+  hibernated sandbox** (the userspace proxy wakes via `ensureRunning`, then dials the
+  guest's current IP). Heartbeats report hibernated ids for routing but exclude them
+  from `slots_used`.
+- **Port forwarding is a userspace TCP proxy, not DNAT**
+  (`internal/server/portproxy.go`). The server binds every mapped host port
+  (primary + `sandbox_ports` rows) with an in-process listener: accept → record
+  activity + pin (same `act.begin` mechanism as API requests) → `ensureRunning` (wakes
+  if hibernated) → re-read the row for the CURRENT guest IP (a clone-path wake changes
+  it — never cache it) → dial guest → bidirectional copy with TCP half-close. Listeners
+  open on create/restore/fanout/expose, persist through hibernation (that's what makes
+  wake-on-connect work), re-bind at startup for hibernated rows (`reopenPortListeners`),
+  and close on destroy. `RemovePortForward*` (iptables `-D`) is kept and still called in
+  destroy/reconcile purely as legacy cleanup for hosts upgrading from the DNAT scheme.
 - **Extra port mappings** live in the `sandbox_ports` table and draw host ports from the
   same pool as primary ports (`loadUsed` reads both tables). destroy() and reconcile()
-  must remove their DNAT rules — read mappings before deleting rows.
+  must close their listeners (and remove legacy DNAT rules) — read mappings before
+  deleting rows. `exposePort` works on a hibernated sandbox without waking it: the new
+  listener is just another wake-on-connect entry point.
 - **`vmCtx` ≠ request ctx.** `handleCreate` must pass `s.vmCtx` (server-scoped) to `vm.NewMachine`
   and `vm.Start`, NOT `r.Context()` — the request ctx cancels when the handler returns, and the
   firecracker SDK SIGTERMs the VM when its ctx cancels. This was an early bug that wasted hours.
 - **Pools allocated atomically via SQLite.** `registry.Create` runs INSERT inside a TX with
-  partial unique indexes (`uniq_tap_running` etc.) guaranteeing no two running sandboxes share
-  a tap/IP/port. Concurrent creates that race lose to UNIQUE constraint and surface as 500.
+  partial unique indexes (`uniq_tap_running`, `uniq_ip_running`, `uniq_port_held` — the port
+  one also binds `hibernated`) guaranteeing no two sandboxes share a tap/IP/port. Concurrent
+  creates that race lose to UNIQUE constraint and surface as 500.
 - **Per-VM rootfs is a full `cp --sparse=always`.** Slow on ext4 (~2 GB-sparse copy in ~1 s,
   but I/O scales linearly with N). On btrfs/XFS, switching to `--reflink=auto` would make it
   instant. Don't share the rootfs between VMs — ext4 corrupts under concurrent mount.
@@ -267,9 +290,11 @@ scripts/              Host setup shell scripts
 - **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
 - **No resource overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
   template-wide. The body only carries `timeout_sec` and `hibernate_after_sec`.
-- **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics) and
-  `internal/registry` (hibernate/wake state machine) have unit tests; the rest is
-  covered by the TS SDK mock-server suite + the fleet e2e suite in `tests/`.
+- **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics),
+  `internal/registry` (hibernate/wake state machine, hibernated-port pinning), and
+  `internal/server` (port proxy: forwarding, wake-on-connect, activity pinning) have
+  unit tests; the rest is covered by the TS SDK mock-server suite + the fleet e2e
+  suite in `tests/`.
 - **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
   the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
   transport security. Don't bind it to a public interface. The Unix socket stays auth-free

@@ -238,7 +238,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.cfg.Provisioner.AddPortForward(sb.HostPort, sb.GuestIP); err != nil {
+	if err := s.pf.Open(id, sb.HostPort, s.cfg.Provisioner.Network.GuestPort); err != nil {
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
 		httpError(w, 500, fmt.Errorf("port forward: %w", err))
@@ -246,7 +246,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
-		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
+		s.pf.CloseSandbox(id)
 		_ = vm.StopForce(m)
 		s.rollbackPreVM(id, sb)
 		httpError(w, 500, fmt.Errorf("finish start: %w", err))
@@ -509,7 +509,7 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		_ = vm.StopForce(m)
 		return fmt.Errorf("attach tap: %w", err)
 	}
-	if err := s.cfg.Provisioner.AddPortForward(sb.HostPort, sb.GuestIP); err != nil {
+	if err := s.pf.Open(sb.ID, sb.HostPort, s.cfg.Provisioner.Network.GuestPort); err != nil {
 		_ = vm.StopForce(m)
 		return fmt.Errorf("port forward: %w", err)
 	}

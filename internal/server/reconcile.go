@@ -33,7 +33,11 @@ func (s *Server) reconcile(ctx context.Context) {
 		if isFirecrackerProc(sb.PID) {
 			killWithGrace(sb.PID, 5*time.Second)
 		}
-		// Read extra port mappings before reg.Destroy deletes their rows.
+		// Legacy DNAT cleanup: port forwarding is a userspace proxy now (no
+		// kernel rules to remove), but hosts upgrading from the DNAT scheme
+		// may still carry rules for these rows. Removing a nonexistent rule
+		// is harmless. Read extra port mappings before reg.Destroy deletes
+		// their rows.
 		if ports, err := s.reg.Ports(ctx, sb.ID); err == nil {
 			for _, pm := range ports {
 				s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)

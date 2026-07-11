@@ -10,7 +10,7 @@ import (
 
 // handleExposePort forwards an extra guest port to a freshly allocated host
 // port. Idempotent: exposing an already-mapped guest port returns the
-// existing mapping without adding a second DNAT rule.
+// existing mapping without opening a second listener.
 func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
@@ -26,9 +26,10 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	// Exposing a port installs DNAT against the live guest IP, so a
-	// hibernated sandbox must wake first.
-	sb, err := s.ensureRunning(ctx, id)
+	// The proxy listener resolves the guest IP per connection, so exposing a
+	// port needs no live guest — a hibernated sandbox stays frozen and the
+	// new port simply becomes another wake-on-connect entry point.
+	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
@@ -42,7 +43,7 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An existing mapping already has its DNAT rule — don't add another.
+	// An existing mapping already has its listener — don't open another.
 	existing, err := s.reg.Ports(ctx, id)
 	if err != nil {
 		httpError(w, 500, err)
@@ -60,7 +61,7 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Errorf("allocate host port: %w", err))
 		return
 	}
-	if err := s.cfg.Provisioner.AddPortForwardTo(hostPort, sb.GuestIP, body.GuestPort); err != nil {
+	if err := s.pf.Open(id, hostPort, body.GuestPort); err != nil {
 		_ = s.reg.DeletePort(ctx, id, body.GuestPort)
 		httpError(w, 500, fmt.Errorf("port forward: %w", err))
 		return
