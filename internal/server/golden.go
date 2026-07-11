@@ -55,7 +55,9 @@ func (s *Server) buildGolden(ctx context.Context) {
 	t0 := time.Now()
 	fmt.Fprintln(os.Stderr, "building golden snapshot (cold boot + snapshot)...")
 
-	sb, err := s.createCold(ctx, nil)
+	// -1: the throwaway golden source must never be hibernated out from under
+	// the snapshot step.
+	sb, err := s.createCold(ctx, nil, -1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "golden snapshot: cold boot failed, creates stay cold: %v\n", err)
 		return
@@ -94,13 +96,13 @@ func (s *Server) stageSnapshotRootfs(snap registry.Snapshot) error {
 
 // createFromSnapshot brings up one identity-neutral clone of snap — the same
 // two-phase resume-then-bridge dance as fan-out, for a single sandbox.
-func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, expiresAt *time.Time) (registry.Sandbox, error) {
+func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
 	if err := s.stageSnapshotRootfs(snap); err != nil {
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 
 	t0 := time.Now()
-	c := s.bringUpClone(snap, expiresAt)
+	c := s.bringUpClone(snap, expiresAt, hibernateAfterSec)
 	if c.err != nil {
 		return registry.Sandbox{}, c.err
 	}

@@ -111,9 +111,11 @@ func (s *Server) wakeLock(id string) *sync.Mutex {
 
 // --- the idle reaper ---
 
-// hibernateLoop periodically freezes sandboxes idle past cfg.HibernateAfter.
-// Runs only when the feature is enabled; serial on purpose (each hibernation
-// writes ~memMiB to disk — a stampede would saturate I/O).
+// hibernateLoop periodically freezes sandboxes idle past their window: the
+// per-sandbox hibernate_after_sec when set (>0 custom, -1 never), else the
+// host-wide cfg.HibernateAfter (0 = no default — only opted-in sandboxes
+// hibernate). Serial on purpose (each hibernation writes ~memMiB to disk —
+// a stampede would saturate I/O).
 func (s *Server) hibernateLoop(ctx context.Context) {
 	ticker := time.NewTicker(hibernateTick)
 	defer ticker.Stop()
@@ -128,6 +130,13 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 				continue
 			}
 			for _, sb := range running {
+				window := s.cfg.HibernateAfter
+				if sb.HibernateAfterSec > 0 {
+					window = time.Duration(sb.HibernateAfterSec) * time.Second
+				}
+				if sb.HibernateAfterSec < 0 || window <= 0 {
+					continue // opted out, or no per-sandbox value and no host default
+				}
 				// Only sandboxes whose VM we actually hold; rows mid-create
 				// aren't in machines yet.
 				if _, ok := s.machines.Load(sb.ID); !ok {
@@ -140,7 +149,7 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 					s.act.touch(sb.ID)
 					continue
 				}
-				if busy || idle < s.cfg.HibernateAfter {
+				if busy || idle < window {
 					continue
 				}
 				if err := s.hibernate(ctx, sb.ID); err != nil {

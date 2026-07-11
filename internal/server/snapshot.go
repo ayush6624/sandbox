@@ -162,7 +162,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		TimeoutSec int `json:"timeout_sec"`
+		TimeoutSec        int `json:"timeout_sec"`
+		HibernateAfterSec int `json:"hibernate_after_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -170,6 +171,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.TimeoutSec < 0 {
 		httpError(w, 400, errors.New("timeout_sec must be >= 0"))
+		return
+	}
+	if body.HibernateAfterSec < -1 {
+		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1"))
 		return
 	}
 	var expiresAt *time.Time
@@ -186,7 +191,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Insert the row first: its partial unique indexes gate on the snapshot's
 	// tap + guest IP, so a restore fails cleanly (before any disk work) if the
 	// source or a prior restore is still live.
-	sb, err := s.reg.CreateRestore(ctx, id, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt)
+	sb, err := s.reg.CreateRestore(ctx, id, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec)
 	if err != nil {
 		httpError(w, 409, fmt.Errorf("registry restore: %w", err))
 		return
@@ -317,8 +322,9 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Count      int `json:"count"`
-		TimeoutSec int `json:"timeout_sec"`
+		Count             int `json:"count"`
+		TimeoutSec        int `json:"timeout_sec"`
+		HibernateAfterSec int `json:"hibernate_after_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -330,6 +336,10 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.TimeoutSec < 0 {
 		httpError(w, 400, errors.New("timeout_sec must be >= 0"))
+		return
+	}
+	if body.HibernateAfterSec < -1 {
+		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1"))
 		return
 	}
 	var expiresAt *time.Time
@@ -367,7 +377,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			clones[i] = s.bringUpClone(snap, expiresAt)
+			clones[i] = s.bringUpClone(snap, expiresAt, body.HibernateAfterSec)
 		}(i)
 	}
 	wg.Wait()
@@ -416,7 +426,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 
 // bringUpClone allocates resources for one clone and resumes it on an unbridged
 // tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
-func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time) *clone {
+func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time, hibernateAfterSec int) *clone {
 	id := uuid.NewString()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 	// Clones of the golden snapshot record it as their diff base; clones of a
@@ -425,7 +435,7 @@ func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time) *clo
 	if snap.Golden {
 		baseID = snap.ID
 	}
-	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt, baseID)
+	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt, baseID, hibernateAfterSec)
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
 	}

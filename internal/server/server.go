@@ -106,9 +106,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.cfg.GatewayURL != "" {
 		go s.heartbeat(ctx)
 	}
+	// Always runs: even with no host-wide default, individual sandboxes can
+	// opt in via hibernate_after_sec at create time.
+	go s.hibernateLoop(ctx)
 	if s.cfg.HibernateAfter > 0 {
-		go s.hibernateLoop(ctx)
-		fmt.Fprintf(os.Stderr, "idle hibernation on: sandboxes freeze after %s idle\n", s.cfg.HibernateAfter)
+		fmt.Fprintf(os.Stderr, "idle hibernation on: default freeze after %s idle (per-sandbox hibernate_after_sec overrides)\n", s.cfg.HibernateAfter)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o755); err != nil {
@@ -214,7 +216,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// The body is optional (older clients send none); tolerate EOF.
 	var body struct {
-		TimeoutSec int `json:"timeout_sec"`
+		TimeoutSec        int `json:"timeout_sec"`
+		HibernateAfterSec int `json:"hibernate_after_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -222,6 +225,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.TimeoutSec < 0 {
 		httpError(w, 400, errors.New("timeout_sec must be >= 0"))
+		return
+	}
+	if body.HibernateAfterSec < -1 {
+		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1 (-1 = never, 0 = host default)"))
 		return
 	}
 	var expiresAt *time.Time
@@ -233,7 +240,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Hot path: clone the golden snapshot when one is ready. Any failure falls
 	// back to a cold boot, so a create is never worse off than before.
 	if snap := s.golden.Load(); snap != nil {
-		sb, err := s.createFromSnapshot(ctx, *snap, expiresAt)
+		sb, err := s.createFromSnapshot(ctx, *snap, expiresAt, body.HibernateAfterSec)
 		if err == nil {
 			writeJSON(w, 201, sb)
 			return
@@ -241,7 +248,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
 	}
 
-	sb, err := s.createCold(ctx, expiresAt)
+	sb, err := s.createCold(ctx, expiresAt, body.HibernateAfterSec)
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -252,7 +259,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
 // so callers can exec/write files the moment it returns.
-func (s *Server) createCold(ctx context.Context, expiresAt *time.Time) (registry.Sandbox, error) {
+func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
 	id := uuid.NewString()
 
 	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
@@ -260,7 +267,7 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time) (registry
 		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
-	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt, "")
+	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt, "", hibernateAfterSec)
 	if err != nil {
 		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)

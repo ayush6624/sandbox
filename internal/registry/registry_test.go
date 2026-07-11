@@ -27,7 +27,7 @@ func testRegistry(t *testing.T) *Registry {
 func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "")
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 
 	// The hibernated identity is free but SOFT-avoided: a new sandbox must
 	// pick different resources while the pool has other entries.
-	other, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "")
+	other, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0)
 	if err != nil {
 		t.Fatalf("create after hibernate should reuse the freed slot: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "")
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	// hibernated identity — soft avoidance yields when the pool is exhausted.
 	squatted := false
 	for _, id := range []string{"a", "b", "c"} {
-		got, err := r.Create(ctx, id, "/tmp/"+id+".ext4", nil, "")
+		got, err := r.Create(ctx, id, "/tmp/"+id+".ext4", nil, "", 0)
 		if err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
@@ -109,11 +109,42 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	}
 }
 
+func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 60)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if sb.HibernateAfterSec != 60 {
+		t.Fatalf("create should record the override, got %d", sb.HibernateAfterSec)
+	}
+	if err := r.Hibernate(ctx, "sb1"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+	woken, _, err := r.Wake(ctx, "sb1")
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if woken.HibernateAfterSec != 60 {
+		t.Fatalf("override must survive hibernate/wake, got %d", woken.HibernateAfterSec)
+	}
+
+	// -1 (never hibernate) round-trips too.
+	never, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", -1)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got, err := r.Get(ctx, never.ID); err != nil || got.HibernateAfterSec != -1 {
+		t.Fatalf("get after create: %v, hibernate_after_sec=%d want -1", err, got.HibernateAfterSec)
+	}
+}
+
 func TestExpiredIncludesHibernated(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
 	past := time.Now().Add(-time.Minute)
-	if _, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", &past, ""); err != nil {
+	if _, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", &past, "", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "sb1"); err != nil {
@@ -131,10 +162,10 @@ func TestExpiredIncludesHibernated(t *testing.T) {
 func TestListRoutedAndListSplitStatuses(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.Create(ctx, "run1", "/tmp/r1.ext4", nil, ""); err != nil {
+	if _, err := r.Create(ctx, "run1", "/tmp/r1.ext4", nil, "", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := r.Create(ctx, "hib1", "/tmp/h1.ext4", nil, ""); err != nil {
+	if _, err := r.Create(ctx, "hib1", "/tmp/h1.ext4", nil, "", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "hib1"); err != nil {

@@ -64,15 +64,23 @@ export class Sandbox {
    *
    * @param opts API URL/key overrides (default to the `SANDBOX_API_URL` /
    *             `SANDBOX_API_KEY` environment variables) plus an optional
-   *             `timeoutMs` after which the sandbox is auto-destroyed.
+   *             `timeoutMs` after which the sandbox is auto-destroyed and an
+   *             optional `hibernateAfterMs` idle-hibernation override.
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
+    const body: Record<string, number> = {}
+    if (opts.timeoutMs !== undefined) {
+      body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
+    }
+    if (opts.hibernateAfterMs !== undefined) {
+      // -1 is the "never hibernate" sentinel, passed through unscaled.
+      body.hibernate_after_sec =
+        opts.hibernateAfterMs < 0 ? -1 : Math.ceil(opts.hibernateAfterMs / 1000)
+    }
     const res = await client.request('POST', '/sandboxes', {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
-      ...(opts.timeoutMs !== undefined
-        ? { json: { timeout_sec: Math.ceil(opts.timeoutMs / 1000) } }
-        : {}),
+      ...(Object.keys(body).length > 0 ? { json: body } : {}),
     })
     const raw = (await res.json()) as ApiSandbox
     return new Sandbox(client, toSandboxInfo(raw))

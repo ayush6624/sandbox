@@ -206,7 +206,10 @@ scripts/              Host setup shell scripts
   goroutine in `Serve` destroys rows whose `expires_at` passed (running AND hibernated).
   `POST .../timeout` resets (0 clears). No default TTL — absent means live forever.
 - **Idle hibernation** (`internal/server/hibernate.go`; `"hibernate_after_sec"` in the
-  config, 0 = off). Sandboxes idle past the window are paused + full-snapshotted
+  config sets the host default, 0 = off; `POST /sandboxes` accepts a per-sandbox
+  `hibernate_after_sec` override — >0 custom window, -1 never, 0 inherit — also on
+  restore/fanout bodies and SDK `hibernateAfterMs`). Sandboxes idle past their window
+  are paused + full-snapshotted
   (mem/state under `snapshots/hib-<id>`; the rootfs file just stays put), the VM killed,
   and the row flipped to `status=hibernated` — releasing tap/IP/port back to the pools
   (the partial unique indexes only bind `running`), so hibernated sandboxes hold no slot
@@ -252,8 +255,8 @@ scripts/              Host setup shell scripts
 ## Not done yet
 
 - **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
-- **No per-VM overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
-  template-wide. Body currently ignored.
+- **No resource overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
+  template-wide. The body only carries `timeout_sec` and `hibernate_after_sec`.
 - **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics) and
   `internal/registry` (hibernate/wake state machine) have unit tests; the rest is
   covered by the TS SDK mock-server suite + the fleet e2e suite in `tests/`.

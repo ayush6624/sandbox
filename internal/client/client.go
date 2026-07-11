@@ -56,12 +56,15 @@ func NewHTTP(addr, token string) *Client {
 type CreateOpts struct {
 	// TimeoutSec auto-destroys the sandbox after this many seconds; 0 = no expiry.
 	TimeoutSec int `json:"timeout_sec,omitempty"`
+	// HibernateAfterSec overrides the host's idle-hibernation window: >0 =
+	// freeze after this many idle seconds, -1 = never hibernate, 0 = host default.
+	HibernateAfterSec int `json:"hibernate_after_sec,omitempty"`
 }
 
 // Create asks the server to provision a new sandbox.
 func (c *Client) Create(ctx context.Context, opts CreateOpts) (registry.Sandbox, error) {
 	var body any
-	if opts.TimeoutSec > 0 {
+	if opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 {
 		body = opts
 	}
 	var sb registry.Sandbox

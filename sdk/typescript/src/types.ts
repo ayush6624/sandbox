@@ -20,6 +20,14 @@ export interface SandboxCreateOpts extends SandboxOpts {
    * `sandbox.setTimeout(ms)`.
    */
   timeoutMs?: number
+  /**
+   * Override the host's idle-hibernation window for this sandbox, in
+   * milliseconds (rounded up to whole seconds): after this long with no API
+   * activity the sandbox is frozen to disk and transparently woken by the
+   * next request (`status` reads `"hibernated"` while frozen). Pass `-1`
+   * to never hibernate. Omit to inherit the host's default.
+   */
+  hibernateAfterMs?: number
 }
 
 /** Raw sandbox object as returned by the REST API (snake_case). */
@@ -35,6 +43,7 @@ export interface ApiSandbox {
   status: string
   created_at: string
   expires_at?: string
+  hibernate_after_sec?: number
   host_addr?: string
 }
 
@@ -92,12 +101,17 @@ export interface SandboxInfo {
   rootfsPath: string
   /** Firecracker API socket path on the host. */
   socketPath: string
-  /** Sandbox status, e.g. `"running"`. */
+  /** Sandbox status: `"running"`, or `"hibernated"` (frozen to disk; the next request wakes it). */
   status: string
   /** Creation time. */
   createdAt: Date
   /** When the sandbox will be auto-destroyed; absent when it has no TTL. */
   expiresAt?: Date
+  /**
+   * Per-sandbox idle-hibernation window in seconds (-1 = never hibernate);
+   * absent when the sandbox inherits the host default.
+   */
+  hibernateAfterSec?: number
   /**
    * Address of the machine hosting this sandbox. Set when talking to a fleet
    * gateway (forwarded ports live on the host, not the gateway); absent when
@@ -188,6 +202,7 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
     createdAt: new Date(raw.created_at),
   }
   if (raw.expires_at) info.expiresAt = new Date(raw.expires_at)
+  if (raw.hibernate_after_sec) info.hibernateAfterSec = raw.hibernate_after_sec
   if (raw.host_addr) info.hostAddr = raw.host_addr
   return info
 }

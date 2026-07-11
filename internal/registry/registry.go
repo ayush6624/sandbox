@@ -39,6 +39,10 @@ type Sandbox struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	StoppedAt  *time.Time `json:"stopped_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"` // nil = no auto-destroy
+	// HibernateAfterSec overrides the host's idle-hibernation window for this
+	// sandbox: >0 = seconds of idleness before freezing, -1 = never hibernate,
+	// 0 = inherit the host config.
+	HibernateAfterSec int `json:"hibernate_after_sec,omitempty"`
 	// BaseSnapshotID is the golden snapshot this sandbox was cloned from
 	// (hot create). It makes the sandbox diff-snapshottable: a snapshot of it
 	// can be stored as a delta against that base. Empty for cold boots,
@@ -189,7 +193,8 @@ func (r *Registry) migrate() error {
 		created_at  INTEGER NOT NULL,
 		stopped_at  INTEGER,
 		expires_at  INTEGER,
-		base_snapshot_id TEXT NOT NULL DEFAULT ''
+		base_snapshot_id TEXT NOT NULL DEFAULT '',
+		hibernate_after_sec INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status = 'running';
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status = 'running';
@@ -257,6 +262,11 @@ func (r *Registry) migrate() error {
 			return err
 		}
 	}
+	// hibernate_after_sec was added with the per-sandbox hibernation override.
+	if _, err := r.db.Exec(`ALTER TABLE sandboxes ADD COLUMN hibernate_after_sec INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
 	return nil
 }
 
@@ -265,8 +275,9 @@ func (r *Registry) migrate() error {
 // once firecracker is up. A non-nil expiresAt marks the sandbox for
 // auto-destroy by the server's reaper. baseSnapshotID records the golden
 // snapshot the sandbox is cloned from ("" for cold boots and user fan-outs) —
-// it makes the sandbox diff-snapshottable.
-func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt *time.Time, baseSnapshotID string) (Sandbox, error) {
+// it makes the sandbox diff-snapshottable. hibernateAfterSec is the
+// per-sandbox idle-hibernation override (>0 seconds, -1 never, 0 host default).
+func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -292,9 +303,9 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, base_snapshot_id)
-		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), baseSnapshotID)
+		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, base_snapshot_id, hibernate_after_sec)
+		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, hibernateAfterSec)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
 	}
@@ -302,15 +313,16 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 		return Sandbox{}, err
 	}
 	return Sandbox{
-		ID:             id,
-		TapDevice:      tap,
-		GuestIP:        ip,
-		HostPort:       port,
-		RootfsPath:     rootfsPath,
-		Status:         StatusRunning,
-		CreatedAt:      now,
-		ExpiresAt:      expiresAt,
-		BaseSnapshotID: baseSnapshotID,
+		ID:                id,
+		TapDevice:         tap,
+		GuestIP:           ip,
+		HostPort:          port,
+		RootfsPath:        rootfsPath,
+		Status:            StatusRunning,
+		CreatedAt:         now,
+		ExpiresAt:         expiresAt,
+		BaseSnapshotID:    baseSnapshotID,
+		HibernateAfterSec: hibernateAfterSec,
 	}, nil
 }
 
@@ -320,7 +332,7 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 // guarantee the tap/IP aren't already taken by a running sandbox, so a restore
 // fails cleanly if the source (or a prior restore of the same snapshot) is
 // still live.
-func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip string, expiresAt *time.Time) (Sandbox, error) {
+func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip string, expiresAt *time.Time, hibernateAfterSec int) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -344,9 +356,9 @@ func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip st
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at)
-		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?)`,
-		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt))
+		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, hibernate_after_sec)
+		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), hibernateAfterSec)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert restored sandbox: %w", err)
 	}
@@ -354,14 +366,15 @@ func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip st
 		return Sandbox{}, err
 	}
 	return Sandbox{
-		ID:         id,
-		TapDevice:  tap,
-		GuestIP:    ip,
-		HostPort:   port,
-		RootfsPath: rootfsPath,
-		Status:     StatusRunning,
-		CreatedAt:  now,
-		ExpiresAt:  expiresAt,
+		ID:                id,
+		TapDevice:         tap,
+		GuestIP:           ip,
+		HostPort:          port,
+		RootfsPath:        rootfsPath,
+		Status:            StatusRunning,
+		CreatedAt:         now,
+		ExpiresAt:         expiresAt,
+		HibernateAfterSec: hibernateAfterSec,
 	}, nil
 }
 
@@ -672,7 +685,7 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 }
 
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
-const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id`
+const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec`
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -712,7 +725,7 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 	var sb Sandbox
 	var createdAt int64
 	var stoppedAt, expiresAt sql.NullInt64
-	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.HostPort, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID)
+	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.HostPort, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec)
 	if err != nil {
 		return sb, err
 	}
