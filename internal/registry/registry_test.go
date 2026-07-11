@@ -144,7 +144,7 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 		t.Fatalf("hibernate: %v", err)
 	}
 
-	sb2, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0)
+	sb2, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 
 	// Both a create and an extra-port expose must fail: the only port left in
 	// the pool belongs to the hibernated sandbox.
-	if _, err := r.Create(ctx, "sb3", "/tmp/sb3.ext4", nil, "", 0); err == nil {
+	if _, err := r.Create(ctx, "sb3", "/tmp/sb3.ext4", nil, "", 0, 0, 0); err == nil {
 		t.Fatal("create should fail with the pool's last port held by a hibernated sandbox")
 	}
 	if _, err := r.AddPort(ctx, "sb2", 8000); err == nil {
@@ -198,13 +198,13 @@ func TestMigrationDedupsCollidingHibernatedPorts(t *testing.T) {
 		t.Fatalf("open registry: %v", err)
 	}
 	ctx := context.Background()
-	if _, err := r.Create(ctx, "hib", "/tmp/hib.ext4", nil, "", 0); err != nil {
+	if _, err := r.Create(ctx, "hib", "/tmp/hib.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "hib"); err != nil {
 		t.Fatalf("hibernate: %v", err)
 	}
-	if _, err := r.Create(ctx, "run", "/tmp/run.ext4", nil, "", 0); err != nil {
+	if _, err := r.Create(ctx, "run", "/tmp/run.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// Force the pre-upgrade collision by hand: revert to the old running-only
