@@ -60,12 +60,15 @@ export class Sandbox {
    * Creates a new sandbox and waits until it is ready to use. The server
    * normally serves this from a pre-booted golden snapshot (a few hundred
    * milliseconds); it falls back to a full cold boot (~2-3 s) when no
-   * snapshot is available yet, e.g. right after a server restart.
+   * snapshot is available yet, e.g. right after a server restart — or when
+   * `vcpus`/`memMib` is set, since resource overrides can't be served from
+   * the golden snapshot (it bakes the template's resources).
    *
    * @param opts API URL/key overrides (default to the `SANDBOX_API_URL` /
    *             `SANDBOX_API_KEY` environment variables) plus an optional
-   *             `timeoutMs` after which the sandbox is auto-destroyed and an
-   *             optional `hibernateAfterMs` idle-hibernation override.
+   *             `timeoutMs` after which the sandbox is auto-destroyed, an
+   *             optional `hibernateAfterMs` idle-hibernation override, and
+   *             optional `vcpus`/`memMib` resource overrides.
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
@@ -77,6 +80,12 @@ export class Sandbox {
       // -1 is the "never hibernate" sentinel, passed through unscaled.
       body.hibernate_after_sec =
         opts.hibernateAfterMs < 0 ? -1 : Math.ceil(opts.hibernateAfterMs / 1000)
+    }
+    if (opts.vcpus !== undefined) {
+      body.vcpus = opts.vcpus
+    }
+    if (opts.memMib !== undefined) {
+      body.mem_mib = opts.memMib
     }
     const res = await client.request('POST', '/sandboxes', {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
@@ -127,6 +136,9 @@ export class Sandbox {
    * the snapshot reuses its guest IP and tap device, which would otherwise
    * collide. To run many restores of one snapshot side by side, use
    * {@link Sandbox.fanout} instead.
+   *
+   * `vcpus`/`memMib` are not sent: resources are baked into the snapshot when
+   * it is taken, so a restore always runs with the source sandbox's resources.
    *
    * @param snapshotId Id returned by {@link Sandbox#snapshot}.
    * @param opts API overrides plus an optional `timeoutMs` auto-destroy.

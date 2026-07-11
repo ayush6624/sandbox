@@ -91,6 +91,22 @@ await sbx.setTimeout(0)         // remove the timeout entirely
 
 `timeoutMs` is rounded up to whole seconds (the API speaks `timeout_sec`).
 
+### Resource overrides
+
+Sandboxes default to the host template's vCPUs and memory. Override either
+per sandbox at create time:
+
+```ts
+const big = await Sandbox.create({ vcpus: 4, memMib: 4096 })
+console.log(big.info.vcpus, big.info.memMib)  // 4 4096 (absent = template default)
+```
+
+An override forces a full cold boot (~2 s) instead of the golden-snapshot hot
+path (~250 ms): Firecracker bakes vcpus/mem into the snapshot at snapshot
+time, so an override can't be served from one. Overrides also can't be passed
+to `restore`/`fanout` — a restored sandbox always runs with the resources
+baked into its snapshot.
+
 ### Snapshots, restore, and fan-out
 
 A snapshot captures a running sandbox completely — memory, running processes,

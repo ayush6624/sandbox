@@ -28,6 +28,18 @@ export interface SandboxCreateOpts extends SandboxOpts {
    * to never hibernate. Omit to inherit the host's default.
    */
   hibernateAfterMs?: number
+  /**
+   * Number of vCPUs for this sandbox. Omit for the host template's default.
+   * Setting this (or {@link memMib}) forces a full cold boot (~2 s) instead
+   * of the golden-snapshot hot path (~250 ms) — snapshots bake vcpus/mem at
+   * snapshot time, so an override can't be served from one.
+   */
+  vcpus?: number
+  /**
+   * Guest memory in MiB for this sandbox. Omit for the host template's
+   * default. Same cold-boot cost as {@link vcpus}.
+   */
+  memMib?: number
 }
 
 /** Raw sandbox object as returned by the REST API (snake_case). */
@@ -44,6 +56,8 @@ export interface ApiSandbox {
   created_at: string
   expires_at?: string
   hibernate_after_sec?: number
+  vcpus?: number
+  mem_mib?: number
   host_addr?: string
 }
 
@@ -112,6 +126,10 @@ export interface SandboxInfo {
    * absent when the sandbox inherits the host default.
    */
   hibernateAfterSec?: number
+  /** Per-sandbox vCPU override; absent when the sandbox runs the host template's default. */
+  vcpus?: number
+  /** Per-sandbox memory override in MiB; absent when the sandbox runs the host template's default. */
+  memMib?: number
   /**
    * Address of the machine hosting this sandbox. Set when talking to a fleet
    * gateway (forwarded ports live on the host, not the gateway); absent when
@@ -203,6 +221,8 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
   }
   if (raw.expires_at) info.expiresAt = new Date(raw.expires_at)
   if (raw.hibernate_after_sec) info.hibernateAfterSec = raw.hibernate_after_sec
+  if (raw.vcpus) info.vcpus = raw.vcpus
+  if (raw.mem_mib) info.memMib = raw.mem_mib
   if (raw.host_addr) info.hostAddr = raw.host_addr
   return info
 }

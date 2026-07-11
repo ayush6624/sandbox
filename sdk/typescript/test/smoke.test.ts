@@ -33,6 +33,7 @@ const guestFiles = new Map<string, Buffer>()
 const exposedPorts = new Map<number, number>() // guest_port -> host_port
 let sandboxAlive = false
 let sandboxExpiresAt: string | undefined
+let sandboxResources: { vcpus?: number; mem_mib?: number } = {}
 let lastExecBody: Record<string, unknown> | undefined
 let lastCreateBody: Record<string, unknown> | undefined
 let lastTimeoutBody: Record<string, unknown> | undefined
@@ -43,9 +44,11 @@ let apiUrl: string
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 function currentSandboxRecord(): Record<string, unknown> {
-  return sandboxExpiresAt !== undefined
-    ? { ...sandboxRecord, expires_at: sandboxExpiresAt }
-    : { ...sandboxRecord }
+  return {
+    ...sandboxRecord,
+    ...sandboxResources,
+    ...(sandboxExpiresAt !== undefined ? { expires_at: sandboxExpiresAt } : {}),
+  }
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
@@ -80,6 +83,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       typeof lastCreateBody?.timeout_sec === 'number' && lastCreateBody.timeout_sec > 0
         ? '2026-06-10T12:05:00Z'
         : undefined
+    sandboxResources = {
+      ...(typeof lastCreateBody?.vcpus === 'number' ? { vcpus: lastCreateBody.vcpus } : {}),
+      ...(typeof lastCreateBody?.mem_mib === 'number' ? { mem_mib: lastCreateBody.mem_mib } : {}),
+    }
     sendJson(res, 201, currentSandboxRecord())
     return
   }
@@ -421,6 +428,22 @@ test('create with timeoutMs sends timeout_sec and surfaces expiresAt', async () 
   const plain = await Sandbox.create(opts())
   assert.equal(lastCreateBody, undefined)
   assert.equal(plain.info.expiresAt, undefined)
+  await plain.kill()
+})
+
+test('create with vcpus/memMib sends the resource overrides and surfaces them', async () => {
+  const sbx = await Sandbox.create({ ...opts(), vcpus: 4, memMib: 2048 })
+  assert.equal(lastCreateBody?.vcpus, 4)
+  assert.equal(lastCreateBody?.mem_mib, 2048)
+  assert.equal(sbx.info.vcpus, 4)
+  assert.equal(sbx.info.memMib, 2048)
+  await sbx.kill()
+
+  // plain create sends neither field and reports template defaults (absent)
+  const plain = await Sandbox.create(opts())
+  assert.equal(lastCreateBody, undefined)
+  assert.equal(plain.info.vcpus, undefined)
+  assert.equal(plain.info.memMib, undefined)
   await plain.kill()
 })
 
