@@ -21,12 +21,20 @@ snapshot collection routes — see [gateway differences](#gateway-differences).
 
 ### Create — `POST /sandboxes`
 
-Body (optional): `{"timeout_sec": 600}` — auto-destroy TTL in seconds; omit
-for no expiry.
+Body (optional): `{"timeout_sec": 600, "vcpus": 4, "mem_mib": 4096}`
+
+- `timeout_sec` — auto-destroy TTL in seconds; omit for no expiry.
+- `hibernate_after_sec` — idle-hibernation override (>0 custom window,
+  -1 never, 0/omit = host default).
+- `vcpus` / `mem_mib` — per-sandbox resource overrides; 0/omit = the host
+  template's defaults. Bounds-checked against the host (400 on negative,
+  more vcpus than host cores, mem below 128 MiB or above host RAM).
 
 Blocks until the sandbox's in-guest agent is healthy, so the sandbox is usable
 the moment this returns. Served from a pre-booted golden snapshot when
-available (~0.5 s), cold boot otherwise (~2-3.5 s). Give the request a
+available (~0.5 s), cold boot otherwise (~2-3.5 s). **A `vcpus`/`mem_mib`
+override always cold-boots** — Firecracker bakes resources into the golden
+snapshot, so an override can't be served from it. Give the request a
 generous client timeout (the SDK uses 90 s).
 
 ```json
@@ -157,12 +165,17 @@ snapshot exactly — same processes, same memory. Reuses the snapshot's baked
 network identity, so: the source sandbox must be dead, and at most one restore
 of a given snapshot can run at a time (`409` on conflict). Returns a Sandbox.
 
+`vcpus`/`mem_mib` are rejected with `400`: resources are baked into the
+snapshot when it is taken — a restored sandbox always runs (and reports)
+the source's resources.
+
 ### Fan-out (1:N) — `POST /snapshots/{id}/fanout`
 
 Body: `{"count": 32, "timeout_sec": 600}`. Starts N identity-neutral clones
 concurrently — each with a fresh IP/ports and copy-on-write disk. Returns
 `201 [Sandbox…]` with every clone that came up (partial success possible;
 failures are logged server-side and their resources reclaimed).
+`vcpus`/`mem_mib` are rejected with `400`, same as restore.
 
 ### List — `GET /snapshots` → `200 [Snapshot…]`
 ### Delete — `DELETE /snapshots/{id}` → `204`
@@ -186,7 +199,7 @@ The gateway fronts N hosts with the same API, plus:
 
 | Status | Meaning |
 | --- | --- |
-| 400 | malformed body (`timeout_sec < 0`, `count < 1`, bad JSON) |
+| 400 | malformed body (`timeout_sec < 0`, `count < 1`, out-of-bounds `vcpus`/`mem_mib`, resource overrides on restore/fanout, bad JSON) |
 | 401 | missing/invalid bearer token (TCP/gateway listeners only) |
 | 404 | unknown sandbox/snapshot/file |
 | 409 | restore conflict (source or a prior restore still running); snapshot of a sandbox not running on this server |

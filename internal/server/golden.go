@@ -56,8 +56,9 @@ func (s *Server) buildGolden(ctx context.Context) {
 	fmt.Fprintln(os.Stderr, "building golden snapshot (cold boot + snapshot)...")
 
 	// -1: the throwaway golden source must never be hibernated out from under
-	// the snapshot step.
-	sb, err := s.createCold(ctx, nil, -1)
+	// the snapshot step. No resource overrides — the golden snapshot always
+	// bakes the template's vcpus/mem (override creates cold-boot instead).
+	sb, err := s.createCold(ctx, nil, -1, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "golden snapshot: cold boot failed, creates stay cold: %v\n", err)
 		return

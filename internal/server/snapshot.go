@@ -128,6 +128,10 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (r
 		BaseSize:         baseSize,
 		Format:           format,
 		BaseID:           baseID,
+		// The snapshot bakes the source's vcpus/mem; record its overrides so
+		// restored/cloned rows report the resources they actually run with.
+		Vcpus:  sb.Vcpus,
+		MemMIB: sb.MemMIB,
 	}
 	if err := s.reg.CreateSnapshot(ctx, snap); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
@@ -149,21 +153,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	snapID := r.PathValue("id")
 
-	snap, err := s.ensureSnapshotLocal(ctx, snapID)
-	if err != nil {
-		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
-		return
-	}
-	// A diff snapshot's mem file holds only dirty pages; Firecracker needs the
-	// rebased full file.
-	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
-		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
-		return
-	}
-
 	var body struct {
-		TimeoutSec        int `json:"timeout_sec"`
-		HibernateAfterSec int `json:"hibernate_after_sec"`
+		TimeoutSec        int   `json:"timeout_sec"`
+		HibernateAfterSec int   `json:"hibernate_after_sec"`
+		Vcpus             int64 `json:"vcpus"`
+		MemMIB            int64 `json:"mem_mib"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -177,6 +171,23 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1"))
 		return
 	}
+	if body.Vcpus != 0 || body.MemMIB != 0 {
+		httpError(w, 400, errors.New("vcpus/mem_mib cannot be set on restore: resources are baked into the snapshot when it is taken"))
+		return
+	}
+
+	snap, err := s.ensureSnapshotLocal(ctx, snapID)
+	if err != nil {
+		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
+		return
+	}
+	// A diff snapshot's mem file holds only dirty pages; Firecracker needs the
+	// rebased full file.
+	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
+		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
+		return
+	}
+
 	var expiresAt *time.Time
 	if body.TimeoutSec > 0 {
 		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
@@ -191,7 +202,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Insert the row first: its partial unique indexes gate on the snapshot's
 	// tap + guest IP, so a restore fails cleanly (before any disk work) if the
 	// source or a prior restore is still live.
-	sb, err := s.reg.CreateRestore(ctx, id, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec)
+	sb, err := s.reg.CreateRestore(ctx, id, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	if err != nil {
 		httpError(w, 409, fmt.Errorf("registry restore: %w", err))
 		return
@@ -313,21 +324,12 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	snapID := r.PathValue("id")
 
-	snap, err := s.ensureSnapshotLocal(ctx, snapID)
-	if err != nil {
-		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
-		return
-	}
-	// Rebase a diff snapshot's mem file once; every clone loads from it.
-	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
-		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
-		return
-	}
-
 	var body struct {
-		Count             int `json:"count"`
-		TimeoutSec        int `json:"timeout_sec"`
-		HibernateAfterSec int `json:"hibernate_after_sec"`
+		Count             int   `json:"count"`
+		TimeoutSec        int   `json:"timeout_sec"`
+		HibernateAfterSec int   `json:"hibernate_after_sec"`
+		Vcpus             int64 `json:"vcpus"`
+		MemMIB            int64 `json:"mem_mib"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -345,6 +347,22 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1"))
 		return
 	}
+	if body.Vcpus != 0 || body.MemMIB != 0 {
+		httpError(w, 400, errors.New("vcpus/mem_mib cannot be set on fanout: resources are baked into the snapshot when it is taken"))
+		return
+	}
+
+	snap, err := s.ensureSnapshotLocal(ctx, snapID)
+	if err != nil {
+		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
+		return
+	}
+	// Rebase a diff snapshot's mem file once; every clone loads from it.
+	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
+		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
+		return
+	}
+
 	var expiresAt *time.Time
 	if body.TimeoutSec > 0 {
 		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
@@ -438,7 +456,8 @@ func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time, hibe
 	if snap.Golden {
 		baseID = snap.ID
 	}
-	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt, baseID, hibernateAfterSec)
+	// Clones run with the snapshot's baked vcpus/mem; the row records them.
+	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
 	}

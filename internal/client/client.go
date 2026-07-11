@@ -59,12 +59,17 @@ type CreateOpts struct {
 	// HibernateAfterSec overrides the host's idle-hibernation window: >0 =
 	// freeze after this many idle seconds, -1 = never hibernate, 0 = host default.
 	HibernateAfterSec int `json:"hibernate_after_sec,omitempty"`
+	// Vcpus/MemMIB override the host template's resources for this sandbox;
+	// 0 = template default. Any override forces a cold boot (~2 s) instead of
+	// the golden-snapshot hot path (~250 ms) — snapshots bake vcpus/mem.
+	Vcpus  int64 `json:"vcpus,omitempty"`
+	MemMIB int64 `json:"mem_mib,omitempty"`
 }
 
 // Create asks the server to provision a new sandbox.
 func (c *Client) Create(ctx context.Context, opts CreateOpts) (registry.Sandbox, error) {
 	var body any
-	if opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 {
+	if opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 || opts.Vcpus != 0 || opts.MemMIB != 0 {
 		body = opts
 	}
 	var sb registry.Sandbox

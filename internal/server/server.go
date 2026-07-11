@@ -14,6 +14,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -226,8 +229,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// The body is optional (older clients send none); tolerate EOF.
 	var body struct {
-		TimeoutSec        int `json:"timeout_sec"`
-		HibernateAfterSec int `json:"hibernate_after_sec"`
+		TimeoutSec        int   `json:"timeout_sec"`
+		HibernateAfterSec int   `json:"hibernate_after_sec"`
+		Vcpus             int64 `json:"vcpus"`
+		MemMIB            int64 `json:"mem_mib"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -241,6 +246,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1 (-1 = never, 0 = host default)"))
 		return
 	}
+	if err := validateResources(body.Vcpus, body.MemMIB); err != nil {
+		httpError(w, 400, err)
+		return
+	}
 	var expiresAt *time.Time
 	if body.TimeoutSec > 0 {
 		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
@@ -249,7 +258,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Hot path: clone the golden snapshot when one is ready. Any failure falls
 	// back to a cold boot, so a create is never worse off than before.
-	if snap := s.golden.Load(); snap != nil {
+	// Resource overrides force the cold path: the golden snapshot bakes the
+	// template's vcpus/mem at snapshot time, so a clone can't change them.
+	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
 		sb, err := s.createFromSnapshot(ctx, *snap, expiresAt, body.HibernateAfterSec)
 		if err == nil {
 			writeJSON(w, 201, sb)
@@ -258,7 +269,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
 	}
 
-	sb, err := s.createCold(ctx, expiresAt, body.HibernateAfterSec)
+	sb, err := s.createCold(ctx, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -268,8 +279,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 // createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
-// so callers can exec/write files the moment it returns.
-func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
+// so callers can exec/write files the moment it returns. vcpus/memMIB override
+// the template's resources when nonzero (already validated by the caller).
+func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
 	id := uuid.NewString()
 
 	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
@@ -277,7 +289,7 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernate
 		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
-	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt, "", hibernateAfterSec)
+	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
@@ -295,6 +307,12 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernate
 	opts.GatewayIP = s.cfg.GatewayIP
 	opts.MacAddress = randomMAC()
 	opts.SocketPath = "" // auto-generate per VM
+	if vcpus > 0 {
+		opts.Vcpus = vcpus
+	}
+	if memMIB > 0 {
+		opts.MemMIB = memMIB
+	}
 
 	m, rt, err := vm.NewMachine(s.vmCtx, opts, false)
 	if err != nil {
@@ -474,6 +492,73 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// --- resource override validation ---
+
+// minMemMIB is the smallest guest memory that reliably boots the devbox image;
+// firecracker itself accepts less, but the kernel OOMs before sandboxd is up.
+const minMemMIB = 128
+
+// fcMaxVcpus is Firecracker's hard vCPU ceiling per microVM.
+const fcMaxVcpus = 32
+
+// fallbackMemCapMIB caps mem_mib when the host's total memory can't be read
+// (non-Linux builds, tests).
+const fallbackMemCapMIB = 64 * 1024
+
+// validateResources bounds-checks per-sandbox vcpus/mem_mib overrides
+// (0 = template default, always valid).
+func validateResources(vcpus, memMIB int64) error {
+	if vcpus < 0 {
+		return errors.New("vcpus must be >= 0 (0 = template default)")
+	}
+	if memMIB < 0 {
+		return errors.New("mem_mib must be >= 0 (0 = template default)")
+	}
+	if maxV := maxVcpus(); vcpus > maxV {
+		return fmt.Errorf("vcpus %d exceeds host limit %d", vcpus, maxV)
+	}
+	if memMIB > 0 && memMIB < minMemMIB {
+		return fmt.Errorf("mem_mib %d is below the minimum bootable %d", memMIB, minMemMIB)
+	}
+	if maxM := maxMemMIB(); memMIB > maxM {
+		return fmt.Errorf("mem_mib %d exceeds host limit %d", memMIB, maxM)
+	}
+	return nil
+}
+
+// maxVcpus is the largest per-sandbox vCPU override: the host's core count,
+// capped at Firecracker's per-VM maximum.
+func maxVcpus() int64 {
+	n := int64(runtime.NumCPU())
+	if n > fcMaxVcpus {
+		return fcMaxVcpus
+	}
+	return n
+}
+
+// maxMemMIB is the largest per-sandbox mem_mib override: the host's total
+// memory (from /proc/meminfo), or a fixed cap where that's unreadable. This
+// bounds a single sandbox, not the sum — hosts can still oversubscribe.
+func maxMemMIB() int64 {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return fallbackMemCapMIB
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) >= 2 {
+			if kb, err := strconv.ParseInt(f[1], 10, 64); err == nil && kb > 0 {
+				return kb / 1024
+			}
+		}
+		break
+	}
+	return fallbackMemCapMIB
 }
 
 // randomMAC returns a locally-administered unicast MAC.

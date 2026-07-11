@@ -182,6 +182,14 @@ scripts/              Host setup shell scripts
   mtime+size; a rebuilt base (e.g. `install-agent`) invalidates it on the next server
   restart — restart `serve` after changing the base image. Opt out with
   `"disable_hot_create": true` in the config.
+- **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
+  `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
+  `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override
+  can't be served from the golden snapshot — it always takes the cold path (~2 s vs ~250 ms
+  hot). Restore/fanout bodies **reject** nonzero `vcpus`/`mem_mib` with 400 (a restored VM
+  runs whatever its snapshot baked; snapshot rows record the source's values so restored/
+  cloned rows report the truth). Hibernate/wake restores from snapshot, so overrides survive
+  automatically.
 - **Clone reidentify is signaled by gratuitous ARP.** A fan-out/hot-create clone resumes on
   an UNBRIDGED tap still carrying the snapshot's baked IP; the in-guest thaw agent adopts the
   fresh identity from MMDS then broadcasts GARPs (`cmd/sandboxd/garp_linux.go`). The host
@@ -278,7 +286,8 @@ scripts/              Host setup shell scripts
 ## Conventions
 
 - Config merging: JSON file < CLI flags. Only `--config` and `--socket` flags exist now;
-  per-VM overrides are not yet exposed in `POST /sandboxes`.
+  per-VM overrides in `POST /sandboxes` are limited to `timeout_sec`,
+  `hibernate_after_sec`, `vcpus`, and `mem_mib`.
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
 - Commits: short imperative subject lines (see `git log`). No co-author trailer.
@@ -288,13 +297,18 @@ scripts/              Host setup shell scripts
 ## Not done yet
 
 - **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
-- **No resource overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
-  template-wide. The body only carries `timeout_sec` and `hibernate_after_sec`.
+- **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
+  rootfs, etc. remain template-wide. The body carries `timeout_sec`,
+  `hibernate_after_sec`, `vcpus`, and `mem_mib`.
+- **Gateway placement is slot-based, not resource-aware.** Every sandbox costs one slot
+  regardless of its `vcpus`/`mem_mib` override, so a host can be memory-oversubscribed if
+  many large-mem sandboxes land on it. Fine while overrides are rare; revisit slot
+  accounting (weight by mem?) before making big sandboxes the norm.
 - **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics),
-  `internal/registry` (hibernate/wake state machine, hibernated-port pinning), and
-  `internal/server` (port proxy: forwarding, wake-on-connect, activity pinning) have
-  unit tests; the rest is covered by the TS SDK mock-server suite + the fleet e2e
-  suite in `tests/`.
+  `internal/registry` (hibernate/wake state machine, hibernated-port pinning, resource
+  persistence), and `internal/server` (port proxy: forwarding, wake-on-connect, activity
+  pinning; resource-override validation) have unit tests; the rest is covered by the
+  TS SDK mock-server suite + the fleet e2e suite in `tests/`.
 - **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
   the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
   transport security. Don't bind it to a public interface. The Unix socket stays auth-free

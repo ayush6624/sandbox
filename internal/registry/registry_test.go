@@ -32,7 +32,7 @@ func testRegistryWithPools(t *testing.T, pools Pools) *Registry {
 func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 
 	// The hibernated identity is free but SOFT-avoided: a new sandbox must
 	// pick different resources while the pool has other entries.
-	other, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0)
+	other, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create after hibernate should reuse the freed slot: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	// tap/IP — soft avoidance yields when the pool is exhausted.
 	squatted := false
 	for _, id := range []string{"a", "b", "c"} {
-		got, err := r.Create(ctx, id, "/tmp/"+id+".ext4", nil, "", 0)
+		got, err := r.Create(ctx, id, "/tmp/"+id+".ext4", nil, "", 0, 0, 0)
 		if err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
@@ -243,7 +243,7 @@ func TestMigrationDedupsCollidingHibernatedPorts(t *testing.T) {
 func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 60)
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 60, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
 	}
 
 	// -1 (never hibernate) round-trips too.
-	never, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", -1)
+	never, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", -1, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -271,11 +271,78 @@ func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
 	}
 }
 
+func TestResourceOverridesPersist(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 4, 2048)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if sb.Vcpus != 4 || sb.MemMIB != 2048 {
+		t.Fatalf("create should record resource overrides, got vcpus=%d mem_mib=%d", sb.Vcpus, sb.MemMIB)
+	}
+	if got, err := r.Get(ctx, "sb1"); err != nil || got.Vcpus != 4 || got.MemMIB != 2048 {
+		t.Fatalf("get after create: %v, vcpus=%d mem_mib=%d want 4/2048", err, got.Vcpus, got.MemMIB)
+	}
+
+	// The overrides survive hibernate/wake — the wake path must not fall back
+	// to template defaults (the hibernation snapshot bakes the real resources).
+	if err := r.Hibernate(ctx, "sb1"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+	woken, _, err := r.Wake(ctx, "sb1")
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if woken.Vcpus != 4 || woken.MemMIB != 2048 {
+		t.Fatalf("overrides must survive hibernate/wake, got vcpus=%d mem_mib=%d", woken.Vcpus, woken.MemMIB)
+	}
+
+	// Absent overrides read back as 0 (= template default).
+	plain, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if plain.Vcpus != 0 || plain.MemMIB != 0 {
+		t.Fatalf("no-override sandbox should report 0/0, got vcpus=%d mem_mib=%d", plain.Vcpus, plain.MemMIB)
+	}
+}
+
+func TestSnapshotRecordsSourceResources(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	// Snapshot rows carry the source's baked resources...
+	snap := Snapshot{
+		ID: "snap1", SourceID: "sb1", TapDevice: "fc0", GuestIP: "172.16.0.10",
+		MemPath: "/tmp/mem", StatePath: "/tmp/state", RootfsPath: "/tmp/rootfs.ext4",
+		CreatedAt: time.Now(), Vcpus: 4, MemMIB: 2048,
+	}
+	if err := r.CreateSnapshot(ctx, snap); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	got, err := r.GetSnapshot(ctx, "snap1")
+	if err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if got.Vcpus != 4 || got.MemMIB != 2048 {
+		t.Fatalf("snapshot must record source resources, got vcpus=%d mem_mib=%d", got.Vcpus, got.MemMIB)
+	}
+
+	// ...and a restore stamps them onto the new row.
+	sb, err := r.CreateRestore(ctx, "sb2", "/tmp/sb2.ext4", got.TapDevice, got.GuestIP, nil, 0, got.Vcpus, got.MemMIB)
+	if err != nil {
+		t.Fatalf("create restore: %v", err)
+	}
+	if sb.Vcpus != 4 || sb.MemMIB != 2048 {
+		t.Fatalf("restored row must report the snapshot's resources, got vcpus=%d mem_mib=%d", sb.Vcpus, sb.MemMIB)
+	}
+}
+
 func TestExpiredIncludesHibernated(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
 	past := time.Now().Add(-time.Minute)
-	if _, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", &past, "", 0); err != nil {
+	if _, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", &past, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "sb1"); err != nil {
@@ -293,10 +360,10 @@ func TestExpiredIncludesHibernated(t *testing.T) {
 func TestListRoutedAndListSplitStatuses(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.Create(ctx, "run1", "/tmp/r1.ext4", nil, "", 0); err != nil {
+	if _, err := r.Create(ctx, "run1", "/tmp/r1.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := r.Create(ctx, "hib1", "/tmp/h1.ext4", nil, "", 0); err != nil {
+	if _, err := r.Create(ctx, "hib1", "/tmp/h1.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "hib1"); err != nil {
