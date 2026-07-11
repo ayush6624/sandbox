@@ -18,10 +18,12 @@ const (
 	StatusRunning  = "running"
 	StatusStopping = "stopping"
 	// StatusHibernated marks an idle sandbox frozen to disk: its VM is gone and
-	// its tap/IP/port are released back to the pools (the partial unique
-	// indexes only bind status='running'), but the row, rootfs file, and
-	// hibernation snapshot survive — including across server restarts. Any
-	// agent-bound request wakes it.
+	// its tap/IP are released back to the pools (their partial unique indexes
+	// only bind status='running'), but its host port(s) stay reserved — the
+	// server keeps the userspace port-forward listeners bound so a connection
+	// can wake it (uniq_port_held covers hibernated rows too). The row, rootfs
+	// file, and hibernation snapshot survive — including across server
+	// restarts. Any agent-bound request or forwarded-port connection wakes it.
 	StatusHibernated = "hibernated"
 )
 
@@ -50,7 +52,7 @@ type Sandbox struct {
 	BaseSnapshotID string `json:"base_snapshot_id,omitempty"`
 	// HostAddr is set by the GATEWAY only (never stored): the owning host's
 	// address, so clients reach forwarded ports on the host that holds the
-	// DNAT rules rather than on the gateway.
+	// port-forward listeners rather than on the gateway.
 	HostAddr string `json:"host_addr,omitempty"`
 }
 
@@ -198,7 +200,6 @@ func (r *Registry) migrate() error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status = 'running';
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status = 'running';
-	CREATE UNIQUE INDEX IF NOT EXISTS uniq_port_running ON sandboxes(host_port)  WHERE status = 'running';
 	CREATE TABLE IF NOT EXISTS sandbox_ports (
 		sandbox_id TEXT NOT NULL,
 		guest_port INTEGER NOT NULL,
@@ -267,7 +268,95 @@ func (r *Registry) migrate() error {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
+	// Host ports moved from kernel DNAT to in-process listeners, which stay
+	// bound while a sandbox is hibernated (wake-on-connect). A hibernated
+	// sandbox therefore holds its port outright: uniq_port_held replaces the
+	// running-only uniq_port_running. Old databases may carry collisions from
+	// the soft-reservation era (a full pool let creates squat hibernated
+	// ports), so dedup before creating the stricter index.
+	if _, err := r.db.Exec(`DROP INDEX IF EXISTS uniq_port_running`); err != nil {
+		return err
+	}
+	if err := r.dedupHibernatedPorts(); err != nil {
+		return fmt.Errorf("dedup hibernated ports: %w", err)
+	}
+	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_port_held ON sandboxes(host_port) WHERE status IN ('running','hibernated')`); err != nil {
+		return err
+	}
 	return nil
+}
+
+// dedupHibernatedPorts reassigns the host_port of hibernated rows that collide
+// with another routed row's port (or an extra exposed port). Only the
+// pre-proxy scheme could produce such rows — hibernated ports were then
+// soft-reserved, and nothing listened on them, so moving one here (before any
+// listener opens) is exactly what the old wake path would have done.
+func (r *Registry) dedupHibernatedPorts() error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	seen := map[int]bool{}
+	for _, q := range []string{
+		`SELECT host_port FROM sandboxes WHERE status = 'running'`,
+		`SELECT host_port FROM sandbox_ports`,
+	} {
+		rows, err := tx.Query(q)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var port int
+			if err := rows.Scan(&port); err != nil {
+				rows.Close()
+				return err
+			}
+			seen[port] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+
+	rows, err := tx.Query(`SELECT id, host_port FROM sandboxes WHERE status = 'hibernated' ORDER BY created_at, id`)
+	if err != nil {
+		return err
+	}
+	var collided []string
+	for rows.Next() {
+		var id string
+		var port int
+		if err := rows.Scan(&id, &port); err != nil {
+			rows.Close()
+			return err
+		}
+		if seen[port] {
+			collided = append(collided, id)
+			continue
+		}
+		seen[port] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, id := range collided {
+		port, err := pickFreePort(usedResources{ports: seen}, r.pools)
+		if err != nil {
+			return fmt.Errorf("reassign port of hibernated sandbox %s: %w", id, err)
+		}
+		if _, err := tx.Exec(`UPDATE sandboxes SET host_port=? WHERE id=?`, port, id); err != nil {
+			return err
+		}
+		seen[port] = true
+	}
+	return tx.Commit()
 }
 
 // Create allocates a tap/IP/port from the pools and inserts a 'running' row
@@ -422,8 +511,10 @@ func (r *Registry) Expired(ctx context.Context, now time.Time) ([]Sandbox, error
 
 // Hibernate marks a running sandbox as hibernated. The caller has already
 // frozen the VM and released its host-side resources; from here the partial
-// unique indexes stop binding the row's tap/IP/port, so new sandboxes may
-// take them (Wake handles that with a fresh identity).
+// unique indexes stop binding the row's tap/IP, so new sandboxes may take
+// them (Wake handles that with a fresh identity). The host port stays bound —
+// uniq_port_held covers hibernated rows, because the server keeps the
+// wake-on-connect listener on it.
 func (r *Registry) Hibernate(ctx context.Context, id string) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE sandboxes SET status=?, stopped_at=?, pid=0, vm_id='', socket_path='' WHERE id=? AND status=?`,
@@ -442,8 +533,9 @@ func (r *Registry) Hibernate(ctx context.Context, id string) error {
 // when possible. Returns sameIdentity=true when the old tap AND guest IP were
 // still free (the caller can plain-restore the snapshot, whose memory has that
 // identity baked in); otherwise fresh ones are allocated and the caller must
-// go through the reidentifying clone path. The host port is kept when free and
-// reallocated independently otherwise — the guest never sees it.
+// go through the reidentifying clone path. The host port is always kept: it
+// stays hard-reserved throughout hibernation (the wake-on-connect listener
+// never let go of it).
 func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -469,11 +561,6 @@ func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 			return Sandbox{}, false, err
 		}
 		if sb.GuestIP, err = pickFreeIP(used, r.pools); err != nil {
-			return Sandbox{}, false, err
-		}
-	}
-	if used.ports[sb.HostPort] {
-		if sb.HostPort, err = pickFreePort(used, r.pools); err != nil {
 			return Sandbox{}, false, err
 		}
 	}
@@ -765,14 +852,14 @@ type usedResources struct {
 	taps  map[string]bool
 	ips   map[string]bool
 	ports map[int]bool
-	// soft* hold the identities of HIBERNATED sandboxes. They're free to take
-	// (the frozen VM isn't using them), but the pickers avoid them while other
-	// pool entries remain, so a wake almost always finds its old tap/IP/port
-	// unclaimed and can restore the same identity (keeping its port stable and
-	// skipping the reidentify dance).
-	softTaps  map[string]bool
-	softIPs   map[string]bool
-	softPorts map[int]bool
+	// soft* hold the tap/IP of HIBERNATED sandboxes. They're free to take (the
+	// frozen VM isn't using them), but the pickers avoid them while other pool
+	// entries remain, so a wake almost always finds its old tap/IP unclaimed
+	// and can restore the same identity (skipping the reidentify dance). Host
+	// ports have no soft tier: a hibernated sandbox's ports are HARD-used —
+	// the server keeps its wake-on-connect listeners bound to them.
+	softTaps map[string]bool
+	softIPs  map[string]bool
 }
 
 func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
@@ -781,9 +868,8 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 		ips:   map[string]bool{},
 		ports: map[int]bool{},
 
-		softTaps:  map[string]bool{},
-		softIPs:   map[string]bool{},
-		softPorts: map[int]bool{},
+		softTaps: map[string]bool{},
+		softIPs:  map[string]bool{},
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT tap_device, guest_ip, host_port, status FROM sandboxes WHERE status IN (?, ?)`,
@@ -801,7 +887,7 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 		if status == StatusHibernated {
 			u.softTaps[tap] = true
 			u.softIPs[ip] = true
-			u.softPorts[port] = true
+			u.ports[port] = true
 			continue
 		}
 		u.taps[tap] = true
@@ -828,10 +914,11 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 	return u, extra.Err()
 }
 
-// The pickers scan their pool twice: first skipping identities parked by
-// hibernated sandboxes (soft), then — only when the pool is otherwise
-// exhausted — allowing them. Hibernated identities are legitimately free;
-// avoiding them just keeps same-identity wakes cheap.
+// The tap/IP pickers scan their pool twice: first skipping identities parked
+// by hibernated sandboxes (soft), then — only when the pool is otherwise
+// exhausted — allowing them. Hibernated taps/IPs are legitimately free;
+// avoiding them just keeps same-identity wakes cheap. Ports have no such
+// second pass — hibernated ports are hard-used (listener still bound).
 
 func pickFreeTap(used usedResources, p Pools) (string, error) {
 	for _, avoidSoft := range []bool{true, false} {
@@ -866,11 +953,9 @@ func pickFreeIP(used usedResources, p Pools) (string, error) {
 }
 
 func pickFreePort(used usedResources, p Pools) (int, error) {
-	for _, avoidSoft := range []bool{true, false} {
-		for port := p.PortMin; port <= p.PortMax; port++ {
-			if !used.ports[port] && !(avoidSoft && used.softPorts[port]) {
-				return port, nil
-			}
+	for port := p.PortMin; port <= p.PortMax; port++ {
+		if !used.ports[port] {
+			return port, nil
 		}
 	}
 	return 0, errors.New("port pool exhausted")

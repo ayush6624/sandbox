@@ -9,7 +9,7 @@ import (
 
 func testRegistry(t *testing.T) *Registry {
 	t.Helper()
-	r, err := Open(filepath.Join(t.TempDir(), "registry.db"), Pools{
+	return testRegistryWithPools(t, Pools{
 		TapPrefix:  "fc",
 		TapMax:     3,
 		GuestIPMin: "172.16.0.10",
@@ -17,6 +17,11 @@ func testRegistry(t *testing.T) *Registry {
 		PortMin:    5200,
 		PortMax:    5202,
 	})
+}
+
+func testRegistryWithPools(t *testing.T, pools Pools) *Registry {
+	t.Helper()
+	r, err := Open(filepath.Join(t.TempDir(), "registry.db"), pools)
 	if err != nil {
 		t.Fatalf("open registry: %v", err)
 	}
@@ -62,7 +67,17 @@ func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 }
 
 func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
-	r, ctx := testRegistry(t), context.Background()
+	// One extra port vs taps/IPs: the hibernated sandbox's port stays
+	// hard-reserved, so filling every tap needs a port pool one bigger.
+	r := testRegistryWithPools(t, Pools{
+		TapPrefix:  "fc",
+		TapMax:     3,
+		GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.12",
+		PortMin:    5200,
+		PortMax:    5203,
+	})
+	ctx := context.Background()
 
 	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
 	if err != nil {
@@ -72,8 +87,8 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 		t.Fatalf("hibernate: %v", err)
 	}
 
-	// Fill the whole pool (3 slots): the last create is forced onto the
-	// hibernated identity — soft avoidance yields when the pool is exhausted.
+	// Fill every tap slot: the last create is forced onto the hibernated
+	// tap/IP — soft avoidance yields when the pool is exhausted.
 	squatted := false
 	for _, id := range []string{"a", "b", "c"} {
 		got, err := r.Create(ctx, id, "/tmp/"+id+".ext4", nil, "", 0)
@@ -83,17 +98,21 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 		if got.TapDevice == sb.TapDevice {
 			squatted = true
 		}
+		if got.HostPort == sb.HostPort {
+			t.Fatalf("create %s squatted the hibernated HOST PORT %d — ports must stay hard-reserved", id, sb.HostPort)
+		}
 	}
 	if !squatted {
 		t.Fatal("filling the pool should have forced a create onto the hibernated tap")
 	}
 
-	// No capacity at all → wake must fail (host is full).
+	// No tap capacity at all → wake must fail (host is full).
 	if _, _, err := r.Wake(ctx, "sb1"); err == nil {
 		t.Fatal("wake with an exhausted pool should fail")
 	}
 
-	// Free one slot; wake must succeed with a FRESH identity.
+	// Free one slot; wake must succeed with a FRESH tap/IP but the SAME host
+	// port — the wake-on-connect listener never let go of it.
 	if err := r.Destroy(ctx, "a"); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -104,8 +123,120 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	if same {
 		t.Fatal("wake should report a fresh identity when the old tap/IP are taken")
 	}
+	if woken.HostPort != sb.HostPort {
+		t.Fatalf("wake must keep the hard-reserved host port: got %d want %d", woken.HostPort, sb.HostPort)
+	}
 	if woken.Status != StatusRunning {
 		t.Fatalf("woken sandbox should be running: %+v", woken)
+	}
+}
+
+func TestHibernatedPortStaysReserved(t *testing.T) {
+	// 2 ports but 3 taps/IPs: port exhaustion hits first, proving hibernated
+	// ports are excluded from the pool outright (not just soft-avoided).
+	r := testRegistryWithPools(t, Pools{
+		TapPrefix:  "fc",
+		TapMax:     3,
+		GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.12",
+		PortMin:    5200,
+		PortMax:    5201,
+	})
+	ctx := context.Background()
+
+	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := r.Hibernate(ctx, "sb1"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+
+	sb2, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if sb2.HostPort == sb.HostPort {
+		t.Fatalf("sb2 took the hibernated sandbox's port %d", sb.HostPort)
+	}
+
+	// Both a create and an extra-port expose must fail: the only port left in
+	// the pool belongs to the hibernated sandbox.
+	if _, err := r.Create(ctx, "sb3", "/tmp/sb3.ext4", nil, "", 0); err == nil {
+		t.Fatal("create should fail with the pool's last port held by a hibernated sandbox")
+	}
+	if _, err := r.AddPort(ctx, "sb2", 8000); err == nil {
+		t.Fatal("AddPort should fail with the pool's last port held by a hibernated sandbox")
+	}
+
+	// Wake keeps the reserved port even with sb2 running alongside.
+	woken, _, err := r.Wake(ctx, "sb1")
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if woken.HostPort != sb.HostPort {
+		t.Fatalf("wake changed the host port: got %d want %d", woken.HostPort, sb.HostPort)
+	}
+}
+
+func TestMigrationDedupsCollidingHibernatedPorts(t *testing.T) {
+	// Simulate a pre-proxy database: a hibernated row sharing its host port
+	// with a running row (soft reservation allowed that under pool pressure).
+	// Reopening the registry must move the hibernated row to a free port so
+	// the strict uniq_port_held index can be created.
+	dir := t.TempDir()
+	pools := Pools{
+		TapPrefix:  "fc",
+		TapMax:     3,
+		GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.12",
+		PortMin:    5200,
+		PortMax:    5202,
+	}
+	r, err := Open(filepath.Join(dir, "registry.db"), pools)
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "hib", "/tmp/hib.ext4", nil, "", 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := r.Hibernate(ctx, "hib"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+	if _, err := r.Create(ctx, "run", "/tmp/run.ext4", nil, "", 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Force the pre-upgrade collision by hand: revert to the old running-only
+	// index (uniq_port_held would refuse the duplicate), then collide.
+	if _, err := r.db.Exec(`DROP INDEX uniq_port_held`); err != nil {
+		t.Fatalf("drop index: %v", err)
+	}
+	if _, err := r.db.Exec(`UPDATE sandboxes SET host_port=(SELECT host_port FROM sandboxes WHERE id='run') WHERE id='hib'`); err != nil {
+		t.Fatalf("inject collision: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r2, err := Open(filepath.Join(dir, "registry.db"), pools)
+	if err != nil {
+		t.Fatalf("reopen after collision must dedup, got: %v", err)
+	}
+	defer r2.Close()
+	hib, err := r2.Get(ctx, "hib")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	run, err := r2.Get(ctx, "run")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if hib.HostPort == run.HostPort {
+		t.Fatalf("migration left the port collision in place: both on %d", hib.HostPort)
+	}
+	if hib.HostPort < pools.PortMin || hib.HostPort > pools.PortMax {
+		t.Fatalf("dedup picked a port outside the pool: %d", hib.HostPort)
 	}
 }
 
