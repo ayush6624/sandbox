@@ -105,5 +105,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now nomad-server sandbox-gateway prometheus nomad-autoscaler
+systemctl enable nomad-server sandbox-gateway prometheus nomad-autoscaler
+# restart (not enable --now): a redeploy must pick up new binaries/config on
+# already-running services. Gateway routes rebuild from heartbeats in <=5s.
+systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler
 echo ">> control-install done"
