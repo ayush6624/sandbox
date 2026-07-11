@@ -18,14 +18,22 @@ var agentClient = &http.Client{}
 
 // handleAgentProxy forwards a request to the sandbox's in-guest agent,
 // rewriting /sandboxes/{id}/<endpoint> to http://guestIP:agentPort/<endpoint>.
+// A hibernated sandbox is woken first, so callers never see the freeze; the
+// begin/done pair marks the sandbox busy (and its idle clock reset) for the
+// whole request, including long-running exec streams.
 func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		sb, err := s.reg.Get(r.Context(), id)
+		sb, err := s.ensureRunning(r.Context(), id)
 		if err != nil {
-			httpError(w, 404, err)
+			httpError(w, statusFor(err), err)
 			return
 		}
+		// Track only ids that exist, or bogus-id requests would leak tracker
+		// entries. The unpinned gap between ensureRunning and begin is a few
+		// µs — the same freeze-vs-request race the reaper already tolerates.
+		done := s.act.begin(id)
+		defer done()
 
 		url := fmt.Sprintf("http://%s:%d/%s", sb.GuestIP, agentapi.Port, endpoint)
 		if r.URL.RawQuery != "" {
@@ -68,11 +76,15 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 func (s *Server) handleShellProxy() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		sb, err := s.reg.Get(r.Context(), id)
+		sb, err := s.ensureRunning(r.Context(), id)
 		if err != nil {
-			httpError(w, 404, err)
+			httpError(w, statusFor(err), err)
 			return
 		}
+		// An open shell pins the sandbox running for its whole lifetime —
+		// ServeHTTP returns when the WebSocket closes.
+		done := s.act.begin(id)
+		defer done()
 		target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", sb.GuestIP, agentapi.Port)}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		// NewSingleHostReverseProxy joins paths; rewrite to the agent's /shell

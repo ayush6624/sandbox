@@ -46,6 +46,12 @@ type Config struct {
 	// pristine booted sandbox and serves POST /sandboxes by cloning it (fan-out
 	// mechanism), falling back to cold boot. Set true to always cold-boot.
 	DisableHotCreate bool `json:"disable_hot_create"`
+	// HibernateAfterSec freezes a sandbox idle this many seconds to disk
+	// (memory snapshot + kill), releasing its slot/tap/IP/port; the next
+	// exec/files/shell request wakes it transparently (~1-2 s). Only API
+	// activity counts — traffic on forwarded host ports does not reset the
+	// idle clock, nor does it wake a hibernated sandbox. 0 disables.
+	HibernateAfterSec int `json:"hibernate_after_sec"`
 
 	// --- Resource pools ---
 	Pools registry.Pools `json:"pools"`

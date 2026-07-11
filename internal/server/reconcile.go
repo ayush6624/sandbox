@@ -7,6 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // reconcile cleans up state left behind by a previous server run. The server
@@ -21,6 +23,13 @@ func (s *Server) reconcile(ctx context.Context) {
 		return
 	}
 	for _, sb := range rows {
+		// Hibernated sandboxes are the one kind of row that legitimately
+		// outlives a server run: no VM, no tap, no DNAT — just the rootfs
+		// file and the hibernation snapshot, both of which must survive so
+		// the sandbox stays wakeable after the restart.
+		if sb.Status == registry.StatusHibernated {
+			continue
+		}
 		if isFirecrackerProc(sb.PID) {
 			killWithGrace(sb.PID, 5*time.Second)
 		}
@@ -35,6 +44,8 @@ func (s *Server) reconcile(ctx context.Context) {
 		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
+		// A crash mid-hibernate can leave artifacts behind a still-'running' row.
+		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(sb.ID))
 		if err := s.reg.Destroy(ctx, sb.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "reconcile: destroy row %s: %v\n", sb.ID, err)
 			continue

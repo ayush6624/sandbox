@@ -26,11 +26,15 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	sb, err := s.reg.Get(ctx, id)
+	// Exposing a port installs DNAT against the live guest IP, so a
+	// hibernated sandbox must wake first.
+	sb, err := s.ensureRunning(ctx, id)
 	if err != nil {
-		httpError(w, 404, err)
+		httpError(w, statusFor(err), err)
 		return
 	}
+	done := s.act.begin(id)
+	defer done()
 
 	// The primary guest port is always forwarded at create time.
 	if body.GuestPort == s.cfg.Provisioner.Network.GuestPort {

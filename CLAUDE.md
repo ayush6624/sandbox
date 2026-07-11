@@ -34,6 +34,7 @@ sudo ./sandbox doctor --config configs/devbox.json   # env validation
 sudo ./sandbox up                                    # POST /sandboxes → prints JSON + URL
 sudo ./sandbox list                                  # GET /sandboxes
 sudo ./sandbox down <id>                             # DELETE /sandboxes/<id>
+sudo ./sandbox hibernate <id>                        # freeze an idle sandbox to disk (next exec wakes it)
 sudo ./sandbox exec <id> -- "node --version"         # run a command in the guest
 sudo ./sandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest
 sudo ./sandbox read <id> /path                       # file out of the guest → stdout
@@ -127,7 +128,8 @@ internal/server/
   server.go           http.ServeMux on Unix socket; owns map[id]*vm.Machine; vmCtx lifetime
   proxy.go            Reverse-proxy to sandboxd (incl. /shell WebSocket via httputil) + waitForAgent readiness poll
   heartbeat.go        When --gateway is set, periodically registers this host with the gateway
-  reconcile.go        Startup cleanup of stale rows/taps/rootfs/orphan firecrackers
+  reconcile.go        Startup cleanup of stale rows/taps/rootfs/orphan firecrackers (skips hibernated)
+  hibernate.go        Idle hibernation: activity tracking, freeze-to-disk reaper, wake-on-access
   snapshot.go         Snapshot/restore/fan-out handlers (pause+snapshot, 1:1 restore, N clones)
   golden.go           Golden snapshot: built at startup, POST /sandboxes clones it (hot create)
 internal/registry/registry.go     SQLite-backed registry; resource allocation (tap/IP/port from pools)
@@ -155,8 +157,11 @@ scripts/              Host setup shell scripts
   and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, sandbox_ids}` to
   the gateway every 5 s. The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
   its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
-  each host reports. `POST /sandboxes` places on the least-loaded live host (flip to bin-pack
-  for Phase-2 autoscaling); id-scoped requests (incl. `/exec/stream` + `/shell`) are
+  each host reports. `POST /sandboxes` bin-packs onto the fullest live host with free slots
+  (reserve-at-pick so concurrent creates see each other); when no slot is free the create
+  waits in a bounded queue (`--queue-wait`/`--queue-max`; depth exported as
+  `sandbox_create_queue_depth` and fed into the autoscaler signal) before 503ing with
+  Retry-After. Id-scoped requests (incl. `/exec/stream` + `/shell`) are
   reverse-proxied to the owning host with the host's token injected; `GET /sandboxes`
   scatter-gathers. Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The
   whole roadmap (incl. Phase-2 elastic/Nomad) is in `~/.claude/plans/i-know-the-agent-abundant-starfish.md`.
@@ -198,8 +203,22 @@ scripts/              Host setup shell scripts
   socket with reason `exit:<code>`; client disconnect kills the shell's process group. See
   the protocol doc-comment in `agentapi`.
 - **TTL reaper.** `POST /sandboxes` accepts optional `{"timeout_sec":N}`; a 10 s ticker
-  goroutine in `Serve` destroys rows whose `expires_at` passed. `POST .../timeout`
-  resets (0 clears). No default TTL — absent means live forever.
+  goroutine in `Serve` destroys rows whose `expires_at` passed (running AND hibernated).
+  `POST .../timeout` resets (0 clears). No default TTL — absent means live forever.
+- **Idle hibernation** (`internal/server/hibernate.go`; `"hibernate_after_sec"` in the
+  config, 0 = off). Sandboxes idle past the window are paused + full-snapshotted
+  (mem/state under `snapshots/hib-<id>`; the rootfs file just stays put), the VM killed,
+  and the row flipped to `status=hibernated` — releasing tap/IP/port back to the pools
+  (the partial unique indexes only bind `running`), so hibernated sandboxes hold no slot
+  and survive server restarts (reconcile skips them). Any agent-bound request
+  (exec/files/dir/shell/expose) wakes transparently via `ensureRunning`: same-identity
+  plain restore when the old tap+IP are free — the common case, because the pool pickers
+  soft-avoid hibernated identities — else the fan-out clone path (fresh identity, MMDS
+  reidentify with a fresh Gen, GARP). Manual trigger: `POST .../hibernate` /
+  `sandbox hibernate <id>`. Activity = API traffic only; in-flight requests (open
+  shells, exec streams) pin the sandbox running. **Forwarded-port traffic does NOT
+  reset the idle clock or wake** — the DNAT path bypasses the server. Heartbeats
+  report hibernated ids for routing but exclude them from `slots_used`.
 - **Extra port mappings** live in the `sandbox_ports` table and draw host ports from the
   same pool as primary ports (`loadUsed` reads both tables). destroy() and reconcile()
   must remove their DNAT rules — read mappings before deleting rows.
@@ -235,7 +254,9 @@ scripts/              Host setup shell scripts
 - **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
 - **No per-VM overrides on `POST /sandboxes`.** Vcpus, mem, kernel args, etc. are
   template-wide. Body currently ignored.
-- **No tests on the Go side.** Zero `_test.go` files (the TS SDK has a mock-server suite).
+- **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics) and
+  `internal/registry` (hibernate/wake state machine) have unit tests; the rest is
+  covered by the TS SDK mock-server suite + the fleet e2e suite in `tests/`.
 - **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
   the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
   transport security. Don't bind it to a public interface. The Unix socket stays auth-free

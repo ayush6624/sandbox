@@ -35,6 +35,10 @@ type Config struct {
 	GatewayIP   string        // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
 	HotCreate   bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
+	// HibernateAfter freezes sandboxes idle this long to disk (snapshot +
+	// kill), releasing their slot; any agent-bound request wakes them.
+	// 0 disables idle hibernation. See hibernate.go.
+	HibernateAfter time.Duration
 	// SnapshotBucket enables GCS snapshot durability: user snapshots upload
 	// in the background and restore/fanout pull missing snapshots down from
 	// the bucket, so any host can serve them. Empty = host-local only.
@@ -70,10 +74,17 @@ type Server struct {
 	// pullMu/pulls serialize concurrent GCS pulls of the same snapshot id.
 	pullMu sync.Mutex
 	pulls  map[string]*sync.Mutex
+
+	// act tracks per-sandbox API activity for idle hibernation; wakesMu/wakes
+	// serialize hibernate/wake/destroy per sandbox id.
+	act     *activityTracker
+	wakesMu sync.Mutex
+	wakes   map[string]*sync.Mutex
 }
 
 func New(cfg Config, reg *registry.Registry) *Server {
-	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{}}
+	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
+		act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
 	if cfg.SnapshotBucket != "" {
 		s.blob = gcsblob.New(cfg.SnapshotBucket)
 		fmt.Fprintf(os.Stderr, "snapshot durability on: gs://%s\n", cfg.SnapshotBucket)
@@ -94,6 +105,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.cfg.GatewayURL != "" {
 		go s.heartbeat(ctx)
+	}
+	if s.cfg.HibernateAfter > 0 {
+		go s.hibernateLoop(ctx)
+		fmt.Fprintf(os.Stderr, "idle hibernation on: sandboxes freeze after %s idle\n", s.cfg.HibernateAfter)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o755); err != nil {
@@ -122,6 +137,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes/{id}/dir", s.handleAgentProxy("dir"))
 	mux.HandleFunc("GET /sandboxes/{id}/shell", s.handleShellProxy())
 	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.handleSnapshot)
+	mux.HandleFunc("POST /sandboxes/{id}/hibernate", s.handleHibernate)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
 	mux.HandleFunc("POST /snapshots/{id}/fanout", s.handleFanout)
@@ -294,6 +310,7 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time) (registry
 	}
 
 	s.machines.Store(id, m)
+	s.act.touch(id)
 
 	// Watch for early death so we don't silently leak rows.
 	go func(id string) {
@@ -313,7 +330,9 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time) (registry
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	sandboxes, err := s.reg.List(r.Context())
+	// Running AND hibernated — a hibernated sandbox is still addressable
+	// (its next exec wakes it), so hiding it from list would be a lie.
+	sandboxes, err := s.reg.ListRouted(r.Context())
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -358,11 +377,26 @@ func (s *Server) rollbackPreVM(id string, sb registry.Sandbox) {
 }
 
 // destroy is the inverse of handleCreate: graceful guest shutdown, then resource cleanup.
+// The per-id wake lock serializes it against a concurrent hibernate/wake of
+// the same sandbox.
 func (s *Server) destroy(ctx context.Context, id string) error {
+	mu := s.wakeLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+	defer s.act.forget(id)
+
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return fmt.Errorf("get sandbox: %w", err)
 	}
+
+	// A hibernated sandbox has no VM, tap, or DNAT — just artifacts and rows.
+	if sb.Status == registry.StatusHibernated {
+		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
+		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
+		return s.reg.Destroy(ctx, id)
+	}
+
 	// Read extra port mappings before reg.Destroy deletes their rows.
 	ports, err := s.reg.Ports(ctx, id)
 	if err != nil {
@@ -397,6 +431,15 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 }
 
 // --- helpers ---
+
+// statusFor maps an ensureRunning error onto an HTTP status: unknown sandbox
+// → 404, anything else (a failed wake) → 500.
+func statusFor(err error) int {
+	if errors.Is(err, sql.ErrNoRows) {
+		return 404
+	}
+	return 500
+}
 
 func httpError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")

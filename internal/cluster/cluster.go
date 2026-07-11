@@ -25,7 +25,12 @@ type Heartbeat struct {
 	// SlotsTotal is the host's sandbox capacity (min of its tap/IP/port pools).
 	SlotsTotal int `json:"slots_total"`
 	// SlotsUsed is the number of running sandboxes on the host right now.
+	// Hibernated sandboxes don't count — their resources are released.
 	SlotsUsed int `json:"slots_used"`
+	// Hibernated is the number of idle sandboxes frozen to disk on this host.
+	// They appear in SandboxIDs (requests must route here to wake them) but
+	// consume no slots.
+	Hibernated int `json:"hibernated,omitempty"`
 	// SandboxIDs are the IDs of the running sandboxes the host owns. The
 	// gateway derives its routing table from these.
 	SandboxIDs []string `json:"sandbox_ids"`

@@ -24,10 +24,11 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		total, used int
 	}
 	var (
-		liveHosts               int
-		totalSlots, usedSlots   int
-		routes                  int
-		perHost                 []hostMetric
+		liveHosts             int
+		totalSlots, usedSlots int
+		hibernated            int
+		routes                int
+		perHost               []hostMetric
 	)
 
 	g.mu.RLock()
@@ -38,6 +39,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		liveHosts++
 		totalSlots += h.slotsTotal
 		usedSlots += h.slotsUsed
+		hibernated += h.hibernated
 		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed})
 	}
 	routes = len(g.route)
@@ -58,6 +60,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_slots_used", "Used sandbox slots across live hosts.", usedSlots)
 	gauge("sandbox_slots_free", "Free sandbox slots across live hosts.", freeSlots)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
+	gauge("sandbox_hibernated", "Idle sandboxes frozen to disk across live hosts (hold no slot).", hibernated)
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -105,6 +106,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		GatewayIP:      cfg.GatewayIP,
 		VMTemplate:     tmpl,
 		HotCreate:      !cfg.DisableHotCreate,
+		HibernateAfter: time.Duration(cfg.HibernateAfterSec) * time.Second,
 		SnapshotBucket: cfg.SnapshotBucket,
 		GatewayURL:     cfg.GatewayURL,
 		GatewayToken:   cfg.GatewayToken,

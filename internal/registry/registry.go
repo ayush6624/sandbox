@@ -17,6 +17,12 @@ import (
 const (
 	StatusRunning  = "running"
 	StatusStopping = "stopping"
+	// StatusHibernated marks an idle sandbox frozen to disk: its VM is gone and
+	// its tap/IP/port are released back to the pools (the partial unique
+	// indexes only bind status='running'), but the row, rootfs file, and
+	// hibernation snapshot survive — including across server restarts. Any
+	// agent-bound request wakes it.
+	StatusHibernated = "hibernated"
 )
 
 // Sandbox represents a row in the sandboxes table.
@@ -271,15 +277,15 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 	if err != nil {
 		return Sandbox{}, err
 	}
-	tap, err := pickFreeTap(used.taps, r.pools)
+	tap, err := pickFreeTap(used, r.pools)
 	if err != nil {
 		return Sandbox{}, err
 	}
-	ip, err := pickFreeIP(used.ips, r.pools)
+	ip, err := pickFreeIP(used, r.pools)
 	if err != nil {
 		return Sandbox{}, err
 	}
-	port, err := pickFreePort(used.ports, r.pools)
+	port, err := pickFreePort(used, r.pools)
 	if err != nil {
 		return Sandbox{}, err
 	}
@@ -331,7 +337,7 @@ func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip st
 	if used.ips[ip] {
 		return Sandbox{}, fmt.Errorf("guest IP %s in use (source sandbox still running?)", ip)
 	}
-	port, err := pickFreePort(used.ports, r.pools)
+	port, err := pickFreePort(used, r.pools)
 	if err != nil {
 		return Sandbox{}, err
 	}
@@ -387,11 +393,97 @@ func (r *Registry) SetExpiry(ctx context.Context, id string, t *time.Time) error
 	return nil
 }
 
-// Expired returns running sandboxes whose expires_at has passed.
+// Expired returns running or hibernated sandboxes whose expires_at has passed
+// (a hibernated sandbox's TTL keeps counting — it's frozen, not immortal).
 func (r *Registry) Expired(ctx context.Context, now time.Time) ([]Sandbox, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes
-		 WHERE status=? AND expires_at IS NOT NULL AND expires_at < ?`, StatusRunning, now.Unix())
+		 WHERE status IN (?, ?) AND expires_at IS NOT NULL AND expires_at < ?`,
+		StatusRunning, StatusHibernated, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectSandboxes(rows)
+}
+
+// Hibernate marks a running sandbox as hibernated. The caller has already
+// frozen the VM and released its host-side resources; from here the partial
+// unique indexes stop binding the row's tap/IP/port, so new sandboxes may
+// take them (Wake handles that with a fresh identity).
+func (r *Registry) Hibernate(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE sandboxes SET status=?, stopped_at=?, pid=0, vm_id='', socket_path='' WHERE id=? AND status=?`,
+		StatusHibernated, time.Now().Unix(), id, StatusRunning)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("sandbox %s not running", id)
+	}
+	return nil
+}
+
+// Wake flips a hibernated sandbox back to running, reusing its old identity
+// when possible. Returns sameIdentity=true when the old tap AND guest IP were
+// still free (the caller can plain-restore the snapshot, whose memory has that
+// identity baked in); otherwise fresh ones are allocated and the caller must
+// go through the reidentifying clone path. The host port is kept when free and
+// reallocated independently otherwise — the guest never sees it.
+func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Sandbox{}, false, err
+	}
+	defer tx.Rollback()
+
+	sb, err := scanSandbox(tx.QueryRowContext(ctx, `SELECT `+sandboxCols+` FROM sandboxes WHERE id=?`, id))
+	if err != nil {
+		return Sandbox{}, false, err
+	}
+	if sb.Status != StatusHibernated {
+		return Sandbox{}, false, fmt.Errorf("sandbox %s is %s, not hibernated", id, sb.Status)
+	}
+
+	used, err := loadUsed(ctx, tx)
+	if err != nil {
+		return Sandbox{}, false, err
+	}
+	same := !used.taps[sb.TapDevice] && !used.ips[sb.GuestIP]
+	if !same {
+		if sb.TapDevice, err = pickFreeTap(used, r.pools); err != nil {
+			return Sandbox{}, false, err
+		}
+		if sb.GuestIP, err = pickFreeIP(used, r.pools); err != nil {
+			return Sandbox{}, false, err
+		}
+	}
+	if used.ports[sb.HostPort] {
+		if sb.HostPort, err = pickFreePort(used, r.pools); err != nil {
+			return Sandbox{}, false, err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sandboxes SET status=?, stopped_at=NULL, tap_device=?, guest_ip=?, host_port=? WHERE id=?`,
+		StatusRunning, sb.TapDevice, sb.GuestIP, sb.HostPort, id); err != nil {
+		return Sandbox{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Sandbox{}, false, err
+	}
+	sb.Status = StatusRunning
+	sb.StoppedAt = nil
+	return sb, same, nil
+}
+
+// ListRouted returns the sandboxes this host must answer for: running and
+// hibernated (a hibernated sandbox is still addressable — a request wakes it).
+func (r *Registry) ListRouted(ctx context.Context) ([]Sandbox, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?) ORDER BY created_at DESC`,
+		StatusRunning, StatusHibernated)
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +544,7 @@ func (r *Registry) AddPort(ctx context.Context, id string, guestPort int) (int, 
 	if err != nil {
 		return 0, err
 	}
-	port, err := pickFreePort(used.ports, r.pools)
+	port, err := pickFreePort(used, r.pools)
 	if err != nil {
 		return 0, err
 	}
@@ -660,6 +752,14 @@ type usedResources struct {
 	taps  map[string]bool
 	ips   map[string]bool
 	ports map[int]bool
+	// soft* hold the identities of HIBERNATED sandboxes. They're free to take
+	// (the frozen VM isn't using them), but the pickers avoid them while other
+	// pool entries remain, so a wake almost always finds its old tap/IP/port
+	// unclaimed and can restore the same identity (keeping its port stable and
+	// skipping the reidentify dance).
+	softTaps  map[string]bool
+	softIPs   map[string]bool
+	softPorts map[int]bool
 }
 
 func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
@@ -667,18 +767,29 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 		taps:  map[string]bool{},
 		ips:   map[string]bool{},
 		ports: map[int]bool{},
+
+		softTaps:  map[string]bool{},
+		softIPs:   map[string]bool{},
+		softPorts: map[int]bool{},
 	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT tap_device, guest_ip, host_port FROM sandboxes WHERE status=?`, StatusRunning)
+		`SELECT tap_device, guest_ip, host_port, status FROM sandboxes WHERE status IN (?, ?)`,
+		StatusRunning, StatusHibernated)
 	if err != nil {
 		return u, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var tap, ip string
+		var tap, ip, status string
 		var port int
-		if err := rows.Scan(&tap, &ip, &port); err != nil {
+		if err := rows.Scan(&tap, &ip, &port, &status); err != nil {
 			return u, err
+		}
+		if status == StatusHibernated {
+			u.softTaps[tap] = true
+			u.softIPs[ip] = true
+			u.softPorts[port] = true
+			continue
 		}
 		u.taps[tap] = true
 		u.ips[ip] = true
@@ -704,17 +815,24 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 	return u, extra.Err()
 }
 
-func pickFreeTap(used map[string]bool, p Pools) (string, error) {
-	for i := 0; i < p.TapMax; i++ {
-		name := fmt.Sprintf("%s%d", p.TapPrefix, i)
-		if !used[name] {
-			return name, nil
+// The pickers scan their pool twice: first skipping identities parked by
+// hibernated sandboxes (soft), then — only when the pool is otherwise
+// exhausted — allowing them. Hibernated identities are legitimately free;
+// avoiding them just keeps same-identity wakes cheap.
+
+func pickFreeTap(used usedResources, p Pools) (string, error) {
+	for _, avoidSoft := range []bool{true, false} {
+		for i := 0; i < p.TapMax; i++ {
+			name := fmt.Sprintf("%s%d", p.TapPrefix, i)
+			if !used.taps[name] && !(avoidSoft && used.softTaps[name]) {
+				return name, nil
+			}
 		}
 	}
 	return "", errors.New("tap pool exhausted")
 }
 
-func pickFreeIP(used map[string]bool, p Pools) (string, error) {
+func pickFreeIP(used usedResources, p Pools) (string, error) {
 	minIP, err := ipToUint32(p.GuestIPMin)
 	if err != nil {
 		return "", err
@@ -723,19 +841,23 @@ func pickFreeIP(used map[string]bool, p Pools) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for n := minIP; n <= maxIP; n++ {
-		s := uint32ToIP(n)
-		if !used[s] {
-			return s, nil
+	for _, avoidSoft := range []bool{true, false} {
+		for n := minIP; n <= maxIP; n++ {
+			s := uint32ToIP(n)
+			if !used.ips[s] && !(avoidSoft && used.softIPs[s]) {
+				return s, nil
+			}
 		}
 	}
 	return "", errors.New("ip pool exhausted")
 }
 
-func pickFreePort(used map[int]bool, p Pools) (int, error) {
-	for port := p.PortMin; port <= p.PortMax; port++ {
-		if !used[port] {
-			return port, nil
+func pickFreePort(used usedResources, p Pools) (int, error) {
+	for _, avoidSoft := range []bool{true, false} {
+		for port := p.PortMin; port <= p.PortMax; port++ {
+			if !used.ports[port] && !(avoidSoft && used.softPorts[port]) {
+				return port, nil
+			}
 		}
 	}
 	return 0, errors.New("port pool exhausted")

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/cluster"
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // heartbeatInterval is how often the host re-registers with the gateway. The
@@ -50,14 +51,23 @@ func (s *Server) heartbeat(ctx context.Context) {
 }
 
 func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, hostID, advertise string) {
-	running, err := s.reg.List(ctx)
+	// Routed = running + hibernated: the gateway must route requests for a
+	// hibernated sandbox here so this host can wake it. Only running ones
+	// consume slots.
+	routed, err := s.reg.ListRouted(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "heartbeat: list sandboxes: %v\n", err)
 		return
 	}
-	ids := make([]string, len(running))
-	for i, sb := range running {
+	ids := make([]string, len(routed))
+	runningCount, hibernated := 0, 0
+	for i, sb := range routed {
 		ids[i] = sb.ID
+		if sb.Status == registry.StatusHibernated {
+			hibernated++
+		} else {
+			runningCount++
+		}
 	}
 	var snapIDs []string
 	if snaps, err := s.reg.ListSnapshots(ctx); err == nil {
@@ -74,7 +84,8 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		Addr:        advertise,
 		Token:       s.cfg.APIToken,
 		SlotsTotal:  s.reg.Pools().Slots(),
-		SlotsUsed:   len(running),
+		SlotsUsed:   runningCount,
+		Hibernated:  hibernated,
 		SandboxIDs:  ids,
 		SnapshotIDs: snapIDs,
 	}

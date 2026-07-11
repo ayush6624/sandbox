@@ -14,6 +14,7 @@
   "kernel_args":     "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0",
   "vcpus":           2,
   "mem_mib":         1024,
+  "hibernate_after_sec": 300,
   "pools": {
     "TapPrefix":  "fc",
     "TapMax":     24,

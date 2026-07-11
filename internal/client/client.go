@@ -94,6 +94,16 @@ func (c *Client) Destroy(ctx context.Context, id string) error {
 	return c.do(ctx, "DELETE", "/sandboxes/"+id, nil, nil)
 }
 
+// Hibernate freezes a running sandbox to disk (memory snapshot + kill),
+// releasing its slot. The next exec/files/shell request wakes it.
+func (c *Client) Hibernate(ctx context.Context, id string) (registry.Sandbox, error) {
+	var sb registry.Sandbox
+	if err := c.do(ctx, "POST", "/sandboxes/"+id+"/hibernate", nil, &sb); err != nil {
+		return registry.Sandbox{}, err
+	}
+	return sb, nil
+}
+
 // Exec runs a shell command inside the sandbox via the guest agent.
 func (c *Client) Exec(ctx context.Context, id string, req agentapi.ExecRequest) (agentapi.ExecResult, error) {
 	var res agentapi.ExecResult

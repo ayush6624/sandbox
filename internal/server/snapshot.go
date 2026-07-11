@@ -249,6 +249,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.machines.Store(id, m)
+	s.act.touch(id)
 	go func(id string) {
 		err := vm.Wait(context.Background(), m)
 		fmt.Fprintf(os.Stderr, "[%s] restored VM exited: %v\n", id, err)
@@ -504,6 +505,7 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		return fmt.Errorf("finish start: %w", err)
 	}
 	s.machines.Store(sb.ID, m)
+	s.act.touch(sb.ID)
 	go func(id string) {
 		_ = vm.Wait(context.Background(), m)
 		fmt.Fprintf(os.Stderr, "[%s] clone VM exited\n", id)

@@ -42,6 +42,7 @@ type host struct {
 	token      string // bearer presented when dialing addr
 	slotsTotal int
 	slotsUsed  int // running sandboxes, from the last heartbeat
+	hibernated int // idle sandboxes frozen to disk on the host (hold no slot)
 	// reserved counts creates dispatched to this host but not yet completed.
 	// Without it, a burst of concurrent creates all read the same stale
 	// slotsUsed (heartbeats lag by seconds) and pile onto one bin-pack target
@@ -158,6 +159,7 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.token = hb.Token
 	h.slotsTotal = hb.SlotsTotal
 	h.slotsUsed = hb.SlotsUsed
+	h.hibernated = hb.Hibernated
 	h.lastSeen = time.Now()
 	// Rebuild this host's routes: drop stale entries, add current ones.
 	for sid, hid := range g.route {
@@ -465,6 +467,7 @@ func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 		Addr       string `json:"addr"`
 		SlotsTotal int    `json:"slots_total"`
 		SlotsUsed  int    `json:"slots_used"`
+		Hibernated int    `json:"hibernated"`
 		Free       int    `json:"free"`
 		Alive      bool   `json:"alive"`
 		LastSeenMS int64  `json:"last_seen_ms_ago"`
@@ -474,7 +477,7 @@ func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 	for _, h := range g.hosts {
 		views = append(views, hostView{
 			ID: h.id, Addr: h.addr, SlotsTotal: h.slotsTotal, SlotsUsed: h.slotsUsed,
-			Free: h.free(), Alive: time.Since(h.lastSeen) <= g.ttl,
+			Hibernated: h.hibernated, Free: h.free(), Alive: time.Since(h.lastSeen) <= g.ttl,
 			LastSeenMS: time.Since(h.lastSeen).Milliseconds(),
 		})
 	}
