@@ -364,6 +364,9 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
 		return fmt.Errorf("agent never ready after wake: %w", err)
 	}
+	// Deterministic clock step before the woken sandbox serves its first
+	// request (the MMDS push above is polled and can lag readiness by a tick).
+	syncGuestClock(ctx, sb.GuestIP)
 	return nil
 }
 

@@ -78,6 +78,16 @@ type ShellControl struct {
 	Rows uint16 `json:"rows,omitempty"` // terminal height in rows
 }
 
+// ClockSyncRequest asks the agent to step the guest's CLOCK_REALTIME to the
+// host's wall clock (POST /clock). A snapshot-restored guest resumes with its
+// clock frozen at snapshot-creation time — hours stale for golden-snapshot hot
+// creates — and NTP is not a reliable fallback (some deployments block
+// outbound UDP). The host calls this right after the readiness gate on every
+// resume path; sub-second accuracy is all that's needed.
+type ClockSyncRequest struct {
+	UnixNano int64 `json:"unix_nano"` // host CLOCK_REALTIME, Unix nanoseconds
+}
+
 // DirEntry is one row of a directory listing.
 type DirEntry struct {
 	Name  string    `json:"name"`

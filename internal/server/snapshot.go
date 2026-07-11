@@ -275,6 +275,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Errorf("restored but agent never became ready: %w", err))
 		return
 	}
+	// Deterministic clock step before the sandbox is handed out (the MMDS
+	// push above is polled and can lag the readiness gate by a tick).
+	syncGuestClock(ctx, sb.GuestIP)
 	agentMS := time.Since(tAgent).Milliseconds()
 	fmt.Fprintf(os.Stderr, "[%s] restored from %s: rootfs_cp=%dms load+resume=%dms agent_ready=%dms\n",
 		id, snapID, rootfsMS, loadMS, agentMS)
@@ -523,6 +526,10 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
 		return fmt.Errorf("agent never ready on %s: %w", sb.GuestIP, err)
 	}
+	// Deterministic clock step before the clone is handed out — covers hot
+	// creates, fan-out, and clone-path wakes (StartClone's MMDS epoch_ms is
+	// polled and can lag the readiness gate by a tick).
+	syncGuestClock(ctx, sb.GuestIP)
 	return nil
 }
 

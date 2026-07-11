@@ -40,6 +40,7 @@ func main() {
 	mux.HandleFunc("PUT /files", handleWriteFile)
 	mux.HandleFunc("GET /dir", handleListDir)
 	mux.HandleFunc("GET /shell", handleShell)
+	mux.HandleFunc("POST /clock", handleClock)
 
 	// Reidentify eth0 from MMDS after a fan-out clone resume (no-op otherwise).
 	go runThawAgent()
@@ -49,6 +50,29 @@ func main() {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// handleClock steps the guest's wall clock to the host-provided time. A
+// snapshot-restored guest resumes with CLOCK_REALTIME frozen at snapshot
+// time; the host calls this after every resume as the deterministic
+// complement to the MMDS epoch_ms poll (see thaw.go), which can lag a poll
+// tick behind the /health readiness gate.
+func handleClock(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.ClockSyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if req.UnixNano <= 0 {
+		httpError(w, 400, errors.New("unix_nano must be > 0"))
+		return
+	}
+	if err := setClockRealtime(req.UnixNano); err != nil {
+		httpError(w, 500, fmt.Errorf("clock_settime: %w", err))
+		return
+	}
+	log.Printf("clock: stepped to unix_nano=%d", req.UnixNano)
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 

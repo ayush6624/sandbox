@@ -1,12 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
@@ -114,6 +118,39 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 		fw.f.Flush()
 	}
 	return n, err
+}
+
+// syncGuestClock steps the guest's wall clock to the host's via the agent's
+// POST /clock. Every snapshot resume (hot create, fan-out, 1:1 restore,
+// hibernation wake) leaves the guest's CLOCK_REALTIME frozen at
+// snapshot-creation time. The MMDS epoch_ms push covers this too, but the
+// thaw agent polls MMDS on a 200ms tick that can lag the /health readiness
+// gate — this call, made after waitForAgent, makes the step deterministic
+// before the sandbox is handed out. Best-effort by design: an old baked agent
+// without /clock answers 404 (log, never fail the resume — the MMDS poll
+// still steps agents new enough to know epoch_ms).
+func syncGuestClock(ctx context.Context, guestIP string) {
+	body, _ := json.Marshal(agentapi.ClockSyncRequest{UnixNano: time.Now().UnixNano()})
+	url := fmt.Sprintf("http://%s:%d/clock", guestIP, agentapi.Port)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clock sync %s: %v\n", guestIP, err)
+		return
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		fmt.Fprintf(os.Stderr, "clock sync %s: agent has no /clock (old sandboxd — re-run install-agent)\n", guestIP)
+	case resp.StatusCode >= 400:
+		msg, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "clock sync %s: HTTP %d: %s\n", guestIP, resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
 }
 
 // waitForAgent polls the guest agent's /health until it responds or the

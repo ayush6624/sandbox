@@ -78,11 +78,7 @@ func applyClock(epochMS string) error {
 	if err != nil {
 		return fmt.Errorf("bad epoch_ms %q: %w", epochMS, err)
 	}
-	arg := fmt.Sprintf("@%d.%03d", ms/1000, ms%1000)
-	if out, err := exec.Command("date", "-u", "-s", arg).CombinedOutput(); err != nil {
-		return fmt.Errorf("date -s %s: %w: %s", arg, err, out)
-	}
-	return nil
+	return setClockRealtime(ms * int64(time.Millisecond))
 }
 
 // fetchIdentity reads the clone identity from MMDS (V2: token, then JSON GET).

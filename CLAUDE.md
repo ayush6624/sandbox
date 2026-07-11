@@ -118,7 +118,7 @@ cmd/sandbox/
   stopserver.go        Finds `sandbox serve` PIDs via /proc, SIGTERM/SIGKILL
   doctor.go            Colored env checks (Linux, KVM, firecracker, kernel, rootfs, bridge, ip_fwd, API socket)
   helpers.go           Shared cfg/socket flags and Client constructor
-cmd/sandboxd/main.go   In-guest agent: /health, /exec, /files (GET/PUT), /dir, /shell (PTY WebSocket) on :8090
+cmd/sandboxd/main.go   In-guest agent: /health, /exec, /files (GET/PUT), /dir, /shell (PTY WebSocket), /clock on :8090
 internal/agentapi/agentapi.go     Shared host↔guest protocol types + port constant
 internal/config/config.go         JSON config + Defaults(); DisallowUnknownFields
 internal/client/client.go         HTTP client: New(socket) for the local socket, NewHTTP(addr,token) for TCP+bearer (gateway/host)
@@ -183,6 +183,16 @@ scripts/              Host setup shell scripts
   moment the announce arrives (~200-400ms); timeout after 1.5 s falls back to bridging anyway
   (matches snapshots whose baked agent predates the announce). New sandboxd must be baked via
   `install-agent` for the fast path.
+- **Guest wall clock is stepped on every snapshot resume.** Firecracker restore leaves the
+  guest's CLOCK_REALTIME frozen at snapshot-creation time (hours stale for golden-snapshot
+  hot creates on a long-lived server), and NTP is NOT a fallback (some deployments block
+  outbound UDP). Two host→guest signals cover all four resume paths (hot create, fan-out,
+  1:1 restore, hibernation wake — both same-identity and clone-path): `epoch_ms` in MMDS
+  (StartClone identity doc; `vm.PushEpoch` on restore/wake), which the thaw agent polls on
+  a 200ms tick, plus a deterministic `POST /clock` (`agentapi.ClockSyncRequest` →
+  clock_settime in the guest) fired by `syncGuestClock` right after each path's readiness
+  gate, so a sandbox is never handed out with a stale clock. Old baked agents 404 the
+  /clock call — logged, never fatal. Re-run `install-agent` to bake the new sandboxd.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
