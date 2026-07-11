@@ -48,7 +48,7 @@ suspect the network path first and re-run before blaming the fleet.
 | `lifecycle` | create/connect/list/kill, error mapping (404/401), TTL reaper, `setTimeout` extend + clear |
 | `exec` | exit codes, `CommandExitError`, envs/cwd, unicode, timeout → process-group kill, backgrounding, 2 MiB output cap, streaming parity with buffered exec, 50 sequential execs |
 | `files` | text/binary/8 MiB round-trips (sha256-verified host- and guest-side), parent-dir creation, listing, overwrites, `NotFoundError`, 20 concurrent writes |
-| `ports` | reaching guest servers from outside via `getHost`, `exposePort` end-to-end + idempotency, `listPorts`, cross-sandbox isolation, DNAT teardown on kill |
+| `ports` | reaching guest servers from outside via `getHost`, `exposePort` end-to-end + idempotency, `listPorts`, cross-sandbox isolation, forward teardown on kill, wake-on-connect for hibernated sandboxes |
 | `concurrency` | burst creates (unique ids/IPs/ports, placement spread, all usable), 16 parallel execs on one agent, mixed parallel API load, create-during-kill overlap |
 | `churn` | sequential + batched create→exec→kill cycles, immediate reuse, **leak check: fleet returns to baseline count** |
 | `load` | N sandboxes running a verified CPU+disk workload concurrently, memory pressure, many-small-files disk churn |

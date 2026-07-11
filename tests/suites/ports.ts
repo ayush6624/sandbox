@@ -6,7 +6,7 @@
 
 import { SuiteDef, assert, assertEq, assertThrows, eventually } from '../harness.js'
 import type { Ctx } from '../harness.js'
-import type { Sandbox } from '../../sdk/typescript/src/index.js'
+import { Sandbox } from '../../sdk/typescript/src/index.js'
 
 export const suite = new SuiteDef('ports')
 
@@ -121,9 +121,36 @@ suite.test('killed sandbox stops answering on its forwarded port', async (ctx) =
         await fetchText(`http://${host}/gone`)
         return false // still answering
       } catch {
-        return true // connection refused / timed out — DNAT removed
+        return true // connection refused / timed out — listener closed
       }
     },
     { timeoutMs: 10_000, what: 'forwarded port to stop answering after kill' }
   )
+})
+
+suite.test('connecting to a forwarded port wakes a hibernated sandbox', async (ctx) => {
+  const sbx = await ctx.createTracked()
+  await startServer(sbx, 3000)
+  const host = sbx.getHost(3000)
+  await eventually(() => fetchText(`http://${host}/pre-freeze`), {
+    timeoutMs: 15_000,
+    what: 'guest server up before hibernating',
+  })
+
+  await sbx.hibernate()
+  const frozen = (await Sandbox.list()).find((s) => s.sandboxId === sbx.sandboxId)
+  assertEq(frozen?.status, 'hibernated', 'sandbox must be frozen before the connect')
+
+  // Plain TCP to the forwarded port — no API call — must wake it: the
+  // userspace proxy holds the listener through hibernation, wakes on accept,
+  // and dials the guest's (possibly new) IP. Generous timeout: the wake
+  // happens inline, inside this request.
+  const res = await fetch(`http://${host}/wake-on-connect`, {
+    signal: AbortSignal.timeout(60_000),
+  })
+  assert(res.ok, `GET through hibernated port responded ${res.status}`)
+  assertEq(await res.text(), 'pong:3000:/wake-on-connect', 'guest server must answer post-wake')
+
+  const woken = (await Sandbox.list()).find((s) => s.sandboxId === sbx.sandboxId)
+  assertEq(woken?.status, 'running', 'forwarded-port traffic must have woken the sandbox')
 })
