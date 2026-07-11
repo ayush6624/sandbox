@@ -27,8 +27,9 @@ import { suite as churn } from './suites/churn.js'
 import { suite as load } from './suites/load.js'
 import { suite as snapshots } from './suites/snapshots.js'
 import { suite as hibernate } from './suites/hibernate.js'
+import { suite as clock } from './suites/clock.js'
 
-const ALL: SuiteDef[] = [lifecycle, exec, files, ports, concurrency, churn, load, snapshots, hibernate]
+const ALL: SuiteDef[] = [lifecycle, exec, files, ports, concurrency, churn, load, snapshots, hibernate, clock]
 
 async function main(): Promise<void> {
   requireEnv('SANDBOX_API_URL')

@@ -53,6 +53,7 @@ suspect the network path first and re-run before blaming the fleet.
 | `churn` | sequential + batched create→exec→kill cycles, immediate reuse, **leak check: fleet returns to baseline count** |
 | `load` | N sandboxes running a verified CPU+disk workload concurrently, memory pressure, many-small-files disk churn |
 | `snapshots` | snapshot → restore (disk **and** live memory state resume), fanout N (shared state, isolated writes, unique identities), list/delete housekeeping — *skipped unless `SANDBOX_HOST_URL`/`SANDBOX_HOST_KEY` are set* |
+| `clock` | guest wall clock matches host time on hot create (golden snapshot may be hours old) and after hibernate + wake |
 
 ## Sizing knobs
 
