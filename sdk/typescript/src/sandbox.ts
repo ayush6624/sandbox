@@ -283,6 +283,21 @@ export class Sandbox {
   }
 
   /**
+   * Freezes this sandbox to disk immediately (memory snapshot, VM torn down),
+   * releasing its slot on the host — the explicit version of what the idle
+   * reaper does after the hibernation window. While frozen, `status` reads
+   * `"hibernated"`; the next command/file/shell request wakes it
+   * transparently, with all processes resuming where they stopped.
+   */
+  async hibernate(): Promise<void> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/hibernate`, {
+      timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+    })
+    const raw = (await res.json()) as ApiSandbox
+    this.info.status = raw.status
+  }
+
+  /**
    * Destroys this sandbox and releases its resources on the host.
    */
   async kill(): Promise<void> {

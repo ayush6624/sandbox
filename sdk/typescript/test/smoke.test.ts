@@ -106,6 +106,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
 
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/hibernate`) {
+    sendJson(res, 200, { ...currentSandboxRecord(), status: 'hibernated' })
+    return
+  }
+
   if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
     const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
     const guestPort = body.guest_port
@@ -417,6 +422,24 @@ test('create with timeoutMs sends timeout_sec and surfaces expiresAt', async () 
   assert.equal(lastCreateBody, undefined)
   assert.equal(plain.info.expiresAt, undefined)
   await plain.kill()
+})
+
+test('create with hibernateAfterMs sends hibernate_after_sec; -1 passes through unscaled', async () => {
+  const sbx = await Sandbox.create({ ...opts(), hibernateAfterMs: 90_500 })
+  assert.equal(lastCreateBody?.hibernate_after_sec, 91) // ceil(90.5)
+  await sbx.kill()
+
+  const never = await Sandbox.create({ ...opts(), hibernateAfterMs: -1 })
+  assert.equal(lastCreateBody?.hibernate_after_sec, -1)
+  await never.kill()
+})
+
+test('hibernate() posts to the hibernate endpoint and updates status', async () => {
+  const sbx = await Sandbox.create(opts())
+  assert.equal(sbx.info.status, 'running')
+  await sbx.hibernate()
+  assert.equal(sbx.info.status, 'hibernated')
+  await sbx.kill()
 })
 
 test('setTimeout posts ceil(ms/1000) and updates expiresAt', async () => {
