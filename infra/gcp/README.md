@@ -64,6 +64,11 @@ SANDBOX_API_URL=http://<control-tailnet-ip>:9090 SANDBOX_API_KEY=<gateway-token>
 make -C ../.. gcs-release && ./deploy-job.sh   # new sha rolls the system job fleet-wide
 ```
 
+That rolls the WORKERS only. If the change touches the gateway — including
+adding fields to `client.CreateOpts` (the gateway re-encodes create bodies
+through it, so an old gateway silently drops new fields) — also run
+`./control.sh deploy` to update the control plane.
+
 **Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` (bounds + cost guardrail),
 `SLOTS_PER_HOST` (must match `configs/devbox-gcp.json` pools), `HEADROOM_SLOTS`
 (free slots kept ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must
