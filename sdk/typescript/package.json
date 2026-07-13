@@ -36,7 +36,7 @@
     "bench": "tsx benchmarks/run-bench.ts",
     "bench:restore": "tsx benchmarks/restore-bench.ts",
     "bench:fanout": "tsx benchmarks/fanout-bench.ts",
-    "test": "tsx --test test/smoke.test.ts"
+    "test": "tsx --test test/smoke.test.ts test/pty.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

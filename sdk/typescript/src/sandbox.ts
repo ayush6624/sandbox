@@ -2,11 +2,14 @@ import { ApiClient, CREATE_REQUEST_TIMEOUT_MS } from './client.js'
 import { Commands } from './commands.js'
 import { SandboxError } from './errors.js'
 import { Files } from './files.js'
-import { toSandboxInfo, toSnapshotInfo } from './types.js'
+import { Pty } from './pty.js'
+import { toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
 import type {
+  ApiHostInfo,
   ApiPortMapping,
   ApiSandbox,
   ApiSnapshot,
+  HostInfo,
   PortMapping,
   SandboxCreateOpts,
   SandboxInfo,
@@ -40,6 +43,8 @@ export class Sandbox {
   readonly commands: Commands
   /** Read, write, and list files inside the sandbox. */
   readonly files: Files
+  /** Interactive PTY shells inside the sandbox (WebSocket-backed). */
+  readonly pty: Pty
   /** Static info captured when the sandbox handle was created. */
   readonly info: SandboxInfo
 
@@ -53,6 +58,7 @@ export class Sandbox {
     this.sandboxId = info.sandboxId
     this.commands = new Commands(client, info.sandboxId)
     this.files = new Files(client, info.sandboxId)
+    this.pty = new Pty(client, info.sandboxId)
     this.portCache.set(PRIMARY_GUEST_PORT, info.hostPort)
   }
 
@@ -105,6 +111,19 @@ export class Sandbox {
     const res = await client.request('GET', `/sandboxes/${sandboxId}`)
     const raw = (await res.json()) as ApiSandbox
     return new Sandbox(client, toSandboxInfo(raw))
+  }
+
+  /**
+   * Returns the host's template defaults and per-sandbox override limits:
+   * the vCPUs/memory a sandbox runs with when created without overrides, the
+   * accepted override bounds, and behavior flags. Against a fleet gateway the
+   * answer comes from one live host (hosts share a template config).
+   */
+  static async hostInfo(opts: SandboxOpts = {}): Promise<HostInfo> {
+    const client = new ApiClient(opts)
+    const res = await client.request('GET', '/info')
+    const raw = (await res.json()) as ApiHostInfo
+    return toHostInfo(raw)
   }
 
   /**

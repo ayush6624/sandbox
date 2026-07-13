@@ -58,6 +58,22 @@ export class ApiClient {
   }
 
   /**
+   * Builds an authenticated WebSocket URL for an API path. The token rides
+   * as `?access_token=` because the WebSocket API (browsers, and Node's
+   * built-in client) cannot set request headers; the server accepts it on
+   * upgrade requests only.
+   */
+  wsUrl(path: string, query: Record<string, string> = {}): string {
+    const url = new URL(this.baseUrl + path)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    for (const [k, v] of Object.entries(query)) {
+      url.searchParams.set(k, v)
+    }
+    url.searchParams.set('access_token', this.apiKey)
+    return url.toString()
+  }
+
+  /**
    * Performs an authenticated request against the API and returns the raw
    * `Response`. Non-2xx responses are mapped to SDK error classes
    * ({@link AuthenticationError}, {@link NotFoundError}, {@link SandboxError});

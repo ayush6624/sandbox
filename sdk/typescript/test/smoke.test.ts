@@ -15,6 +15,11 @@ import {
 const API_KEY = 'test-key'
 const SANDBOX_ID = '0f5e3a1c-1111-2222-3333-444455556666'
 
+// The server always reports effective resources: the template defaults
+// (2 vCPUs / 1024 MiB here) unless the create carried an override.
+const TEMPLATE_VCPUS = 2
+const TEMPLATE_MEM_MIB = 1024
+
 const sandboxRecord = {
   id: SANDBOX_ID,
   pid: 4242,
@@ -26,6 +31,19 @@ const sandboxRecord = {
   rootfs_path: '/opt/fc/instances/test.ext4',
   status: 'running',
   created_at: '2026-06-10T12:00:00Z',
+  vcpus: TEMPLATE_VCPUS,
+  mem_mib: TEMPLATE_MEM_MIB,
+}
+
+const hostInfoRecord = {
+  default_vcpus: TEMPLATE_VCPUS,
+  default_mem_mib: TEMPLATE_MEM_MIB,
+  max_vcpus: 32,
+  max_mem_mib: 64_512,
+  guest_port: 3000,
+  hot_create: true,
+  hibernate_after_sec: 90,
+  host_id: 'testvm-1',
 }
 
 // In-memory fake API state
@@ -88,6 +106,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       ...(typeof lastCreateBody?.mem_mib === 'number' ? { mem_mib: lastCreateBody.mem_mib } : {}),
     }
     sendJson(res, 201, currentSandboxRecord())
+    return
+  }
+
+  if (req.method === 'GET' && path === '/info') {
+    sendJson(res, 200, hostInfoRecord)
     return
   }
 
@@ -439,12 +462,27 @@ test('create with vcpus/memMib sends the resource overrides and surfaces them', 
   assert.equal(sbx.info.memMib, 2048)
   await sbx.kill()
 
-  // plain create sends neither field and reports template defaults (absent)
+  // plain create sends neither field; the server reports the effective
+  // (template-default) resources, and the SDK surfaces them as-is.
   const plain = await Sandbox.create(opts())
   assert.equal(lastCreateBody, undefined)
-  assert.equal(plain.info.vcpus, undefined)
-  assert.equal(plain.info.memMib, undefined)
+  assert.equal(plain.info.vcpus, TEMPLATE_VCPUS)
+  assert.equal(plain.info.memMib, TEMPLATE_MEM_MIB)
   await plain.kill()
+})
+
+test('hostInfo maps the /info payload to camelCase', async () => {
+  const info = await Sandbox.hostInfo(opts())
+  assert.deepEqual(info, {
+    defaultVcpus: TEMPLATE_VCPUS,
+    defaultMemMib: TEMPLATE_MEM_MIB,
+    maxVcpus: 32,
+    maxMemMib: 64_512,
+    guestPort: 3000,
+    hotCreate: true,
+    hibernateAfterSec: 90,
+    hostId: 'testvm-1',
+  })
 })
 
 test('create with hibernateAfterMs sends hibernate_after_sec; -1 passes through unscaled', async () => {

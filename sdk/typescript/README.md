@@ -112,7 +112,18 @@ per sandbox at create time:
 
 ```ts
 const big = await Sandbox.create({ vcpus: 4, memMib: 4096 })
-console.log(big.info.vcpus, big.info.memMib)  // 4 4096 (absent = template default)
+console.log(big.info.vcpus, big.info.memMib)  // 4 4096
+```
+
+`info.vcpus` / `info.memMib` always report the **effective** resources: with
+no override, the server fills in the template defaults (e.g. `2 1024`), so a
+dashboard never has to guess. The defaults and the accepted override bounds
+are queryable:
+
+```ts
+const host = await Sandbox.hostInfo()
+console.log(host.defaultVcpus, host.defaultMemMib)  // 2 1024
+console.log(host.maxVcpus, host.maxMemMib)          // e.g. 16 64312
 ```
 
 An override forces a full cold boot (~2 s) instead of the golden-snapshot hot
@@ -120,6 +131,29 @@ path (~250 ms): Firecracker bakes vcpus/mem into the snapshot at snapshot
 time, so an override can't be served from one. Overrides also can't be passed
 to `restore`/`fanout` — a restored sandbox always runs with the resources
 baked into its snapshot.
+
+### Interactive PTY
+
+`sandbox.pty` opens a real login shell (`bash -l` on a pty) over the shell
+WebSocket — the same protocol the CLI's `sandbox shell <id>` speaks:
+
+```ts
+const pty = await sbx.pty.create({
+  cols: 120,
+  rows: 30,
+  onData: (data) => process.stdout.write(data),   // raw terminal bytes
+})
+pty.sendInput('ls -la\n')
+pty.resize({ cols: 200, rows: 50 })
+pty.sendInput('exit\n')
+console.log('exit code:', await pty.exited)       // or pty.kill() to end it
+```
+
+Requires a global `WebSocket` (Node 22+, or any browser). Auth and routing
+failures reject with the same typed errors as the REST API — the server
+delivers them as WebSocket close codes (`4401` bad key →
+`AuthenticationError`, `4404` unknown sandbox → `NotFoundError`) instead of
+an opaque `1006`. Connecting to a hibernated sandbox wakes it transparently.
 
 ### Snapshots, restore, and fan-out
 
@@ -196,9 +230,10 @@ All errors extend `SandboxError`:
 | `CommandExitError` / `TimeoutError` | same names and semantics |
 | `sbx.betaPause()` / resume | `sbx.snapshot()` + `Sandbox.restore(snapshotId)` — full memory+disk capture |
 | — | `Sandbox.fanout(snapshotId, n)` — N live clones of one snapshot |
+| `sbx.pty.create({ onData, cols, rows })` | `sbx.pty.create({ onData, cols, rows, cwd })` — `sendInput` / `resize` / `kill` / `await pty.exited` |
+| `sbx.getInfo()` template resources | `sbx.info.vcpus` / `sbx.info.memMib` (always the effective values) + `Sandbox.hostInfo()` for defaults/limits |
 
 Not supported (yet): background commands (`commands.run(..., { background: true })`),
-PTYs from the SDK (`sandbox shell <id>` in the CLI covers interactive use),
 `files.watchDir`, and sandbox metadata/templates.
 
 ## Scripts

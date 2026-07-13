@@ -56,9 +56,47 @@ export interface ApiSandbox {
   created_at: string
   expires_at?: string
   hibernate_after_sec?: number
+  /**
+   * Effective vCPU count — current servers always send it (the template
+   * default is filled in when no override was set). Absent only with older
+   * servers that omitted unset overrides.
+   */
   vcpus?: number
+  /** Effective guest memory in MiB; same presence rules as {@link vcpus}. */
   mem_mib?: number
   host_addr?: string
+}
+
+/** Raw host info as returned by `GET /info` (snake_case). */
+export interface ApiHostInfo {
+  default_vcpus: number
+  default_mem_mib: number
+  max_vcpus: number
+  max_mem_mib: number
+  guest_port: number
+  hot_create: boolean
+  hibernate_after_sec: number
+  host_id?: string
+}
+
+/** Host template defaults and limits, as returned by {@link Sandbox.hostInfo}. */
+export interface HostInfo {
+  /** vCPUs a sandbox runs with when created without a `vcpus` override. */
+  defaultVcpus: number
+  /** Guest memory in MiB when created without a `memMib` override. */
+  defaultMemMib: number
+  /** Largest accepted per-sandbox `vcpus` override. */
+  maxVcpus: number
+  /** Largest accepted per-sandbox `memMib` override. */
+  maxMemMib: number
+  /** The primary in-guest port forwarded to a host port at create time. */
+  guestPort: number
+  /** Whether creates are served from a pre-booted golden snapshot. */
+  hotCreate: boolean
+  /** Host default idle-hibernation window in seconds (0 = disabled). */
+  hibernateAfterSec: number
+  /** Host identity in fleet mode; absent standalone. */
+  hostId?: string
 }
 
 /** Raw port mapping as returned by the REST API (snake_case). */
@@ -126,9 +164,14 @@ export interface SandboxInfo {
    * absent when the sandbox inherits the host default.
    */
   hibernateAfterSec?: number
-  /** Per-sandbox vCPU override; absent when the sandbox runs the host template's default. */
+  /**
+   * Effective vCPU count the sandbox runs with. Current servers always
+   * report it (the template default is filled in when no override was set);
+   * absent only when talking to an older server — treat that as "template
+   * default" and look it up via {@link Sandbox.hostInfo}.
+   */
   vcpus?: number
-  /** Per-sandbox memory override in MiB; absent when the sandbox runs the host template's default. */
+  /** Effective guest memory in MiB; same presence rules as {@link vcpus}. */
   memMib?: number
   /**
    * Address of the machine hosting this sandbox. Set when talking to a fleet
@@ -203,6 +246,21 @@ export function toSnapshotInfo(raw: ApiSnapshot): SnapshotInfo {
     sourceId: raw.source_id,
     createdAt: new Date(raw.created_at),
   }
+}
+
+/** Converts a raw API host info object to the public {@link HostInfo} shape. */
+export function toHostInfo(raw: ApiHostInfo): HostInfo {
+  const info: HostInfo = {
+    defaultVcpus: raw.default_vcpus,
+    defaultMemMib: raw.default_mem_mib,
+    maxVcpus: raw.max_vcpus,
+    maxMemMib: raw.max_mem_mib,
+    guestPort: raw.guest_port,
+    hotCreate: raw.hot_create,
+    hibernateAfterSec: raw.hibernate_after_sec,
+  }
+  if (raw.host_id) info.hostId = raw.host_id
+  return info
 }
 
 /** Converts a raw API sandbox object to the public {@link SandboxInfo} shape. */
