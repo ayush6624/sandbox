@@ -18,8 +18,14 @@
   "engines": {
     "node": ">=18"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ayush6624/sandbox.git",
+    "directory": "sdk/typescript"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "example": "tsx examples/demo.ts",
     "example:streaming": "tsx examples/streaming.ts",

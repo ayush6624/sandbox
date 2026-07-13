@@ -1,7 +1,8 @@
 # HTTP API reference
 
-Everything the server (and gateway) speaks. The [TypeScript SDK](../sdk/typescript/README.md)
-wraps all of this; use the raw API from other languages or shells.
+Everything the server (and gateway) speaks, verified against the code. The
+[TypeScript SDK](../sdk/typescript/README.md) wraps all of this; use the raw
+API from other languages or shells.
 
 ## Base URL and auth
 
@@ -11,56 +12,148 @@ wraps all of this; use the raw API from other languages or shells.
 | TCP `--listen <ip>:8080` | `Authorization: Bearer <token>` | per-host API |
 | Gateway `--listen <ip>:9090` | `Authorization: Bearer <token>` | fleet front door; same API |
 
-All request/response bodies are JSON unless noted. Errors are
+All request/response bodies are JSON unless noted. Errors are always
 `{"error": "message"}` with a 4xx/5xx status. There is no versioning yet.
 
-Against a **gateway**, every endpoint below behaves identically except the
-snapshot collection routes — see [gateway differences](#gateway-differences).
+Notes for browser frontends:
+
+- **No CORS headers are set.** A browser can't call the TCP/gateway API
+  cross-origin directly — put your own backend (or a same-origin proxy) in
+  front and inject the bearer token there.
+- **WebSocket auth**: browsers can't set an `Authorization` header on a
+  WebSocket handshake, so `/shell` also needs to go through your proxy.
+- **Hibernation is transparent.** A sandbox with `"status": "hibernated"` is
+  still fully addressable: any exec/files/dir/shell request — or a TCP
+  connection to one of its forwarded ports — wakes it automatically (adds
+  ~0.05–2 s to that first request). UIs should treat hibernated as "idle",
+  not "stopped".
+
+Against a **gateway**, every endpoint below behaves identically, plus fleet
+extras — see [gateway differences](#gateway-differences).
+
+## Objects
+
+### Sandbox
+
+```json
+{
+  "id": "2fdcea66-d551-417a-9877-77c586f0ea91",
+  "pid": 41823,
+  "vm_id": "…",
+  "socket_path": "/run/fc-….sock",
+  "tap_device": "fc-tap3",
+  "guest_ip": "172.16.0.10",
+  "host_port": 5200,
+  "rootfs_path": "/opt/fc/rootfs/….ext4",
+  "status": "running",
+  "created_at": "2026-07-02T10:56:51Z",
+  "expires_at": "2026-07-02T11:06:51Z",
+  "hibernate_after_sec": 300,
+  "vcpus": 4,
+  "mem_mib": 4096,
+  "base_snapshot_id": "…",
+  "host_addr": "100.64.0.7"
+}
+```
+
+- `status` — `"running"` or `"hibernated"` (`"stopping"` is a transient
+  internal state you normally won't see).
+- `expires_at` — omitted when there's no TTL.
+- `hibernate_after_sec`, `vcpus`, `mem_mib`, `base_snapshot_id` — omitted
+  when zero/empty (zero = host default).
+- `host_addr` — **gateway only**: the owning host's address. Use
+  `host_addr:host_port` (not the gateway address) to reach forwarded ports.
+- `pid`, `vm_id`, `socket_path`, `tap_device`, `rootfs_path` are host-side
+  internals; frontends can ignore them.
+
+`host_port` is the pre-forwarded mapping to the primary guest port **3000** —
+reach an in-guest server at `<api-host>:<host_port>`.
+
+### Snapshot
+
+```json
+{
+  "id": "b72c5f9e-…",
+  "source_id": "2fdcea66-…",
+  "tap_device": "fc-tap3",
+  "guest_ip": "172.16.0.10",
+  "mem_path": "…", "state_path": "…", "rootfs_path": "…", "source_rootfs_path": "…",
+  "created_at": "2026-07-02T11:00:00Z",
+  "golden": true,
+  "format": "diff",
+  "base_id": "…",
+  "vcpus": 4,
+  "mem_mib": 4096
+}
+```
+
+- `golden` — the server-managed pristine snapshot that hot creates clone
+  from (at most one; omitted when false). You generally want to hide it or
+  badge it in a UI — deleting it just makes creates cold-boot until the next
+  server restart.
+- `format` — `"full"` or `"diff"` (delta against `base_id`); absent = full.
+- `vcpus`/`mem_mib` — resources baked into the snapshot (omitted = template
+  default); restores and clones run with these.
+- The `*_path` fields are host-side internals.
+
+### PortMapping
+
+```json
+{"guest_port": 8000, "host_port": 5201}
+```
 
 ## Sandboxes
 
 ### Create — `POST /sandboxes`
 
-Body (optional): `{"timeout_sec": 600, "vcpus": 4, "mem_mib": 4096}`
-
-- `timeout_sec` — auto-destroy TTL in seconds; omit for no expiry.
-- `hibernate_after_sec` — idle-hibernation override (>0 custom window,
-  -1 never, 0/omit = host default).
-- `vcpus` / `mem_mib` — per-sandbox resource overrides; 0/omit = the host
-  template's defaults. Bounds-checked against the host (400 on negative,
-  more vcpus than host cores, mem below 128 MiB or above host RAM).
-
-Blocks until the sandbox's in-guest agent is healthy, so the sandbox is usable
-the moment this returns. Served from a pre-booted golden snapshot when
-available (~0.5 s), cold boot otherwise (~2-3.5 s). **A `vcpus`/`mem_mib`
-override always cold-boots** — Firecracker bakes resources into the golden
-snapshot, so an override can't be served from it. Give the request a
-generous client timeout (the SDK uses 90 s).
+Body (optional — empty body is fine):
 
 ```json
-201 {
-  "id": "2fdcea66-d551-417a-9877-77c586f0ea91",
-  "guest_ip": "172.16.0.10",
-  "host_port": 5200,
-  "status": "running",
-  "created_at": "2026-07-02T10:56:51Z",
-  "expires_at": "2026-07-02T11:06:51Z"
-}
+{"timeout_sec": 600, "hibernate_after_sec": 300, "vcpus": 4, "mem_mib": 4096}
 ```
 
-`host_port` is the pre-forwarded mapping to guest port 3000 — reach an
-in-guest server at `<api-host>:<host_port>`.
+- `timeout_sec` — auto-destroy TTL in seconds; 0/omit = no expiry.
+- `hibernate_after_sec` — idle-hibernation override: >0 custom window,
+  `-1` never hibernate, 0/omit = host default.
+- `vcpus` / `mem_mib` — per-sandbox resource overrides; 0/omit = the host
+  template's defaults. Bounds-checked (400 on negative, more vcpus than host
+  cores, mem below 128 MiB or above host RAM).
+
+Returns `201 Sandbox`. Blocks until the sandbox's in-guest agent is healthy,
+so the sandbox is usable the moment this returns. Served from a pre-booted
+golden snapshot when available (~0.3–0.5 s), cold boot otherwise (~2–3.5 s).
+**A `vcpus`/`mem_mib` override always cold-boots** — Firecracker bakes
+resources into the golden snapshot, so an override can't be served from it.
+Give the request a generous client timeout (the SDK uses 90 s).
 
 ### List — `GET /sandboxes` → `200 [Sandbox…]`
-### Get — `GET /sandboxes/{id}` → `200 Sandbox` | `404`
-### Destroy — `DELETE /sandboxes/{id}` → `204`
 
-Graceful in-guest shutdown, then full resource cleanup (VM, tap, IP, ports, disk).
+Includes both `running` and `hibernated` sandboxes (a hibernated sandbox is
+still addressable). Empty list is `[]`, never `null`.
+
+### Get — `GET /sandboxes/{id}` → `200 Sandbox` | `404`
+
+### Destroy — `DELETE /sandboxes/{id}` → `204` | `404`
+
+Graceful in-guest shutdown, then full resource cleanup (VM, tap, IP, ports,
+disk). Works on hibernated sandboxes too.
 
 ### Reset TTL — `POST /sandboxes/{id}/timeout`
 
 Body: `{"timeout_sec": N}`. Replaces the TTL counting from now; `0` clears it.
-Returns the updated sandbox. A reaper destroys expired sandboxes within ~10 s.
+Returns `200` with the updated Sandbox. A reaper destroys expired sandboxes
+within ~10 s (running **and** hibernated).
+
+### Hibernate — `POST /sandboxes/{id}/hibernate`
+
+Freezes a running sandbox to disk immediately (memory snapshot + VM kill);
+the same thing the idle reaper does automatically after
+`hibernate_after_sec`. Returns `200` with the updated Sandbox
+(`"status": "hibernated"`). `409` if it isn't running on this server.
+
+Waking is implicit — there is no `/wake` endpoint. The next agent-bound
+request (exec/files/dir/shell) or connection to a forwarded port resumes it
+(~50 ms typical, up to ~2 s on the clone path).
 
 ## Commands
 
@@ -88,7 +181,7 @@ Note: a non-zero exit code is still HTTP 200 — check `exit_code`.
 ### Streaming exec — `POST /sandboxes/{id}/exec/stream`
 
 Same request body. Response is **NDJSON** (one JSON object per line, flushed
-as produced — not SSE):
+as produced — not SSE, so read the response body incrementally):
 
 ```
 {"type":"stdout","data":"installing…\n"}
@@ -102,27 +195,40 @@ omitted when zero-valued — treat absent fields as `0`/`""`/`false`
 
 ### Interactive shell — `GET /sandboxes/{id}/shell?cols=120&rows=32&cwd=/home/sandbox`
 
-WebSocket upgrade to a real `bash -l` on a pty.
+WebSocket upgrade to a real `bash -l` on a pty. Query params set the initial
+size (defaults 80×24) and working directory.
 
-- **Binary frames**: raw terminal bytes, both directions.
+- **Binary frames**: raw terminal bytes, both directions (guest→client is
+  stdout+stderr combined; client→guest is stdin).
 - **Text frames** (client→server): `{"type":"resize","cols":120,"rows":32}`.
-- Clean shell exit closes the socket with close reason `exit:<code>`.
+- Clean shell exit closes the socket with close reason `exit:<code>` — parse
+  the trailing integer.
 - Client disconnect kills the shell's process group.
+- An open shell pins the sandbox running (it won't idle-hibernate or be
+  considered idle while connected).
 
-`sandbox shell <id>` in the CLI is a ready-made client.
+`sandbox shell <id>` in the CLI is a ready-made client; pairs naturally with
+xterm.js in a browser.
 
 ## Files
 
 ### Read — `GET /sandboxes/{id}/files?path=/abs/path`
 
-`200` with the raw file bytes (`application/octet-stream`). `404` if missing.
+`200` with the raw file bytes (`application/octet-stream`, `Content-Length`
+set). `400` if `path` is missing or a directory; `404` if missing.
 
 ### Write — `PUT /sandboxes/{id}/files?path=/abs/path`
 
-Request body = file content (raw bytes). Creates parent directories.
-Returns `200 {"path": "...", "size": 123}`.
+Request body = file content (raw bytes). Creates parent directories,
+truncates any existing file (mode 0644).
+
+```json
+201 {"path": "/abs/path", "bytes": 123}
+```
 
 ### List directory — `GET /sandboxes/{id}/dir?path=/abs/path`
+
+`path` defaults to `/home/sandbox/app`.
 
 ```json
 200 [{"name":"app","size":4096,"mode":"drwxr-xr-x","is_dir":true,"mtime":"2026-07-02T10:00:00Z"}, …]
@@ -132,16 +238,21 @@ Returns `200 {"path": "...", "size": 123}`.
 
 ### Expose — `POST /sandboxes/{id}/ports`
 
-Body: `{"guest_port": 8000}`. Forwards the guest port to a pool-allocated host
-port. Idempotent — re-exposing returns the existing mapping.
+Body: `{"guest_port": 8000}` (1–65535). Forwards the guest port to a
+pool-allocated host port. Idempotent — re-exposing (or exposing the primary
+port 3000) returns the existing mapping.
 
 ```json
-201 {"guest_port": 8000, "host_port": 5201}
+200 {"guest_port": 8000, "host_port": 5201}
 ```
+
+Works on a hibernated sandbox without waking it — the new port is just
+another wake-on-connect entry point.
 
 ### List — `GET /sandboxes/{id}/ports`
 
-All forwarded ports, always including the primary `3000 → host_port` mapping.
+`200 [PortMapping…]` — all forwarded ports, always including the primary
+`3000 → host_port` mapping first.
 
 ## Snapshots
 
@@ -152,18 +263,16 @@ prepare-once/clone-many workflow.
 ### Take — `POST /sandboxes/{id}/snapshot`
 
 Pauses the sandbox (~1 s), writes memory + device state + a frozen disk copy,
-resumes it. The source keeps running.
-
-```json
-201 {"id": "b72c5f9e-…", "source_id": "2fdcea66-…", "created_at": "…"}
-```
+resumes it. The source keeps running. Returns `201 Snapshot`. `409` if the
+sandbox isn't running on this server (e.g. hibernated).
 
 ### Restore (1:1) — `POST /snapshots/{id}/restore`
 
-Body (optional): `{"timeout_sec": N}`. Boots a **new** sandbox resuming the
-snapshot exactly — same processes, same memory. Reuses the snapshot's baked
-network identity, so: the source sandbox must be dead, and at most one restore
-of a given snapshot can run at a time (`409` on conflict). Returns a Sandbox.
+Body (optional): `{"timeout_sec": N, "hibernate_after_sec": N}`. Boots a
+**new** sandbox resuming the snapshot exactly — same processes, same memory.
+Reuses the snapshot's baked network identity, so: the source sandbox must be
+dead, and at most one restore of a given snapshot can run at a time (`409` on
+conflict). Returns `201 Sandbox`.
 
 `vcpus`/`mem_mib` are rejected with `400`: resources are baked into the
 snapshot when it is taken — a restored sandbox always runs (and reports)
@@ -171,16 +280,19 @@ the source's resources.
 
 ### Fan-out (1:N) — `POST /snapshots/{id}/fanout`
 
-Body: `{"count": 32, "timeout_sec": 600}`. Starts N identity-neutral clones
-concurrently — each with a fresh IP/ports and copy-on-write disk. Returns
-`201 [Sandbox…]` with every clone that came up (partial success possible;
-failures are logged server-side and their resources reclaimed).
-`vcpus`/`mem_mib` are rejected with `400`, same as restore.
+Body: `{"count": 32, "timeout_sec": 600, "hibernate_after_sec": N}`
+(`count` >= 1 required). Starts N identity-neutral clones concurrently — each
+with a fresh IP/ports and copy-on-write disk. Returns `201 [Sandbox…]` with
+every clone that came up (**partial success possible** — the array may be
+shorter than `count`; failures are logged server-side and their resources
+reclaimed). `500` only if every clone failed. `vcpus`/`mem_mib` are rejected
+with `400`, same as restore.
 
 ### List — `GET /snapshots` → `200 [Snapshot…]`
-### Delete — `DELETE /snapshots/{id}` → `204`
+### Delete — `DELETE /snapshots/{id}` → `204` | `404`
 
-Removes the snapshot record and its on-disk artifacts.
+Removes the snapshot record, its on-disk artifacts, and (when GCS durability
+is on) its bucket objects in the background.
 
 ## Gateway differences
 
@@ -188,23 +300,28 @@ The gateway fronts N hosts with the same API, plus:
 
 | | |
 | --- | --- |
-| `GET /hosts` | Fleet state: `[{"id","addr","slots_total","free","alive","last_seen_ms_ago"}]` |
-| `POST /sandboxes` | Placed on the least-loaded live host |
+| `GET /hosts` | Fleet state: `[{"id","addr","slots_total","slots_used","hibernated","free","alive","last_seen_ms_ago"}]` |
+| `GET /metrics` | Prometheus text format: `sandbox_hosts_live`, `sandbox_slots_total/used/free`, `sandbox_create_queue_depth`, per-host gauges |
+| `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |
 | `GET /sandboxes` | Merged across all hosts |
-| `/sandboxes/{id}/…` | Proxied to the owning host (includes exec, files, `/shell`, `/snapshot`) |
-| `host_addr` | Sandbox objects gain `"host_addr"`: the owning host's address. Use it (not the gateway's) to reach forwarded ports — the SDK's `getHost()` does this automatically |
-| `/snapshots/*` | **Not routed** — restore/fan-out/list/delete are host-local; call the owning host directly |
+| `/sandboxes/{id}/…` | Proxied to the owning host (includes exec, exec/stream, files, dir, `/shell`, ports, `/snapshot`, `/hibernate`); unknown id → `404` |
+| `host_addr` | Sandbox objects gain `"host_addr"`: the owning host's address. Use `host_addr:host_port` (not the gateway) to reach forwarded ports — the SDK's `getHost()` does this |
+| `GET /snapshots` | Merged + deduped across live hosts |
+| `POST /snapshots/{id}/restore` / `/fanout`, `DELETE /snapshots/{id}` | Forwarded to the owning host; if that host is dead/unknown, any live host serves it by pulling the snapshot from GCS (returns `503` if no live host) |
 
 ## Errors and limits
 
 | Status | Meaning |
 | --- | --- |
-| 400 | malformed body (`timeout_sec < 0`, `count < 1`, out-of-bounds `vcpus`/`mem_mib`, resource overrides on restore/fanout, bad JSON) |
+| 400 | malformed body (`timeout_sec < 0`, `count < 1`, out-of-bounds `vcpus`/`mem_mib`, resource overrides on restore/fanout, missing `path`, bad JSON) |
 | 401 | missing/invalid bearer token (TCP/gateway listeners only) |
 | 404 | unknown sandbox/snapshot/file |
-| 409 | restore conflict (source or a prior restore still running); snapshot of a sandbox not running on this server |
-| 500 | provisioning failure (host out of pool slots, VM boot failure, …) |
+| 409 | restore conflict (source or a prior restore still running); snapshot/hibernate of a sandbox not running on this server |
+| 502 | in-guest agent unreachable; gateway → host proxy failure |
+| 503 | gateway only: no live host with capacity (create queue timed out; `Retry-After` set) |
+| 500 | provisioning failure (host out of pool slots, VM boot failure, failed wake, …) |
 
 Capacity: each host has fixed pools (default 64 sandboxes: taps, IPs, host
-ports 5200-5263). When the pool is exhausted, creates fail with 500 — size
-your fleet or TTLs accordingly.
+ports 5200–5263). Hibernated sandboxes release their tap/IP slot but **keep
+their host ports reserved**. When a host's pool is exhausted, creates fail
+with 500 (or queue at the gateway) — size your fleet or TTLs accordingly.

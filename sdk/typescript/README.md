@@ -9,11 +9,25 @@ sandboxes for frontend development. The API surface mirrors the
 
 ## Install
 
+Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox/releases)
+(tags `sdk-v*`):
+
 ```bash
-npm install            # from this directory, for development
-# or, once published / via a file path:
-npm install sandbox
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v0.1.0/sandbox-0.1.0.tgz
 ```
+
+Upgrading means pointing at a newer release URL — there are no semver ranges
+with tarball installs.
+
+For development, work from this directory directly:
+
+```bash
+npm install && npm run build
+```
+
+To cut a release: bump `version` in package.json, then
+`npm pack` (builds via `prepack`) and
+`gh release create sdk-v<version> sandbox-<version>.tgz`.
 
 ## Configuration
 
@@ -142,11 +156,11 @@ Note: you don't need snapshots just to make `create` fast — the server keeps
 a golden snapshot of a freshly booted sandbox and serves plain `create` from
 it automatically. Snapshots are for capturing *your* prepared state.
 
-**Multi-host caveat:** when `SANDBOX_API_URL` points at a gateway (fleet
-mode), `sbx.snapshot()` works (it's routed to the sandbox's host), but
-`restore` / `fanout` / `listSnapshots` / `deleteSnapshot` are host-local —
-point the SDK at the host's own address to use them. Gateway routing for
-snapshots is on the roadmap.
+Multi-host works transparently: when `SANDBOX_API_URL` points at a gateway
+(fleet mode), `sbx.snapshot()` is routed to the sandbox's host,
+`listSnapshots` merges across hosts, and `restore` / `fanout` /
+`deleteSnapshot` are forwarded to the snapshot's owning host (or, with GCS
+durability configured, to any live host if the owner is gone).
 
 ### Errors
 
