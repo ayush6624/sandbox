@@ -99,6 +99,32 @@ APT
   # Create the working directory used by exec/files (HOME=/home/sandbox,
   # default exec cwd /home/sandbox/app — sandboxd falls back to / without it).
   sudo chroot "$BUILD_DIR" bash -c 'mkdir -p /home/sandbox/app'
+
+  # Shell rc files for /home/sandbox (the HOME of sandboxd's interactive
+  # shells) so `bash -l` gets a color prompt + color aliases. install-agent
+  # rewrites these on every run; keep the content in sync with installagent.go.
+  sudo tee "$BUILD_DIR/home/sandbox/.profile" > /dev/null <<'PROFILE'
+# ~/.profile: sourced by login shells (sandboxd's /shell runs bash -l).
+if [ -n "$BASH" ] && [ -f "$HOME/.bashrc" ]; then
+	. "$HOME/.bashrc"
+fi
+PROFILE
+  sudo tee "$BUILD_DIR/home/sandbox/.bashrc" > /dev/null <<'BASHRC'
+# ~/.bashrc for sandbox shells — enable colors (baked by install-agent).
+case $- in *i*) ;; *) return ;; esac
+
+eval "$(dircolors -b 2>/dev/null)"
+alias ls='ls --color=auto'
+alias ll='ls --color=auto -al'
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+alias diff='diff --color=auto'
+alias ip='ip -color=auto'
+
+PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+BASHRC
+
   sudo touch "$BUILD_DIR/.step4-done"
 fi
 

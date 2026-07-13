@@ -26,6 +26,30 @@ Environment=HOME=/home/sandbox
 WantedBy=multi-user.target
 `
 
+// Interactive shells run as root with HOME=/home/sandbox (see the unit above),
+// so these rc files — not /root's or /etc/skel's — are what `bash -l` on the
+// /shell pty actually reads. Without them the shell has no color at all.
+const sandboxProfile = `# ~/.profile: sourced by login shells (sandboxd's /shell runs bash -l).
+if [ -n "$BASH" ] && [ -f "$HOME/.bashrc" ]; then
+	. "$HOME/.bashrc"
+fi
+`
+
+const sandboxBashrc = `# ~/.bashrc for sandbox shells — enable colors (baked by install-agent).
+case $- in *i*) ;; *) return ;; esac
+
+eval "$(dircolors -b 2>/dev/null)"
+alias ls='ls --color=auto'
+alias ll='ls --color=auto -al'
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+alias diff='diff --color=auto'
+alias ip='ip -color=auto'
+
+PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+`
+
 func installAgentCmd() *cobra.Command {
 	var agentBin string
 	cmd := &cobra.Command{
@@ -84,6 +108,14 @@ func installAgent(rootfs, agentBin string) error {
 	// creating it here heals base images built before the rootfs script did.
 	if err := os.MkdirAll(filepath.Join(mnt, "home/sandbox/app"), 0o755); err != nil {
 		return fmt.Errorf("create app dir: %w", err)
+	}
+	// Shell rc files live in /home/sandbox (the shell's HOME), not /root —
+	// written unconditionally, like the unit, so updates propagate.
+	if err := os.WriteFile(filepath.Join(mnt, "home/sandbox/.profile"), []byte(sandboxProfile), 0o644); err != nil {
+		return fmt.Errorf("write .profile: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(mnt, "home/sandbox/.bashrc"), []byte(sandboxBashrc), 0o644); err != nil {
+		return fmt.Errorf("write .bashrc: %w", err)
 	}
 	link := filepath.Join(wants, "sandboxd.service")
 	_ = os.Remove(link)

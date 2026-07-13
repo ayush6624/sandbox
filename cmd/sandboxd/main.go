@@ -265,7 +265,7 @@ func handleShell(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cmd := exec.Command("/bin/bash", "-l")
 	cmd.Dir = workingDir(q.Get("cwd"))
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: parseDim(q.Get("cols"), 80),
