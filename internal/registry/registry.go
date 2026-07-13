@@ -47,9 +47,12 @@ type Sandbox struct {
 	HibernateAfterSec int `json:"hibernate_after_sec,omitempty"`
 	// Vcpus/MemMIB are per-sandbox resource overrides recorded at create time;
 	// 0 = the host's template default. An override forces a cold boot (the
-	// golden snapshot bakes the template's resources).
-	Vcpus  int64 `json:"vcpus,omitempty"`
-	MemMIB int64 `json:"mem_mib,omitempty"`
+	// golden snapshot bakes the template's resources). API responses never
+	// carry 0: the server fills in the template default before writing
+	// (effectiveResources in internal/server), so clients always see the
+	// resources the sandbox actually runs with.
+	Vcpus  int64 `json:"vcpus"`
+	MemMIB int64 `json:"mem_mib"`
 	// BaseSnapshotID is the golden snapshot this sandbox was cloned from
 	// (hot create). It makes the sandbox diff-snapshottable: a snapshot of it
 	// can be stored as a delta against that base. Empty for cold boots,

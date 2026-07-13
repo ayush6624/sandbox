@@ -417,5 +417,5 @@ func (s *Server) handleHibernate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, sb)
+	writeJSON(w, 200, s.effectiveResources(sb))
 }

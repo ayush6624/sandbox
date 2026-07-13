@@ -21,7 +21,12 @@ Notes for browser frontends:
   cross-origin directly — put your own backend (or a same-origin proxy) in
   front and inject the bearer token there.
 - **WebSocket auth**: browsers can't set an `Authorization` header on a
-  WebSocket handshake, so `/shell` also needs to go through your proxy.
+  WebSocket handshake, so upgrade requests (only) may carry the token as
+  `?access_token=<token>` instead. Auth and routing failures on `/shell` are
+  delivered as **post-handshake close frames** with code `4000 + HTTP status`
+  (`4401` bad token, `4404` unknown sandbox, `4500` failed wake, `4502` agent
+  unreachable) and the error message as the close reason — browsers surface
+  these to the page, unlike a failed handshake (opaque `1006`).
 - **Hibernation is transparent.** A sandbox with `"status": "hibernated"` is
   still fully addressable: any exec/files/dir/shell request — or a TCP
   connection to one of its forwarded ports — wakes it automatically (adds
@@ -59,8 +64,11 @@ extras — see [gateway differences](#gateway-differences).
 - `status` — `"running"` or `"hibernated"` (`"stopping"` is a transient
   internal state you normally won't see).
 - `expires_at` — omitted when there's no TTL.
-- `hibernate_after_sec`, `vcpus`, `mem_mib`, `base_snapshot_id` — omitted
-  when zero/empty (zero = host default).
+- `vcpus`, `mem_mib` — **always present**: the effective resources the
+  sandbox runs with. When no override was given at create, the host
+  template's defaults are filled in (compare against `GET /info`).
+- `hibernate_after_sec`, `base_snapshot_id` — omitted when zero/empty
+  (zero = host default).
 - `host_addr` — **gateway only**: the owning host's address. Use
   `host_addr:host_port` (not the gateway address) to reach forwarded ports.
 - `pid`, `vm_id`, `socket_path`, `tap_device`, `rootfs_path` are host-side
@@ -101,6 +109,34 @@ reach an in-guest server at `<api-host>:<host_port>`.
 ```json
 {"guest_port": 8000, "host_port": 5201}
 ```
+
+## Host info
+
+### `GET /info`
+
+Template defaults and per-sandbox override limits — what a sandbox gets when
+created without `vcpus`/`mem_mib`, and the accepted override bounds. Lets a
+UI label resources without guessing.
+
+```json
+{
+  "default_vcpus": 2,
+  "default_mem_mib": 1024,
+  "max_vcpus": 16,
+  "max_mem_mib": 64312,
+  "guest_port": 3000,
+  "hot_create": true,
+  "hibernate_after_sec": 300,
+  "host_id": "testvm-1"
+}
+```
+
+- `hibernate_after_sec` — the host-wide idle default (0 = off);
+  per-sandbox overrides still apply.
+- `host_id` — omitted when the host isn't fleet-registered.
+
+Against a **gateway**, `/info` is answered by one live host (fleet hosts
+share a template config); `503` when no host is live.
 
 ## Sandboxes
 
@@ -195,20 +231,26 @@ omitted when zero-valued — treat absent fields as `0`/`""`/`false`
 
 ### Interactive shell — `GET /sandboxes/{id}/shell?cols=120&rows=32&cwd=/home/sandbox`
 
-WebSocket upgrade to a real `bash -l` on a pty. Query params set the initial
-size (defaults 80×24) and working directory.
+WebSocket upgrade to a real `bash -l` on a pty. This is a **supported client
+API**, not an internal detail. Query params set the initial size (defaults
+80×24) and working directory; browser clients append `&access_token=<token>`
+(headers can't be set on a WebSocket).
 
 - **Binary frames**: raw terminal bytes, both directions (guest→client is
   stdout+stderr combined; client→guest is stdin).
 - **Text frames** (client→server): `{"type":"resize","cols":120,"rows":32}`.
 - Clean shell exit closes the socket with close reason `exit:<code>` — parse
   the trailing integer.
+- **Errors close with code `4000 + HTTP status`** and the message as the
+  close reason: `4401` bad token, `4404` unknown sandbox, `4500` failed
+  wake, `4502` agent unreachable. The handshake itself succeeds first, so
+  these reach browser `onclose` handlers instead of collapsing into `1006`.
 - Client disconnect kills the shell's process group.
 - An open shell pins the sandbox running (it won't idle-hibernate or be
   considered idle while connected).
 
-`sandbox shell <id>` in the CLI is a ready-made client; pairs naturally with
-xterm.js in a browser.
+`sandbox shell <id>` in the CLI and `sandbox.pty` in the SDK are ready-made
+clients; the protocol pairs naturally with xterm.js in a browser.
 
 ## Files
 
@@ -300,6 +342,7 @@ The gateway fronts N hosts with the same API, plus:
 
 | | |
 | --- | --- |
+| `GET /info` | Forwarded to one live host (fleet hosts share a template config); `503` when none is live |
 | `GET /hosts` | Fleet state: `[{"id","addr","slots_total","slots_used","hibernated","free","alive","last_seen_ms_ago"}]` |
 | `GET /metrics` | Prometheus text format: `sandbox_hosts_live`, `sandbox_slots_total/used/free`, `sandbox_create_queue_depth`, per-host gauges |
 | `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |

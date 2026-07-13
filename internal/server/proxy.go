@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/wsutil"
 )
 
 // agentClient talks to in-guest sandboxd agents. No overall timeout — exec
@@ -77,12 +78,15 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 // in-guest agent. httputil.ReverseProxy transparently handles the Upgrade
 // handshake and then streams raw bytes both ways, so the interactive pty works
 // over either the Unix socket or the bearer-auth'd TCP listener unchanged.
+// Errors before the proxy takes over (unknown id, failed wake, unreachable
+// agent) are delivered as WebSocket close frames (4404/4500/4502) when the
+// request is an upgrade, so browser clients see the reason, not a bare 1006.
 func (s *Server) handleShellProxy() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		sb, err := s.ensureRunning(r.Context(), id)
 		if err != nil {
-			httpError(w, statusFor(err), err)
+			shellError(w, r, statusFor(err), err)
 			return
 		}
 		// An open shell pins the sandbox running for its whole lifetime —
@@ -93,17 +97,32 @@ func (s *Server) handleShellProxy() http.HandlerFunc {
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		// NewSingleHostReverseProxy joins paths; rewrite to the agent's /shell
 		// (the incoming path is /sandboxes/{id}/shell) while preserving the
-		// cols/rows/cwd query string.
+		// cols/rows/cwd query string. access_token is auth plumbing for
+		// browser WebSockets (see bearerAuth) — don't leak it into the guest.
 		base := proxy.Director
 		proxy.Director = func(req *http.Request) {
 			base(req)
 			req.URL.Path = "/shell"
+			if q := req.URL.Query(); q.Has("access_token") {
+				q.Del("access_token")
+				req.URL.RawQuery = q.Encode()
+			}
 		}
-		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-			httpError(w, http.StatusBadGateway, fmt.Errorf("agent unreachable: %w", err))
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			shellError(w, r, http.StatusBadGateway, fmt.Errorf("agent unreachable: %w", err))
 		}
 		proxy.ServeHTTP(w, r)
 	}
+}
+
+// shellError reports a shell-endpoint failure: as a post-handshake WebSocket
+// close frame (code 4000+status) when the request is an upgrade — the only
+// form browsers surface to the page — falling back to a plain HTTP error.
+func shellError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseCodeFor(status), err.Error()) == nil {
+		return
+	}
+	httpError(w, status, err)
 }
 
 // flushWriter flushes the ResponseWriter after every write.

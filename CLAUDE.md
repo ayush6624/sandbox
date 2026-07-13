@@ -128,6 +128,7 @@ internal/config/config.go         JSON config + Defaults(); DisallowUnknownField
 internal/client/client.go         HTTP client: New(socket) for the local socket, NewHTTP(addr,token) for TCP+bearer (gateway/host)
 internal/cluster/cluster.go       Host→gateway heartbeat protocol type
 internal/gateway/gateway.go       Multi-host control plane: host registry, derived routing, placement, reverse-proxy, scatter-gather
+internal/wsutil/wsutil.go         Minimal WS handshake+close-frame reject: delivers auth/routing errors on WS endpoints as close codes (4401/4404/…) browsers can see
 internal/server/
   server.go           http.ServeMux on Unix socket; owns map[id]*vm.Machine; vmCtx lifetime
   proxy.go            Reverse-proxy to sandboxd (incl. /shell WebSocket via httputil) + waitForAgent readiness poll
@@ -189,7 +190,17 @@ scripts/              Host setup shell scripts
   hot). Restore/fanout bodies **reject** nonzero `vcpus`/`mem_mib` with 400 (a restored VM
   runs whatever its snapshot baked; snapshot rows record the source's values so restored/
   cloned rows report the truth). Hibernate/wake restores from snapshot, so overrides survive
-  automatically.
+  automatically. **API responses always report effective resources**: the registry keeps
+  0 (= template default) but every sandbox-returning handler runs `effectiveResources`,
+  filling in the template's vcpus/mem — so clients never see an absent value. `GET /info`
+  exposes the template defaults + override limits (gateway forwards it to a live host).
+- **The shell WebSocket is a supported client API.** Browsers can't set headers on a
+  WebSocket, so upgrade requests may auth via `?access_token=` (accepted by both bearerAuth
+  middlewares, upgrade requests only; the shell proxy strips it before the guest). Errors on
+  WS endpoints (bad token, unknown id, failed wake, agent unreachable) are delivered via
+  `internal/wsutil.Reject`: complete the 101 handshake, then close with code 4000+HTTPstatus
+  and the message as the close reason — a plain 401/404 would reach browsers as an opaque
+  1006. The SDK's `sandbox.pty` maps 4401/4404 back onto AuthenticationError/NotFoundError.
 - **Clone reidentify is signaled by gratuitous ARP.** A fan-out/hot-create clone resumes on
   an UNBRIDGED tap still carrying the snapshot's baked IP; the in-guest thaw agent adopts the
   fresh identity from MMDS then broadcasts GARPs (`cmd/sandboxd/garp_linux.go`). The host

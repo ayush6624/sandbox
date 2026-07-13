@@ -296,7 +296,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	sb.PID = pid
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
-	writeJSON(w, 201, sb)
+	writeJSON(w, 201, s.effectiveResources(sb))
 }
 
 // clone is one in-flight fan-out clone between Phase 1 (resume) and Phase 2 (bridge).
@@ -441,6 +441,9 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	if len(live) == 0 {
 		httpError(w, 500, errors.New("all clones failed to start"))
 		return
+	}
+	for i := range live {
+		live[i] = s.effectiveResources(live[i])
 	}
 	writeJSON(w, 201, live)
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
+	"github.com/ayush6624/sandbox/internal/wsutil"
 )
 
 // Config bundles everything the server needs at startup.
@@ -137,6 +138,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	_ = os.Chmod(s.cfg.SocketPath, 0o600)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /info", s.handleInfo)
 	mux.HandleFunc("POST /sandboxes", s.handleCreate)
 	mux.HandleFunc("GET /sandboxes", s.handleList)
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)
@@ -195,12 +197,26 @@ func (s *Server) Serve(ctx context.Context) error {
 
 // bearerAuth rejects requests whose Authorization header doesn't carry token.
 // Applied only to the TCP listener — the Unix socket is protected by file mode.
+// WebSocket upgrades get two accommodations for browser clients, which cannot
+// set request headers on a WebSocket: the token may ride in ?access_token=,
+// and a rejection is delivered as a post-handshake close frame (4401) instead
+// of a plain 401 the browser would collapse into an opaque 1006.
 func bearerAuth(token string, next http.Handler) http.Handler {
 	want := sha256.Sum256([]byte("Bearer " + token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		auth := r.Header.Get("Authorization")
+		if auth == "" && wsutil.IsUpgrade(r) {
+			if t := r.URL.Query().Get("access_token"); t != "" {
+				auth = "Bearer " + t
+			}
+		}
+		got := sha256.Sum256([]byte(auth))
 		if subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
-			httpError(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
+			err := errors.New("missing or invalid bearer token")
+			if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseUnauthorized, err.Error()) == nil {
+				return
+			}
+			httpError(w, http.StatusUnauthorized, err)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -263,7 +279,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
 		sb, err := s.createFromSnapshot(ctx, *snap, expiresAt, body.HibernateAfterSec)
 		if err == nil {
-			writeJSON(w, 201, sb)
+			writeJSON(w, 201, s.effectiveResources(sb))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
@@ -274,7 +290,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	writeJSON(w, 201, sb)
+	writeJSON(w, 201, s.effectiveResources(sb))
 }
 
 // createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
@@ -375,6 +391,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	if sandboxes == nil {
 		sandboxes = []registry.Sandbox{}
 	}
+	for i := range sandboxes {
+		sandboxes[i] = s.effectiveResources(sandboxes[i])
+	}
 	writeJSON(w, 200, sandboxes)
 }
 
@@ -385,7 +404,58 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, err)
 		return
 	}
-	writeJSON(w, 200, sb)
+	writeJSON(w, 200, s.effectiveResources(sb))
+}
+
+// Info is the GET /info payload: the host's template defaults and per-sandbox
+// override limits, so clients can show effective resources and validate
+// overrides without guessing.
+type Info struct {
+	// DefaultVcpus/DefaultMemMIB are the template resources a sandbox runs
+	// with when created without overrides.
+	DefaultVcpus  int64 `json:"default_vcpus"`
+	DefaultMemMIB int64 `json:"default_mem_mib"`
+	// MaxVcpus/MaxMemMIB bound per-sandbox overrides on this host.
+	MaxVcpus  int64 `json:"max_vcpus"`
+	MaxMemMIB int64 `json:"max_mem_mib"`
+	// GuestPort is the primary in-guest port forwarded to a host port at create.
+	GuestPort int `json:"guest_port"`
+	// HotCreate reports whether POST /sandboxes is served from a golden snapshot.
+	HotCreate bool `json:"hot_create"`
+	// HibernateAfterSec is the host's default idle-hibernation window (0 = off).
+	HibernateAfterSec int `json:"hibernate_after_sec"`
+	// HostID identifies this host in fleet mode; empty standalone.
+	HostID string `json:"host_id,omitempty"`
+}
+
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	guestPort := 0
+	if s.cfg.Provisioner != nil {
+		guestPort = s.cfg.Provisioner.Network.GuestPort
+	}
+	writeJSON(w, 200, Info{
+		DefaultVcpus:      s.cfg.VMTemplate.Vcpus,
+		DefaultMemMIB:     s.cfg.VMTemplate.MemMIB,
+		MaxVcpus:          maxVcpus(),
+		MaxMemMIB:         maxMemMIB(),
+		GuestPort:         guestPort,
+		HotCreate:         s.cfg.HotCreate,
+		HibernateAfterSec: int(s.cfg.HibernateAfter / time.Second),
+		HostID:            s.cfg.HostID,
+	})
+}
+
+// effectiveResources fills a zero Vcpus/MemMIB with the host template's
+// defaults so API responses always report the resources the sandbox actually
+// runs with. The registry keeps 0 (= template default) unchanged.
+func (s *Server) effectiveResources(sb registry.Sandbox) registry.Sandbox {
+	if sb.Vcpus == 0 {
+		sb.Vcpus = s.cfg.VMTemplate.Vcpus
+	}
+	if sb.MemMIB == 0 {
+		sb.MemMIB = s.cfg.VMTemplate.MemMIB
+	}
+	return sb
 }
 
 func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {

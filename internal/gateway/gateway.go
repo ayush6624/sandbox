@@ -33,6 +33,7 @@ import (
 	"github.com/ayush6624/sandbox/internal/client"
 	"github.com/ayush6624/sandbox/internal/cluster"
 	"github.com/ayush6624/sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/wsutil"
 )
 
 // host is the gateway's view of one registered `sandbox serve` node.
@@ -101,6 +102,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", g.handleRegister)
+	mux.HandleFunc("GET /info", g.handleInfo)
 	mux.HandleFunc("GET /hosts", g.handleHosts)
 	mux.HandleFunc("GET /metrics", g.handleMetrics)
 	mux.HandleFunc("POST /sandboxes", g.handleCreate)
@@ -385,7 +387,11 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 	g.mu.RUnlock()
 
 	if h == nil {
-		httpError(w, 404, fmt.Errorf("sandbox %s not found on any host", id))
+		err := fmt.Errorf("sandbox %s not found on any host", id)
+		if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseNotFound, err.Error()) == nil {
+			return
+		}
+		httpError(w, 404, err)
 		return
 	}
 
@@ -400,9 +406,19 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 		} else {
 			req.Header.Del("Authorization") // don't leak the gateway token
 		}
+		// The gateway already re-authenticated with the host's token; drop a
+		// browser client's access_token so it doesn't ride further.
+		if q := req.URL.Query(); q.Has("access_token") {
+			q.Del("access_token")
+			req.URL.RawQuery = q.Encode()
+		}
 	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		httpError(w, http.StatusBadGateway, fmt.Errorf("host %s unreachable: %w", snap.id, err))
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		err = fmt.Errorf("host %s unreachable: %w", snap.id, err)
+		if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseBadGateway, err.Error()) == nil {
+			return
+		}
+		httpError(w, http.StatusBadGateway, err)
 	}
 	// Record a freshly created snapshot's location immediately — its id only
 	// reaches heartbeats after up to one interval, and a restore issued in
@@ -457,6 +473,51 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// --- host info ---
+
+// handleInfo forwards GET /info to a live host. A fleet's hosts share one
+// template config, so any host's defaults and limits speak for the fleet;
+// the lowest-id live host is picked for determinism.
+func (g *Gateway) handleInfo(w http.ResponseWriter, r *http.Request) {
+	g.mu.RLock()
+	var pick *host
+	for _, h := range g.hosts {
+		if time.Since(h.lastSeen) > g.ttl {
+			continue
+		}
+		if pick == nil || h.id < pick.id {
+			pick = h
+		}
+	}
+	var snap host
+	if pick != nil {
+		snap = *pick
+	}
+	g.mu.RUnlock()
+	if pick == nil {
+		httpError(w, http.StatusServiceUnavailable, errors.New("no live host to serve /info"))
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+snap.addr+"/info", nil)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	if snap.token != "" {
+		req.Header.Set("Authorization", "Bearer "+snap.token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, fmt.Errorf("host %s unreachable: %w", snap.id, err))
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // --- debug ---
@@ -520,12 +581,26 @@ func (g *Gateway) pruneLoop(ctx context.Context) {
 
 // --- helpers (mirrors internal/server) ---
 
+// bearerAuth mirrors internal/server: WebSocket upgrades may carry the token
+// as ?access_token= (browsers can't set headers on a WebSocket), and their
+// rejections are delivered as post-handshake close frames (4401) so the page
+// sees the reason instead of an opaque 1006.
 func bearerAuth(token string, next http.Handler) http.Handler {
 	want := sha256.Sum256([]byte("Bearer " + token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		auth := r.Header.Get("Authorization")
+		if auth == "" && wsutil.IsUpgrade(r) {
+			if t := r.URL.Query().Get("access_token"); t != "" {
+				auth = "Bearer " + t
+			}
+		}
+		got := sha256.Sum256([]byte(auth))
 		if subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
-			httpError(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
+			err := errors.New("missing or invalid bearer token")
+			if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseUnauthorized, err.Error()) == nil {
+				return
+			}
+			httpError(w, http.StatusUnauthorized, err)
 			return
 		}
 		next.ServeHTTP(w, r)
