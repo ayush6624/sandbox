@@ -1,3 +1,4 @@
 node_modules/
 dist/
-benchmarks/results/
+benchmarks/results/*
+!benchmarks/results/README.md

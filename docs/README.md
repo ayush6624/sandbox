@@ -12,5 +12,5 @@ Self-hosted Firecracker microVM sandboxes with an e2b-style API. Start here:
 Also:
 
 - [TypeScript SDK](../sdk/typescript/README.md) — the recommended client (`Sandbox.create()`, e2b-compatible)
-- [Benchmarks](../sdk/typescript/benchmarks/README.md) — create/restore/fan-out latency suites
+- [Benchmarks](benchmarks.md) — latest measured numbers + comparison vs hosted providers ([interactive report](benchmark-report.html)); runnable suites in [`sdk/typescript/benchmarks/`](../sdk/typescript/benchmarks/README.md)
 - Internals deep-dives: [snapshot fan-out findings](snapshot-fanout-m0-findings.md), [fan-out benchmark report](snapshot-fanout-bench.md)
