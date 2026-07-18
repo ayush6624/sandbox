@@ -13,7 +13,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v0.2.0/sandbox-0.2.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v0.3.0/sandbox-0.3.0.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges

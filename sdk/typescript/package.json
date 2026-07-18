@@ -1,6 +1,6 @@
 {
   "name": "sandbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeScript SDK for the sandbox Firecracker microVM sandbox API. Mirrors the e2b JavaScript SDK surface.",
   "license": "MIT",
   "type": "module",
