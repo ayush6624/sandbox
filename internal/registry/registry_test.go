@@ -32,7 +32,7 @@ func testRegistryWithPools(t *testing.T, pools Pools) *Registry {
 func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
+	sb, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestHibernateFreesSlotAndWakeReclaimsIdentity(t *testing.T) {
 
 	// The hibernated identity is free but SOFT-avoided: a new sandbox must
 	// pick different resources while the pool has other entries.
-	other, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
+	other, err := r.Create(ctx, "sb2", "", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create after hibernate should reuse the freed slot: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
+	sb, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestWakeAllocatesFreshIdentityWhenSquatted(t *testing.T) {
 	// tap/IP — soft avoidance yields when the pool is exhausted.
 	squatted := false
 	for _, id := range []string{"a", "b", "c"} {
-		got, err := r.Create(ctx, id, "/tmp/"+id+".ext4", nil, "", 0, 0, 0)
+		got, err := r.Create(ctx, id, "", "/tmp/"+id+".ext4", nil, "", 0, 0, 0)
 		if err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
@@ -144,7 +144,7 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
+	sb, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 		t.Fatalf("hibernate: %v", err)
 	}
 
-	sb2, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
+	sb2, err := r.Create(ctx, "sb2", "", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 
 	// Both a create and an extra-port expose must fail: the only port left in
 	// the pool belongs to the hibernated sandbox.
-	if _, err := r.Create(ctx, "sb3", "/tmp/sb3.ext4", nil, "", 0, 0, 0); err == nil {
+	if _, err := r.Create(ctx, "sb3", "", "/tmp/sb3.ext4", nil, "", 0, 0, 0); err == nil {
 		t.Fatal("create should fail with the pool's last port held by a hibernated sandbox")
 	}
 	if _, err := r.AddPort(ctx, "sb2", 8000); err == nil {
@@ -198,13 +198,13 @@ func TestMigrationDedupsCollidingHibernatedPorts(t *testing.T) {
 		t.Fatalf("open registry: %v", err)
 	}
 	ctx := context.Background()
-	if _, err := r.Create(ctx, "hib", "/tmp/hib.ext4", nil, "", 0, 0, 0); err != nil {
+	if _, err := r.Create(ctx, "hib", "", "/tmp/hib.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "hib"); err != nil {
 		t.Fatalf("hibernate: %v", err)
 	}
-	if _, err := r.Create(ctx, "run", "/tmp/run.ext4", nil, "", 0, 0, 0); err != nil {
+	if _, err := r.Create(ctx, "run", "", "/tmp/run.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// Force the pre-upgrade collision by hand: revert to the old running-only
@@ -243,7 +243,7 @@ func TestMigrationDedupsCollidingHibernatedPorts(t *testing.T) {
 func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 60, 0, 0)
+	sb, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 60, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
 	}
 
 	// -1 (never hibernate) round-trips too.
-	never, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", -1, 0, 0)
+	never, err := r.Create(ctx, "sb2", "", "/tmp/sb2.ext4", nil, "", -1, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestHibernateAfterSecPersistsThroughLifecycle(t *testing.T) {
 func TestResourceOverridesPersist(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	sb, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", nil, "", 0, 4, 2048)
+	sb, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 4, 2048)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestResourceOverridesPersist(t *testing.T) {
 	}
 
 	// Absent overrides read back as 0 (= template default).
-	plain, err := r.Create(ctx, "sb2", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
+	plain, err := r.Create(ctx, "sb2", "", "/tmp/sb2.ext4", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestSnapshotRecordsSourceResources(t *testing.T) {
 	}
 
 	// ...and a restore stamps them onto the new row.
-	sb, err := r.CreateRestore(ctx, "sb2", "/tmp/sb2.ext4", got.TapDevice, got.GuestIP, nil, 0, got.Vcpus, got.MemMIB)
+	sb, err := r.CreateRestore(ctx, "sb2", "", "/tmp/sb2.ext4", got.TapDevice, got.GuestIP, nil, 0, got.Vcpus, got.MemMIB)
 	if err != nil {
 		t.Fatalf("create restore: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestExpiredIncludesHibernated(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
 	past := time.Now().Add(-time.Minute)
-	if _, err := r.Create(ctx, "sb1", "/tmp/sb1.ext4", &past, "", 0, 0, 0); err != nil {
+	if _, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", &past, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "sb1"); err != nil {
@@ -360,10 +360,10 @@ func TestExpiredIncludesHibernated(t *testing.T) {
 func TestListRoutedAndListSplitStatuses(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.Create(ctx, "run1", "/tmp/r1.ext4", nil, "", 0, 0, 0); err != nil {
+	if _, err := r.Create(ctx, "run1", "", "/tmp/r1.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := r.Create(ctx, "hib1", "/tmp/h1.ext4", nil, "", 0, 0, 0); err != nil {
+	if _, err := r.Create(ctx, "hib1", "", "/tmp/h1.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := r.Hibernate(ctx, "hib1"); err != nil {
@@ -383,5 +383,61 @@ func TestListRoutedAndListSplitStatuses(t *testing.T) {
 	}
 	if len(routed) != 2 {
 		t.Fatalf("ListRouted should include hibernated, got %+v", routed)
+	}
+}
+
+func TestNamesPersistAndRename(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	sb, err := r.Create(ctx, "sb1", "my devbox", "/tmp/sb1.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if sb.Name != "my devbox" {
+		t.Fatalf("create must return the name, got %q", sb.Name)
+	}
+	got, err := r.Get(ctx, "sb1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Name != "my devbox" {
+		t.Fatalf("name must persist, got %q", got.Name)
+	}
+
+	if err := r.SetName(ctx, "sb1", "renamed"); err != nil {
+		t.Fatalf("set name: %v", err)
+	}
+	if got, _ = r.Get(ctx, "sb1"); got.Name != "renamed" {
+		t.Fatalf("rename must persist, got %q", got.Name)
+	}
+	if err := r.SetName(ctx, "sb1", ""); err != nil {
+		t.Fatalf("clear name: %v", err)
+	}
+	if got, _ = r.Get(ctx, "sb1"); got.Name != "" {
+		t.Fatalf("empty name must clear, got %q", got.Name)
+	}
+	if err := r.SetName(ctx, "nope", "x"); err == nil {
+		t.Fatal("SetName on unknown id must fail")
+	}
+
+	snap := Snapshot{
+		ID: "snap1", Name: "golden-ish", SourceID: "sb1", TapDevice: "fc0", GuestIP: "172.16.0.10",
+		MemPath: "/tmp/mem", StatePath: "/tmp/state", RootfsPath: "/tmp/rootfs.ext4",
+		CreatedAt: time.Now(),
+	}
+	if err := r.CreateSnapshot(ctx, snap); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if got, _ := r.GetSnapshot(ctx, "snap1"); got.Name != "golden-ish" {
+		t.Fatalf("snapshot name must persist, got %q", got.Name)
+	}
+	if err := r.SetSnapshotName(ctx, "snap1", "prepped"); err != nil {
+		t.Fatalf("set snapshot name: %v", err)
+	}
+	if got, _ := r.GetSnapshot(ctx, "snap1"); got.Name != "prepped" {
+		t.Fatalf("snapshot rename must persist, got %q", got.Name)
+	}
+	if err := r.SetSnapshotName(ctx, "nope", "x"); err == nil {
+		t.Fatal("SetSnapshotName on unknown id must fail")
 	}
 }

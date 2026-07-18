@@ -50,6 +50,7 @@ const hostInfoRecord = {
 const guestFiles = new Map<string, Buffer>()
 const exposedPorts = new Map<number, number>() // guest_port -> host_port
 let sandboxAlive = false
+let sandboxName: string | undefined
 let sandboxExpiresAt: string | undefined
 let sandboxResources: { vcpus?: number; mem_mib?: number } = {}
 let lastExecBody: Record<string, unknown> | undefined
@@ -65,6 +66,7 @@ function currentSandboxRecord(): Record<string, unknown> {
   return {
     ...sandboxRecord,
     ...sandboxResources,
+    ...(sandboxName ? { name: sandboxName } : {}),
     ...(sandboxExpiresAt !== undefined ? { expires_at: sandboxExpiresAt } : {}),
   }
 }
@@ -96,6 +98,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const raw = (await readBody(req)).toString()
     lastCreateBody = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined
     sandboxAlive = true
+    sandboxName =
+      typeof lastCreateBody?.name === 'string' && lastCreateBody.name !== ''
+        ? lastCreateBody.name
+        : undefined
     exposedPorts.clear()
     sandboxExpiresAt =
       typeof lastCreateBody?.timeout_sec === 'number' && lastCreateBody.timeout_sec > 0
@@ -124,6 +130,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       sendJson(res, 404, { error: 'sandbox not found' })
       return
     }
+    sendJson(res, 200, currentSandboxRecord())
+    return
+  }
+
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/rename`) {
+    const body = JSON.parse((await readBody(req)).toString()) as Record<string, unknown>
+    sandboxName = typeof body.name === 'string' && body.name !== '' ? body.name : undefined
     sendJson(res, 200, currentSandboxRecord())
     return
   }
@@ -451,6 +464,25 @@ test('create with timeoutMs sends timeout_sec and surfaces expiresAt', async () 
   const plain = await Sandbox.create(opts())
   assert.equal(lastCreateBody, undefined)
   assert.equal(plain.info.expiresAt, undefined)
+  await plain.kill()
+})
+
+test('create with name sends it and rename updates it', async () => {
+  const sbx = await Sandbox.create({ ...opts(), name: 'my devbox' })
+  assert.equal(lastCreateBody?.name, 'my devbox')
+  assert.equal(sbx.info.name, 'my devbox')
+
+  await sbx.rename('renamed')
+  assert.equal(sbx.info.name, 'renamed')
+
+  // an empty name clears it, and unnamed sandboxes surface no name at all
+  await sbx.rename('')
+  assert.equal(sbx.info.name, undefined)
+  await sbx.kill()
+
+  const plain = await Sandbox.create(opts())
+  assert.equal(lastCreateBody, undefined)
+  assert.equal(plain.info.name, undefined)
   await plain.kill()
 })
 

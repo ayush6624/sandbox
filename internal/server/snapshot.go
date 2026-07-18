@@ -27,7 +27,19 @@ import (
 // the snapshot bakes in the guest IP and tap name, so a restore reuses both and
 // would collide with the still-running source.
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	snap, status, err := s.snapshotSandbox(r.Context(), r.PathValue("id"), false)
+	// The body is optional (older clients send none); tolerate EOF.
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if err := validateName(body.Name); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	snap, status, err := s.snapshotSandbox(r.Context(), r.PathValue("id"), false, body.Name)
 	if err != nil {
 		httpError(w, status, err)
 		return
@@ -45,7 +57,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 // sends only rootfs extents that diverged from the base. Everything else
 // (cold boots, restores, user fan-out clones, the golden build itself) is a
 // self-contained FULL snapshot.
-func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (registry.Snapshot, int, error) {
+func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, name string) (registry.Snapshot, int, error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return registry.Snapshot{}, 404, err
@@ -115,6 +127,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool) (r
 
 	snap := registry.Snapshot{
 		ID:               snapID,
+		Name:             name,
 		SourceID:         id,
 		TapDevice:        sb.TapDevice,
 		GuestIP:          sb.GuestIP,
@@ -154,10 +167,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	snapID := r.PathValue("id")
 
 	var body struct {
-		TimeoutSec        int   `json:"timeout_sec"`
-		HibernateAfterSec int   `json:"hibernate_after_sec"`
-		Vcpus             int64 `json:"vcpus"`
-		MemMIB            int64 `json:"mem_mib"`
+		Name              string `json:"name"`
+		TimeoutSec        int    `json:"timeout_sec"`
+		HibernateAfterSec int    `json:"hibernate_after_sec"`
+		Vcpus             int64  `json:"vcpus"`
+		MemMIB            int64  `json:"mem_mib"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -173,6 +187,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Vcpus != 0 || body.MemMIB != 0 {
 		httpError(w, 400, errors.New("vcpus/mem_mib cannot be set on restore: resources are baked into the snapshot when it is taken"))
+		return
+	}
+	if err := validateName(body.Name); err != nil {
+		httpError(w, 400, err)
 		return
 	}
 
@@ -202,7 +220,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Insert the row first: its partial unique indexes gate on the snapshot's
 	// tap + guest IP, so a restore fails cleanly (before any disk work) if the
 	// source or a prior restore is still live.
-	sb, err := s.reg.CreateRestore(ctx, id, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
+	sb, err := s.reg.CreateRestore(ctx, id, body.Name, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	if err != nil {
 		httpError(w, 409, fmt.Errorf("registry restore: %w", err))
 		return
@@ -398,7 +416,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			clones[i] = s.bringUpClone(snap, expiresAt, body.HibernateAfterSec)
+			clones[i] = s.bringUpClone(snap, "", expiresAt, body.HibernateAfterSec)
 		}(i)
 	}
 	wg.Wait()
@@ -450,7 +468,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 
 // bringUpClone allocates resources for one clone and resumes it on an unbridged
 // tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
-func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time, hibernateAfterSec int) *clone {
+func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) *clone {
 	id := uuid.NewString()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 	// Clones of the golden snapshot record it as their diff base; clones of a
@@ -460,7 +478,7 @@ func (s *Server) bringUpClone(snap registry.Snapshot, expiresAt *time.Time, hibe
 		baseID = snap.ID
 	}
 	// Clones run with the snapshot's baked vcpus/mem; the row records them.
-	sb, err := s.reg.Create(s.vmCtx, id, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
+	sb, err := s.reg.Create(s.vmCtx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
 	}

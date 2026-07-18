@@ -35,6 +35,7 @@ sudo ./sandbox up                                    # POST /sandboxes → print
 sudo ./sandbox list                                  # GET /sandboxes
 sudo ./sandbox down <id>                             # DELETE /sandboxes/<id>
 sudo ./sandbox hibernate <id>                        # freeze an idle sandbox to disk (next exec wakes it)
+sudo ./sandbox rename <id> "my devbox"               # set a sandbox's display name ("" clears)
 sudo ./sandbox exec <id> -- "node --version"         # run a command in the guest
 sudo ./sandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest
 sudo ./sandbox read <id> /path                       # file out of the guest → stdout
@@ -115,6 +116,7 @@ cmd/sandbox/
   up.go                Thin client: POST /sandboxes
   down.go              Thin client: DELETE /sandboxes/<id>
   list.go              Thin client: GET /sandboxes (tabwriter output)
+  rename.go            Thin client: POST /sandboxes/<id>/rename (display name)
   exec.go              Thin client: POST /sandboxes/<id>/exec; exits with the command's exit code
   shell.go             Interactive PTY: raw-mode stdin ↔ WebSocket /shell; relays SIGWINCH resizes
   files.go             Thin clients: read/write/ls over /files and /dir
@@ -297,7 +299,7 @@ scripts/              Host setup shell scripts
 ## Conventions
 
 - Config merging: JSON file < CLI flags. Only `--config` and `--socket` flags exist now;
-  per-VM overrides in `POST /sandboxes` are limited to `timeout_sec`,
+  per-VM overrides in `POST /sandboxes` are limited to `name`, `timeout_sec`,
   `hibernate_after_sec`, `vcpus`, and `mem_mib`.
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
@@ -309,7 +311,7 @@ scripts/              Host setup shell scripts
 
 - **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
 - **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
-  rootfs, etc. remain template-wide. The body carries `timeout_sec`,
+  rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
   `hibernate_after_sec`, `vcpus`, and `mem_mib`.
 - **Gateway placement is slot-based, not resource-aware.** Every sandbox costs one slot
   regardless of its `vcpus`/`mem_mib` override, so a host can be memory-oversubscribed if

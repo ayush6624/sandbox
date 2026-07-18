@@ -78,7 +78,10 @@ export class Sandbox {
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
-    const body: Record<string, number> = {}
+    const body: Record<string, number | string> = {}
+    if (opts.name !== undefined) {
+      body.name = opts.name
+    }
     if (opts.timeoutMs !== undefined) {
       body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
     }
@@ -164,11 +167,16 @@ export class Sandbox {
    */
   static async restore(snapshotId: string, opts: SandboxCreateOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
+    const body: Record<string, number | string> = {}
+    if (opts.name !== undefined) {
+      body.name = opts.name
+    }
+    if (opts.timeoutMs !== undefined) {
+      body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
+    }
     const res = await client.request('POST', `/snapshots/${snapshotId}/restore`, {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
-      ...(opts.timeoutMs !== undefined
-        ? { json: { timeout_sec: Math.ceil(opts.timeoutMs / 1000) } }
-        : {}),
+      ...(Object.keys(body).length > 0 ? { json: body } : {}),
     })
     const raw = (await res.json()) as ApiSandbox
     return new Sandbox(client, toSandboxInfo(raw))
@@ -220,6 +228,22 @@ export class Sandbox {
   static async deleteSnapshot(snapshotId: string, opts: SandboxOpts = {}): Promise<void> {
     const client = new ApiClient(opts)
     await client.request('DELETE', `/snapshots/${snapshotId}`)
+  }
+
+  /**
+   * Sets a snapshot's display name; an empty string clears it.
+   */
+  static async renameSnapshot(
+    snapshotId: string,
+    name: string,
+    opts: SandboxOpts = {}
+  ): Promise<SnapshotInfo> {
+    const client = new ApiClient(opts)
+    const res = await client.request('POST', `/snapshots/${snapshotId}/rename`, {
+      json: { name },
+    })
+    const raw = (await res.json()) as ApiSnapshot
+    return toSnapshotInfo(raw)
   }
 
   /**
@@ -298,16 +322,30 @@ export class Sandbox {
   }
 
   /**
+   * Sets this sandbox's display name; an empty string clears it. The name is
+   * a free-form label shown in listings — not unique and not a lookup key.
+   */
+  async rename(name: string): Promise<void> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/rename`, {
+      json: { name },
+    })
+    const raw = (await res.json()) as ApiSandbox
+    this.info.name = raw.name
+  }
+
+  /**
    * Captures a snapshot of this sandbox (Firecracker memory + device state plus
    * a frozen rootfs copy) that can later be restored into a new sandbox with
    * {@link Sandbox.restore}. The sandbox is paused briefly during capture and
    * then keeps running.
    *
+   * @param opts Optional `name`, a display label for the snapshot.
    * @returns Metadata for the saved snapshot, including its `snapshotId`.
    */
-  async snapshot(): Promise<SnapshotInfo> {
+  async snapshot(opts: { name?: string } = {}): Promise<SnapshotInfo> {
     const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/snapshot`, {
       timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+      ...(opts.name !== undefined ? { json: { name: opts.name } } : {}),
     })
     const raw = (await res.json()) as ApiSnapshot
     return toSnapshotInfo(raw)

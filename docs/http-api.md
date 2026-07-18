@@ -43,6 +43,7 @@ extras — see [gateway differences](#gateway-differences).
 ```json
 {
   "id": "2fdcea66-d551-417a-9877-77c586f0ea91",
+  "name": "my devbox",
   "pid": 41823,
   "vm_id": "…",
   "socket_path": "/run/fc-….sock",
@@ -61,6 +62,8 @@ extras — see [gateway differences](#gateway-differences).
 }
 ```
 
+- `name` — free-form display label (set at create or via `/rename`); omitted
+  when unnamed. Not unique, not a lookup key.
 - `status` — `"running"` or `"hibernated"` (`"stopping"` is a transient
   internal state you normally won't see).
 - `expires_at` — omitted when there's no TTL.
@@ -82,6 +85,7 @@ reach an in-guest server at `<api-host>:<host_port>`.
 ```json
 {
   "id": "b72c5f9e-…",
+  "name": "deps-installed",
   "source_id": "2fdcea66-…",
   "tap_device": "fc-tap3",
   "guest_ip": "172.16.0.10",
@@ -95,6 +99,8 @@ reach an in-guest server at `<api-host>:<host_port>`.
 }
 ```
 
+- `name` — free-form display label (set at snapshot time or via `/rename`);
+  omitted when unnamed.
 - `golden` — the server-managed pristine snapshot that hot creates clone
   from (at most one; omitted when false). You generally want to hide it or
   badge it in a UI — deleting it just makes creates cold-boot until the next
@@ -145,9 +151,11 @@ share a template config); `503` when no host is live.
 Body (optional — empty body is fine):
 
 ```json
-{"timeout_sec": 600, "hibernate_after_sec": 300, "vcpus": 4, "mem_mib": 4096}
+{"name": "my devbox", "timeout_sec": 600, "hibernate_after_sec": 300, "vcpus": 4, "mem_mib": 4096}
 ```
 
+- `name` — display label, at most 64 bytes, no control characters;
+  ""/omit = unnamed. Change it later via `/rename`.
 - `timeout_sec` — auto-destroy TTL in seconds; 0/omit = no expiry.
 - `hibernate_after_sec` — idle-hibernation override: >0 custom window,
   `-1` never hibernate, 0/omit = host default.
@@ -179,6 +187,12 @@ disk). Works on hibernated sandboxes too.
 Body: `{"timeout_sec": N}`. Replaces the TTL counting from now; `0` clears it.
 Returns `200` with the updated Sandbox. A reaper destroys expired sandboxes
 within ~10 s (running **and** hibernated).
+
+### Rename — `POST /sandboxes/{id}/rename`
+
+Body: `{"name": "new name"}`. Sets the display name; `""` clears it. Returns
+`200` with the updated Sandbox. Same validation as at create (≤ 64 bytes, no
+control characters → `400`).
 
 ### Hibernate — `POST /sandboxes/{id}/hibernate`
 
@@ -304,14 +318,15 @@ prepare-once/clone-many workflow.
 
 ### Take — `POST /sandboxes/{id}/snapshot`
 
-Pauses the sandbox (~1 s), writes memory + device state + a frozen disk copy,
-resumes it. The source keeps running. Returns `201 Snapshot`. `409` if the
-sandbox isn't running on this server (e.g. hibernated).
+Body (optional): `{"name": "deps-installed"}` — a display label for the
+snapshot. Pauses the sandbox (~1 s), writes memory + device state + a frozen
+disk copy, resumes it. The source keeps running. Returns `201 Snapshot`.
+`409` if the sandbox isn't running on this server (e.g. hibernated).
 
 ### Restore (1:1) — `POST /snapshots/{id}/restore`
 
-Body (optional): `{"timeout_sec": N, "hibernate_after_sec": N}`. Boots a
-**new** sandbox resuming the snapshot exactly — same processes, same memory.
+Body (optional): `{"name": "…", "timeout_sec": N, "hibernate_after_sec": N}`.
+Boots a **new** sandbox resuming the snapshot exactly — same processes, same memory.
 Reuses the snapshot's baked network identity, so: the source sandbox must be
 dead, and at most one restore of a given snapshot can run at a time (`409` on
 conflict). Returns `201 Sandbox`.
@@ -329,6 +344,11 @@ every clone that came up (**partial success possible** — the array may be
 shorter than `count`; failures are logged server-side and their resources
 reclaimed). `500` only if every clone failed. `vcpus`/`mem_mib` are rejected
 with `400`, same as restore.
+
+### Rename — `POST /snapshots/{id}/rename`
+
+Body: `{"name": "new name"}`. Sets the snapshot's display name; `""` clears
+it. Returns `200` with the updated Snapshot.
 
 ### List — `GET /snapshots` → `200 [Snapshot…]`
 ### Delete — `DELETE /snapshots/{id}` → `204` | `404`

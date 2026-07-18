@@ -29,7 +29,10 @@ const (
 
 // Sandbox represents a row in the sandboxes table.
 type Sandbox struct {
-	ID         string     `json:"id"`
+	ID string `json:"id"`
+	// Name is a free-form display label, settable at create time and via
+	// POST /sandboxes/{id}/rename. Not unique, not a lookup key; "" = unnamed.
+	Name       string     `json:"name,omitempty"`
 	PID        int        `json:"pid"`
 	VMID       string     `json:"vm_id"`
 	SocketPath string     `json:"socket_path"`
@@ -75,7 +78,10 @@ type PortMapping struct {
 // from. TapDevice and GuestIP are recorded because the snapshot bakes them in:
 // a restore must recreate the same tap and reuse the same guest IP.
 type Snapshot struct {
-	ID       string `json:"id"`
+	ID string `json:"id"`
+	// Name is a free-form display label, settable at snapshot time and via
+	// POST /snapshots/{id}/rename. Not unique, not a lookup key; "" = unnamed.
+	Name     string `json:"name,omitempty"`
 	SourceID string `json:"source_id"`
 	// TapDevice and GuestIP are reused on restore (baked into the snapshot).
 	TapDevice string `json:"tap_device"`
@@ -212,7 +218,8 @@ func (r *Registry) migrate() error {
 		base_snapshot_id TEXT NOT NULL DEFAULT '',
 		hibernate_after_sec INTEGER NOT NULL DEFAULT 0,
 		vcpus       INTEGER NOT NULL DEFAULT 0,
-		mem_mib     INTEGER NOT NULL DEFAULT 0
+		mem_mib     INTEGER NOT NULL DEFAULT 0,
+		name        TEXT NOT NULL DEFAULT ''
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status = 'running';
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status = 'running';
@@ -239,7 +246,8 @@ func (r *Registry) migrate() error {
 		format             TEXT NOT NULL DEFAULT 'full',
 		base_id            TEXT NOT NULL DEFAULT '',
 		vcpus              INTEGER NOT NULL DEFAULT 0,
-		mem_mib            INTEGER NOT NULL DEFAULT 0
+		mem_mib            INTEGER NOT NULL DEFAULT 0,
+		name               TEXT NOT NULL DEFAULT ''
 	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
@@ -308,6 +316,15 @@ func (r *Registry) migrate() error {
 		`ALTER TABLE sandboxes ADD COLUMN mem_mib INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE snapshots ADD COLUMN vcpus INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE snapshots ADD COLUMN mem_mib INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	// name was added with sandbox/snapshot display names.
+	for _, col := range []string{
+		`ALTER TABLE sandboxes ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE snapshots ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return err
@@ -397,7 +414,8 @@ func (r *Registry) dedupHibernatedPorts() error {
 // it makes the sandbox diff-snapshottable. hibernateAfterSec is the
 // per-sandbox idle-hibernation override (>0 seconds, -1 never, 0 host default).
 // vcpus/memMIB are per-sandbox resource overrides (0 = template default).
-func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
+// name is the free-form display label ("" = unnamed).
+func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -423,9 +441,9 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib)
-		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
+		`INSERT INTO sandboxes (id, name, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib)
+		 VALUES (?, ?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, name, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
 	}
@@ -434,6 +452,7 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 	}
 	return Sandbox{
 		ID:                id,
+		Name:              name,
 		TapDevice:         tap,
 		GuestIP:           ip,
 		HostPort:          port,
@@ -456,7 +475,7 @@ func (r *Registry) Create(ctx context.Context, id, rootfsPath string, expiresAt 
 // still live. vcpus/memMIB carry the snapshot's recorded resources — the
 // restore can't change them (they're baked into the snapshot), it just
 // reports them.
-func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
+func (r *Registry) CreateRestore(ctx context.Context, id, name, rootfsPath, tap, ip string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -480,9 +499,9 @@ func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip st
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, hibernate_after_sec, vcpus, mem_mib)
-		 VALUES (?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), hibernateAfterSec, vcpus, memMIB)
+		`INSERT INTO sandboxes (id, name, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, expires_at, hibernate_after_sec, vcpus, mem_mib)
+		 VALUES (?, ?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, name, tap, ip, port, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert restored sandbox: %w", err)
 	}
@@ -491,6 +510,7 @@ func (r *Registry) CreateRestore(ctx context.Context, id, rootfsPath, tap, ip st
 	}
 	return Sandbox{
 		ID:                id,
+		Name:              name,
 		TapDevice:         tap,
 		GuestIP:           ip,
 		HostPort:          port,
@@ -515,6 +535,32 @@ func (r *Registry) FinishStart(ctx context.Context, id string, pid int, vmID, so
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("sandbox %s not found", id)
+	}
+	return nil
+}
+
+// SetName updates a sandbox's display name; "" clears it.
+func (r *Registry) SetName(ctx context.Context, id, name string) error {
+	res, err := r.db.ExecContext(ctx, `UPDATE sandboxes SET name=? WHERE id=?`, name, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("sandbox %s not found", id)
+	}
+	return nil
+}
+
+// SetSnapshotName updates a snapshot's display name; "" clears it.
+func (r *Registry) SetSnapshotName(ctx context.Context, id, name string) error {
+	res, err := r.db.ExecContext(ctx, `UPDATE snapshots SET name=? WHERE id=?`, name, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("snapshot %s not found", id)
 	}
 	return nil
 }
@@ -726,7 +772,7 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib`
+const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
@@ -740,9 +786,9 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 		format = FormatFull
 	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB)
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name)
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
@@ -796,7 +842,7 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var s Snapshot
 	var createdAt int64
 	var golden int
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB)
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name)
 	if err != nil {
 		return s, err
 	}
@@ -809,7 +855,7 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 }
 
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
-const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib`
+const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, host_port, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name`
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -849,7 +895,7 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 	var sb Sandbox
 	var createdAt int64
 	var stoppedAt, expiresAt sql.NullInt64
-	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.HostPort, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB)
+	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.HostPort, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name)
 	if err != nil {
 		return sb, err
 	}

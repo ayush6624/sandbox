@@ -144,6 +144,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)
 	mux.HandleFunc("DELETE /sandboxes/{id}", s.handleDestroy)
 	mux.HandleFunc("POST /sandboxes/{id}/timeout", s.handleSetTimeout)
+	mux.HandleFunc("POST /sandboxes/{id}/rename", s.handleRename)
 	mux.HandleFunc("POST /sandboxes/{id}/ports", s.handleExposePort)
 	mux.HandleFunc("GET /sandboxes/{id}/ports", s.handleListPorts)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.handleAgentProxy("exec"))
@@ -155,6 +156,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("POST /sandboxes/{id}/hibernate", s.handleHibernate)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
+	mux.HandleFunc("POST /snapshots/{id}/rename", s.handleRenameSnapshot)
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
 	mux.HandleFunc("POST /snapshots/{id}/fanout", s.handleFanout)
 	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
@@ -245,10 +247,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// The body is optional (older clients send none); tolerate EOF.
 	var body struct {
-		TimeoutSec        int   `json:"timeout_sec"`
-		HibernateAfterSec int   `json:"hibernate_after_sec"`
-		Vcpus             int64 `json:"vcpus"`
-		MemMIB            int64 `json:"mem_mib"`
+		Name              string `json:"name"`
+		TimeoutSec        int    `json:"timeout_sec"`
+		HibernateAfterSec int    `json:"hibernate_after_sec"`
+		Vcpus             int64  `json:"vcpus"`
+		MemMIB            int64  `json:"mem_mib"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -266,6 +269,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	if err := validateName(body.Name); err != nil {
+		httpError(w, 400, err)
+		return
+	}
 	var expiresAt *time.Time
 	if body.TimeoutSec > 0 {
 		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
@@ -277,7 +284,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Resource overrides force the cold path: the golden snapshot bakes the
 	// template's vcpus/mem at snapshot time, so a clone can't change them.
 	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
-		sb, err := s.createFromSnapshot(ctx, *snap, expiresAt, body.HibernateAfterSec)
+		sb, err := s.createFromSnapshot(ctx, *snap, body.Name, expiresAt, body.HibernateAfterSec)
 		if err == nil {
 			writeJSON(w, 201, s.effectiveResources(sb))
 			return
@@ -285,7 +292,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
 	}
 
-	sb, err := s.createCold(ctx, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
+	sb, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -297,7 +304,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
 // so callers can exec/write files the moment it returns. vcpus/memMIB override
 // the template's resources when nonzero (already validated by the caller).
-func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
+func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
 	id := uuid.NewString()
 
 	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
@@ -305,7 +312,7 @@ func (s *Server) createCold(ctx context.Context, expiresAt *time.Time, hibernate
 		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
-	sb, err := s.reg.Create(ctx, id, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
+	sb, err := s.reg.Create(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
@@ -458,6 +465,58 @@ func (s *Server) effectiveResources(sb registry.Sandbox) registry.Sandbox {
 	return sb
 }
 
+// handleRename sets a sandbox's display name; "" clears it.
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if err := validateName(body.Name); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if err := s.reg.SetName(r.Context(), id, body.Name); err != nil {
+		httpError(w, 404, err)
+		return
+	}
+	sb, err := s.reg.Get(r.Context(), id)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, s.effectiveResources(sb))
+}
+
+// handleRenameSnapshot sets a snapshot's display name; "" clears it.
+func (s *Server) handleRenameSnapshot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if err := validateName(body.Name); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if err := s.reg.SetSnapshotName(r.Context(), id, body.Name); err != nil {
+		httpError(w, 404, err)
+		return
+	}
+	snap, err := s.reg.GetSnapshot(r.Context(), id)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, snap)
+}
+
 func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.destroy(r.Context(), id); err != nil {
@@ -562,6 +621,23 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// maxNameLen bounds sandbox/snapshot display names.
+const maxNameLen = 64
+
+// validateName checks a display name ("" = unnamed, always valid): a short
+// single-line label, not an identifier — any printable characters are fine.
+func validateName(name string) error {
+	if len(name) > maxNameLen {
+		return fmt.Errorf("name exceeds %d bytes", maxNameLen)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("name must not contain control characters")
+		}
+	}
+	return nil
 }
 
 // --- resource override validation ---

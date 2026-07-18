@@ -15,6 +15,12 @@ export interface SandboxOpts {
 /** Options for {@link Sandbox.create}. */
 export interface SandboxCreateOpts extends SandboxOpts {
   /**
+   * Free-form display name for the sandbox. Not unique and not a lookup
+   * key — purely a label shown in listings. Can be changed later with
+   * `sandbox.rename(name)`.
+   */
+  name?: string
+  /**
    * Auto-destroy the sandbox after this many milliseconds (rounded up to
    * whole seconds). Omit for no expiry. Can be changed later with
    * `sandbox.setTimeout(ms)`.
@@ -45,6 +51,7 @@ export interface SandboxCreateOpts extends SandboxOpts {
 /** Raw sandbox object as returned by the REST API (snake_case). */
 export interface ApiSandbox {
   id: string
+  name?: string
   pid: number
   vm_id: string
   socket_path: string
@@ -108,6 +115,7 @@ export interface ApiPortMapping {
 /** Raw snapshot object as returned by the REST API (snake_case). */
 export interface ApiSnapshot {
   id: string
+  name?: string
   source_id: string
   tap_device: string
   guest_ip: string
@@ -121,6 +129,8 @@ export interface ApiSnapshot {
 export interface SnapshotInfo {
   /** Unique snapshot id (pass to {@link Sandbox.restore}). */
   snapshotId: string
+  /** Display name; absent when the snapshot is unnamed. */
+  name?: string
   /** Id of the sandbox this snapshot was taken from. */
   sourceId: string
   /** Creation time. */
@@ -139,6 +149,8 @@ export interface PortMapping {
 export interface SandboxInfo {
   /** Unique sandbox id. */
   sandboxId: string
+  /** Display name; absent when the sandbox is unnamed. */
+  name?: string
   /** Host PID of the firecracker process. */
   pid: number
   /** Firecracker VM id. */
@@ -241,11 +253,13 @@ export interface ReadOpts {
 
 /** Converts a raw API snapshot object to the public {@link SnapshotInfo} shape. */
 export function toSnapshotInfo(raw: ApiSnapshot): SnapshotInfo {
-  return {
+  const info: SnapshotInfo = {
     snapshotId: raw.id,
     sourceId: raw.source_id,
     createdAt: new Date(raw.created_at),
   }
+  if (raw.name) info.name = raw.name
+  return info
 }
 
 /** Converts a raw API host info object to the public {@link HostInfo} shape. */
@@ -277,6 +291,7 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
     status: raw.status,
     createdAt: new Date(raw.created_at),
   }
+  if (raw.name) info.name = raw.name
   if (raw.expires_at) info.expiresAt = new Date(raw.expires_at)
   if (raw.hibernate_after_sec) info.hibernateAfterSec = raw.hibernate_after_sec
   if (raw.vcpus) info.vcpus = raw.vcpus

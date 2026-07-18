@@ -54,6 +54,8 @@ func NewHTTP(addr, token string) *Client {
 
 // CreateOpts customizes sandbox creation.
 type CreateOpts struct {
+	// Name is a free-form display label for the sandbox; "" = unnamed.
+	Name string `json:"name,omitempty"`
 	// TimeoutSec auto-destroys the sandbox after this many seconds; 0 = no expiry.
 	TimeoutSec int `json:"timeout_sec,omitempty"`
 	// HibernateAfterSec overrides the host's idle-hibernation window: >0 =
@@ -69,7 +71,7 @@ type CreateOpts struct {
 // Create asks the server to provision a new sandbox.
 func (c *Client) Create(ctx context.Context, opts CreateOpts) (registry.Sandbox, error) {
 	var body any
-	if opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 || opts.Vcpus != 0 || opts.MemMIB != 0 {
+	if opts.Name != "" || opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 || opts.Vcpus != 0 || opts.MemMIB != 0 {
 		body = opts
 	}
 	var sb registry.Sandbox
@@ -92,6 +94,16 @@ func (c *Client) List(ctx context.Context) ([]registry.Sandbox, error) {
 func (c *Client) Get(ctx context.Context, id string) (registry.Sandbox, error) {
 	var sb registry.Sandbox
 	if err := c.do(ctx, "GET", "/sandboxes/"+id, nil, &sb); err != nil {
+		return registry.Sandbox{}, err
+	}
+	return sb, nil
+}
+
+// Rename sets a sandbox's display name; "" clears it.
+func (c *Client) Rename(ctx context.Context, id, name string) (registry.Sandbox, error) {
+	var sb registry.Sandbox
+	body := map[string]string{"name": name}
+	if err := c.do(ctx, "POST", "/sandboxes/"+id+"/rename", body, &sb); err != nil {
 		return registry.Sandbox{}, err
 	}
 	return sb, nil

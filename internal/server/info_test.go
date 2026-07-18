@@ -64,11 +64,11 @@ func TestListAndGetReportEffectiveResources(t *testing.T) {
 	s := testServerWithTemplate(t)
 	ctx := context.Background()
 
-	def, err := s.reg.Create(ctx, "sb-default", "/tmp/r1", nil, "", 0, 0, 0)
+	def, err := s.reg.Create(ctx, "sb-default", "", "/tmp/r1", nil, "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("create default row: %v", err)
 	}
-	ovr, err := s.reg.Create(ctx, "sb-override", "/tmp/r2", nil, "", 0, 4, 2048)
+	ovr, err := s.reg.Create(ctx, "sb-override", "", "/tmp/r2", nil, "", 0, 4, 2048)
 	if err != nil {
 		t.Fatalf("create override row: %v", err)
 	}

@@ -58,12 +58,12 @@ func (s *Server) buildGolden(ctx context.Context) {
 	// -1: the throwaway golden source must never be hibernated out from under
 	// the snapshot step. No resource overrides — the golden snapshot always
 	// bakes the template's vcpus/mem (override creates cold-boot instead).
-	sb, err := s.createCold(ctx, nil, -1, 0, 0)
+	sb, err := s.createCold(ctx, "", nil, -1, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "golden snapshot: cold boot failed, creates stay cold: %v\n", err)
 		return
 	}
-	snap, _, snapErr := s.snapshotSandbox(ctx, sb.ID, true)
+	snap, _, snapErr := s.snapshotSandbox(ctx, sb.ID, true, "")
 	// The source exists only to be snapshotted — destroy it either way.
 	if err := s.destroy(context.Background(), sb.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "golden snapshot: destroy source %s: %v\n", sb.ID, err)
@@ -97,13 +97,13 @@ func (s *Server) stageSnapshotRootfs(snap registry.Snapshot) error {
 
 // createFromSnapshot brings up one identity-neutral clone of snap — the same
 // two-phase resume-then-bridge dance as fan-out, for a single sandbox.
-func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
+func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
 	if err := s.stageSnapshotRootfs(snap); err != nil {
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 
 	t0 := time.Now()
-	c := s.bringUpClone(snap, expiresAt, hibernateAfterSec)
+	c := s.bringUpClone(snap, name, expiresAt, hibernateAfterSec)
 	if c.err != nil {
 		return registry.Sandbox{}, c.err
 	}

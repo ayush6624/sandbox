@@ -105,6 +105,23 @@ await sbx.setTimeout(0)         // remove the timeout entirely
 
 `timeoutMs` is rounded up to whole seconds (the API speaks `timeout_sec`).
 
+### Names
+
+Sandboxes and snapshots take an optional free-form display name — a label
+for listings, not a unique id or lookup key:
+
+```ts
+const sbx = await Sandbox.create({ name: 'my devbox' })
+console.log(sbx.info.name)                       // 'my devbox'
+await sbx.rename('renamed')                      // '' clears the name
+
+const snap = await sbx.snapshot({ name: 'deps-installed' })
+await Sandbox.renameSnapshot(snap.snapshotId, 'prepped')
+```
+
+`restore` also accepts `{ name }` for the new sandbox it boots. Names are
+capped at 64 bytes; unnamed objects surface `info.name === undefined`.
+
 ### Resource overrides
 
 Sandboxes default to the host template's vCPUs and memory. Override either

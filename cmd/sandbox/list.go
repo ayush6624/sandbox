@@ -33,9 +33,9 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tGUEST\tHOST PORT\tTAP\tPID")
+	fmt.Fprintln(tw, "ID\tNAME\tGUEST\tHOST PORT\tTAP\tPID")
 	for _, sb := range sandboxes {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%d\n", sb.ID, sb.GuestIP, sb.HostPort, sb.TapDevice, sb.PID)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%d\n", sb.ID, sb.Name, sb.GuestIP, sb.HostPort, sb.TapDevice, sb.PID)
 	}
 	return tw.Flush()
 }
