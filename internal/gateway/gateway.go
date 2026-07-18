@@ -117,6 +117,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /snapshots", g.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/restore", g.handleSnapshotOp)
 	mux.HandleFunc("POST /snapshots/{id}/fanout", g.handleSnapshotOp)
+	mux.HandleFunc("POST /snapshots/{id}/rename", g.handleSnapshotOp)
 	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
 
 	srv := &http.Server{Addr: addr, Handler: bearerAuth(g.token, mux)}
