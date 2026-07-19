@@ -73,7 +73,10 @@ through it, so an old gateway silently drops new fields) — also run
 `SLOTS_PER_HOST` (the **single source of truth** for per-host capacity —
 `deploy-job.sh` *generates* the pools in `devbox-gcp.json` from it: taps = IPs
 = N, ports = 4N so hibernated port-holds and extra exposed ports never bind
-capacity; max 200 per the /24 guest subnet), `HEADROOM_SLOTS` (free slots kept
+capacity, plus `mem_budget_mib = N×1180` so `mem_mib` overrides are admitted
+against the host's real memory — a big-mem sandbox consumes multiple slots'
+worth of `slots_free` and can never OOM the cgroup; max 200 per the /24 guest
+subnet), `HEADROOM_SLOTS` (free slots kept
 ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must stay low before
 scale-in), `STANDBY_STOPPED_SIZE` (pre-created stopped VMs the MIG starts on
 scale-up — tens of seconds to serving instead of the minutes a fresh

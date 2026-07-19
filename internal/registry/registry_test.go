@@ -256,6 +256,116 @@ func TestCreateReturnsErrPoolExhausted(t *testing.T) {
 	}
 }
 
+// memRegistry is the 3-slot test registry with memory admission on: template
+// 1024 MiB + 156 overhead = 1180 per sandbox, budget fits exactly two.
+func memRegistry(t *testing.T) *Registry {
+	t.Helper()
+	r := testRegistry(t)
+	r.SetMemAccounting(MemAccounting{TemplateMemMIB: 1024, BudgetMIB: 2 * 1180, OverheadMIB: 156})
+	return r
+}
+
+func TestCreateRejectsBeyondMemBudget(t *testing.T) {
+	r, ctx := memRegistry(t), context.Background()
+
+	for _, id := range []string{"a", "b"} {
+		if _, err := r.Create(ctx, id, "", "/tmp/"+id+".ext4", nil, "", 0, 0, 0); err != nil {
+			t.Fatalf("create %s within budget: %v", id, err)
+		}
+	}
+	_, err := r.Create(ctx, "c", "", "/tmp/c.ext4", nil, "", 0, 0, 0)
+	if err == nil {
+		t.Fatal("third template create should exceed the 2-sandbox memory budget")
+	}
+	if !errors.Is(err, ErrMemExhausted) || !errors.Is(err, ErrPoolExhausted) {
+		t.Fatalf("rejection must be Is-able as BOTH ErrMemExhausted and ErrPoolExhausted (503/failover path); got %v", err)
+	}
+}
+
+func TestCreateMixedOverridesAgainstBudget(t *testing.T) {
+	r, ctx := memRegistry(t), context.Background()
+
+	// One big override eats the whole budget (2204 + 156 = 2360 = budget).
+	if _, err := r.Create(ctx, "big", "", "/tmp/big.ext4", nil, "", 0, 0, 2204); err != nil {
+		t.Fatalf("big create exactly at budget: %v", err)
+	}
+	if _, err := r.Create(ctx, "small", "", "/tmp/small.ext4", nil, "", 0, 0, 0); err == nil {
+		t.Fatal("template create should be rejected: the override consumed the budget")
+	}
+	// Freeing the big one re-admits.
+	if err := r.Destroy(ctx, "big"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if _, err := r.Create(ctx, "small", "", "/tmp/small.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create after destroy should be admitted: %v", err)
+	}
+}
+
+func TestHibernatedHoldsNoMemoryAndWakeRecommits(t *testing.T) {
+	r, ctx := memRegistry(t), context.Background()
+
+	if _, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create sb1: %v", err)
+	}
+	if _, err := r.Create(ctx, "sb2", "", "/tmp/sb2.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create sb2: %v", err)
+	}
+	// Budget full. Hibernating sb1 releases its memory (the VM is dead)...
+	if err := r.Hibernate(ctx, "sb1"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+	if _, err := r.Create(ctx, "sb3", "", "/tmp/sb3.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create sb3 should fit — hibernated sandboxes hold no memory: %v", err)
+	}
+	// ...but waking re-commits it, and the budget is full again.
+	if _, _, err := r.Wake(ctx, "sb1"); err == nil {
+		t.Fatal("wake should be rejected: re-committing sb1's memory exceeds the budget")
+	} else if !errors.Is(err, ErrMemExhausted) {
+		t.Fatalf("wake rejection should be ErrMemExhausted; got %v", err)
+	}
+	// Rejection must leave the row hibernated (wakeable later).
+	sb, err := r.Get(ctx, "sb1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sb.Status != StatusHibernated {
+		t.Fatalf("rejected wake must keep the row hibernated; got %s", sb.Status)
+	}
+	if err := r.Destroy(ctx, "sb3"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if _, _, err := r.Wake(ctx, "sb1"); err != nil {
+		t.Fatalf("wake after freeing capacity: %v", err)
+	}
+}
+
+func TestFreeSlotsMemoryBound(t *testing.T) {
+	r, ctx := memRegistry(t), context.Background()
+
+	// Pools allow 3, the budget fits 2 → memory is the binding term.
+	if got, err := r.FreeSlots(ctx); err != nil || got != 2 {
+		t.Fatalf("FreeSlots = %d, %v; want 2 (memory-bound)", got, err)
+	}
+	// Disabled budget → pool-bound as before.
+	r.SetMemAccounting(MemAccounting{})
+	if got, err := r.FreeSlots(ctx); err != nil || got != 3 {
+		t.Fatalf("FreeSlots with admission disabled = %d, %v; want 3", got, err)
+	}
+}
+
+func TestRestoreChargesBakedMem(t *testing.T) {
+	r, ctx := memRegistry(t), context.Background()
+
+	// A restore whose snapshot baked more memory than the budget allows.
+	_, err := r.CreateRestore(ctx, "big", "", "/tmp/big.ext4", "fc0", "172.16.0.10", nil, 0, 0, 4096)
+	if err == nil {
+		t.Fatal("restore with baked mem beyond the budget should be rejected")
+	}
+	if !errors.Is(err, ErrMemExhausted) {
+		t.Fatalf("restore rejection should be ErrMemExhausted; got %v", err)
+	}
+}
+
 func TestMigrationDedupsCollidingHibernatedPorts(t *testing.T) {
 	// Simulate a pre-proxy database: a hibernated row sharing its host port
 	// with a running row (soft reservation allowed that under pool pressure).

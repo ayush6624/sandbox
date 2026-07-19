@@ -42,10 +42,15 @@ if [ "$SLOTS" -lt 1 ] || [ "$SLOTS" -gt 200 ]; then
   exit 1
 fi
 GEN_CONFIG="$(mktemp)"
+# mem_budget_mib = SLOTS x 1180 = TASK_MEMORY - 2000 (the Nomad cgroup minus
+# serve's own reserve): the sum-of-guest-memory admission ceiling. Must be set
+# explicitly on Nomad hosts — serve's /proc/meminfo fallback sees the machine
+# total, not the cgroup limit.
 jq --argjson n "$SLOTS" '
   .pools.TapMax     = $n |
   .pools.GuestIPMax = ("172.16.0." + (9 + $n | tostring)) |
-  .pools.PortMax    = (.pools.PortMin + 4 * $n - 1)
+  .pools.PortMax    = (.pools.PortMin + 4 * $n - 1) |
+  .mem_budget_mib   = ($n * 1180)
 ' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
 
 # Size the Nomad task cgroup to the host: ~1.18 GiB per slot (1 GiB guest +

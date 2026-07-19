@@ -234,6 +234,20 @@ scripts/              Host setup shell scripts
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
   that's the first thing to check.
+- **Memory is admission-checked; CPU is deliberately oversubscribed (~6:1).**
+  `mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
+  total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running
+  sandbox's effective `mem_mib` + 156 MiB VMM overhead; hibernated VMs hold none. The
+  check runs inside the registry TX of `Create`/`CreateRestore`/**`Wake`** (waking
+  re-commits the snapshot's baked memory; a rejected wake rolls back to hibernated and
+  surfaces as 503 on agent-bound requests / close code 4503 on the shell WS), returns
+  `ErrMemExhausted` (wraps `ErrPoolExhausted` so 503 + gateway failover fire unchanged),
+  and bounds `FreeSlots` — a big-mem sandbox eats multiple slots' worth of `slots_free`,
+  so placement and autoscaling see the truth and the Nomad cgroup can never be
+  OOM-blown by `mem_mib` overrides. `maxMemMIB` (the per-sandbox override ceiling and
+  `GET /info` MaxMemMIB) is clamped to the budget. vcpus have NO sum guard by design:
+  the Nomad task runs CPU *shares*, so contention degrades to fair-share slowdown —
+  there is no CPU analogue of the OOM killer.
 - **Creates are bounded and capacity-classed.** A per-host semaphore
   (`"create_concurrency"` in the config; 0 = min(2×NumCPU, 16)) gates every bring-up
   (hot clone, cold boot, 1:1 restore) so a burst queues in-process instead of
@@ -330,10 +344,11 @@ scripts/              Host setup shell scripts
 - **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
   rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
   `hibernate_after_sec`, `vcpus`, and `mem_mib`.
-- **Gateway placement is slot-based, not resource-aware.** Every sandbox costs one slot
-  regardless of its `vcpus`/`mem_mib` override, so a host can be memory-oversubscribed if
-  many large-mem sandboxes land on it. Fine while overrides are rare; revisit slot
-  accounting (weight by mem?) before making big sandboxes the norm.
+- **No memory overcommit.** Guest memory is provisioned 1:1 (admission-enforced via
+  `mem_budget_mib` — see the memory-admission note above). Hot-created clones share the
+  golden snapshot's page cache and idle guests touch a fraction of their RAM, so real
+  density headroom exists — but without a virtio-balloon/free-page-reporting device,
+  dirtied pages never return until hibernation. Add a balloon before any overcommit knob.
 - **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics),
   `internal/registry` (hibernate/wake state machine, hibernated-port pinning, resource
   persistence), and `internal/server` (port proxy: forwarding, wake-on-connect, activity
