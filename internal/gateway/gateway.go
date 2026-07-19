@@ -258,6 +258,13 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		g.release(h.id, false) // create failed: free the reservation
+		if r.Context().Err() != nil {
+			// The CLIENT went away mid-create; the error is our own context
+			// cancellation, not the host's fault. Penalizing here would let a
+			// wave of client timeouts blackout placement on healthy hosts.
+			httpError(w, 499, fmt.Errorf("client disconnected during create on host %s: %w", h.id, err))
+			return
+		}
 		lastErr = fmt.Errorf("create on host %s: %w", h.id, err)
 		var ae *client.APIError
 		switch {

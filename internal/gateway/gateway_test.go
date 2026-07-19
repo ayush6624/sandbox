@@ -252,6 +252,41 @@ func addTestHost(g *Gateway, id, addr string, used, free int) *host {
 	return h
 }
 
+// TestCreateClientCancelDoesNotPenalize: a client that disconnects mid-create
+// makes the outbound call fail with OUR context's cancellation — that must not
+// read as "host down". A wave of client timeouts would otherwise penalize
+// every healthy host and blackout placement.
+func TestCreateClientCancelDoesNotPenalize(t *testing.T) {
+	blocked := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blocked // hold the create until the client has gone away
+		w.WriteHeader(500)
+	}))
+	t.Cleanup(func() { close(blocked); srv.Close() })
+
+	g := New("tok", 20*time.Second, 0, 0)
+	addTestHost(g, "a", strings.TrimPrefix(srv.URL, "http://"), 0, 24)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/sandboxes", strings.NewReader(`{}`)).WithContext(ctx)
+	g.handleCreate(rr, req)
+
+	if rr.Code != 499 {
+		t.Fatalf("cancelled create: got %d, want 499 (body: %s)", rr.Code, rr.Body.String())
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	a := g.hosts["a"]
+	if time.Now().Before(a.penaltyUntil) {
+		t.Fatal("client cancellation must not penalize the host")
+	}
+	if a.reserved != 0 {
+		t.Fatalf("reservation leaked: %d", a.reserved)
+	}
+}
+
 func TestCreateFailsOverOnCapacityPushback(t *testing.T) {
 	// Host A (fuller — bin-pack picks it first) answers 503 "port pool
 	// exhausted"; host B answers 201. The create must land on B, and A must be

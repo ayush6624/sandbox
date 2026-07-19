@@ -393,16 +393,19 @@ func (s *Server) releaseCreate() { <-s.createSem }
 // the template's resources when nonzero (already validated by the caller).
 func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
 	id := uuid.NewString()
+	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 
-	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
-	if err != nil {
-		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
-	}
-
+	// Allocate identity + admission BEFORE the rootfs copy: a capacity-rejected
+	// create (pool/memory exhaustion — routine under gateway failover) must not
+	// pay a multi-GB copy + cleanup on a host that's already full.
 	sb, err := s.reg.Create(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
-		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
+	}
+
+	if _, err := s.cfg.Provisioner.PrepareRootfs(id); err != nil {
+		s.rollbackPreVM(id, sb)
+		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
 	if err := s.cfg.Provisioner.CreateTap(sb.TapDevice); err != nil {
