@@ -277,9 +277,15 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 			// Transport-level failure — host possibly down or unreachable.
 			g.penalize(h.id, connPenalty, false)
 		default:
-			// A real host-side failure (500, 4xx): not a capacity signal —
-			// don't burn boots on other hosts, surface it.
-			httpError(w, http.StatusBadGateway, lastErr)
+			// A real host-side failure: not a capacity signal — don't burn
+			// boots on other hosts, surface it. A client error (4xx) keeps its
+			// status so e.g. an unfittable mem_mib override reaches the client
+			// as the 400 the host intended, not a retryable-looking 502.
+			code := http.StatusBadGateway
+			if ae.StatusCode >= 400 && ae.StatusCode < 500 {
+				code = ae.StatusCode
+			}
+			httpError(w, code, lastErr)
 			return
 		}
 		tried[h.id] = true

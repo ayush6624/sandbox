@@ -347,6 +347,29 @@ func TestCreateDoesNotRetryOnHostError(t *testing.T) {
 	}
 }
 
+// TestCreateClientErrorKeepsStatus: a host-side 4xx is the CLIENT's mistake
+// (e.g. an unfittable mem_mib override) — it must reach the client with the
+// host's status, not be wrapped into a retryable-looking 502, and must not
+// fail over.
+func TestCreateClientErrorKeepsStatus(t *testing.T) {
+	srvA, hitsA := fakeHost(t, 400, `{"error":"mem_mib 99999 exceeds host limit 28164"}`)
+	srvB, hitsB := fakeHost(t, 201, `{"id":"sb-3","status":"running"}`)
+
+	g := New("tok", 20*time.Second, 0, 0)
+	addTestHost(g, "a", strings.TrimPrefix(srvA.URL, "http://"), 20, 4)
+	addTestHost(g, "b", strings.TrimPrefix(srvB.URL, "http://"), 0, 24)
+
+	rr := httptest.NewRecorder()
+	g.handleCreate(rr, httptest.NewRequest("POST", "/sandboxes", strings.NewReader(`{"mem_mib":99999}`)))
+
+	if rr.Code != 400 {
+		t.Fatalf("host 400 must pass through: got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if hitsA.Load() != 1 || hitsB.Load() != 0 {
+		t.Fatalf("client error must not fail over; a=%d b=%d", hitsA.Load(), hitsB.Load())
+	}
+}
+
 func TestCreateAttemptsBoundedAndReleased(t *testing.T) {
 	// Every host pushes back on capacity: the create ends 503 + Retry-After
 	// after at most maxCreateAttempts hosts, with no reservation leaked.
