@@ -17,10 +17,10 @@
   "hibernate_after_sec": 300,
   "pools": {
     "TapPrefix":  "fc",
-    "TapMax":     24,
+    "TapMax":     48,
     "GuestIPMin": "172.16.0.10",
-    "GuestIPMax": "172.16.0.33",
+    "GuestIPMax": "172.16.0.57",
     "PortMin":    5200,
-    "PortMax":    5223
+    "PortMax":    5391
   }
 }

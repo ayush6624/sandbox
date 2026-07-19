@@ -106,6 +106,7 @@ cmd_deploy() {
        SCALE_DOWN_WINDOW='${SCALE_DOWN_WINDOW:-15m}' \
        PROJECT='$PROJECT' ZONE='$ZONE' MIG_NAME='${MIG_NAME:-sandbox-workers}' \
        MIG_MIN='${MIG_MIN:-1}' MIG_MAX='${MIG_MAX:-8}' \
+       QUEUE_WAIT='${QUEUE_WAIT:-180s}' QUEUE_MAX='${QUEUE_MAX:-512}' \
        REMOTE_DIR='$REMOTE_DIR' bash -s" < "$DIR/control-install.sh"
 
   cmd_status

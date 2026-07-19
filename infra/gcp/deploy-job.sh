@@ -24,9 +24,41 @@ GW_URL="http://${CONTROL_IP}:${GW_PORT:-9090}"
 
 sshc() { ssh -o BatchMode=yes "${SSH_USER}@${CONTROL_NAME}" "$@"; }
 
-echo ">> copy job + config to $CONTROL_NAME"
-scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "$REPO/configs/devbox-gcp.json" \
-  "${SSH_USER}@${CONTROL_NAME}:/tmp/"
+# --- derive per-host capacity from SLOTS_PER_HOST (the single source of truth) ---
+# The pools in devbox-gcp.json are GENERATED here, not hand-maintained, so the
+# autoscaler math (SLOTS_PER_HOST) and the hosts' actual pools cannot drift:
+#   taps  = N                          (fc0..fcN-1)
+#   IPs   = N                          (172.16.0.10 .. 172.16.0.(9+N))
+#   ports = 4N                         (hibernated sandboxes hold their port and
+#                                       extra exposed ports drain the same pool;
+#                                       4x keeps ports from ever binding Slots())
+SLOTS="${SLOTS_PER_HOST:?set SLOTS_PER_HOST in config.env}"
+command -v jq >/dev/null || { echo "error: deploy-job.sh needs jq"; exit 1; }
+if [ "$SLOTS" -lt 1 ] || [ "$SLOTS" -gt 200 ]; then
+  # 200 slots ~= 209 IPs ending at 172.16.0.209 — comfortably inside the /24
+  # guest subnet (which the host code hard-codes). Beyond that widen the subnet
+  # first (internal/server GuestCIDR + provisioner GatewayCIDR).
+  echo "error: SLOTS_PER_HOST=$SLOTS out of range [1,200] (the /24 guest subnet is the wall)"
+  exit 1
+fi
+GEN_CONFIG="$(mktemp)"
+jq --argjson n "$SLOTS" '
+  .pools.TapMax     = $n |
+  .pools.GuestIPMax = ("172.16.0." + (9 + $n | tostring)) |
+  .pools.PortMax    = (.pools.PortMin + 4 * $n - 1)
+' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
+
+# Size the Nomad task cgroup to the host: ~1.18 GiB per slot (1 GiB guest +
+# firecracker overhead) + 2 GiB for serve itself; CPU shares near the machine's
+# core count (parsed from WORKER_MACHINE_TYPE, e.g. n2-standard-16 -> 16).
+TASK_MEMORY="$(( SLOTS * 1180 + 2000 ))"
+CORES="$(echo "${WORKER_MACHINE_TYPE:-n2-standard-16}" | grep -oE '[0-9]+$' || echo 16)"
+TASK_CPU="$(( (CORES - 1) * 1000 ))"
+
+echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS mem=${TASK_MEMORY}MiB cpu=${TASK_CPU})"
+scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_NAME}:/tmp/serve.nomad.hcl"
+scp -o BatchMode=yes -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_NAME}:/tmp/devbox-gcp.json"
+rm -f "$GEN_CONFIG"
 
 echo ">> nomad job run sandbox-serve (release=$RELEASE)"
 # Values are expanded locally into single-quoted -var args (tokens are hex, the
@@ -39,5 +71,7 @@ sshc "nomad job run \
         -var=release='$RELEASE' \
         -var=bucket='$RELEASE_BUCKET' \
         -var=config_path=/tmp/devbox-gcp.json \
+        -var=task_cpu='$TASK_CPU' \
+        -var=task_memory='$TASK_MEMORY' \
         /tmp/serve.nomad.hcl"
 echo ">> submitted. Watch: ssh ${SSH_USER}@${CONTROL_NAME} 'nomad job status sandbox-serve'"

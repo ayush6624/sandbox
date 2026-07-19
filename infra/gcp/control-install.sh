@@ -3,7 +3,8 @@
 # starts the four control-plane services from the rsync'd assets under
 # $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
 # PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SLOTS_PER_HOST
-# HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX REMOTE_DIR
+# HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
+# QUEUE_WAIT QUEUE_MAX REMOTE_DIR
 set -euo pipefail
 
 need() { command -v "$1" >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$1"; }
@@ -49,9 +50,11 @@ Description=sandbox multi-host gateway (control plane)
 After=network-online.target
 Wants=network-online.target
 [Service]
-ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN}
+ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN} \
+  --queue-wait ${QUEUE_WAIT:-180s} --queue-max ${QUEUE_MAX:-512}
 Restart=always
 RestartSec=2
+LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
