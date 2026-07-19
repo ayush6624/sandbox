@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -40,12 +42,33 @@ func New(socketPath string) *Client {
 	return &Client{http: &http.Client{Transport: tr}, baseURL: "http://unix", wsURL: "ws://sandbox"}
 }
 
+// tcpTransport is shared by every NewHTTP client. The default transport keeps
+// only 2 idle connections per host — under a burst of hundreds of concurrent
+// creates the gateway would churn a fresh TCP connection per request against
+// the bin-packed target host. Sized so a full host's worth of parallel calls
+// reuses warm connections. No hard MaxConnsPerHost cap: the hosts' own create
+// semaphores bound the work.
+var tcpTransport = &http.Transport{
+	MaxIdleConns:        1024,
+	MaxIdleConnsPerHost: 64,
+	IdleConnTimeout:     90 * time.Second,
+	DialContext: (&net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+}
+
+// SharedTransport exposes the tuned TCP transport for callers that build their
+// own HTTP machinery against hosts (the gateway's reverse proxies).
+func SharedTransport() http.RoundTripper { return tcpTransport }
+
 // NewHTTP returns a client that talks to addr (host:port) over TCP, presenting
 // token as a bearer on every request. Used by the CLI to reach a gateway and by
-// the gateway to reach hosts.
+// the gateway to reach hosts. No client-level timeout: exec streams and shells
+// are long-lived, so per-request contexts govern deadlines.
 func NewHTTP(addr, token string) *Client {
 	return &Client{
-		http:    &http.Client{},
+		http:    &http.Client{Transport: tcpTransport},
 		baseURL: "http://" + addr,
 		wsURL:   "ws://" + addr,
 		token:   token,
@@ -273,6 +296,35 @@ func filePath(id, endpoint, path string) string {
 	return "/sandboxes/" + id + "/" + endpoint + "?" + q.Encode()
 }
 
+// APIError is a non-2xx response from the server. It carries the HTTP status
+// so callers can tell capacity pushback (503 + Retry-After — the gateway fails
+// a create over to another host on it) apart from genuine failures. Error()
+// keeps the historical "server: <msg>" text, so CLI/SDK-visible messages are
+// unchanged.
+type APIError struct {
+	StatusCode int
+	RetryAfter int // seconds from the Retry-After header; 0 if absent
+	Msg        string
+}
+
+func (e *APIError) Error() string { return fmt.Sprintf("server: %s", e.Msg) }
+
+// apiError builds an *APIError from a non-2xx response, draining the body.
+func apiError(resp *http.Response) *APIError {
+	var e struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&e)
+	if e.Error == "" {
+		e.Error = resp.Status
+	}
+	retryAfter := 0
+	if s := resp.Header.Get("Retry-After"); s != "" {
+		retryAfter, _ = strconv.Atoi(s)
+	}
+	return &APIError{StatusCode: resp.StatusCode, RetryAfter: retryAfter, Msg: e.Error}
+}
+
 // doRaw issues a request with a raw body and returns the response on 2xx.
 func (c *Client) doRaw(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
@@ -288,14 +340,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body io.Reader)
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
-		var e struct {
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		if e.Error == "" {
-			e.Error = resp.Status
-		}
-		return nil, fmt.Errorf("server: %s", e.Error)
+		return nil, apiError(resp)
 	}
 	return resp, nil
 }
@@ -322,14 +367,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		if e.Error == "" {
-			e.Error = resp.Status
-		}
-		return fmt.Errorf("server: %s", e.Error)
+		return apiError(resp)
 	}
 	if out != nil && resp.StatusCode != http.StatusNoContent {
 		return json.NewDecoder(resp.Body).Decode(out)

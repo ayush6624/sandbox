@@ -39,6 +39,9 @@ type Config struct {
 	GatewayIP   string        // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
 	HotCreate   bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
+	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
+	// golden clones); excess creates queue. <=0 = default: min(2×NumCPU, 16).
+	CreateConcurrency int
 	// HibernateAfter freezes sandboxes idle this long to disk (snapshot +
 	// kill), releasing their slot; any agent-bound request wakes them.
 	// 0 disables idle hibernation. See hibernate.go.
@@ -89,11 +92,34 @@ type Server struct {
 	// portproxy.go). Its listeners persist through hibernation so a connection
 	// to a frozen sandbox's port wakes it.
 	pf *portForwarder
+
+	// createSem bounds concurrent sandbox bring-ups (cold boots AND golden
+	// clones) so a burst of creates queues instead of boot-storming the host —
+	// the 60 s agent gate only starts ticking once a slot is acquired. Fanout
+	// keeps its own separate budget.
+	createSem chan struct{}
+	// warmed is closed once ensureGolden has settled (adopted, built, or
+	// failed). Until then the heartbeat advertises SlotsFree=0 so the gateway
+	// doesn't route a burst of guaranteed-cold creates at a host that's still
+	// building its golden snapshot. Pre-closed when hot create is disabled.
+	warmed chan struct{}
 }
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
 		act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
+	sem := cfg.CreateConcurrency
+	if sem <= 0 {
+		sem = 2 * runtime.NumCPU()
+		if sem > 16 {
+			sem = 16
+		}
+	}
+	s.createSem = make(chan struct{}, sem)
+	s.warmed = make(chan struct{})
+	if !cfg.HotCreate {
+		close(s.warmed) // nothing to warm up: cold creates are the steady state
+	}
 	s.pf = newPortForwarder(s.dialGuest, s.act.begin)
 	if cfg.SnapshotBucket != "" {
 		s.blob = gcsblob.New(cfg.SnapshotBucket)
@@ -279,6 +305,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
+	// Bound concurrent bring-ups: a burst queues here instead of boot-storming
+	// the host. Queuing is correct (not 503) — the gateway only dispatches up
+	// to the host's advertised free slots, and the 60 s agent gate below only
+	// starts once a slot is acquired.
+	if err := s.acquireCreate(ctx); err != nil {
+		httpError(w, 499, fmt.Errorf("cancelled while queued for create slot: %w", err))
+		return
+	}
+	defer s.releaseCreate()
+
 	// Hot path: clone the golden snapshot when one is ready. Any failure falls
 	// back to a cold boot, so a create is never worse off than before.
 	// Resource overrides force the cold path: the golden snapshot bakes the
@@ -294,11 +330,23 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	sb, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
 	if err != nil {
-		httpError(w, 500, err)
+		capacityOrHTTPError(w, 500, err)
 		return
 	}
 	writeJSON(w, 201, s.effectiveResources(sb))
 }
+
+// acquireCreate takes one bring-up slot, blocking until one frees or ctx ends.
+func (s *Server) acquireCreate(ctx context.Context) error {
+	select {
+	case s.createSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) releaseCreate() { <-s.createSem }
 
 // createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
@@ -615,6 +663,19 @@ func httpError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// capacityOrHTTPError distinguishes capacity-class failures from genuine
+// server errors: pool exhaustion is 503 + Retry-After (it clears as sandboxes
+// are destroyed or the autoscaler adds hosts, and the gateway fails the create
+// over to another host on it); anything else keeps fallbackCode.
+func capacityOrHTTPError(w http.ResponseWriter, fallbackCode int, err error) {
+	if errors.Is(err, registry.ErrPoolExhausted) {
+		w.Header().Set("Retry-After", "5")
+		httpError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	httpError(w, fallbackCode, err)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

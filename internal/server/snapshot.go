@@ -194,6 +194,14 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Restores share the create bring-up budget: they do the same disk copy +
+	// VM resume + agent wait as a create and storm the host just the same.
+	if err := s.acquireCreate(ctx); err != nil {
+		httpError(w, 499, fmt.Errorf("cancelled while queued for create slot: %w", err))
+		return
+	}
+	defer s.releaseCreate()
+
 	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
 		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
@@ -222,7 +230,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// source or a prior restore is still live.
 	sb, err := s.reg.CreateRestore(ctx, id, body.Name, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	if err != nil {
-		httpError(w, 409, fmt.Errorf("registry restore: %w", err))
+		// Port-pool exhaustion is capacity (503); identity conflicts stay 409.
+		capacityOrHTTPError(w, 409, fmt.Errorf("registry restore: %w", err))
 		return
 	}
 
@@ -457,6 +466,14 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(os.Stderr, "[fanout %s] %d/%d clones live in %s\n",
 		snapID, len(live), body.Count, time.Since(t0).Round(time.Millisecond))
 	if len(live) == 0 {
+		// If any clone died on pool exhaustion, the whole fanout failed on
+		// capacity — report it as such so callers back off instead of bailing.
+		for _, c := range clones {
+			if c != nil && c.err != nil && errors.Is(c.err, registry.ErrPoolExhausted) {
+				capacityOrHTTPError(w, 500, fmt.Errorf("all clones failed to start: %w", c.err))
+				return
+			}
+		}
 		httpError(w, 500, errors.New("all clones failed to start"))
 		return
 	}
@@ -532,7 +549,15 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	// announce, matching the old fixed sleep.
 	if c.arp != nil {
 		if err := c.arp.WaitForSenderIP(sb.GuestIP, reidentifyMargin); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] no reidentify announce (agent in snapshot predates GARP?): %v\n", sb.ID, err)
+			// A listener was open but no announce arrived. Under a boot storm a
+			// CPU-starved guest can miss the margin while still being a modern,
+			// announcing agent — bridging now would put two guests with the same
+			// baked IP on the bridge. Give it one more margin before falling
+			// back to blind bridging (which stays, for pre-announce agents).
+			if err2 := c.arp.WaitForSenderIP(sb.GuestIP, reidentifyMargin); err2 != nil {
+				fmt.Fprintf(os.Stderr, "[%s] no reidentify announce after %s (agent in snapshot predates GARP?): %v\n",
+					sb.ID, 2*reidentifyMargin, err2)
+			}
 		}
 		_ = c.arp.Close()
 		c.arp = nil

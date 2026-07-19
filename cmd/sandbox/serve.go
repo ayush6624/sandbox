@@ -99,20 +99,26 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		SocketPath:     cfg.SocketPath,
-		ListenAddr:     cfg.ListenAddr,
-		APIToken:       cfg.APIToken,
-		Provisioner:    prov,
-		GatewayIP:      cfg.GatewayIP,
-		VMTemplate:     tmpl,
-		HotCreate:      !cfg.DisableHotCreate,
-		HibernateAfter: time.Duration(cfg.HibernateAfterSec) * time.Second,
-		SnapshotBucket: cfg.SnapshotBucket,
-		GatewayURL:     cfg.GatewayURL,
-		GatewayToken:   cfg.GatewayToken,
-		AdvertiseAddr:  cfg.AdvertiseAddr,
-		HostID:         cfg.HostID,
+		SocketPath:        cfg.SocketPath,
+		ListenAddr:        cfg.ListenAddr,
+		APIToken:          cfg.APIToken,
+		Provisioner:       prov,
+		GatewayIP:         cfg.GatewayIP,
+		VMTemplate:        tmpl,
+		HotCreate:         !cfg.DisableHotCreate,
+		CreateConcurrency: cfg.CreateConcurrency,
+		HibernateAfter:    time.Duration(cfg.HibernateAfterSec) * time.Second,
+		SnapshotBucket:    cfg.SnapshotBucket,
+		GatewayURL:        cfg.GatewayURL,
+		GatewayToken:      cfg.GatewayToken,
+		AdvertiseAddr:     cfg.AdvertiseAddr,
+		HostID:            cfg.HostID,
 	}, reg)
+
+	// Every running sandbox costs a handful of fds (firecracker socket, log,
+	// FIFO, port-proxy listener + connections); the default 1024 soft limit
+	// falls over well before the pools do.
+	raiseNoFileLimit()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

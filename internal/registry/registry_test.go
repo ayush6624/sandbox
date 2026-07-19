@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -176,6 +177,82 @@ func TestHibernatedPortStaysReserved(t *testing.T) {
 	}
 	if woken.HostPort != sb.HostPort {
 		t.Fatalf("wake changed the host port: got %d want %d", woken.HostPort, sb.HostPort)
+	}
+}
+
+func TestFreeSlotsAccountsHibernatedPortsAndExtraPorts(t *testing.T) {
+	// Ports = taps = IPs = 3. Hibernated sandboxes free their tap/IP but hold
+	// their port, so FreeSlots must be port-bound while Slots()-running lies.
+	r, ctx := testRegistry(t), context.Background()
+
+	free := func() int {
+		t.Helper()
+		n, err := r.FreeSlots(ctx)
+		if err != nil {
+			t.Fatalf("free slots: %v", err)
+		}
+		return n
+	}
+
+	if got := free(); got != 3 {
+		t.Fatalf("empty registry: FreeSlots = %d, want 3", got)
+	}
+	if _, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := r.Create(ctx, "sb2", "", "/tmp/sb2.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got := free(); got != 1 {
+		t.Fatalf("2 running: FreeSlots = %d, want 1", got)
+	}
+
+	// Hibernate one: tap/IP return to the pool but the port stays held.
+	// Slots()-running would now claim 2 free; the truth is still 1.
+	if err := r.Hibernate(ctx, "sb1"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+	if got, lie := free(), r.Pools().Slots()-1; got != 1 || lie != 2 {
+		t.Fatalf("1 running + 1 hibernated: FreeSlots = %d (want 1); Slots()-running = %d (the overstatement this fixes)", got, lie)
+	}
+
+	// An extra exposed port drains the same pool: nothing left to create with.
+	if _, err := r.AddPort(ctx, "sb2", 8000); err != nil {
+		t.Fatalf("add port: %v", err)
+	}
+	if got := free(); got != 0 {
+		t.Fatalf("extra port should exhaust the port pool: FreeSlots = %d, want 0", got)
+	}
+
+	// Destroying the hibernated sandbox releases its port.
+	if err := r.Destroy(ctx, "sb1"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if got := free(); got != 1 {
+		t.Fatalf("after destroy: FreeSlots = %d, want 1", got)
+	}
+}
+
+func TestCreateReturnsErrPoolExhausted(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	for _, id := range []string{"a", "b", "c"} {
+		if _, err := r.Create(ctx, id, "", "/tmp/"+id+".ext4", nil, "", 0, 0, 0); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	_, err := r.Create(ctx, "d", "", "/tmp/d.ext4", nil, "", 0, 0, 0)
+	if err == nil {
+		t.Fatal("create beyond the pool should fail")
+	}
+	if !errors.Is(err, ErrPoolExhausted) {
+		t.Fatalf("exhaustion must be errors.Is-able as ErrPoolExhausted; got %v", err)
+	}
+
+	// AddPort exhaustion carries the sentinel too (ports are the create-path
+	// pool the gateway needs to recognize as capacity).
+	if _, err := r.AddPort(ctx, "a", 8000); err == nil || !errors.Is(err, ErrPoolExhausted) {
+		t.Fatalf("AddPort exhaustion should wrap ErrPoolExhausted; got %v", err)
 	}
 }
 

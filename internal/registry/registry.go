@@ -144,17 +144,59 @@ func (p Pools) Slots() int {
 	if c := p.PortMax - p.PortMin + 1; c < n {
 		n = c
 	}
-	if minIP, err := ipToUint32(p.GuestIPMin); err == nil {
-		if maxIP, err := ipToUint32(p.GuestIPMax); err == nil {
-			if c := int(maxIP-minIP) + 1; c < n {
-				n = c
-			}
-		}
+	if c := p.ipPoolSize(); c < n {
+		n = c
 	}
 	if n < 0 {
 		n = 0
 	}
 	return n
+}
+
+// ipPoolSize is the number of guest IPs in the pool, or TapMax when the range
+// is unparsable (so a bad config degrades to tap-bound rather than zero).
+func (p Pools) ipPoolSize() int {
+	minIP, err := ipToUint32(p.GuestIPMin)
+	if err != nil {
+		return p.TapMax
+	}
+	maxIP, err := ipToUint32(p.GuestIPMax)
+	if err != nil {
+		return p.TapMax
+	}
+	return int(maxIP-minIP) + 1
+}
+
+// FreeSlots returns how many new sandboxes Create could allocate right now:
+// the smallest per-pool availability. Running sandboxes hold a tap, an IP, and
+// a port; hibernated sandboxes hold ONLY their port (the wake-on-connect
+// listener stays bound — see loadUsed), their tap/IP being soft-reserved and
+// allocatable. Extra exposed ports draw from the same port pool. This is what
+// the heartbeat must advertise: Slots()-running overstates capacity whenever
+// hibernated port-holds make ports the binding pool.
+func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
+	var running, portsHeld, extraPorts int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM sandboxes WHERE status = ?),
+			(SELECT COUNT(*) FROM sandboxes WHERE status IN (?, ?)),
+			(SELECT COUNT(*) FROM sandbox_ports)`,
+		StatusRunning, StatusRunning, StatusHibernated,
+	).Scan(&running, &portsHeld, &extraPorts)
+	if err != nil {
+		return 0, err
+	}
+	free := r.pools.TapMax - running
+	if f := r.pools.ipPoolSize() - running; f < free {
+		free = f
+	}
+	if f := (r.pools.PortMax - r.pools.PortMin + 1) - portsHeld - extraPorts; f < free {
+		free = f
+	}
+	if free < 0 {
+		free = 0
+	}
+	return free, nil
 }
 
 // Registry wraps the SQLite-backed sandbox state.
@@ -997,6 +1039,12 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 	return u, extra.Err()
 }
 
+// ErrPoolExhausted marks capacity-class allocation failures: every entry of a
+// resource pool (tap/IP/port) is in use. Handlers map it to 503 + Retry-After
+// (it clears as sandboxes are destroyed or the fleet scales), and the gateway
+// fails a create over to another host on it — unlike a genuine 500.
+var ErrPoolExhausted = errors.New("pool exhausted")
+
 // The tap/IP pickers scan their pool twice: first skipping identities parked
 // by hibernated sandboxes (soft), then — only when the pool is otherwise
 // exhausted — allowing them. Hibernated taps/IPs are legitimately free;
@@ -1012,7 +1060,7 @@ func pickFreeTap(used usedResources, p Pools) (string, error) {
 			}
 		}
 	}
-	return "", errors.New("tap pool exhausted")
+	return "", fmt.Errorf("tap pool exhausted: %w", ErrPoolExhausted)
 }
 
 func pickFreeIP(used usedResources, p Pools) (string, error) {
@@ -1032,7 +1080,7 @@ func pickFreeIP(used usedResources, p Pools) (string, error) {
 			}
 		}
 	}
-	return "", errors.New("ip pool exhausted")
+	return "", fmt.Errorf("ip pool exhausted: %w", ErrPoolExhausted)
 }
 
 func pickFreePort(used usedResources, p Pools) (int, error) {
@@ -1041,7 +1089,7 @@ func pickFreePort(used usedResources, p Pools) (int, error) {
 			return port, nil
 		}
 	}
-	return 0, errors.New("port pool exhausted")
+	return 0, fmt.Errorf("port pool exhausted: %w", ErrPoolExhausted)
 }
 
 func ipToUint32(s string) (uint32, error) {

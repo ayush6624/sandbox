@@ -58,7 +58,7 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 
 	hostPort, err := s.reg.AddPort(ctx, id, body.GuestPort)
 	if err != nil {
-		httpError(w, 500, fmt.Errorf("allocate host port: %w", err))
+		capacityOrHTTPError(w, 500, fmt.Errorf("allocate host port: %w", err))
 		return
 	}
 	if err := s.pf.Open(id, hostPort, body.GuestPort); err != nil {

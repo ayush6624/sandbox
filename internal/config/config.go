@@ -52,6 +52,11 @@ type Config struct {
 	// activity counts — traffic on forwarded host ports does not reset the
 	// idle clock, nor does it wake a hibernated sandbox. 0 disables.
 	HibernateAfterSec int `json:"hibernate_after_sec"`
+	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
+	// golden clones); excess creates queue in-process so a burst can't
+	// boot-storm the host into agent timeouts. 0 = server default
+	// (min(2×NumCPU, 16)).
+	CreateConcurrency int `json:"create_concurrency"`
 
 	// --- Resource pools ---
 	Pools registry.Pools `json:"pools"`
