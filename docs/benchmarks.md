@@ -3,7 +3,6 @@
 **Updated 2026-07-18** (numbers measured 2026-07-01 → 2026-07-12, server release
 `b801d6d`+). Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 (published at <https://claude.ai/code/artifact/f14de3c5-96c3-45d1-bc7d-1a4ce4ccf6b3>).
-The earlier snapshot/fan-out deep-dive is [`snapshot-fanout-bench.md`](./snapshot-fanout-bench.md).
 
 ## Headline
 
@@ -58,7 +57,7 @@ single-clone latency now matches hot create):
 
 64 clones in 5.7 s vs 72.8 s of cold boots (**12.7×**); memory density at N=64
 is **925 MB PSS vs 10.1 GB** (10.9×) because clones mmap the same snapshot
-memory file. Full methodology: [`snapshot-fanout-bench.md`](./snapshot-fanout-bench.md).
+memory file. Runnable suite: [`sdk/typescript/benchmarks/`](../sdk/typescript/benchmarks/README.md).
 
 ### Hibernation
 
