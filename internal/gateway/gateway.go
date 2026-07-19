@@ -86,6 +86,13 @@ type Gateway struct {
 	queueWait time.Duration
 	queueMax  int
 	queued    atomic.Int64 // creates currently waiting; exported as a metric
+	// rejected counts creates 503'd for capacity (queue full, or no host freed
+	// within queue-wait). The queue-depth gauge saturates at queueMax, so once
+	// a burst overflows the queue this counter is the ONLY signal of the
+	// excess demand — the autoscaler rule folds its rate back into
+	// workers_desired (rejected clients retry every Retry-After, so the rate
+	// approximates outstanding unqueued demand).
+	rejected atomic.Int64
 	// slotFreed nudges one queued create to retry placement immediately when
 	// capacity may have appeared (failed create, fresh heartbeat). Buffered,
 	// best-effort; the queue's poll ticker is the backstop.
@@ -292,6 +299,7 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Retry-After", "5")
+	g.rejected.Add(1)
 	if lastErr != nil {
 		httpError(w, http.StatusServiceUnavailable, fmt.Errorf("no host with free capacity (last error: %w)", lastErr))
 		return

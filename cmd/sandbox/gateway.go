@@ -38,7 +38,12 @@ The gateway exposes the same API as a single server; point the CLI at it with
 	// standby VM start → nomad join → serve up + golden build → first warm
 	// heartbeat (~2-3 min). 90s was right at the edge and 503'd real bursts.
 	cmd.Flags().DurationVar(&gwQueueWait, "queue-wait", 180*time.Second, "how long a create may wait for a free slot before 503 (0 disables queueing)")
-	cmd.Flags().IntVar(&gwQueueMax, "queue-max", 512, "max creates waiting at once; beyond this creates 503 immediately")
+	// queue-max also bounds what the queue-depth metric can express: overflow
+	// beyond it only shows up as the rejected-creates rate. A queued create is
+	// one goroutine + one connection, so a large bound is cheap — undersizing
+	// it starves the autoscaler signal (a 1000-burst against a 512 queue read
+	// as half its real demand).
+	cmd.Flags().IntVar(&gwQueueMax, "queue-max", 4096, "max creates waiting at once; beyond this creates 503 immediately")
 	return cmd
 }
 

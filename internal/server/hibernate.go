@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +36,40 @@ import (
 // hibID names the snapshot-dir entry holding a sandbox's hibernation
 // artifacts (mem + device state; the rootfs needs no frozen copy).
 func hibID(id string) string { return "hib-" + id }
+
+// hibDiffMarker is the file recording, beside a diff hibernation's mem file,
+// the golden snapshot id the diff must be rebased onto at wake. Its absence
+// means the mem file is a full, directly loadable snapshot.
+func hibDiffMarker(memPath string) string {
+	return filepath.Join(filepath.Dir(memPath), "diff_base")
+}
+
+// materializeHibMem rebases a diff hibernation mem onto its golden base,
+// returning a full, loadable mem file cached beside the diff. Reflink-fast on
+// XFS. Mirrors materializeMem, but for hibernation artifacts (which have no
+// snapshot row).
+func (s *Server) materializeHibMem(ctx context.Context, diffMem, baseID string) (string, error) {
+	fullPath := filepath.Join(filepath.Dir(diffMem), "mem.full.bin")
+	if _, err := os.Stat(fullPath); err == nil {
+		return fullPath, nil
+	}
+	baseMem, _, err := s.ensureBaseLocal(ctx, baseID)
+	if err != nil {
+		return "", fmt.Errorf("diff base %s: %w", baseID, err)
+	}
+	tmp := fullPath + ".tmp"
+	if err := provisioner.CloneFile(baseMem, tmp); err != nil {
+		return "", fmt.Errorf("clone base mem: %w", err)
+	}
+	if err := s.cfg.Provisioner.OverlaySparse(diffMem, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("overlay dirty pages: %w", err)
+	}
+	if err := os.Rename(tmp, fullPath); err != nil {
+		return "", err
+	}
+	return fullPath, nil
+}
 
 // hibernateTick is how often the reaper looks for idle sandboxes.
 const hibernateTick = 30 * time.Second
@@ -154,7 +190,7 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 				if busy || idle < window {
 					continue
 				}
-				if err := s.hibernate(ctx, sb.ID); err != nil {
+				if err := s.hibernate(ctx, sb.ID, false); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] hibernate failed: %v\n", sb.ID, err)
 				}
 			}
@@ -163,7 +199,9 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 }
 
 // hibernate freezes one running sandbox to disk and releases its resources.
-func (s *Server) hibernate(ctx context.Context, id string) error {
+// force skips the busy check — server shutdown freezes even pinned sandboxes
+// (their connections are dying with the server either way).
+func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	mu := s.wakeLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -182,7 +220,7 @@ func (s *Server) hibernate(ctx context.Context, id string) error {
 	m := v.(*vm.Machine)
 	// Re-check under the lock: a request may have raced in since the reaper's
 	// scan decided this sandbox was idle.
-	if _, busy, _ := s.act.idleFor(id); busy {
+	if _, busy, _ := s.act.idleFor(id); busy && !force {
 		return fmt.Errorf("sandbox %s is busy", id)
 	}
 
@@ -191,11 +229,34 @@ func (s *Server) hibernate(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("hibernate dir: %w", err)
 	}
+	// Freeze as a DIFF against the golden base when the machine's dirty-page
+	// bitmap still tracks it (see Server.diffBase): the mem file then holds
+	// only pages dirtied since clone, which is what lets a whole host's worth
+	// of sandboxes freeze inside a ~100 s shutdown window instead of writing
+	// N full guest memories. Wake rebases it (materializeHibMem).
+	snapType, diffBaseID := vm.SnapshotFull, ""
+	if v, ok := s.diffBase.Load(id); ok && vm.DiffCapable(m) {
+		if base, err := s.reg.GetSnapshot(ctx, v.(string)); err == nil && base.Golden {
+			snapType, diffBaseID = vm.SnapshotDiff, base.ID
+		}
+	}
 	if err := vm.Pause(ctx, m); err != nil {
 		return fmt.Errorf("pause: %w", err)
 	}
-	if err := vm.Snapshot(ctx, m, memPath, statePath, vm.SnapshotFull); err != nil {
-		// Snapshot failed — thaw the sandbox and pretend nothing happened.
+	err = vm.Snapshot(ctx, m, memPath, statePath, snapType)
+	// The snapshot attempt reset (or left indeterminate) the dirty bitmap —
+	// no future diff against the old base is valid either way.
+	s.diffBase.Delete(id)
+	if err == nil {
+		if diffBaseID != "" {
+			err = os.WriteFile(hibDiffMarker(memPath), []byte(diffBaseID), 0o644)
+		} else {
+			_ = os.Remove(hibDiffMarker(memPath)) // stale marker from a prior freeze
+		}
+	}
+	if err != nil {
+		// Snapshot (or marker write — without which a diff is unrestorable)
+		// failed: thaw the sandbox and pretend nothing happened.
 		if rerr := vm.Resume(context.Background(), m); rerr != nil {
 			fmt.Fprintf(os.Stderr, "[%s] resume after failed hibernate snapshot: %v\n", id, rerr)
 		}
@@ -264,6 +325,14 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 	for _, p := range []string{memPath, statePath} {
 		if _, err := os.Stat(p); err != nil {
 			return sb, fmt.Errorf("hibernation artifacts missing for %s: %w", id, err)
+		}
+	}
+	// A diff freeze stored only dirty pages; rebase onto the golden base
+	// before anything commits. Failure leaves the row hibernated and the
+	// artifacts intact — wakeable once the base is available again.
+	if b, err := os.ReadFile(hibDiffMarker(memPath)); err == nil {
+		if memPath, err = s.materializeHibMem(ctx, memPath, strings.TrimSpace(string(b))); err != nil {
+			return sb, fmt.Errorf("materialize hibernation memory for %s: %w", id, err)
 		}
 	}
 
@@ -408,7 +477,7 @@ func (s *Server) handleHibernate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, err)
 		return
 	}
-	if err := s.hibernate(r.Context(), id); err != nil {
+	if err := s.hibernate(r.Context(), id, false); err != nil {
 		httpError(w, 409, err)
 		return
 	}

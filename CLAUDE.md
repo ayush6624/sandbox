@@ -273,6 +273,23 @@ scripts/              Host setup shell scripts
 - **TTL reaper.** `POST /sandboxes` accepts optional `{"timeout_sec":N}`; a 10 s ticker
   goroutine in `Serve` destroys rows whose `expires_at` passed (running AND hibernated).
   `POST .../timeout` resets (0 clears). No default TTL — absent means live forever.
+- **Server shutdown hibernates, never destroys.** `shutdownAll` freezes every
+  running sandbox (bounded-parallel, 100 s budget, `force` past activity pins;
+  fallback destroy per sandbox on failure). This is what makes MIG standby-pool
+  stop/start cycles and autoscaler scale-in non-destructive: the frozen rows +
+  artifacts live on the persistent disk, and the next `serve` start re-binds
+  their port listeners and heartbeats their ids. Requires `vmCtx` to be
+  DECOUPLED from the serve ctx (a cancelled serve ctx makes the firecracker
+  SDK / clone CommandContext kill VMs before anything can be frozen).
+- **Diff hibernation + the diffBase map.** Hibernate (and user snapshots)
+  write a DIFF against the golden base only while `Server.diffBase` has an
+  entry for the machine: set when a clone is loaded from a snapshot, deleted
+  after ANY snapshot attempt (Firecracker resets the dirty bitmap at snapshot
+  creation) and never set for hibernation-woken machines (their bitmap tracks
+  the hib artifacts, not the golden). Do NOT gate diffs on `sb.BaseSnapshotID`
+  — it is never cleared, and trusting it silently corrupts memory on restore.
+  A diff freeze writes a `diff_base` marker next to the mem file; wake rebases
+  via `materializeHibMem` (reflink + sparse overlay; GCS base pull fallback).
 - **Idle hibernation** (`internal/server/hibernate.go`; `"hibernate_after_sec"` in the
   config sets the host default, 0 = off; `POST /sandboxes` accepts a per-sandbox
   `hibernate_after_sec` override — >0 custom window, -1 never, 0 inherit — also on

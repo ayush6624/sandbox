@@ -246,6 +246,9 @@ func (s *Server) ensureBaseLocal(ctx context.Context, baseID string) (mem, rootf
 			return mem, rootfs, nil
 		}
 	}
+	if s.blob == nil {
+		return "", "", fmt.Errorf("base template %s is not on disk and no snapshot bucket is configured", baseID)
+	}
 	if err := os.MkdirAll(filepath.Dir(mem), 0o755); err != nil {
 		return "", "", err
 	}

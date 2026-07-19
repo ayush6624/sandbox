@@ -85,9 +85,12 @@ create+boot takes; apply to a live MIG with `./mig.sh standby`), and
 start → nomad join → golden-snapshot build, ~2-3 min). The defaults size the
 fleet for **1000 concurrent sandboxes**: n2-standard-16 workers × 48 slots ×
 MIG_MAX=22. Scale-up is immediate; scale-down waits out the window.
-**Scale-in kills running sandboxes on the removed host** (saved snapshots
-survive via GCS durability); bin-pack placement + the window minimize how
-often that hits an in-use host.
+**Scale-in freezes running sandboxes on the removed host**: server shutdown
+hibernates them (diff snapshots — a full host freezes inside the 120 s stop
+window), so they come back wakeable if that VM ever starts again (standby-pool
+stop/start does exactly this); on a *deleted* instance the frozen state goes
+with the disk, and only saved snapshots survive via GCS durability. Bin-pack
+placement + the window minimize how often scale-in hits an in-use host.
 
 **Burst behavior** end to end: a burst first lands on `HEADROOM_SLOTS` of free
 capacity; overflow creates wait in the gateway's bounded queue

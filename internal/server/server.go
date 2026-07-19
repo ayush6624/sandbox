@@ -92,6 +92,18 @@ type Server struct {
 	wakesMu sync.Mutex
 	wakes   map[string]*sync.Mutex
 
+	// diffBase maps a live machine's sandbox id → the snapshot id its
+	// dirty-page bitmap is tracking against. An entry exists ONLY while a diff
+	// snapshot would be valid: set when a clone is loaded from a snapshot
+	// (bringUpClone→finishClone), deleted the moment the bitmap stops matching
+	// that base — any snapshot of the sandbox (Firecracker resets the bitmap
+	// at snapshot creation) or a machine reload (hibernation wake loads from
+	// the hib mem, not the original base). sb.BaseSnapshotID alone is NOT
+	// sufficient: it's never cleared, so trusting it would write diffs against
+	// the wrong base after a wake or a second snapshot — silent memory
+	// corruption on restore.
+	diffBase sync.Map // sandbox id → snapshot id
+
 	// pf owns the userspace host-port → guest-port TCP proxies (see
 	// portproxy.go). Its listeners persist through hibernation so a connection
 	// to a frozen sandbox's port wakes it.
@@ -168,10 +180,18 @@ func New(cfg Config, reg *registry.Registry) *Server {
 }
 
 // Serve listens on the configured Unix socket — and, if ListenAddr is set, on
-// TCP with bearer-token auth — until ctx is cancelled. On shutdown, all
-// running sandboxes are torn down.
+// TCP with bearer-token auth — until ctx is cancelled. On shutdown, running
+// sandboxes are hibernated (frozen to disk, wakeable on next start) rather
+// than destroyed — see shutdownAll.
 func (s *Server) Serve(ctx context.Context) error {
-	s.vmCtx = ctx
+	// vmCtx must NOT be the serve ctx: the firecracker SDK (and the raw clone
+	// path's CommandContext) kill their VMs the moment their context cancels,
+	// and the serve ctx cancels on SIGTERM — before shutdownAll gets a chance
+	// to freeze anything. Decouple it and cancel explicitly on the way out as
+	// the backstop for VMs that outlive shutdown.
+	vmCtx, vmCancel := context.WithCancel(context.Background())
+	defer vmCancel()
+	s.vmCtx = vmCtx
 
 	s.reconcile(ctx)
 	// Hibernated sandboxes survived reconcile; re-bind their port-forward
@@ -246,7 +266,10 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Short drain: freezing sandboxes (below) matters more than letting
+		// slow API requests finish — the whole stop window is ~120 s (Nomad
+		// kill_timeout / GCE stop) and hibernation needs most of it.
+		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		for _, srv := range servers {
 			_ = srv.Shutdown(shCtx)
 		}
@@ -290,15 +313,33 @@ func bearerAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
-// shutdownAll tears down every tracked sandbox on server stop.
+// shutdownAll freezes every tracked sandbox on server stop. Hibernate, not
+// destroy: a server stop is routinely the HOST going away underneath live
+// sandboxes — autoscaler scale-in, or the MIG stopping a standby-pool refill
+// VM that had already taken placements — and hibernated rows survive it
+// (artifacts + SQLite live on the persistent disk; reconcile skips them and
+// re-binds their port listeners on the next start, so they come back
+// wakeable). Diff hibernation keeps the write volume inside the stop window.
+// Bounded parallelism: the mem writes all hit one disk. A sandbox that can't
+// be frozen in the window is destroyed, as before.
 func (s *Server) shutdownAll() {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	s.machines.Range(func(k, _ any) bool {
 		id := k.(string)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.destroy(context.Background(), id)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			// force=true: open connections are dying with the server anyway —
+			// a busy pin must not condemn the sandbox to destruction.
+			if err := s.hibernate(ctx, id, true); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] shutdown hibernate failed (%v), destroying\n", id, err)
+				_ = s.destroy(context.Background(), id)
+			}
 		}()
 		return true
 	})
@@ -638,6 +679,7 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	defer s.act.forget(id)
+	defer s.diffBase.Delete(id)
 
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {

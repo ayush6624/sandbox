@@ -69,11 +69,16 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	m := v.(*vm.Machine)
 
 	format, baseID := registry.FormatFull, ""
-	if !golden && sb.BaseSnapshotID != "" && vm.DiffCapable(m) {
+	// Diff only while Server.diffBase still vouches for the machine's bitmap:
+	// the entry is dropped after any snapshot (Firecracker resets the bitmap
+	// at snapshot creation) and never exists for hibernation-woken machines
+	// (loaded from hib artifacts, not the recorded base). Trusting the row's
+	// BaseSnapshotID here would diff against the wrong base in both cases.
+	if v, ok := s.diffBase.Load(id); ok && !golden && vm.DiffCapable(m) {
 		// The base must still exist locally — it anchors the diff (and the
 		// upload path reads its artifacts). A rebuilt/deleted golden falls
 		// back to a full snapshot.
-		if base, err := s.reg.GetSnapshot(ctx, sb.BaseSnapshotID); err == nil && base.Golden {
+		if base, err := s.reg.GetSnapshot(ctx, v.(string)); err == nil && base.Golden {
 			format, baseID = registry.FormatDiff, base.ID
 		}
 	}
@@ -105,7 +110,11 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	defer resume()
 
 	t0 := time.Now()
-	if err := vm.Snapshot(ctx, m, memPath, statePath, snapType); err != nil {
+	err = vm.Snapshot(ctx, m, memPath, statePath, snapType)
+	// The attempt reset (or left indeterminate) the dirty-page bitmap: no
+	// future diff against the machine's original base is valid now.
+	s.diffBase.Delete(id)
+	if err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, 500, fmt.Errorf("create snapshot: %w", err)
 	}
@@ -332,7 +341,12 @@ type clone struct {
 	m          *vm.Machine
 	vmID, sock string
 	arp        *provisioner.ARPListener // opened on the unbridged tap before resume; nil = fixed-sleep fallback
-	err        error
+	// baseSnap is the snapshot this machine was loaded from — the base its
+	// dirty-page bitmap tracks against (recorded into Server.diffBase by
+	// finishClone). Empty for machines whose load source is not a snapshot
+	// row (hibernation wakes load from hib artifacts).
+	baseSnap string
+	err      error
 }
 
 // reidentifyMargin bounds how long finishClone waits for the guest's
@@ -534,7 +548,7 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", err)}
 	}
-	return &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp}
+	return &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp, baseSnap: snap.ID}
 }
 
 // finishClone waits for the guest's reidentify announce, then bridges the
@@ -583,6 +597,9 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		return fmt.Errorf("finish start: %w", err)
 	}
 	s.machines.Store(sb.ID, m)
+	if c.baseSnap != "" {
+		s.diffBase.Store(sb.ID, c.baseSnap)
+	}
 	s.act.touch(sb.ID)
 	go func(id string) {
 		_ = vm.Wait(context.Background(), m)

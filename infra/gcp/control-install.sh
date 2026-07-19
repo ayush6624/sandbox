@@ -51,7 +51,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN} \
-  --queue-wait ${QUEUE_WAIT:-180s} --queue-max ${QUEUE_MAX:-512}
+  --queue-wait ${QUEUE_WAIT:-180s} --queue-max ${QUEUE_MAX:-4096}
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

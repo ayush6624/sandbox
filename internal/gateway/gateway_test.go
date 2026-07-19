@@ -404,6 +404,30 @@ func TestCreateAttemptsBoundedAndReleased(t *testing.T) {
 	}
 }
 
+// TestRejectedCounterCountsCapacity503s: demand beyond the queue is invisible
+// to the queue-depth gauge, so every capacity 503 must increment the rejected
+// counter — it's the autoscaler's only signal of the overflow.
+func TestRejectedCounterCountsCapacity503s(t *testing.T) {
+	g := New("tok", 20*time.Second, 0, 0) // no hosts, queueing disabled
+
+	for i := 0; i < 3; i++ {
+		rr := httptest.NewRecorder()
+		g.handleCreate(rr, httptest.NewRequest("POST", "/sandboxes", strings.NewReader(`{}`)))
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("want 503 with no hosts, got %d", rr.Code)
+		}
+	}
+	if got := g.rejected.Load(); got != 3 {
+		t.Fatalf("rejected counter = %d, want 3", got)
+	}
+
+	rr := httptest.NewRecorder()
+	g.handleMetrics(rr, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rr.Body.String(), "sandbox_create_rejected_total 3") {
+		t.Fatalf("metrics must expose the rejected counter:\n%s", rr.Body.String())
+	}
+}
+
 func TestPenaltyExpires(t *testing.T) {
 	g := New("tok", 20*time.Second, 0, 0)
 	addTestHost(g, "a", "1.2.3.4:8080", 0, 24)
