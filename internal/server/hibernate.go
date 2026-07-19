@@ -233,10 +233,14 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	// bitmap still tracks it (see Server.diffBase): the mem file then holds
 	// only pages dirtied since clone, which is what lets a whole host's worth
 	// of sandboxes freeze inside a ~100 s shutdown window instead of writing
-	// N full guest memories. Wake rebases it (materializeHibMem).
+	// N full guest memories. Wake rebases it (materializeHibMem). The base
+	// must already be durable in GCS: unlike user diff snapshots (whose upload
+	// pushes the base first), a hibernation uploads nothing — and the local
+	// golden is deleted whenever it's rebuilt (agent update), which would
+	// orphan the frozen sandbox forever.
 	snapType, diffBaseID := vm.SnapshotFull, ""
 	if v, ok := s.diffBase.Load(id); ok && vm.DiffCapable(m) {
-		if base, err := s.reg.GetSnapshot(ctx, v.(string)); err == nil && base.Golden {
+		if base, err := s.reg.GetSnapshot(ctx, v.(string)); err == nil && base.Golden && s.baseUploaded(base.ID) {
 			snapType, diffBaseID = vm.SnapshotDiff, base.ID
 		}
 	}

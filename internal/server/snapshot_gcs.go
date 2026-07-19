@@ -97,6 +97,19 @@ func (s *Server) uploadSnapshot(snap registry.Snapshot) {
 		snap.ID, s.blob.Bucket(), snap.Format, memBytes>>20, rootfsBytes>>20, time.Since(t0).Round(time.Millisecond))
 }
 
+// baseUploaded reports whether a base template is known-durable in GCS —
+// the precondition for anchoring a hibernation diff to it. Only reflects
+// uploads this process has verified (the map re-fills from the Exists check
+// on the eager golden upload at startup).
+func (s *Server) baseUploaded(id string) bool {
+	if s.blob == nil {
+		return false
+	}
+	s.baseUpMu.Lock()
+	defer s.baseUpMu.Unlock()
+	return s.basesUploaded[id]
+}
+
 // ensureBaseUploaded uploads a golden snapshot's mem+rootfs as an immutable
 // base template, once. The "complete" marker commits it; meta.json of any
 // snapshot referencing the base is only uploaded after this returns.

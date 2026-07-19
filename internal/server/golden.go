@@ -28,6 +28,7 @@ func (s *Server) ensureGolden(ctx context.Context) {
 		if s.goldenUsable(snap) {
 			if err := s.stageSnapshotRootfs(snap); err == nil {
 				s.golden.Store(&snap)
+				go s.uploadGoldenBase(snap)
 				fmt.Fprintf(os.Stderr, "golden snapshot %s adopted; creates are hot\n", snap.ID)
 				return
 			}
@@ -82,7 +83,25 @@ func (s *Server) buildGolden(ctx context.Context) {
 		return
 	}
 	s.golden.Store(&snap)
+	go s.uploadGoldenBase(snap)
 	fmt.Fprintf(os.Stderr, "golden snapshot %s built in %s; creates are hot\n", snap.ID, time.Since(t0).Round(time.Millisecond))
+}
+
+// uploadGoldenBase eagerly pushes the golden's base template to GCS (once).
+// User diff snapshots would upload it lazily on their first upload anyway;
+// hibernation diffs need it EAGERLY — they anchor to the golden without ever
+// uploading anything themselves, and hibernate only chooses the diff format
+// once s.baseUploaded reports the anchor durable. Without this, a golden
+// rebuild (agent update) would orphan every diff-hibernated sandbox.
+func (s *Server) uploadGoldenBase(snap registry.Snapshot) {
+	if s.blob == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := s.ensureBaseUploaded(ctx, snap); err != nil {
+		fmt.Fprintf(os.Stderr, "[base %s] eager golden base upload failed (hibernation stays full-format): %v\n", snap.ID, err)
+	}
 }
 
 // stageSnapshotRootfs makes sure the rootfs path baked into the snapshot
