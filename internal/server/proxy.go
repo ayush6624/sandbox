@@ -31,7 +31,9 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 		id := r.PathValue("id")
 		sb, err := s.ensureRunning(r.Context(), id)
 		if err != nil {
-			httpError(w, statusFor(err), err)
+			// A capacity-rejected wake (memory budget/pool) surfaces as 503 +
+			// Retry-After: the sandbox stays hibernated and wakeable later.
+			capacityOrHTTPError(w, statusFor(err), err)
 			return
 		}
 		// Track only ids that exist, or bogus-id requests would leak tracker

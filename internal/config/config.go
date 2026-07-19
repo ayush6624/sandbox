@@ -52,6 +52,20 @@ type Config struct {
 	// activity counts — traffic on forwarded host ports does not reset the
 	// idle clock, nor does it wake a hibernated sandbox. 0 disables.
 	HibernateAfterSec int `json:"hibernate_after_sec"`
+	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
+	// golden clones); excess creates queue in-process so a burst can't
+	// boot-storm the host into agent timeouts. 0 = server default
+	// (min(2×NumCPU, 16)).
+	CreateConcurrency int `json:"create_concurrency"`
+	// MemBudgetMIB caps the SUM of committed guest memory (each running
+	// sandbox's effective mem_mib + per-VM firecracker overhead) so mem_mib
+	// overrides can't oversubscribe the host past its cgroup/RAM — admission
+	// beyond it returns 503 and the gateway places elsewhere. 0 = derive from
+	// /proc/meminfo (MemTotal − 2 GiB host reserve); <0 = disabled. Fleet
+	// deployments must set it explicitly (deploy-job.sh injects SLOTS×1180,
+	// the Nomad cgroup minus serve's own reserve) because /proc/meminfo shows
+	// the machine total, not the cgroup limit.
+	MemBudgetMIB int64 `json:"mem_budget_mib"`
 
 	// --- Resource pools ---
 	Pools registry.Pools `json:"pools"`

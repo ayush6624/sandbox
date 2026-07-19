@@ -42,7 +42,7 @@ func TestValidateResources(t *testing.T) {
 		{name: "unbootably small mem", mem: 64, wantErr: true, errSubstring: "minimum"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateResources(tc.vcpus, tc.mem)
+			err := testServer(t).validateResources(tc.vcpus, tc.mem)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("validateResources(%d, %d) should fail", tc.vcpus, tc.mem)

@@ -137,7 +137,20 @@ suite.test('connecting to a forwarded port wakes a hibernated sandbox', async (c
     what: 'guest server up before hibernating',
   })
 
-  await sbx.hibernate()
+  // The pre-freeze fetch's keep-alive connection (undici pools it for ~4s)
+  // holds the port-proxy pin, and a pinned sandbox correctly refuses manual
+  // hibernate with 409 busy. Retry until the idle connection is reaped; a
+  // REAL pin leak never clears, so this still fails loudly on a timeout.
+  await eventually(
+    async () => {
+      await sbx.hibernate()
+      return true // hibernate resolves undefined; eventually needs truthy
+    },
+    {
+      timeoutMs: 20_000,
+      what: 'hibernate to succeed once the keep-alive connection unpins',
+    }
+  )
   const frozen = (await Sandbox.list()).find((s) => s.sandboxId === sbx.sandboxId)
   assertEq(frozen?.status, 'hibernated', 'sandbox must be frozen before the connect')
 

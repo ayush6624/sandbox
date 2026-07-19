@@ -89,6 +89,23 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		SandboxIDs:  ids,
 		SnapshotIDs: snapIDs,
 	}
+	// Advertise true allocatable capacity. SlotsTotal-SlotsUsed overstates it:
+	// hibernated sandboxes hold their host port (wake-on-connect listener stays
+	// bound) without counting as used, and extra exposed ports drain the same
+	// pool. Until the golden snapshot is ready, advertise 0 — a fresh host that
+	// invites a burst before it can hot-create serves nothing but cold-boot
+	// storms and agent timeouts. On FreeSlots error, omit the field (gateway
+	// falls back to SlotsTotal-SlotsUsed).
+	if free, err := s.reg.FreeSlots(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "heartbeat: free slots: %v\n", err)
+	} else {
+		select {
+		case <-s.warmed:
+		default:
+			free = 0
+		}
+		hb.SlotsFree = &free
+	}
 	b, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
 	if err != nil {

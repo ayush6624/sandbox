@@ -144,12 +144,8 @@ func (p Pools) Slots() int {
 	if c := p.PortMax - p.PortMin + 1; c < n {
 		n = c
 	}
-	if minIP, err := ipToUint32(p.GuestIPMin); err == nil {
-		if maxIP, err := ipToUint32(p.GuestIPMax); err == nil {
-			if c := int(maxIP-minIP) + 1; c < n {
-				n = c
-			}
-		}
+	if c := p.ipPoolSize(); c < n {
+		n = c
 	}
 	if n < 0 {
 		n = 0
@@ -157,11 +153,84 @@ func (p Pools) Slots() int {
 	return n
 }
 
+// ipPoolSize is the number of guest IPs in the pool, or TapMax when the range
+// is unparsable (so a bad config degrades to tap-bound rather than zero).
+func (p Pools) ipPoolSize() int {
+	minIP, err := ipToUint32(p.GuestIPMin)
+	if err != nil {
+		return p.TapMax
+	}
+	maxIP, err := ipToUint32(p.GuestIPMax)
+	if err != nil {
+		return p.TapMax
+	}
+	return int(maxIP-minIP) + 1
+}
+
+// FreeSlots returns how many new sandboxes Create could allocate right now:
+// the smallest per-pool availability, further bounded by the memory budget
+// when one is configured. Running sandboxes hold a tap, an IP, a port, and
+// their guest memory; hibernated sandboxes hold ONLY their port (the
+// wake-on-connect listener stays bound — see loadUsed), their tap/IP being
+// soft-reserved and allocatable and their memory released (the VM is dead).
+// Extra exposed ports draw from the same port pool. This is what the
+// heartbeat must advertise: Slots()-running overstates capacity whenever
+// hibernated port-holds make ports the binding pool or big mem_mib overrides
+// eat the memory budget faster than one slot apiece.
+func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
+	var running, portsHeld, extraPorts int
+	var committedMem int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM sandboxes WHERE status = ?1),
+			(SELECT COUNT(*) FROM sandboxes WHERE status IN (?1, ?2)),
+			(SELECT COUNT(*) FROM sandbox_ports),
+			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?3 ELSE mem_mib END + ?4), 0)
+			   FROM sandboxes WHERE status = ?1)`,
+		StatusRunning, StatusHibernated, r.mem.TemplateMemMIB, r.mem.OverheadMIB,
+	).Scan(&running, &portsHeld, &extraPorts, &committedMem)
+	if err != nil {
+		return 0, err
+	}
+	free := r.pools.TapMax - running
+	if f := r.pools.ipPoolSize() - running; f < free {
+		free = f
+	}
+	if f := (r.pools.PortMax - r.pools.PortMin + 1) - portsHeld - extraPorts; f < free {
+		free = f
+	}
+	if per := r.mem.TemplateMemMIB + r.mem.OverheadMIB; r.mem.BudgetMIB > 0 && per > 0 {
+		if f := int((r.mem.BudgetMIB - committedMem) / per); f < free {
+			free = f
+		}
+	}
+	if free < 0 {
+		free = 0
+	}
+	return free, nil
+}
+
+// MemAccounting configures memory-aware admission: the sum of committed guest
+// memory (each running sandbox's effective mem_mib + OverheadMIB of VMM
+// overhead) must stay within BudgetMIB. Hibernated sandboxes hold no memory —
+// their VM is dead. BudgetMIB <= 0 disables admission and the FreeSlots
+// memory bound entirely (tests, hosts with no configured limit).
+type MemAccounting struct {
+	TemplateMemMIB int64 // resolves rows/requests with mem_mib=0 (template default)
+	BudgetMIB      int64 // committed-memory ceiling; <=0 = disabled
+	OverheadMIB    int64 // per-VM firecracker/VMM overhead charged on top of guest mem
+}
+
 // Registry wraps the SQLite-backed sandbox state.
 type Registry struct {
 	db    *sql.DB
 	pools Pools
+	mem   MemAccounting
 }
+
+// SetMemAccounting installs the memory-admission parameters. Call once before
+// serving; the zero value leaves admission disabled.
+func (r *Registry) SetMemAccounting(a MemAccounting) { r.mem = a }
 
 // Open initializes the database (creating it if needed) and applies migrations.
 func Open(dbPath string, pools Pools) (*Registry, error) {
@@ -438,6 +507,9 @@ func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expi
 	if err != nil {
 		return Sandbox{}, err
 	}
+	if err := r.checkMemBudget(ctx, tx, memMIB); err != nil {
+		return Sandbox{}, err
+	}
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
@@ -494,6 +566,9 @@ func (r *Registry) CreateRestore(ctx context.Context, id, name, rootfsPath, tap,
 	}
 	port, err := pickFreePort(used, r.pools)
 	if err != nil {
+		return Sandbox{}, err
+	}
+	if err := r.checkMemBudget(ctx, tx, memMIB); err != nil {
 		return Sandbox{}, err
 	}
 
@@ -632,6 +707,14 @@ func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 	}
 	if sb.Status != StatusHibernated {
 		return Sandbox{}, false, fmt.Errorf("sandbox %s is %s, not hibernated", id, sb.Status)
+	}
+	// Waking re-materializes the snapshot's baked memory: it must pass the
+	// same admission as a create, or poking a frozen big-mem sandbox would
+	// push the host past its cgroup and OOM an arbitrary running guest. On
+	// rejection the TX rolls back — the row stays hibernated, artifacts
+	// intact, wakeable once capacity frees.
+	if err := r.checkMemBudget(ctx, tx, sb.MemMIB); err != nil {
+		return Sandbox{}, false, err
 	}
 
 	used, err := loadUsed(ctx, tx)
@@ -997,6 +1080,45 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 	return u, extra.Err()
 }
 
+// ErrPoolExhausted marks capacity-class allocation failures: every entry of a
+// resource pool (tap/IP/port) is in use. Handlers map it to 503 + Retry-After
+// (it clears as sandboxes are destroyed or the fleet scales), and the gateway
+// fails a create over to another host on it — unlike a genuine 500.
+var ErrPoolExhausted = errors.New("pool exhausted")
+
+// ErrMemExhausted marks a memory-budget admission rejection. It wraps
+// ErrPoolExhausted so every existing capacity path (503 + Retry-After,
+// gateway failover, fanout classification) fires unchanged.
+var ErrMemExhausted = fmt.Errorf("memory budget exhausted: %w", ErrPoolExhausted)
+
+// checkMemBudget rejects an admission that would push committed guest memory
+// (running rows only — hibernated VMs are dead) past the configured budget.
+// memMIB=0 resolves to the template default. No-op when admission is disabled.
+// Runs inside the caller's transaction; the single-connection DB serializes
+// admissions, so the read-then-insert is race-free.
+func (r *Registry) checkMemBudget(ctx context.Context, tx *sql.Tx, memMIB int64) error {
+	if r.mem.BudgetMIB <= 0 {
+		return nil
+	}
+	if memMIB == 0 {
+		memMIB = r.mem.TemplateMemMIB
+	}
+	need := memMIB + r.mem.OverheadMIB
+	var committed int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ? ELSE mem_mib END + ?), 0)
+		   FROM sandboxes WHERE status = ?`,
+		r.mem.TemplateMemMIB, r.mem.OverheadMIB, StatusRunning,
+	).Scan(&committed); err != nil {
+		return err
+	}
+	if committed+need > r.mem.BudgetMIB {
+		return fmt.Errorf("need %d MiB with %d of %d MiB budget committed: %w",
+			need, committed, r.mem.BudgetMIB, ErrMemExhausted)
+	}
+	return nil
+}
+
 // The tap/IP pickers scan their pool twice: first skipping identities parked
 // by hibernated sandboxes (soft), then — only when the pool is otherwise
 // exhausted — allowing them. Hibernated taps/IPs are legitimately free;
@@ -1012,7 +1134,7 @@ func pickFreeTap(used usedResources, p Pools) (string, error) {
 			}
 		}
 	}
-	return "", errors.New("tap pool exhausted")
+	return "", fmt.Errorf("tap pool exhausted: %w", ErrPoolExhausted)
 }
 
 func pickFreeIP(used usedResources, p Pools) (string, error) {
@@ -1032,7 +1154,7 @@ func pickFreeIP(used usedResources, p Pools) (string, error) {
 			}
 		}
 	}
-	return "", errors.New("ip pool exhausted")
+	return "", fmt.Errorf("ip pool exhausted: %w", ErrPoolExhausted)
 }
 
 func pickFreePort(used usedResources, p Pools) (int, error) {
@@ -1041,7 +1163,7 @@ func pickFreePort(used usedResources, p Pools) (int, error) {
 			return port, nil
 		}
 	}
-	return 0, errors.New("port pool exhausted")
+	return 0, fmt.Errorf("port pool exhausted: %w", ErrPoolExhausted)
 }
 
 func ipToUint32(s string) (uint32, error) {

@@ -14,6 +14,8 @@ variable "host_token"    { type = string }
 variable "release"       { type = string }              # git sha under releases/
 variable "bucket"        { type = string }              # GCS release bucket
 variable "config_path"   { type = string }              # path to devbox-gcp.json on the submitting host
+variable "task_cpu"      { type = number }              # cgroup CPU shares; deploy-job.sh sizes from the machine type
+variable "task_memory"   { type = number }              # cgroup memory.max MiB; deploy-job.sh sizes from SLOTS_PER_HOST
 
 job "sandbox-serve" {
   datacenters = ["dc1"]
@@ -93,13 +95,13 @@ EOT
       # serve OWNS the whole host: it launches every firecracker guest as a
       # child process, so the task's cgroup must fit all of them. Nomad (cgroups
       # v2) sets memory.max from `memory`; too low a value OOM-kills the guests
-      # (a 512 MiB cap kills every 1 GiB microVM). Size to the host: 24 slots x
-      # ~1.15 GiB/guest + serve + headroom on an n2-standard-8 (32 GiB). CPU is
-      # shares-based (not a hard cap), set near the 8-core host so guests aren't
-      # throttled under contention.
+      # (a 512 MiB cap kills every 1 GiB microVM). deploy-job.sh derives both
+      # values from config.env — memory from SLOTS_PER_HOST (~1.18 GiB/slot +
+      # serve overhead), CPU shares near the machine's core count so guests
+      # aren't throttled under contention (shares-based, not a hard cap).
       resources {
-        cpu    = 7000
-        memory = 30000
+        cpu    = var.task_cpu
+        memory = var.task_memory
       }
     }
   }

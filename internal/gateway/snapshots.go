@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/client"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -24,7 +25,7 @@ import (
 
 // snapClient forwards snapshot ops host-side. No overall timeout: a fallback
 // restore may pull gigabytes from GCS before it answers.
-var snapClient = &http.Client{}
+var snapClient = &http.Client{Transport: client.SharedTransport()}
 
 func (g *Gateway) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	g.mu.RLock()
@@ -149,6 +150,9 @@ func (g *Gateway) recordSnapshotOp(r *http.Request, snapID string, target *host,
 			g.route[sb.ID] = target.id
 			if hh := g.hosts[target.id]; hh != nil {
 				hh.slotsUsed++
+				if hh.slotsFree > 0 {
+					hh.slotsFree--
+				}
 			}
 			sb.HostAddr = hostOnly(target.addr)
 			if b, err := json.Marshal(sb); err == nil {
@@ -164,6 +168,10 @@ func (g *Gateway) recordSnapshotOp(r *http.Request, snapID string, target *host,
 			}
 			if hh := g.hosts[target.id]; hh != nil {
 				hh.slotsUsed += len(sbs)
+				hh.slotsFree -= len(sbs)
+				if hh.slotsFree < 0 {
+					hh.slotsFree = 0
+				}
 			}
 			if b, err := json.Marshal(sbs); err == nil {
 				*respBody = b

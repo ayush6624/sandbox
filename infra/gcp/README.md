@@ -70,23 +70,39 @@ through it, so an old gateway silently drops new fields) — also run
 `./control.sh deploy` to update the control plane.
 
 **Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` (bounds + cost guardrail),
-`SLOTS_PER_HOST` (must match `configs/devbox-gcp.json` pools), `HEADROOM_SLOTS`
-(free slots kept ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must
-stay low before scale-in), `STANDBY_STOPPED_SIZE` (pre-created stopped VMs the
-MIG starts on scale-up — tens of seconds to serving instead of the minutes a
-fresh create+boot takes; apply to a live MIG with `./mig.sh standby`).
-Scale-up is immediate; scale-down waits out the window. **Scale-in kills
-running sandboxes on the removed host** (saved snapshots survive via GCS
-durability); bin-pack placement + the window minimize how often that hits an
-in-use host.
+`SLOTS_PER_HOST` (the **single source of truth** for per-host capacity —
+`deploy-job.sh` *generates* the pools in `devbox-gcp.json` from it: taps = IPs
+= N, ports = 4N so hibernated port-holds and extra exposed ports never bind
+capacity, plus `mem_budget_mib = N×1180` so `mem_mib` overrides are admitted
+against the host's real memory — a big-mem sandbox consumes multiple slots'
+worth of `slots_free` and can never OOM the cgroup; max 200 per the /24 guest
+subnet), `HEADROOM_SLOTS` (free slots kept
+ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must stay low before
+scale-in), `STANDBY_STOPPED_SIZE` (pre-created stopped VMs the MIG starts on
+scale-up — tens of seconds to serving instead of the minutes a fresh
+create+boot takes; apply to a live MIG with `./mig.sh standby`), and
+`QUEUE_WAIT`/`QUEUE_MAX` (the gateway's create queue — wait must cover standby
+start → nomad join → golden-snapshot build, ~2-3 min). The defaults size the
+fleet for **1000 concurrent sandboxes**: n2-standard-16 workers × 48 slots ×
+MIG_MAX=22. Scale-up is immediate; scale-down waits out the window.
+**Scale-in kills running sandboxes on the removed host** (saved snapshots
+survive via GCS durability); bin-pack placement + the window minimize how
+often that hits an in-use host.
 
 **Burst behavior** end to end: a burst first lands on `HEADROOM_SLOTS` of free
-capacity; overflow creates wait in the gateway's bounded queue (`sandbox
-gateway --queue-wait/--queue-max`) instead of 503ing, and the queue depth
-itself feeds `sandbox:workers_desired` so the autoscaler scales up
+capacity; overflow creates wait in the gateway's bounded queue
+(`QUEUE_WAIT`/`QUEUE_MAX`) instead of 503ing, and the queue depth itself feeds
+`sandbox:workers_desired` — computed from **effective occupancy**
+(`slots_total − slots_free`, so capacity held by hibernated sandboxes' ports
+or still-warming hosts counts as demand) — so the autoscaler scales up
 immediately; the MIG serves that resize from the stopped standby pool in
-~30-60 s (falling back to fresh creates when the pool runs dry). Only a burst
-that outruns queue-wait + MIG_MAX sees 503s (with Retry-After).
+~30-60 s (falling back to fresh creates when the pool runs dry). A fresh host
+advertises `slots_free=0` until its golden snapshot is built, so it is never
+boot-stormed with cold creates; each host also bounds concurrent bring-ups
+(`create_concurrency`, default 2×cores capped at 16). A create that still hits
+a stale host gets failed over to the next host by the gateway (up to 3
+attempts) before it would ever surface an error. Only a burst that outruns
+queue-wait + MIG_MAX sees 503s (with Retry-After).
 
 **Teardown:** `./mig.sh down` then `./control.sh down` (the reserved IP, SAs, and
 buckets persist — remove with `gcloud` if you're fully done).

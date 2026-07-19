@@ -163,17 +163,27 @@ scripts/              Host setup shell scripts
   API and fans out across hosts. Each host keeps its own SQLite + pools + `reconcile()`
   unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
   opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
-  and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, sandbox_ids}` to
-  the gateway every 5 s. The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
+  and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, slots_free,
+  sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
+  `registry.FreeSlots`: min per-pool availability, counting hibernated sandboxes' held ports
+  and extra exposed ports) — NOT `slots_total - slots_used`, which overstates capacity
+  whenever hibernated port-holds bind the port pool; a host still building its golden
+  snapshot advertises `slots_free=0` so fresh hosts aren't boot-stormed with cold creates.
+  The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
   its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
   each host reports. `POST /sandboxes` bin-packs onto the fullest live host with free slots
-  (reserve-at-pick so concurrent creates see each other); when no slot is free the create
-  waits in a bounded queue (`--queue-wait`/`--queue-max`; depth exported as
+  (reserve-at-pick so concurrent creates see each other); a create that a host rejects with a
+  capacity-class error (503/429, e.g. pool exhaustion) or a connection failure **fails over**
+  to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
+  host errors return 502 without retry. When no slot is free the create
+  waits in a bounded queue (`--queue-wait`/`--queue-max`, defaults 180s/512; depth exported as
   `sandbox_create_queue_depth` and fed into the autoscaler signal) before 503ing with
   Retry-After. Id-scoped requests (incl. `/exec/stream` + `/shell`) are
-  reverse-proxied to the owning host with the host's token injected; `GET /sandboxes`
-  scatter-gathers. Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The
-  whole roadmap (incl. Phase-2 elastic/Nomad) is in `~/.claude/plans/i-know-the-agent-abundant-starfish.md`.
+  reverse-proxied to the owning host (one cached proxy per host over a shared tuned
+  transport) with the host's token injected; `GET /sandboxes` scatter-gathers in parallel.
+  Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The elastic fleet
+  (Nomad autoscaler + GCE MIG) lives in `infra/gcp/` — `SLOTS_PER_HOST` in `config.env` is
+  the single source of truth; `deploy-job.sh` generates the pools from it (ports = 4× slots).
 - **Creates are hot by default (golden snapshot).** On startup (`ensureGolden` in
   `internal/server/golden.go`) the server adopts or builds a **golden snapshot**: it
   cold-boots a throwaway pristine sandbox, snapshots it (marked `golden=1`, at most one via
@@ -224,6 +234,27 @@ scripts/              Host setup shell scripts
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
   that's the first thing to check.
+- **Memory is admission-checked; CPU is deliberately oversubscribed (~6:1).**
+  `mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
+  total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running
+  sandbox's effective `mem_mib` + 156 MiB VMM overhead; hibernated VMs hold none. The
+  check runs inside the registry TX of `Create`/`CreateRestore`/**`Wake`** (waking
+  re-commits the snapshot's baked memory; a rejected wake rolls back to hibernated and
+  surfaces as 503 on agent-bound requests / close code 4503 on the shell WS), returns
+  `ErrMemExhausted` (wraps `ErrPoolExhausted` so 503 + gateway failover fire unchanged),
+  and bounds `FreeSlots` — a big-mem sandbox eats multiple slots' worth of `slots_free`,
+  so placement and autoscaling see the truth and the Nomad cgroup can never be
+  OOM-blown by `mem_mib` overrides. `maxMemMIB` (the per-sandbox override ceiling and
+  `GET /info` MaxMemMIB) is clamped to the budget. vcpus have NO sum guard by design:
+  the Nomad task runs CPU *shares*, so contention degrades to fair-share slowdown —
+  there is no CPU analogue of the OOM killer.
+- **Creates are bounded and capacity-classed.** A per-host semaphore
+  (`"create_concurrency"` in the config; 0 = min(2×NumCPU, 16)) gates every bring-up
+  (hot clone, cold boot, 1:1 restore) so a burst queues in-process instead of
+  boot-storming the host into agent timeouts — the 60 s agent gate starts ticking only
+  after acquisition. Pool exhaustion (`registry.ErrPoolExhausted` from the tap/IP/port
+  pickers) returns **503 + Retry-After**, not 500, so the gateway/SDK can tell capacity
+  from failure; `client.APIError` carries the status code through `internal/client`.
 - **exec kills whole process groups.** sandboxd runs commands with `Setpgid` and kills
   `-pgid` on timeout so shell children don't outlive the request. stdout/stderr are capped
   at 2 MiB each (`agentapi.MaxOutputBytes`).
@@ -313,10 +344,11 @@ scripts/              Host setup shell scripts
 - **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
   rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
   `hibernate_after_sec`, `vcpus`, and `mem_mib`.
-- **Gateway placement is slot-based, not resource-aware.** Every sandbox costs one slot
-  regardless of its `vcpus`/`mem_mib` override, so a host can be memory-oversubscribed if
-  many large-mem sandboxes land on it. Fine while overrides are rare; revisit slot
-  accounting (weight by mem?) before making big sandboxes the norm.
+- **No memory overcommit.** Guest memory is provisioned 1:1 (admission-enforced via
+  `mem_budget_mib` — see the memory-admission note above). Hot-created clones share the
+  golden snapshot's page cache and idle guests touch a fraction of their RAM, so real
+  density headroom exists — but without a virtio-balloon/free-page-reporting device,
+  dirtied pages never return until hibernation. Add a balloon before any overcommit knob.
 - **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics),
   `internal/registry` (hibernate/wake state machine, hibernated-port pinning, resource
   persistence), and `internal/server` (port proxy: forwarding, wake-on-connect, activity

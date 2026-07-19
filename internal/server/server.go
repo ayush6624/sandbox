@@ -39,6 +39,13 @@ type Config struct {
 	GatewayIP   string        // bridge IP; used as the guest's default gateway
 	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
 	HotCreate   bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
+	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
+	// golden clones); excess creates queue. <=0 = default: min(2×NumCPU, 16).
+	CreateConcurrency int
+	// MemBudgetMIB caps committed guest memory (mem_mib + per-VM overhead)
+	// across running sandboxes. 0 = derive from host total − 2 GiB;
+	// <0 = disabled. See config.MemBudgetMIB.
+	MemBudgetMIB int64
 	// HibernateAfter freezes sandboxes idle this long to disk (snapshot +
 	// kill), releasing their slot; any agent-bound request wakes them.
 	// 0 disables idle hibernation. See hibernate.go.
@@ -89,11 +96,69 @@ type Server struct {
 	// portproxy.go). Its listeners persist through hibernation so a connection
 	// to a frozen sandbox's port wakes it.
 	pf *portForwarder
+
+	// createSem bounds concurrent sandbox bring-ups (cold boots AND golden
+	// clones) so a burst of creates queues instead of boot-storming the host —
+	// the 60 s agent gate only starts ticking once a slot is acquired. Fanout
+	// keeps its own separate budget.
+	createSem chan struct{}
+	// warmed is closed once ensureGolden has settled (adopted, built, or
+	// failed). Until then the heartbeat advertises SlotsFree=0 so the gateway
+	// doesn't route a burst of guaranteed-cold creates at a host that's still
+	// building its golden snapshot. Pre-closed when hot create is disabled.
+	warmed chan struct{}
+
+	// memBudgetMIB is the resolved committed-guest-memory ceiling (0 =
+	// disabled). Mirrors what reg.SetMemAccounting was given; kept here so
+	// validateResources/handleInfo can clamp the per-sandbox override too.
+	memBudgetMIB int64
 }
+
+// fcOverheadMIB is the per-VM memory charged on top of the guest's mem_mib:
+// firecracker/VMM overhead. 1024 (template) + 156 = 1180, matching the
+// MiB-per-slot arithmetic deploy-job.sh sizes the Nomad cgroup with.
+const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
 		act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
+	sem := cfg.CreateConcurrency
+	if sem <= 0 {
+		sem = 2 * runtime.NumCPU()
+		if sem > 16 {
+			sem = 16
+		}
+	}
+	s.createSem = make(chan struct{}, sem)
+	s.warmed = make(chan struct{})
+	if !cfg.HotCreate {
+		close(s.warmed) // nothing to warm up: cold creates are the steady state
+	}
+
+	// Memory-aware admission: explicit budget wins (fleet hosts MUST set it —
+	// /proc/meminfo shows the machine total, not the Nomad cgroup limit);
+	// 0 derives machine total minus a 2 GiB host reserve; negative (or a
+	// failed derivation) disables admission entirely.
+	budget := cfg.MemBudgetMIB
+	if budget == 0 {
+		if total := hostTotalMemMIB(); total > 2048 {
+			budget = total - 2048
+		}
+	}
+	if budget < 0 {
+		budget = 0
+	}
+	s.memBudgetMIB = budget
+	reg.SetMemAccounting(registry.MemAccounting{
+		TemplateMemMIB: cfg.VMTemplate.MemMIB,
+		BudgetMIB:      budget,
+		OverheadMIB:    fcOverheadMIB,
+	})
+	if budget > 0 && budget < cfg.VMTemplate.MemMIB+fcOverheadMIB {
+		fmt.Fprintf(os.Stderr, "WARNING: mem_budget_mib %d cannot fit even one template sandbox (%d+%d MiB) — every create (incl. the golden build) will be rejected\n",
+			budget, cfg.VMTemplate.MemMIB, fcOverheadMIB)
+	}
+
 	s.pf = newPortForwarder(s.dialGuest, s.act.begin)
 	if cfg.SnapshotBucket != "" {
 		s.blob = gcsblob.New(cfg.SnapshotBucket)
@@ -265,7 +330,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("hibernate_after_sec must be >= -1 (-1 = never, 0 = host default)"))
 		return
 	}
-	if err := validateResources(body.Vcpus, body.MemMIB); err != nil {
+	if err := s.validateResources(body.Vcpus, body.MemMIB); err != nil {
 		httpError(w, 400, err)
 		return
 	}
@@ -278,6 +343,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
 		expiresAt = &t
 	}
+
+	// Bound concurrent bring-ups: a burst queues here instead of boot-storming
+	// the host. Queuing is correct (not 503) — the gateway only dispatches up
+	// to the host's advertised free slots, and the 60 s agent gate below only
+	// starts once a slot is acquired.
+	if err := s.acquireCreate(ctx); err != nil {
+		httpError(w, 499, fmt.Errorf("cancelled while queued for create slot: %w", err))
+		return
+	}
+	defer s.releaseCreate()
 
 	// Hot path: clone the golden snapshot when one is ready. Any failure falls
 	// back to a cold boot, so a create is never worse off than before.
@@ -294,11 +369,23 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	sb, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
 	if err != nil {
-		httpError(w, 500, err)
+		capacityOrHTTPError(w, 500, err)
 		return
 	}
 	writeJSON(w, 201, s.effectiveResources(sb))
 }
+
+// acquireCreate takes one bring-up slot, blocking until one frees or ctx ends.
+func (s *Server) acquireCreate(ctx context.Context) error {
+	select {
+	case s.createSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) releaseCreate() { <-s.createSem }
 
 // createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
@@ -306,16 +393,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // the template's resources when nonzero (already validated by the caller).
 func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
 	id := uuid.NewString()
+	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 
-	rootfsPath, err := s.cfg.Provisioner.PrepareRootfs(id)
-	if err != nil {
-		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
-	}
-
+	// Allocate identity + admission BEFORE the rootfs copy: a capacity-rejected
+	// create (pool/memory exhaustion — routine under gateway failover) must not
+	// pay a multi-GB copy + cleanup on a host that's already full.
 	sb, err := s.reg.Create(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
-		_ = s.cfg.Provisioner.CleanupRootfs(id)
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
+	}
+
+	if _, err := s.cfg.Provisioner.PrepareRootfs(id); err != nil {
+		s.rollbackPreVM(id, sb)
+		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
 	if err := s.cfg.Provisioner.CreateTap(sb.TapDevice); err != nil {
@@ -444,7 +534,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		DefaultVcpus:      s.cfg.VMTemplate.Vcpus,
 		DefaultMemMIB:     s.cfg.VMTemplate.MemMIB,
 		MaxVcpus:          maxVcpus(),
-		MaxMemMIB:         maxMemMIB(),
+		MaxMemMIB:         s.maxMemMIB(),
 		GuestPort:         guestPort,
 		HotCreate:         s.cfg.HotCreate,
 		HibernateAfterSec: int(s.cfg.HibernateAfter / time.Second),
@@ -603,10 +693,14 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 // --- helpers ---
 
 // statusFor maps an ensureRunning error onto an HTTP status: unknown sandbox
-// → 404, anything else (a failed wake) → 500.
+// → 404, a wake rejected for capacity (pool or memory-budget exhaustion —
+// waking re-commits the frozen VM's memory) → 503, anything else → 500.
 func statusFor(err error) int {
 	if errors.Is(err, sql.ErrNoRows) {
 		return 404
+	}
+	if errors.Is(err, registry.ErrPoolExhausted) {
+		return http.StatusServiceUnavailable
 	}
 	return 500
 }
@@ -615,6 +709,19 @@ func httpError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// capacityOrHTTPError distinguishes capacity-class failures from genuine
+// server errors: pool exhaustion is 503 + Retry-After (it clears as sandboxes
+// are destroyed or the autoscaler adds hosts, and the gateway fails the create
+// over to another host on it); anything else keeps fallbackCode.
+func capacityOrHTTPError(w http.ResponseWriter, fallbackCode int, err error) {
+	if errors.Is(err, registry.ErrPoolExhausted) {
+		w.Header().Set("Retry-After", "5")
+		httpError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	httpError(w, fallbackCode, err)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -655,7 +762,7 @@ const fallbackMemCapMIB = 64 * 1024
 
 // validateResources bounds-checks per-sandbox vcpus/mem_mib overrides
 // (0 = template default, always valid).
-func validateResources(vcpus, memMIB int64) error {
+func (s *Server) validateResources(vcpus, memMIB int64) error {
 	if vcpus < 0 {
 		return errors.New("vcpus must be >= 0 (0 = template default)")
 	}
@@ -668,7 +775,7 @@ func validateResources(vcpus, memMIB int64) error {
 	if memMIB > 0 && memMIB < minMemMIB {
 		return fmt.Errorf("mem_mib %d is below the minimum bootable %d", memMIB, minMemMIB)
 	}
-	if maxM := maxMemMIB(); memMIB > maxM {
+	if maxM := s.maxMemMIB(); memMIB > maxM {
 		return fmt.Errorf("mem_mib %d exceeds host limit %d", memMIB, maxM)
 	}
 	return nil
@@ -684,13 +791,30 @@ func maxVcpus() int64 {
 	return n
 }
 
-// maxMemMIB is the largest per-sandbox mem_mib override: the host's total
-// memory (from /proc/meminfo), or a fixed cap where that's unreadable. This
-// bounds a single sandbox, not the sum — hosts can still oversubscribe.
-func maxMemMIB() int64 {
+// maxMemMIB is the largest per-sandbox mem_mib override. With a memory budget
+// configured it's the budget minus per-VM overhead — an override that can
+// never be admitted 400s up front instead of burning gateway failover
+// attempts + queue-wait before 503ing. (Caveat: on a heterogeneous fleet this
+// 400 kills a create a bigger host could serve; fine while the MIG is
+// uniform.) Without a budget it falls back to the host's total memory, which
+// bounds a single sandbox only — the registry's admission check bounds the sum.
+func (s *Server) maxMemMIB() int64 {
+	if s.memBudgetMIB > 0 {
+		return s.memBudgetMIB - fcOverheadMIB
+	}
+	if total := hostTotalMemMIB(); total > 0 {
+		return total
+	}
+	return fallbackMemCapMIB
+}
+
+// hostTotalMemMIB reads MemTotal from /proc/meminfo; 0 when unreadable
+// (non-Linux builds, tests). Note: inside a cgroup this is the MACHINE total,
+// not the cgroup limit — which is why fleet hosts set mem_budget_mib explicitly.
+func hostTotalMemMIB() int64 {
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
-		return fallbackMemCapMIB
+		return 0
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		if !strings.HasPrefix(line, "MemTotal:") {
@@ -704,7 +828,7 @@ func maxMemMIB() int64 {
 		}
 		break
 	}
-	return fallbackMemCapMIB
+	return 0
 }
 
 // randomMAC returns a locally-administered unicast MAC.

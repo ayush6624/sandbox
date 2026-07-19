@@ -19,6 +19,11 @@ import (
 // throwaway sandbox, snapshots it, and destroys it. Every failure is
 // non-fatal — s.golden stays nil and creates simply cold-boot as before.
 func (s *Server) ensureGolden(ctx context.Context) {
+	// Whatever happens — adopt, build, or fail — the host is "warmed" once this
+	// returns: the heartbeat may start advertising real free slots. A failed
+	// build just means cold creates (slower, still functional); never leave the
+	// host permanently unplaceable.
+	defer close(s.warmed)
 	if snap, err := s.reg.GoldenSnapshot(ctx); err == nil {
 		if s.goldenUsable(snap) {
 			if err := s.stageSnapshotRootfs(snap); err == nil {

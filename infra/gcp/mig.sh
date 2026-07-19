@@ -60,7 +60,7 @@ cmd_init() {
   "${GC[@]}" storage buckets add-iam-policy-binding "gs://${RELEASE_BUCKET}" \
     --member="serviceAccount:${SA_EMAIL}" --role="roles/storage.objectViewer" >/dev/null
   echo ">> Firewall: internal traffic must be allowed (heartbeat 9090, host 8080,"
-  echo "   sandbox ports 5200-5223, nomad 4646-4648). Default VPC rules:"
+  echo "   sandbox ports 5200-$((5200 + 4 * ${SLOTS_PER_HOST:-48} - 1)), nomad 4646-4648). Default VPC rules:"
   "${GC[@]}" compute firewall-rules list --filter="network=default AND direction=INGRESS" \
     --format="table(name,sourceRanges.list(),allowed[].map().firewall_rule().list())" 2>/dev/null || true
   echo "   If no default-allow-internal covers the subnet, add one internal-allow rule."

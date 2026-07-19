@@ -20,12 +20,13 @@ import (
 // doesn't mask real demand.
 func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	type hostMetric struct {
-		id          string
-		total, used int
+		id                string
+		total, used, free int
 	}
 	var (
 		liveHosts             int
 		totalSlots, usedSlots int
+		freeSlots             int
 		hibernated            int
 		routes                int
 		perHost               []hostMetric
@@ -39,16 +40,13 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		liveHosts++
 		totalSlots += h.slotsTotal
 		usedSlots += h.slotsUsed
+		freeSlots += h.free()
 		hibernated += h.hibernated
-		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed})
+		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed, free: h.free()})
 	}
 	routes = len(g.route)
 	g.mu.RUnlock()
 
-	freeSlots := totalSlots - usedSlots
-	if freeSlots < 0 {
-		freeSlots = 0
-	}
 	sort.Slice(perHost, func(i, j int) bool { return perHost[i].id < perHost[j].id })
 
 	var b strings.Builder
@@ -58,7 +56,12 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_hosts_live", "Number of hosts seen within the heartbeat TTL.", liveHosts)
 	gauge("sandbox_slots_total", "Total sandbox slots across live hosts.", totalSlots)
 	gauge("sandbox_slots_used", "Used sandbox slots across live hosts.", usedSlots)
-	gauge("sandbox_slots_free", "Free sandbox slots across live hosts.", freeSlots)
+	// slots_free is host-reported allocatable capacity (minus in-flight
+	// reservations) — NOT total-used. Hibernated sandboxes hold their host
+	// port without holding a slot, so total-used overstates what the fleet can
+	// actually place; the autoscaler's recording rule uses
+	// (slots_total - slots_free) as effective occupancy for the same reason.
+	gauge("sandbox_slots_free", "Allocatable sandbox slots across live hosts (host-reported).", freeSlots)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
 	gauge("sandbox_hibernated", "Idle sandboxes frozen to disk across live hosts (hold no slot).", hibernated)
 	// Queued creates are demand without a slot — the recording rule adds this
@@ -73,6 +76,10 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# HELP sandbox_host_slots_used Used slots on a live host.\n# TYPE sandbox_host_slots_used gauge\n")
 	for _, h := range perHost {
 		fmt.Fprintf(&b, "sandbox_host_slots_used{host=%q} %d\n", h.id, h.used)
+	}
+	fmt.Fprintf(&b, "# HELP sandbox_host_slots_free Allocatable slots on a live host (host-reported, minus reservations).\n# TYPE sandbox_host_slots_free gauge\n")
+	for _, h := range perHost {
+		fmt.Fprintf(&b, "sandbox_host_slots_free{host=%q} %d\n", h.id, h.free)
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
