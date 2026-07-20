@@ -169,37 +169,45 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 				continue // ignore non-fault events (e.g. REMOVE)
 			}
 			addr := binary.LittleEndian.Uint64(msg[16:24])
-			h.copyPage(uffd, regions, addr)
+			h.copyWindow(uffd, regions, addr)
 		}
 	}
 }
 
-// copyPage installs the one page containing addr into the guest, read from the
-// mem file at the region-mapped offset.
-func (h *uffdHandler) copyPage(uffd int, regions []guestRegion, addr uint64) {
-	aligned, srcOff, pageSize, ok := resolvePage(regions, addr)
+// copyWindow installs the faulting page plus a fault-ahead run into the guest
+// in one UFFDIO_COPY, read from the mem file at the region-mapped offset. One
+// syscall for many pages is the whole point — it amortizes the userspace
+// round-trip that made single-page UFFD lose to the eager File backend.
+func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
+	dst, srcOff, length, ok := faultWindow(regions, addr, prefetchPages)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "uffd: fault @%#x maps to no region\n", addr)
 		return
 	}
-	// Overflow-safe bounds check: srcOff+pageSize can wrap past 2^64 and
-	// silently pass a naive `> len` comparison (this is what let the original
-	// underflow panic reach the slice index). Compare without adding.
+	// Overflow-safe bounds check: srcOff+length can wrap past 2^64 and silently
+	// pass a naive `> len` comparison (this is what let the original underflow
+	// panic reach the slice index). Compare without adding, and clamp the run to
+	// the mem file — a short copy just means the tail pages refault later.
 	memLen := uint64(len(h.mem))
-	if srcOff > memLen || pageSize > memLen-srcOff {
-		fmt.Fprintf(os.Stderr, "uffd: page @%#x src %#x+%d out of mem (len %d) — skipping\n", aligned, srcOff, pageSize, memLen)
+	if srcOff >= memLen {
+		fmt.Fprintf(os.Stderr, "uffd: page @%#x src %#x past mem (len %d) — skipping\n", dst, srcOff, memLen)
 		return
 	}
+	if length > memLen-srcOff {
+		length = memLen - srcOff
+	}
 	arg := uffdioCopyArg{
-		Dst: aligned,
+		Dst: dst,
 		Src: uint64(uintptr(unsafe.Pointer(&h.mem[srcOff]))),
-		Len: pageSize,
+		Len: length,
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(uffd), uintptr(uffdioCopy), uintptr(unsafe.Pointer(&arg)))
-	// EEXIST: another fault already populated this page — benign. EAGAIN: the
-	// mapping changed under us (removed) — the guest will refault.
+	// EEXIST: part of the run was already populated (a prior fault-ahead or a
+	// racing fault) — benign; the faulting page itself is at the run's head and
+	// gets copied up to the first present page, so the guest still progresses.
+	// EAGAIN: the mapping changed under us (removed) — the guest will refault.
 	if errno != 0 && errno != unix.EEXIST && errno != unix.EAGAIN {
-		fmt.Fprintf(os.Stderr, "uffd: copy page @%#x: %v\n", aligned, errno)
+		fmt.Fprintf(os.Stderr, "uffd: copy %d bytes @%#x: %v\n", length, dst, errno)
 	}
 }
 

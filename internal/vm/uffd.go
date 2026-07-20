@@ -57,25 +57,63 @@ func (r guestRegion) pageSizeBytes() uint64 {
 	}
 }
 
-// resolvePage maps a faulting host virtual address to the page-aligned
-// destination address, the source offset in the mem file, and the page size,
-// by locating the region whose PAGE contains it. Matching on the aligned
-// address (not the raw fault address) mirrors Firecracker's reference handler
-// and guarantees aligned >= BaseHostVirtAddr, so aligned-base can't underflow
-// even if a region base isn't aligned to the page size. It also requires the
-// whole page to sit inside the region. ok=false means no region's page
-// contains the fault — the caller logs and skips rather than indexing blindly.
-func resolvePage(regions []guestRegion, addr uint64) (aligned, srcOff, pageSize uint64, ok bool) {
-	for _, r := range regions {
-		pageSize = r.pageSizeBytes()
+// prefetchPages is the fault-ahead window: on a fault we copy the faulting
+// page plus up to this many following pages in one UFFDIO_COPY, amortizing the
+// per-fault userspace round-trip that made single-page UFFD lose to the eager
+// File backend (docs/uffd-roadmap.md, Phase A). 32 × 4 KiB = 128 KiB — large
+// enough to cut round-trips sharply, small enough not to over-read cold pages
+// the guest never touches. FC's own reference handler fills the whole region;
+// this is a bounded middle ground.
+const prefetchPages = 32
+
+// locate finds the region whose PAGE contains addr and returns that region plus
+// the page-aligned fault address and page size. Matching on the aligned address
+// (not the raw fault address) mirrors Firecracker's reference handler and
+// guarantees aligned >= BaseHostVirtAddr, so aligned-base can't underflow even
+// if a region base isn't page-aligned; it also requires the whole page to sit
+// inside the region. ok=false means no region's page contains the fault.
+func locate(regions []guestRegion, addr uint64) (r guestRegion, aligned, pageSize uint64, ok bool) {
+	for _, reg := range regions {
+		pageSize = reg.pageSizeBytes()
 		aligned = addr &^ (pageSize - 1)
-		// The page must lie fully within [base, base+size). The first clause
-		// (aligned >= base) is what prevents the aligned-base underflow.
-		if aligned < r.BaseHostVirtAddr || aligned+pageSize > r.BaseHostVirtAddr+r.Size {
+		if aligned < reg.BaseHostVirtAddr || aligned+pageSize > reg.BaseHostVirtAddr+reg.Size {
 			continue
 		}
-		srcOff = r.Offset + (aligned - r.BaseHostVirtAddr)
-		return aligned, srcOff, pageSize, true
+		return reg, aligned, pageSize, true
 	}
-	return 0, 0, 0, false
+	return guestRegion{}, 0, 0, false
+}
+
+// resolvePage maps a fault to the single page containing it: the page-aligned
+// destination address, its source offset in the mem file, and the page size.
+// Thin wrapper over locate, kept for callers/tests that want one page.
+func resolvePage(regions []guestRegion, addr uint64) (aligned, srcOff, pageSize uint64, ok bool) {
+	r, aligned, pageSize, ok := locate(regions, addr)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return aligned, r.Offset + (aligned - r.BaseHostVirtAddr), pageSize, true
+}
+
+// faultWindow returns the copy run to service a fault at addr with fault-ahead:
+// the destination host address, the source offset in the mem file, and the byte
+// length — the faulting page plus up to prefetch-1 following pages, clamped to
+// the end of the enclosing region so a copy never crosses a region boundary.
+// length is always a whole number of pages (UFFDIO_COPY requires it) and >0 on
+// ok. Caller still clamps against the mem-file length.
+func faultWindow(regions []guestRegion, addr, prefetch uint64) (dst, srcOff, length uint64, ok bool) {
+	r, aligned, pageSize, ok := locate(regions, addr)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	if prefetch == 0 {
+		prefetch = 1
+	}
+	dst = aligned
+	srcOff = r.Offset + (aligned - r.BaseHostVirtAddr)
+	length = prefetch * pageSize
+	if regionTail := r.BaseHostVirtAddr + r.Size - aligned; length > regionTail {
+		length = regionTail // clamp to region end (whole pages, since size is page-multiple)
+	}
+	return dst, srcOff, length, true
 }

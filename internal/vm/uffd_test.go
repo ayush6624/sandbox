@@ -165,6 +165,58 @@ func TestResolvePageRealFirecracker(t *testing.T) {
 	}
 }
 
+// TestFaultWindow covers fault-ahead: the run spans the faulting page plus
+// prefetch-1 following pages, is clamped to the region end, and never crosses
+// a boundary.
+func TestFaultWindow(t *testing.T) {
+	const p = 4096
+	// One region: base 0x1000_0000, 64 KiB (16 pages), backed from offset 0x8000.
+	regions := []guestRegion{{BaseHostVirtAddr: 0x1000_0000, Size: 0x10000, Offset: 0x8000, PageSize: 4096}}
+
+	t.Run("full window mid-region", func(t *testing.T) {
+		dst, srcOff, length, ok := faultWindow(regions, 0x1000_0abc, 4)
+		if !ok || dst != 0x1000_0000 || srcOff != 0x8000 || length != 4*p {
+			t.Fatalf("got dst=%#x srcOff=%#x len=%d ok=%v", dst, srcOff, length, ok)
+		}
+	})
+	t.Run("clamped to region end", func(t *testing.T) {
+		// Fault in the 15th page (0-indexed 14); only 2 pages remain, so a
+		// prefetch of 8 clamps to 2 pages.
+		addr := regions[0].BaseHostVirtAddr + 14*p + 10
+		dst, srcOff, length, ok := faultWindow(regions, addr, 8)
+		if !ok || dst != regions[0].BaseHostVirtAddr+14*p || length != 2*p {
+			t.Fatalf("got dst=%#x len=%d ok=%v, want dst=%#x len=%d", dst, length, ok, regions[0].BaseHostVirtAddr+14*p, 2*p)
+		}
+		if srcOff != 0x8000+14*p {
+			t.Fatalf("srcOff=%#x, want %#x", srcOff, 0x8000+14*p)
+		}
+	})
+	t.Run("prefetch 1 is a single page", func(t *testing.T) {
+		_, _, length, ok := faultWindow(regions, 0x1000_0000, 1)
+		if !ok || length != p {
+			t.Fatalf("len=%d ok=%v, want %d", length, ok, p)
+		}
+	})
+	t.Run("prefetch 0 defaults to 1 page", func(t *testing.T) {
+		_, _, length, ok := faultWindow(regions, 0x1000_0000, 0)
+		if !ok || length != p {
+			t.Fatalf("len=%d ok=%v, want %d", length, ok, p)
+		}
+	})
+	t.Run("last page: window is exactly one page", func(t *testing.T) {
+		addr := regions[0].BaseHostVirtAddr + 15*p // final page
+		_, _, length, ok := faultWindow(regions, addr, 8)
+		if !ok || length != p {
+			t.Fatalf("len=%d ok=%v, want %d", length, ok, p)
+		}
+	})
+	t.Run("no region", func(t *testing.T) {
+		if _, _, _, ok := faultWindow(regions, 0x2000_0000, 4); ok {
+			t.Fatal("expected no match")
+		}
+	})
+}
+
 // TestGuestRegionJSON pins the wire field names Firecracker sends.
 func TestGuestRegionJSON(t *testing.T) {
 	const body = `[{"base_host_virt_addr":123456,"size":65536,"offset":4096,"page_size_kib":4}]`
