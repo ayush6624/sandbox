@@ -458,7 +458,7 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 		GuestIP:         sb.GuestIP,
 		MacAddress:      randomMAC(),
 		GatewayIP:       s.cfg.GatewayIP,
-		Prefix:          24,
+		Prefix:          s.guestSubnetBits(),
 		Gen:             uuid.NewString(),
 	})
 	if err != nil {

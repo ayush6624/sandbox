@@ -28,39 +28,82 @@ sshc() { ssh -o BatchMode=yes "${SSH_USER}@${CONTROL_NAME}" "$@"; }
 # The pools in devbox-gcp.json are GENERATED here, not hand-maintained, so the
 # autoscaler math (SLOTS_PER_HOST) and the hosts' actual pools cannot drift:
 #   taps  = N                          (fc0..fcN-1)
-#   IPs   = N                          (172.16.0.10 .. 172.16.0.(9+N))
-#   ports = 4N                         (hibernated sandboxes hold their port and
-#                                       extra exposed ports drain the same pool;
-#                                       4x keeps ports from ever binding Slots())
+#   IPs   = N                          (GuestIPMin .. GuestIPMin+N-1, octet-spanning)
+#   ports = PORTS_PER_HOST, default 4N (see below)
+# SLOTS bounds concurrently RUNNING sandboxes: each holds a tap, an IP, and
+# committed memory. It is NO LONGER capped at 200 — the wall is the guest
+# subnet, whose width GUEST_SUBNET_BITS now controls (see below).
 SLOTS="${SLOTS_PER_HOST:?set SLOTS_PER_HOST in config.env}"
 command -v jq >/dev/null || { echo "error: deploy-job.sh needs jq"; exit 1; }
-if [ "$SLOTS" -lt 1 ] || [ "$SLOTS" -gt 200 ]; then
-  # 200 slots ~= 209 IPs ending at 172.16.0.209 — comfortably inside the /24
-  # guest subnet (which the host code hard-codes). Beyond that widen the subnet
-  # first (internal/server GuestCIDR + provisioner GatewayCIDR).
-  echo "error: SLOTS_PER_HOST=$SLOTS out of range [1,200] (the /24 guest subnet is the wall)"
+
+# GUEST_SUBNET_BITS: the prefix length of the guest subnet (bridge + every guest
+# NIC). It is the hard ceiling on concurrently running sandboxes per host: a /24
+# holds ~253 usable IPs, /22 ~1021, /20 ~4093. Default 24 (unchanged from the
+# fleet's original single-/24). Widen it to run more than ~250 small sandboxes
+# at once. The host reads it as guest_subnet_bits and applies it to the gateway
+# CIDR, the cold-boot guest CIDR, AND the clone-path MMDS reidentify prefix.
+BITS="${GUEST_SUBNET_BITS:-24}"
+if [ "$BITS" -lt 8 ] || [ "$BITS" -gt 30 ]; then
+  echo "error: GUEST_SUBNET_BITS=$BITS out of range [8,30]"; exit 1
+fi
+GW_IP="$(jq -r '.gateway_ip'      "$REPO/configs/devbox-gcp.json")"
+GIP_MIN="$(jq -r '.pools.GuestIPMin' "$REPO/configs/devbox-gcp.json")"
+ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
+int2ip() { local i=$1; echo "$(( (i>>24)&255 )).$(( (i>>16)&255 )).$(( (i>>8)&255 )).$(( i&255 ))"; }
+MASK=$(( (0xFFFFFFFF << (32-BITS)) & 0xFFFFFFFF ))
+NET=$(( $(ip2int "$GW_IP") & MASK ))
+BCAST=$(( NET | (~MASK & 0xFFFFFFFF) ))
+GIP_MIN_INT=$(ip2int "$GIP_MIN")
+GIP_MAX_INT=$(( GIP_MIN_INT + SLOTS - 1 ))
+# Usable host IPs strictly between network and broadcast, above the pool start.
+USABLE=$(( BCAST - GIP_MIN_INT ))   # broadcast excluded, min inclusive
+if [ "$SLOTS" -lt 1 ] || [ "$SLOTS" -gt "$USABLE" ]; then
+  echo "error: SLOTS_PER_HOST=$SLOTS exceeds the /$BITS guest subnet's usable IPs from $GIP_MIN ($USABLE). Widen GUEST_SUBNET_BITS."
   exit 1
 fi
+GIP_MAX="$(int2ip "$GIP_MAX_INT")"
+
+# Ports are sized SEPARATELY from taps/IPs/memory: those three bound
+# concurrently RUNNING sandboxes (real compute capacity, tied to SLOTS), but a
+# hibernated sandbox holds only its port (taps/IPs release on hibernate) — so
+# the port pool is really the ceiling on TOTAL sandboxes (running + hibernated).
+# A fleet whose sandboxes run much smaller than the MEM_PER_SLOT_MIB assumption
+# can sustain far more than 4x SLOTS hibernated at once; PORTS_PER_HOST lets that
+# be sized independently. Defaults to 4x SLOTS so fleets that never set it are
+# unaffected.
+PORTS="${PORTS_PER_HOST:-$((4 * SLOTS))}"
+if [ "$PORTS" -lt "$SLOTS" ]; then
+  echo "error: PORTS_PER_HOST=$PORTS must be >= SLOTS_PER_HOST=$SLOTS (every running sandbox holds one port)"
+  exit 1
+fi
+
+# MEM_PER_SLOT_MIB: committed memory charged per running slot = the average
+# sandbox's guest mem_mib + ~156 MiB firecracker/VMM overhead. Default 1180
+# (1 GiB guest + overhead), matching the original template. LOWER it for a
+# small-sandbox fleet (e.g. 128 MiB guests -> ~300) so the same host RAM admits
+# far more running sandboxes; mem_budget_mib and the Nomad cgroup both scale
+# from it, keeping the admission ceiling honest to what the host can actually
+# hold. Must be set explicitly on Nomad hosts — serve's /proc/meminfo fallback
+# sees the machine total, not the cgroup limit.
+MEM_PER_SLOT="${MEM_PER_SLOT_MIB:-1180}"
 GEN_CONFIG="$(mktemp)"
-# mem_budget_mib = SLOTS x 1180 = TASK_MEMORY - 2000 (the Nomad cgroup minus
-# serve's own reserve): the sum-of-guest-memory admission ceiling. Must be set
-# explicitly on Nomad hosts — serve's /proc/meminfo fallback sees the machine
-# total, not the cgroup limit.
-jq --argjson n "$SLOTS" '
-  .pools.TapMax     = $n |
-  .pools.GuestIPMax = ("172.16.0." + (9 + $n | tostring)) |
-  .pools.PortMax    = (.pools.PortMin + 4 * $n - 1) |
-  .mem_budget_mib   = ($n * 1180)
+jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" \
+   --arg gipmax "$GIP_MAX" --argjson mps "$MEM_PER_SLOT" '
+  .guest_subnet_bits = $bits |
+  .pools.TapMax      = $n |
+  .pools.GuestIPMax  = $gipmax |
+  .pools.PortMax     = (.pools.PortMin + $p - 1) |
+  .mem_budget_mib    = ($n * $mps)
 ' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
 
-# Size the Nomad task cgroup to the host: ~1.18 GiB per slot (1 GiB guest +
-# firecracker overhead) + 2 GiB for serve itself; CPU shares near the machine's
-# core count (parsed from WORKER_MACHINE_TYPE, e.g. n2-standard-16 -> 16).
-TASK_MEMORY="$(( SLOTS * 1180 + 2000 ))"
+# Size the Nomad task cgroup to the host: MEM_PER_SLOT_MIB per slot + 2 GiB for
+# serve itself; CPU shares near the machine's core count (parsed from
+# WORKER_MACHINE_TYPE, e.g. n2-standard-16 -> 16).
+TASK_MEMORY="$(( SLOTS * MEM_PER_SLOT + 2000 ))"
 CORES="$(echo "${WORKER_MACHINE_TYPE:-n2-standard-16}" | grep -oE '[0-9]+$' || echo 16)"
 TASK_CPU="$(( (CORES - 1) * 1000 ))"
 
-echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS mem=${TASK_MEMORY}MiB cpu=${TASK_CPU})"
+echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
 scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_NAME}:/tmp/serve.nomad.hcl"
 scp -o BatchMode=yes -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_NAME}:/tmp/devbox-gcp.json"
 rm -f "$GEN_CONFIG"

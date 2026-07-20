@@ -77,7 +77,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	prov := &provisioner.Provisioner{
 		Network: provisioner.Network{
 			Bridge:      cfg.Bridge,
-			GatewayCIDR: cfg.GatewayIP + "/24",
+			GatewayCIDR: fmt.Sprintf("%s/%d", cfg.GatewayIP, cfg.GuestSubnetBits),
 			GuestPort:   cfg.GuestPort,
 		},
 		RootfsBase:  cfg.RootfsBase,
@@ -104,6 +104,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		APIToken:          cfg.APIToken,
 		Provisioner:       prov,
 		GatewayIP:         cfg.GatewayIP,
+		GuestSubnetBits:   cfg.GuestSubnetBits,
 		VMTemplate:        tmpl,
 		HotCreate:         !cfg.DisableHotCreate,
 		CreateConcurrency: cfg.CreateConcurrency,

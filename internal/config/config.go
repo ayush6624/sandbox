@@ -40,6 +40,13 @@ type Config struct {
 	GatewayIP   string `json:"gateway_ip"`  // bridge IP, used as guest default gateway
 	Nameservers string `json:"nameservers"` // comma-separated DNS for the guest
 	GuestPort   int    `json:"guest_port"`  // port the in-guest app listens on, forwarded to a host port
+	// GuestSubnetBits is the prefix length of the guest subnet shared by the
+	// bridge (gateway) and every guest NIC. It caps how many sandboxes can run
+	// concurrently on a host: a /24 holds ~253 usable IPs, a /22 ~1021, a /20
+	// ~4093. Widen it (and the guest-IP pool) to run more than ~250 small
+	// sandboxes at once. Must be the same on the gateway CIDR and the guest
+	// CIDR or guests can't route to the gateway. 0 = default 24.
+	GuestSubnetBits int `json:"guest_subnet_bits"`
 
 	// --- Behavior ---
 	// Hot create is on by default: the server maintains a golden snapshot of a
@@ -106,6 +113,9 @@ func (c *Config) Defaults() {
 	}
 	if c.GuestPort == 0 {
 		c.GuestPort = 3000
+	}
+	if c.GuestSubnetBits == 0 {
+		c.GuestSubnetBits = 24
 	}
 	if c.KernelArgs == "" {
 		c.KernelArgs = "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0"

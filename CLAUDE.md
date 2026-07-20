@@ -183,7 +183,14 @@ scripts/              Host setup shell scripts
   transport) with the host's token injected; `GET /sandboxes` scatter-gathers in parallel.
   Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The elastic fleet
   (Nomad autoscaler + GCE MIG) lives in `infra/gcp/` — `SLOTS_PER_HOST` in `config.env` is
-  the single source of truth; `deploy-job.sh` generates the pools from it (ports = 4× slots).
+  the source of truth for RUNNING capacity (taps/IPs/mem_budget_mib); `deploy-job.sh`
+  generates those pools from it. Three knobs decouple the pools that used to all scale off
+  `SLOTS_PER_HOST`: `PORTS_PER_HOST` (default 4× slots) sizes the port pool independently
+  since hibernated sandboxes hold only their port; `GUEST_SUBNET_BITS` (default 24) widens
+  the guest subnet past a single /24 so a host can run more than ~250 sandboxes at once;
+  `MEM_PER_SLOT_MIB` (default 1180) sets committed memory per slot so a small-sandbox fleet
+  can pack many more running sandboxes into the same host RAM — see the capacity-sizing
+  notes under Architecture notes.
 - **Creates are hot by default (golden snapshot).** On startup (`ensureGolden` in
   `internal/server/golden.go`) the server adopts or builds a **golden snapshot**: it
   cold-boots a throwaway pristine sandbox, snapshots it (marked `golden=1`, at most one via
@@ -333,9 +340,40 @@ scripts/              Host setup shell scripts
   partial unique indexes (`uniq_tap_running`, `uniq_ip_running`, `uniq_port_held` — the port
   one also binds `hibernated`) guaranteeing no two sandboxes share a tap/IP/port. Concurrent
   creates that race lose to UNIQUE constraint and surface as 500.
-- **Per-VM rootfs is a full `cp --sparse=always`.** Slow on ext4 (~2 GB-sparse copy in ~1 s,
-  but I/O scales linearly with N). On btrfs/XFS, switching to `--reflink=auto` would make it
-  instant. Don't share the rootfs between VMs — ext4 corrupts under concurrent mount.
+- **The port pool is sized independently of tap/IP/memory, because hibernation doesn't
+  release it.** Taps/IPs/`mem_budget_mib` bound concurrently *running* sandboxes (real
+  compute capacity); a hibernated sandbox holds only its port (taps/IPs free on hibernate),
+  so the port pool is really the ceiling on *total* sandboxes (running + hibernated) per
+  host. `deploy-job.sh` generates `PortMax` from `PORTS_PER_HOST` (defaults to 4×
+  `SLOTS_PER_HOST` if unset, matching the fleet's original fixed ratio) rather than tying it
+  to `SLOTS_PER_HOST` directly — raise it independently when sandboxes run much smaller than
+  `MEM_PER_SLOT_MIB` and you want more hibernated at once than the default ratio allows.
+- **The guest subnet width is configurable (`guest_subnet_bits`), and it — not a hard-coded
+  /24 — is the ceiling on concurrently RUNNING sandboxes per host.** Every running sandbox
+  needs a guest IP; a /24 holds ~253, /22 ~1021, /20 ~4093. The prefix is applied at three
+  sites that MUST agree or guests can't route to the gateway: the bridge/gateway CIDR
+  (`cmd/sandbox/serve.go`), the cold-boot guest CIDR (`server.go` handleCreate), and the
+  clone-path MMDS reidentify prefix (`CloneParams.Prefix` in `snapshot.go` fan-out +
+  `hibernate.go` wake — the in-guest thaw agent flushes eth0 and re-adds `ip/prefix`, so
+  hot-created clones adopt the configured width even if the golden was baked at a different
+  one). Widen it via `GUEST_SUBNET_BITS` in `config.env`; `deploy-job.sh` then spans the
+  guest-IP pool across octets (proper 32-bit IP arithmetic, no longer last-octet-only) and
+  refuses a `SLOTS_PER_HOST` that would overrun the subnet's usable range or hit its
+  broadcast address. Default 24 keeps every existing config byte-identical.
+- **Committed memory per slot is a knob (`MEM_PER_SLOT_MIB`, default 1180), decoupled from
+  the 1 GiB template assumption.** `mem_budget_mib` (admission ceiling) and the Nomad task
+  cgroup (`TASK_MEMORY`) both derive as `SLOTS_PER_HOST × MEM_PER_SLOT_MIB` (+2 GiB for
+  serve). A small-sandbox fleet (e.g. 128 MiB guests) lowers it to ~300 so the same host RAM
+  admits many more running sandboxes; the memory-admission check in `registry` still sums
+  each sandbox's *actual* effective `mem_mib` + overhead, so this only sizes the budget, not
+  the per-sandbox charge.
+- **Per-VM rootfs is a CoW clone where the filesystem allows it.** `provisioner.CloneFile`
+  (used by `PrepareRootfs` for cold boot, and by `CloneRootfs`/`CopyFileSparse` for
+  restore/fan-out/hibernate) tries `cp --reflink=always` first — instant, near-zero disk
+  on XFS/btrfs (the GCP data disk is formatted XFS specifically for this) — and falls back
+  to a full `cp --sparse=always` only when the filesystem can't reflink (e.g. ext4, where
+  it's ~2 GB-sparse copy in ~1 s and I/O scales linearly with N). Don't share the rootfs
+  between VMs — ext4 corrupts under concurrent mount.
 - **Build tags**: `//go:build linux` for SDK code, `//go:build !linux` for the stub. Keep the
   signatures identical in both files.
 - **`disableValidation` arg on `NewMachine`** lets you build the SDK config on non-Linux for
@@ -357,7 +395,6 @@ scripts/              Host setup shell scripts
 
 ## Not done yet
 
-- **No CoW rootfs.** Full `cp` on ext4 hosts. btrfs/XFS reflink is a one-line change.
 - **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
   rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
   `hibernate_after_sec`, `vcpus`, and `mem_mib`.

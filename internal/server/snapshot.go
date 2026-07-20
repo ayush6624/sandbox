@@ -538,7 +538,7 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 		GuestIP:         sb.GuestIP,
 		MacAddress:      randomMAC(),
 		GatewayIP:       s.cfg.GatewayIP,
-		Prefix:          24,
+		Prefix:          s.guestSubnetBits(),
 		Gen:             id,
 	})
 	if err != nil {

@@ -36,9 +36,13 @@ type Config struct {
 	ListenAddr  string // optional TCP listener (e.g. tailnet IP:port); requires APIToken
 	APIToken    string // bearer token enforced on the TCP listener only
 	Provisioner *provisioner.Provisioner
-	GatewayIP   string        // bridge IP; used as the guest's default gateway
-	VMTemplate  vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
-	HotCreate   bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
+	GatewayIP   string // bridge IP; used as the guest's default gateway
+	// GuestSubnetBits is the prefix length shared by the gateway and every
+	// guest NIC (cold-boot GuestCIDR and the clone-path MMDS reidentify
+	// prefix). Must match the gateway CIDR. <=0 falls back to 24.
+	GuestSubnetBits int
+	VMTemplate      vm.RunOptions // base options (firecracker bin, kernel, args, vcpus, mem, dns)
+	HotCreate       bool          // maintain a golden snapshot and serve POST /sandboxes by cloning it
 	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
 	// golden clones); excess creates queue. <=0 = default: min(2×NumCPU, 16).
 	CreateConcurrency int
@@ -457,7 +461,7 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	opts := s.cfg.VMTemplate
 	opts.RootfsPath = rootfsPath
 	opts.TapDevice = sb.TapDevice
-	opts.GuestCIDR = sb.GuestIP + "/24"
+	opts.GuestCIDR = fmt.Sprintf("%s/%d", sb.GuestIP, s.guestSubnetBits())
 	opts.GatewayIP = s.cfg.GatewayIP
 	opts.MacAddress = randomMAC()
 	opts.SocketPath = "" // auto-generate per VM
@@ -797,6 +801,16 @@ const minMemMIB = 128
 
 // fcMaxVcpus is Firecracker's hard vCPU ceiling per microVM.
 const fcMaxVcpus = 32
+
+// guestSubnetBits is the prefix length shared by the gateway CIDR and every
+// guest NIC. It gates the cold-boot GuestCIDR and the clone-path MMDS
+// reidentify prefix; defaults to 24 when unset (single-/24 subnet).
+func (s *Server) guestSubnetBits() int {
+	if s.cfg.GuestSubnetBits <= 0 {
+		return 24
+	}
+	return s.cfg.GuestSubnetBits
+}
 
 // fallbackMemCapMIB caps mem_mib when the host's total memory can't be read
 // (non-Linux builds, tests).
