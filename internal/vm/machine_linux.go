@@ -45,13 +45,18 @@ type Machine struct {
 // snapshot.
 func DiffCapable(m *Machine) bool { return m != nil && m.diffCapable }
 
-// rawMachine is a Firecracker process we manage directly (clone path), driving
-// its API over the unix socket instead of through the SDK.
+// rawMachine is a Firecracker process we manage directly (clone path, and the
+// UFFD restore path), driving its API over the unix socket instead of through
+// the SDK.
 type rawMachine struct {
 	cmd     *exec.Cmd
 	sock    string
 	doneCh  chan struct{} // closed when the process exits
 	waitErr error         // exit error, valid once doneCh is closed
+	// uffd is the page-fault handler backing a UFFD-restored VM's memory; nil
+	// for cold boots and clones. It must outlive the VM (the guest faults
+	// throughout its run) and be torn down when the VM exits.
+	uffd *uffdHandler
 }
 
 func (o *RunOptions) applyDefaults() error {
@@ -249,8 +254,13 @@ func StopForce(m *Machine) error {
 	}
 	if m.raw != nil {
 		if m.raw.cmd.Process != nil {
-			return m.raw.cmd.Process.Signal(syscall.SIGTERM)
+			err := m.raw.cmd.Process.Signal(syscall.SIGTERM)
+			// Close the UFFD handler's socket (if any); its mem mapping is
+			// released by the fault goroutine once Firecracker actually exits.
+			m.raw.uffd.close()
+			return err
 		}
+		m.raw.uffd.close()
 		return nil
 	}
 	if m.Machine == nil {
@@ -454,6 +464,71 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	}
 
 	return &Machine{raw: rm, diffCapable: true}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+}
+
+// RestoreUFFD restores a snapshot on its ORIGINAL identity (same-identity wake)
+// with the UFFD memory backend, so the guest resumes before its RAM is paged in
+// and faults its working set from memPath on demand (see uffd_linux.go). Like
+// StartClone it drives Firecracker over the raw socket, because SDK v1.0.0's
+// WithSnapshot exposes no mem_backend field. The caller must have recreated the
+// baked tap and staged the rootfs at its baked path first; there is no
+// network_overrides / drive relocation, so this is a plain load+resume.
+func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string) (mm *Machine, rt RuntimeConfig, err error) {
+	if err = opts.applyDefaults(); err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	vmID := uuid.NewString()
+	uffdSock := opts.SocketPath + ".uffd"
+
+	// The handler must be listening before the load call — Firecracker dials it
+	// during LoadSnapshot to hand over the uffd.
+	h, err := startUffdHandler(uffdSock, memPath)
+	if err != nil {
+		return nil, RuntimeConfig{}, fmt.Errorf("start uffd handler: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			h.close()
+		}
+	}()
+
+	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, "--api-sock", opts.SocketPath, "--id", vmID, "--no-seccomp")
+	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
+	if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); ferr == nil {
+		cmd.Stdout = f
+		cmd.Stderr = f
+	}
+	if err = cmd.Start(); err != nil {
+		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
+	}
+	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), uffd: h}
+	// When Firecracker exits, the uffd read fails and faultLoop returns on its
+	// own — but tear the handler down explicitly too, to unmap the mem file and
+	// remove the socket.
+	go func() { rm.waitErr = cmd.Wait(); h.close(); close(rm.doneCh) }()
+	defer func() {
+		if err != nil {
+			_ = cmd.Process.Kill()
+		}
+	}()
+
+	client := unixClient(opts.SocketPath)
+	if err = waitAPI(ctx, client); err != nil {
+		return nil, RuntimeConfig{}, fmt.Errorf("firecracker API never came up: %w", err)
+	}
+
+	// Load with the UFFD backend and resume in one call. resume_vm=true is safe
+	// here (unlike the clone path) because there's no drive/identity fixup to do
+	// between load and resume. Firecracker connects to uffdSock during this call.
+	load := map[string]any{
+		"snapshot_path": statePath,
+		"mem_backend":   map[string]any{"backend_type": "Uffd", "backend_path": uffdSock},
+		"resume_vm":     true,
+	}
+	if err = fcAPI(ctx, client, "PUT", "/snapshot/load", load); err != nil {
+		return nil, RuntimeConfig{}, fmt.Errorf("load snapshot (uffd): %w", err)
+	}
+	return &Machine{raw: rm, diffCapable: false}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
 }
 
 // PushEpoch writes the host's current wall clock into a VM's MMDS store so

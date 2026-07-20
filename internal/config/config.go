@@ -64,6 +64,14 @@ type Config struct {
 	// boot-storm the host into agent timeouts. 0 = server default
 	// (min(2×NumCPU, 16)).
 	CreateConcurrency int `json:"create_concurrency"`
+	// UFFDRestore makes same-identity hibernation wakes restore the guest with
+	// Firecracker's userfaultfd memory backend: the guest resumes before its
+	// RAM is paged in and faults its working set from the mem file on demand,
+	// cutting wake latency (and wake I/O) roughly to the working set instead of
+	// the whole guest. Off = the eager File backend (whole-RAM fault-in before
+	// resume). Only the same-identity restore path is UFFD-backed; the
+	// clone-path wake still uses File. See docs/scale-to-zero.md.
+	UFFDRestore bool `json:"uffd_restore"`
 	// MemBudgetMIB caps the SUM of committed guest memory (each running
 	// sandbox's effective mem_mib + per-VM firecracker overhead) so mem_mib
 	// overrides can't oversubscribe the host past its cgroup/RAM — admission

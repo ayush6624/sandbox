@@ -54,6 +54,10 @@ type Config struct {
 	// kill), releasing their slot; any agent-bound request wakes them.
 	// 0 disables idle hibernation. See hibernate.go.
 	HibernateAfter time.Duration
+	// UFFDRestore restores same-identity hibernation wakes with the userfaultfd
+	// memory backend (lazy page-in) instead of the eager File backend. See
+	// config.UFFDRestore and uffd_linux.go.
+	UFFDRestore bool
 	// SnapshotBucket enables GCS snapshot durability: user snapshots upload
 	// in the background and restore/fanout pull missing snapshots down from
 	// the bucket, so any host can serve them. Empty = host-local only.

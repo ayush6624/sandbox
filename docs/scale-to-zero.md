@@ -139,16 +139,29 @@ baseline the later phases must beat. **Do this first.**
   first-hits queues instead of storming disk. `mem_budget` already bounds committed
   RAM; this bounds the restore *work*.
 
-### Phase 3 — UFFD lazy paging (the big win: → sub-200 ms)
+### Phase 3 — UFFD lazy paging (the big win: → sub-200 ms) — **implemented, behind a flag**
 - Load snapshots with `mem_backend: {backend_type: "Uffd", backend_path: <sock>}`
   and a userspace page-fault handler that serves the mem file on demand. Resume
   returns before pages are in; the guest faults its small working set lazily.
-- **SDK v1.0.0 can't express this.** Reuse the existing **raw-socket path**
+- **SDK v1.0.0 can't express this.** We reuse the existing **raw-socket path**
   (`m.raw` / `fcAPI` in `machine_linux.go`, already used for clone
   `PUT /snapshot/create` and pause/resume) to issue `PUT /snapshot/load` with the
-  UFFD backend, bypassing the SDK's `LoadSnapshot`. (Alternative: bump the SDK; the
-  raw path is lower-risk and consistent with how clones already work.)
+  UFFD backend, bypassing the SDK's `LoadSnapshot`.
 - Bonus: slashes wake *I/O* for large guests — only touched pages are read.
+
+**Landed:** `vm.RestoreUFFD` + the handler in `internal/vm/uffd_linux.go`
+(receives the uffd via SCM_RIGHTS, mmaps the mem file, services `UFFDIO_COPY` per
+fault). Wired into `wakeRestore` for the **same-identity** wake path, gated by
+`"uffd_restore": true` in the config (default off = the eager File backend). The
+fault-offset math is unit-tested (`uffd_test.go`); the handler's page source is a
+plain local `mmap`, structured so a remote/GCS source (Model B, below) slots into
+the same fault path later.
+
+**Not yet:** the clone-path wake (`wakeClone`) still uses the File backend; UFFD
+there is a follow-up. And this needs **fleet verification** — it cannot be
+runtime-tested off a real Firecracker+KVM host (macOS builds the vm stub). First
+run on the fleet: enable the flag, wake a hibernated sandbox, confirm the
+`firecracker-<id>.log` shows a clean resume and measure wake latency vs. File.
 
 ### Phase 4 — Provision-dormant + density knobs
 - **"Create hibernated"** fast path: create → snapshot → freeze without ever

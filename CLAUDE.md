@@ -237,6 +237,20 @@ scripts/              Host setup shell scripts
   clock_settime in the guest) fired by `syncGuestClock` right after each path's readiness
   gate, so a sandbox is never handed out with a stale clock. Old baked agents 404 the
   /clock call — logged, never fatal. Re-run `install-agent` to bake the new sandboxd.
+- **UFFD lazy page-in on wake (opt-in).** With `"uffd_restore": true`, the same-identity
+  hibernation wake (`wakeRestore`) restores via Firecracker's userfaultfd memory backend
+  instead of the eager File backend: `vm.RestoreUFFD` issues `PUT /snapshot/load` over the
+  raw socket with `mem_backend={backend_type:"Uffd", backend_path:<sock>}` (SDK v1.0.0 has
+  no `mem_backend` field, so this reuses the clone path's raw `fcAPI`, not `WithSnapshot`)
+  and resumes before RAM is paged in; the guest faults its working set from the mem file
+  on demand. The handler (`internal/vm/uffd_linux.go`) receives the uffd over SCM_RIGHTS,
+  mmaps the (already-materialized, full) mem file read-only, and services each fault with
+  `UFFDIO_COPY`. Wake latency/I-O then track the working set, not guest size. The handler
+  is host-local (one page-fault goroutine + OS thread per awake UFFD VM); its mem mapping
+  is unmapped by that goroutine only after Firecracker exits (never by `close()`, which
+  just drops the socket) so a page copy can't race the unmap. **Only same-identity wake is
+  UFFD-backed; the clone-path wake still uses File.** Default off; not yet fleet-verified
+  (can't run off a real FC+KVM host). See docs/scale-to-zero.md.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —

@@ -397,13 +397,28 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 	opts := s.cfg.VMTemplate
 	opts.RootfsPath = sb.RootfsPath
 	opts.SocketPath = ""
-	m, rt, err := vm.NewMachineFromSnapshot(s.vmCtx, opts, memPath, statePath, false)
-	if err != nil {
-		return fmt.Errorf("new machine from snapshot: %w", err)
-	}
-	if err := vm.Start(s.vmCtx, m); err != nil {
-		_ = vm.StopForce(m)
-		return fmt.Errorf("load snapshot + resume: %w", err)
+	var (
+		m   *vm.Machine
+		rt  vm.RuntimeConfig
+		err error
+	)
+	if s.cfg.UFFDRestore {
+		// UFFD backend: LoadSnapshot + resume happen inside RestoreUFFD, and the
+		// guest faults its RAM in lazily from memPath instead of paying a full
+		// eager fault-in before resume (uffd_linux.go).
+		m, rt, err = vm.RestoreUFFD(s.vmCtx, opts, memPath, statePath)
+		if err != nil {
+			return fmt.Errorf("restore (uffd): %w", err)
+		}
+	} else {
+		m, rt, err = vm.NewMachineFromSnapshot(s.vmCtx, opts, memPath, statePath, false)
+		if err != nil {
+			return fmt.Errorf("new machine from snapshot: %w", err)
+		}
+		if serr := vm.Start(s.vmCtx, m); serr != nil {
+			_ = vm.StopForce(m)
+			return fmt.Errorf("load snapshot + resume: %w", serr)
+		}
 	}
 	pid, err := vm.PID(m)
 	if err != nil {
