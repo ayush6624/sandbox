@@ -176,7 +176,9 @@ round-trip per 4 KiB fault, ~30–50 ms of overhead across the resume working se
 UFFD only wins when eager load is genuinely expensive: **large guests, cold/
 uncached mem files, or remote (GCS) memory** — i.e. Model B and big-VM cases, not
 today's small warm guests. The code stays (correct, tested, panic-safe) behind
-the flag for exactly those cases.
+the flag for exactly those cases. Where UFFD actually pays off — remote/chunked
+memory, overcommit, migration — and the best-practices-grounded plan for it is in
+**`docs/uffd-roadmap.md`**.
 
 Two real bugs the fleet run caught (neither reproducible off real Firecracker):
 a page-size field (`page_size_kib`) that FC v1.15 populates in **bytes** (4096),
