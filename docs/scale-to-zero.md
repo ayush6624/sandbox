@@ -158,10 +158,33 @@ plain local `mmap`, structured so a remote/GCS source (Model B, below) slots int
 the same fault path later.
 
 **Not yet:** the clone-path wake (`wakeClone`) still uses the File backend; UFFD
-there is a follow-up. And this needs **fleet verification** — it cannot be
-runtime-tested off a real Firecracker+KVM host (macOS builds the vm stub). First
-run on the fleet: enable the flag, wake a hibernated sandbox, confirm the
-`firecracker-<id>.log` shows a clean resume and measure wake latency vs. File.
+there is a follow-up.
+
+**Fleet-verified 2026-07-20 — and the result overturned the premise.** Measured
+on a worker (1 GiB guest, local XFS, `same_identity` wake), internal wake time:
+
+| wake | UFFD | File backend |
+|---|---|---|
+| first (cold page cache) | 517 ms | **197 ms** |
+| warm | 109–132 ms | **81–83 ms** |
+
+**File is faster here, so the fleet default is `uffd_restore: false`.** Two
+things the design doc got wrong for this workload: (1) File-backend wake is
+already ~80 ms, not the assumed ~1 s — the mem file is small and page-cache-warm,
+so the "eager" load is just mapping cached pages; (2) UFFD adds a userspace
+round-trip per 4 KiB fault, ~30–50 ms of overhead across the resume working set.
+UFFD only wins when eager load is genuinely expensive: **large guests, cold/
+uncached mem files, or remote (GCS) memory** — i.e. Model B and big-VM cases, not
+today's small warm guests. The code stays (correct, tested, panic-safe) behind
+the flag for exactly those cases.
+
+Two real bugs the fleet run caught (neither reproducible off real Firecracker):
+a page-size field (`page_size_kib`) that FC v1.15 populates in **bytes** (4096),
+not KiB — the ×1024 made 4 MiB "pages" and a wild offset; and that offset
+underflowing/overflowing past a naive bounds check into a slice-index **panic
+that crashed the whole `serve` process**. Fixed: match the region by the aligned
+address (no underflow), overflow-safe bounds, and a `recover()` so a fault
+handler bug can never take down serve again.
 
 ### Phase 4 — Provision-dormant + density knobs
 - **"Create hibernated"** fast path: create → snapshot → freeze without ever

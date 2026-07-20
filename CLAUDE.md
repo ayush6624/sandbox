@@ -249,8 +249,15 @@ scripts/              Host setup shell scripts
   is host-local (one page-fault goroutine + OS thread per awake UFFD VM); its mem mapping
   is unmapped by that goroutine only after Firecracker exits (never by `close()`, which
   just drops the socket) so a page copy can't race the unmap. **Only same-identity wake is
-  UFFD-backed; the clone-path wake still uses File.** Default off; not yet fleet-verified
-  (can't run off a real FC+KVM host). See docs/scale-to-zero.md.
+  UFFD-backed; the clone-path wake still uses File.** **Default off, and fleet measurement
+  (2026-07-20) says keep it off for the current small-guest workload**: File-backend wake is
+  already ~80 ms warm (mem file is small + page-cache-warm, so the "eager" load just maps
+  cached pages), while UFFD's per-4 KiB-fault userspace round-trip adds ~30–50 ms. UFFD only
+  wins when eager load is expensive — large guests, cold/uncached mem files, or remote/GCS
+  memory (scale-to-zero Model B). NB `page_size_kib` in FC v1.15's UFFD message is actually
+  BYTES (4096), not KiB — `pageSizeBytes()` normalizes it; getting this wrong made 4 MiB
+  "pages" and an offset that panicked. The fault loop has a `recover()` so a handler bug
+  degrades to a failed wake, never a serve crash. See docs/scale-to-zero.md.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
