@@ -126,12 +126,12 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 	}
 	uffd := fds[0]
 	defer unix.Close(uffd)
-	// Firecracker may hand us a non-blocking uffd; force blocking so our
-	// dedicated read loop parks on it instead of spinning on EAGAIN. One OS
-	// thread per awake UFFD-restored VM — fine at the "tens–hundreds awake"
-	// scale this targets.
-	if err := unix.SetNonblock(uffd, false); err != nil {
-		fmt.Fprintf(os.Stderr, "uffd: set blocking: %v\n", err)
+	// Non-blocking + poll(): a blocking read does NOT reliably wake when
+	// Firecracker exits, so serve() would hang forever and its defers (working
+	// set persist, mem unmap) would never run. poll() reports POLLHUP on the
+	// uffd when FC's mm goes away, giving faultLoop a deterministic exit.
+	if err := unix.SetNonblock(uffd, true); err != nil {
+		fmt.Fprintf(os.Stderr, "uffd: set nonblock: %v\n", err)
 	}
 
 	var regions []guestRegion
@@ -237,13 +237,29 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 	// so a wrong assumption is diagnosable from the logs, not just a crash.
 	fmt.Fprintf(os.Stderr, "uffd: serving %d region(s): %+v\n", len(regions), regions)
 	buf := make([]byte, uffdMsgSize*16) // batch several events per read
+	pfd := []unix.PollFd{{Fd: int32(uffd), Events: unix.POLLIN}}
 	for {
-		n, err := unix.Read(uffd, buf)
-		if err != nil {
+		pfd[0].Revents = 0
+		if _, err := unix.Poll(pfd, -1); err != nil {
 			if err == unix.EINTR {
 				continue
 			}
-			return // Firecracker gone (or fd closed) — stop serving
+			return
+		}
+		// POLLHUP/POLLERR = Firecracker's mm is gone (VM exited). Stop, letting
+		// serve()'s defers persist the working set and unmap.
+		if pfd[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			return
+		}
+		if pfd[0].Revents&unix.POLLIN == 0 {
+			continue
+		}
+		n, err := unix.Read(uffd, buf)
+		if err != nil {
+			if err == unix.EAGAIN || err == unix.EINTR {
+				continue
+			}
+			return
 		}
 		if n <= 0 {
 			return
