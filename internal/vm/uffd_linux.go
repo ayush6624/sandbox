@@ -205,6 +205,11 @@ func (h *uffdHandler) prewarm(uffd int, regions []guestRegion) {
 // prewarm. Atomic (tmp + rename) so a crash can't leave a torn file. Skipped
 // when nothing was recorded (e.g. a wake that faulted entirely from prewarm).
 func (h *uffdHandler) saveWorkingSet() {
+	cnt := 0
+	if h.recorded != nil {
+		cnt = h.recorded.count()
+	}
+	fmt.Fprintf(os.Stderr, "uffd: saveWorkingSet path=%q pages=%d\n", h.wsPath, cnt) // DIAG
 	if h.wsPath == "" || h.recorded == nil || h.recorded.count() == 0 {
 		return
 	}
