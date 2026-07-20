@@ -15,7 +15,7 @@
   "vcpus":           2,
   "mem_mib":         1024,
   "hibernate_after_sec": 300,
-  "uffd_restore": false,
+  "uffd_restore": true,
   "pools": {
     "TapPrefix":  "fc",
     "TapMax":     48,
