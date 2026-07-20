@@ -87,6 +87,47 @@ func TestResolvePageDefaultPageSize(t *testing.T) {
 	}
 }
 
+// TestResolvePageNoUnderflow is the regression for the crash: a fault whose
+// page-aligned address falls below the region base (e.g. a base not aligned to
+// the page size) must NOT match — the old code matched on the raw address and
+// then underflowed aligned-base into a ~2^64 offset that panicked the indexer.
+func TestResolvePageNoUnderflow(t *testing.T) {
+	// Region base is 0x800 into a page; a fault at base aligns down to 0x...000,
+	// which is below base.
+	regions := []guestRegion{{BaseHostVirtAddr: 0x1000_0800, Size: 0x10000, Offset: 0, PageSizeKiB: 4}}
+	if _, srcOff, _, ok := resolvePage(regions, 0x1000_0800); ok {
+		t.Fatalf("expected no match (aligned below base), got srcOff=%#x", srcOff)
+	}
+}
+
+// TestResolvePageHugePage covers 2 MiB pages (page_size_kib=2048), the layout
+// whose -2 MiB underflow surfaced the bug on the fleet.
+func TestResolvePageHugePage(t *testing.T) {
+	const twoMiB = 2 * 1024 * 1024
+	regions := []guestRegion{{BaseHostVirtAddr: 0x4000_0000, Size: 0x4000_0000, Offset: 0, PageSizeKiB: 2048}}
+	aligned, srcOff, page, ok := resolvePage(regions, 0x4020_1234)
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	if page != twoMiB {
+		t.Fatalf("pageSize = %d, want %d", page, twoMiB)
+	}
+	if aligned != 0x4020_0000 || srcOff != 0x20_0000 {
+		t.Fatalf("aligned=%#x srcOff=%#x, want 0x40200000 / 0x200000", aligned, srcOff)
+	}
+}
+
+// TestResolvePagePageStraddlesEnd rejects a page that would run past the region
+// end (keeps a copy from reading beyond the mapped region).
+func TestResolvePagePageStraddlesEnd(t *testing.T) {
+	// size is one byte into the last page, so the aligned last page + pageSize
+	// exceeds base+size.
+	regions := []guestRegion{{BaseHostVirtAddr: 0x2000_0000, Size: 0x1001, Offset: 0, PageSizeKiB: 4}}
+	if _, _, _, ok := resolvePage(regions, 0x2000_1000); ok {
+		t.Fatal("expected no match: page straddles region end")
+	}
+}
+
 // TestGuestRegionJSON pins the wire field names Firecracker sends.
 func TestGuestRegionJSON(t *testing.T) {
 	const body = `[{"base_host_virt_addr":123456,"size":65536,"offset":4096,"page_size_kib":4}]`

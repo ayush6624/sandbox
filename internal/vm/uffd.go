@@ -40,18 +40,24 @@ type guestRegion struct {
 
 // resolvePage maps a faulting host virtual address to the page-aligned
 // destination address, the source offset in the mem file, and the page size,
-// by locating the region that contains it. ok=false means no region does
-// (which shouldn't happen for a fault the kernel delivered).
+// by locating the region whose PAGE contains it. Matching on the aligned
+// address (not the raw fault address) mirrors Firecracker's reference handler
+// and guarantees aligned >= BaseHostVirtAddr, so aligned-base can't underflow
+// even if a region base isn't aligned to the page size. It also requires the
+// whole page to sit inside the region. ok=false means no region's page
+// contains the fault — the caller logs and skips rather than indexing blindly.
 func resolvePage(regions []guestRegion, addr uint64) (aligned, srcOff, pageSize uint64, ok bool) {
 	for _, r := range regions {
-		if addr < r.BaseHostVirtAddr || addr >= r.BaseHostVirtAddr+r.Size {
-			continue
-		}
 		pageSize = r.PageSizeKiB * 1024
 		if pageSize == 0 {
 			pageSize = 4096
 		}
 		aligned = addr &^ (pageSize - 1)
+		// The page must lie fully within [base, base+size). The first clause
+		// (aligned >= base) is what prevents the aligned-base underflow.
+		if aligned < r.BaseHostVirtAddr || aligned+pageSize > r.BaseHostVirtAddr+r.Size {
+			continue
+		}
 		srcOff = r.Offset + (aligned - r.BaseHostVirtAddr)
 		return aligned, srcOff, pageSize, true
 	}

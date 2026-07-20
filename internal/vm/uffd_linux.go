@@ -137,7 +137,20 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 // faultLoop reads pagefault events off the uffd and copies each faulting page
 // in from the mem file. It returns when the uffd is no longer readable —
 // normally because Firecracker exited (freeze/destroy tore the VM down).
+//
+// A recover() guards the whole loop: a page-fault handler is on the critical
+// path of a live guest, but it runs inside the shared serve process, so a bug
+// here must degrade to "this one wake fails" — never crash serve and take every
+// sandbox on the host down with it.
 func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "uffd: fault loop panic (wake will fail, serve survives): %v\n", r)
+		}
+	}()
+	// One-time dump of the real region layout — base/size/offset/page size —
+	// so a wrong assumption is diagnosable from the logs, not just a crash.
+	fmt.Fprintf(os.Stderr, "uffd: serving %d region(s): %+v\n", len(regions), regions)
 	buf := make([]byte, uffdMsgSize*16) // batch several events per read
 	for {
 		n, err := unix.Read(uffd, buf)
@@ -169,8 +182,13 @@ func (h *uffdHandler) copyPage(uffd int, regions []guestRegion, addr uint64) {
 		fmt.Fprintf(os.Stderr, "uffd: fault @%#x maps to no region\n", addr)
 		return
 	}
-	if srcOff+pageSize > uint64(len(h.mem)) {
-		return // out of range — shouldn't happen with a full mem file
+	// Overflow-safe bounds check: srcOff+pageSize can wrap past 2^64 and
+	// silently pass a naive `> len` comparison (this is what let the original
+	// underflow panic reach the slice index). Compare without adding.
+	memLen := uint64(len(h.mem))
+	if srcOff > memLen || pageSize > memLen-srcOff {
+		fmt.Fprintf(os.Stderr, "uffd: page @%#x src %#x+%d out of mem (len %d) — skipping\n", aligned, srcOff, pageSize, memLen)
+		return
 	}
 	arg := uffdioCopyArg{
 		Dst: aligned,
