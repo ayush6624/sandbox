@@ -473,7 +473,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 // WithSnapshot exposes no mem_backend field. The caller must have recreated the
 // baked tap and staged the rootfs at its baked path first; there is no
 // network_overrides / drive relocation, so this is a plain load+resume.
-func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string) (mm *Machine, rt RuntimeConfig, err error) {
+func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath, wsPath string) (mm *Machine, rt RuntimeConfig, err error) {
 	if err = opts.applyDefaults(); err != nil {
 		return nil, RuntimeConfig{}, err
 	}
@@ -481,8 +481,9 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	uffdSock := opts.SocketPath + ".uffd"
 
 	// The handler must be listening before the load call — Firecracker dials it
-	// during LoadSnapshot to hand over the uffd.
-	h, err := startUffdHandler(uffdSock, memPath)
+	// during LoadSnapshot to hand over the uffd. wsPath carries the working set
+	// to prewarm from / record to across wakes ("" disables it).
+	h, err := startUffdHandler(uffdSock, memPath, wsPath)
 	if err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("start uffd handler: %w", err)
 	}

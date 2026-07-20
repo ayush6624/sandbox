@@ -39,9 +39,12 @@ import (
 // file, for the lifetime of that VM.
 type uffdHandler struct {
 	sockPath string
+	wsPath   string // working-set bitset file (read to prewarm, written on exit); "" disables
 	ln       *net.UnixListener
 	memFile  *os.File
 	mem      []byte // read-only mmap of the whole mem file
+
+	recorded *bitset // pages faulted this run, persisted to wsPath on exit
 
 	closeOnce sync.Once // guards listener close + socket removal
 	memOnce   sync.Once // guards mem unmap + file close (owned by the fault goroutine)
@@ -49,8 +52,9 @@ type uffdHandler struct {
 
 // startUffdHandler binds the handler socket and mmaps the mem file, then serves
 // Firecracker's connection in the background. It must be listening before the
-// snapshot-load call (Firecracker dials it during load).
-func startUffdHandler(sockPath, memPath string) (*uffdHandler, error) {
+// snapshot-load call (Firecracker dials it during load). wsPath, when set, is
+// the working-set file to prewarm from on start and record to on exit.
+func startUffdHandler(sockPath, memPath, wsPath string) (*uffdHandler, error) {
 	_ = os.Remove(sockPath)
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
 	if err != nil {
@@ -76,10 +80,14 @@ func startUffdHandler(sockPath, memPath string) (*uffdHandler, error) {
 		_ = os.Remove(sockPath)
 		return nil, fmt.Errorf("mmap mem file: %w", err)
 	}
-	h := &uffdHandler{sockPath: sockPath, ln: ln, memFile: f, mem: mem}
+	h := &uffdHandler{sockPath: sockPath, wsPath: wsPath, ln: ln, memFile: f, mem: mem}
 	go h.accept()
 	return h, nil
 }
+
+// numPages is the mem file's size in wsPageUnit pages — the working-set bitset
+// capacity.
+func (h *uffdHandler) numPages() uint64 { return uint64(len(h.mem)) / wsPageUnit }
 
 // accept waits for Firecracker's single connection and serves it. The fault
 // goroutine owns the mem mapping's lifetime: it unmaps only after serve()
@@ -131,7 +139,84 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 		fmt.Fprintf(os.Stderr, "uffd: parse mappings %q: %v\n", string(body[:n]), err)
 		return
 	}
+
+	h.recorded = newBitset(h.numPages())
+	// Prewarm: bulk-load last wake's working set before the guest fault-storms
+	// it in one page at a time. The guest is already running (load resumed it),
+	// so this races its faults — harmless, both use EEXIST-tolerant UFFDIO_COPY.
+	// Persist this run's freshly-recorded set on the way out.
+	h.prewarm(uffd, regions)
+	defer h.saveWorkingSet()
 	h.faultLoop(uffd, regions)
+}
+
+// prewarm bulk-copies the persisted working set (if any) into the guest before
+// serving on-demand faults, turning a cold fault-storm into a few sequential
+// UFFDIO_COPY runs. Best-effort: a missing/short/oversized set just falls back
+// to pure on-demand faulting.
+func (h *uffdHandler) prewarm(uffd int, regions []guestRegion) {
+	if h.wsPath == "" {
+		return
+	}
+	data, err := os.ReadFile(h.wsPath)
+	if err != nil {
+		return // no prior working set (first wake) — nothing to prewarm
+	}
+	ws := bitsetFromBytes(data, h.numPages())
+	n := ws.count()
+	if n == 0 {
+		return
+	}
+	// If the guest touched most of RAM last time, prewarm ≈ eager load with no
+	// benefit; skip and let fault-ahead handle it (never worse than File).
+	if uint64(n) > h.numPages()/2 {
+		fmt.Fprintf(os.Stderr, "uffd: skip prewarm, working set %d/%d pages too large\n", n, h.numPages())
+		return
+	}
+	memLen := uint64(len(h.mem))
+	var copied uint64
+	for _, run := range ws.runs() {
+		off := run.start * wsPageUnit
+		length := run.count * wsPageUnit
+		for length > 0 { // chunk so one huge run isn't one monster syscall
+			chunk := length
+			if chunk > prewarmMaxRun {
+				chunk = prewarmMaxRun
+			}
+			if off >= memLen {
+				break
+			}
+			if chunk > memLen-off {
+				chunk = memLen - off
+			}
+			dst, ok := hostAddrForOffset(regions, off)
+			if ok {
+				h.copyRange(uffd, dst, off, chunk)
+				copied += chunk
+			}
+			off += chunk
+			length -= chunk
+		}
+	}
+	fmt.Fprintf(os.Stderr, "uffd: prewarmed %d KiB (%d pages) from working set\n", copied/1024, n)
+}
+
+// saveWorkingSet persists the pages faulted this run, for the next wake to
+// prewarm. Atomic (tmp + rename) so a crash can't leave a torn file. Skipped
+// when nothing was recorded (e.g. a wake that faulted entirely from prewarm).
+func (h *uffdHandler) saveWorkingSet() {
+	if h.wsPath == "" || h.recorded == nil || h.recorded.count() == 0 {
+		return
+	}
+	tmp := h.wsPath + ".tmp"
+	if err := os.WriteFile(tmp, h.recorded.marshal(), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "uffd: write working set: %v\n", err)
+		return
+	}
+	if err := os.Rename(tmp, h.wsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "uffd: commit working set: %v\n", err)
+		_ = os.Remove(tmp)
+	}
 }
 
 // faultLoop reads pagefault events off the uffd and copies each faulting page
@@ -175,26 +260,41 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 }
 
 // copyWindow installs the faulting page plus a fault-ahead run into the guest
-// in one UFFDIO_COPY, read from the mem file at the region-mapped offset. One
-// syscall for many pages is the whole point — it amortizes the userspace
-// round-trip that made single-page UFFD lose to the eager File backend.
+// in one UFFDIO_COPY, read from the mem file at the region-mapped offset, and
+// records the faulted page in the working set. One syscall for many pages is
+// the whole point — it amortizes the userspace round-trip that made single-page
+// UFFD lose to the eager File backend.
 func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
 	dst, srcOff, length, ok := faultWindow(regions, addr, prefetchPages)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "uffd: fault @%#x maps to no region\n", addr)
 		return
 	}
+	// Record the faulting page itself (the run head), not the whole prefetched
+	// window — the working set is what the guest actually touched.
+	if h.recorded != nil {
+		h.recorded.set(srcOff / wsPageUnit)
+	}
+	h.copyRange(uffd, dst, srcOff, length)
+}
+
+// copyRange copies [srcOff, srcOff+length) of the mem file to guest host addr
+// dst in one UFFDIO_COPY, bounds-clamped. Shared by fault-ahead and prewarm.
+func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
 	// Overflow-safe bounds check: srcOff+length can wrap past 2^64 and silently
 	// pass a naive `> len` comparison (this is what let the original underflow
 	// panic reach the slice index). Compare without adding, and clamp the run to
 	// the mem file — a short copy just means the tail pages refault later.
 	memLen := uint64(len(h.mem))
 	if srcOff >= memLen {
-		fmt.Fprintf(os.Stderr, "uffd: page @%#x src %#x past mem (len %d) — skipping\n", dst, srcOff, memLen)
+		fmt.Fprintf(os.Stderr, "uffd: src %#x past mem (len %d) — skipping\n", srcOff, memLen)
 		return
 	}
 	if length > memLen-srcOff {
 		length = memLen - srcOff
+	}
+	if length == 0 {
+		return
 	}
 	arg := uffdioCopyArg{
 		Dst: dst,
@@ -202,9 +302,9 @@ func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
 		Len: length,
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(uffd), uintptr(uffdioCopy), uintptr(unsafe.Pointer(&arg)))
-	// EEXIST: part of the run was already populated (a prior fault-ahead or a
-	// racing fault) — benign; the faulting page itself is at the run's head and
-	// gets copied up to the first present page, so the guest still progresses.
+	// EEXIST: part of the run was already populated (prewarm, a prior fault-ahead,
+	// or a racing fault) — benign; a faulting page is at the run's head and gets
+	// copied up to the first present page, so the guest still progresses.
 	// EAGAIN: the mapping changed under us (removed) — the guest will refault.
 	if errno != 0 && errno != unix.EEXIST && errno != unix.EAGAIN {
 		fmt.Fprintf(os.Stderr, "uffd: copy %d bytes @%#x: %v\n", length, dst, errno)

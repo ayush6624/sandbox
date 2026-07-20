@@ -1,5 +1,10 @@
 package vm
 
+import (
+	"encoding/binary"
+	"math/bits"
+)
+
 // Platform-neutral pieces of the UFFD memory backend (see uffd_linux.go for the
 // syscall/mmap/socket handler). Kept untagged so the fault-offset arithmetic —
 // the correctness core — is unit-testable on any host.
@@ -93,6 +98,105 @@ func resolvePage(regions []guestRegion, addr uint64) (aligned, srcOff, pageSize 
 		return 0, 0, 0, false
 	}
 	return aligned, r.Offset + (aligned - r.BaseHostVirtAddr), pageSize, true
+}
+
+// --- working-set recording + prewarm ---
+//
+// The set of mem-file pages a guest faults during a wake is recorded (page
+// indices, which are stable across restores — unlike host addresses, whose
+// mmap base changes each time), persisted beside the sandbox, and bulk-loaded
+// on the next wake before the guest fault-storms them in one page at a time.
+// This is what the cold first-wake and the Phase B remote source both need
+// (docs/uffd-roadmap.md). The unit is a fixed 4 KiB page index.
+
+// wsPageUnit is the page granularity of the working-set bitset. Fixed at 4 KiB
+// (the observed guest page size) so a persisted set stays comparable across
+// restores regardless of how a region reports its page size.
+const wsPageUnit = 4096
+
+// prewarmMaxRun caps a single prewarm UFFDIO_COPY at 4 MiB so one giant
+// contiguous working set doesn't become one monster syscall that stalls the
+// guest with no interleaving.
+const prewarmMaxRun = 1024 * wsPageUnit
+
+// bitset is a compact set of mem-file page indices — the recorded working set.
+type bitset struct {
+	words []uint64
+	n     uint64 // capacity in bits (number of pages)
+}
+
+func newBitset(numPages uint64) *bitset {
+	return &bitset{words: make([]uint64, (numPages+63)/64), n: numPages}
+}
+
+func (b *bitset) set(i uint64) {
+	if i < b.n {
+		b.words[i/64] |= 1 << (i % 64)
+	}
+}
+
+func (b *bitset) get(i uint64) bool {
+	return i < b.n && b.words[i/64]&(1<<(i%64)) != 0
+}
+
+func (b *bitset) count() int {
+	c := 0
+	for _, w := range b.words {
+		c += bits.OnesCount64(w)
+	}
+	return c
+}
+
+// pageRun is a contiguous span of set page indices.
+type pageRun struct{ start, count uint64 }
+
+// runs returns the maximal contiguous runs of set bits — the coalesced spans
+// prewarm copies, one UFFDIO_COPY each (further capped by prewarmMaxRun).
+func (b *bitset) runs() []pageRun {
+	var out []pageRun
+	for i := uint64(0); i < b.n; {
+		if !b.get(i) {
+			i++
+			continue
+		}
+		start := i
+		for i < b.n && b.get(i) {
+			i++
+		}
+		out = append(out, pageRun{start: start, count: i - start})
+	}
+	return out
+}
+
+// marshal serializes the set as little-endian 64-bit words.
+func (b *bitset) marshal() []byte {
+	out := make([]byte, len(b.words)*8)
+	for i, w := range b.words {
+		binary.LittleEndian.PutUint64(out[i*8:], w)
+	}
+	return out
+}
+
+// bitsetFromBytes rebuilds a set of capacity numPages from marshal() output,
+// tolerating a length mismatch (a mem size that changed clamps, never panics).
+func bitsetFromBytes(data []byte, numPages uint64) *bitset {
+	b := newBitset(numPages)
+	for i := 0; i < len(b.words) && (i+1)*8 <= len(data); i++ {
+		b.words[i] = binary.LittleEndian.Uint64(data[i*8:])
+	}
+	return b
+}
+
+// hostAddrForOffset maps a mem-file offset back to its host virtual address in
+// the current restore's regions — the inverse of the fault path, used by
+// prewarm to pick the UFFDIO_COPY destination. ok=false if no region covers it.
+func hostAddrForOffset(regions []guestRegion, memOffset uint64) (dst uint64, ok bool) {
+	for _, r := range regions {
+		if memOffset >= r.Offset && memOffset < r.Offset+r.Size {
+			return r.BaseHostVirtAddr + (memOffset - r.Offset), true
+		}
+	}
+	return 0, false
 }
 
 // faultWindow returns the copy run to service a fault at addr with fault-ahead:
