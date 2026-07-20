@@ -69,10 +69,24 @@ actually wants: multi-host restore, density, and migration.
 ## Plan (phased; each independently shippable and measurable)
 
 ### Phase A — Make local UFFD competitive (cheap, unblocks the rest)
-Fault-ahead prefetch window + `UFFDIO_ZEROPAGE` for zero pages + record the
-wake working-set and bulk-prewarm it on the next wake (one big `UFFDIO_COPY` of
-exactly the touched pages, before/around resume). Re-run the A/B; target
-UFFD ≤ File locally. This is the groundwork the remote path reuses.
+Fault-ahead prefetch window + record the wake working-set and bulk-prewarm it on
+the next wake (one big `UFFDIO_COPY` of exactly the touched pages, around resume).
+Re-run the A/B; target UFFD ≤ File locally. This is the groundwork the remote
+path reuses. (`UFFDIO_ZEROPAGE` moved to Phase C — its real value is
+zero-on-refault under ballooning, not local latency.)
+
+**Fault-ahead: DONE (commit 1a1874b), fleet-measured 2026-07-20.** A fault now
+copies a 128 KiB window (`prefetchPages`) in one `UFFDIO_COPY` instead of one
+4 KiB page. Warm wake went 109–132 ms → **80–86 ms, parity with File (~81 ms)** —
+the per-fault round-trip regression is gone. It's parity, not a win: a small
+page-cache-warm guest gives lazy loading nothing to save. Cold first-wake is
+still ~520 ms vs File's ~197 ms.
+
+**Working-set prewarm: TODO — the next increment, and what the cold path needs.**
+Record which pages the guest faults during a wake, persist the set beside the
+snapshot, and on the next wake bulk-`UFFDIO_COPY` exactly those pages up front
+so the cold fault-storm becomes one sequential read. This is also the bridge to
+Phase B (the recorded set is what you prefetch over the network).
 
 ### Phase B — Remote/chunked page source (the real prize: multi-host)
 Introduce a `pageSource` interface behind the handler (the local mmap is one
