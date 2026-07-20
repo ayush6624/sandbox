@@ -31,11 +31,30 @@ type uffdioCopyArg struct {
 // guestRegion is one entry of the JSON mapping array Firecracker sends: a guest
 // memory region living at BaseHostVirtAddr in Firecracker's address space,
 // backed by the mem file starting at Offset.
+//
+// PageSize's wire name is "page_size_kib", but Firecracker v1.15 populates it
+// with the page size in BYTES (observed: 4096), not KiB — a known misnomer.
+// pageSizeBytes() normalizes both interpretations so we page in at the true
+// granularity instead of, say, 4096×1024 = 4 MiB.
 type guestRegion struct {
 	BaseHostVirtAddr uint64 `json:"base_host_virt_addr"`
 	Size             uint64 `json:"size"`
 	Offset           uint64 `json:"offset"`
-	PageSizeKiB      uint64 `json:"page_size_kib"`
+	PageSize         uint64 `json:"page_size_kib"`
+}
+
+// pageSizeBytes returns the region's page size in bytes, tolerating both the
+// documented KiB unit (small values like 4 or 2048 → ×1024) and Firecracker
+// v1.15's actual bytes unit (4096 → as-is). 0 defaults to 4 KiB.
+func (r guestRegion) pageSizeBytes() uint64 {
+	switch {
+	case r.PageSize == 0:
+		return 4096
+	case r.PageSize < 4096: // a KiB value (4=4KiB, 2048=2MiB)
+		return r.PageSize * 1024
+	default: // already bytes (4096, ...)
+		return r.PageSize
+	}
 }
 
 // resolvePage maps a faulting host virtual address to the page-aligned
@@ -48,10 +67,7 @@ type guestRegion struct {
 // contains the fault — the caller logs and skips rather than indexing blindly.
 func resolvePage(regions []guestRegion, addr uint64) (aligned, srcOff, pageSize uint64, ok bool) {
 	for _, r := range regions {
-		pageSize = r.PageSizeKiB * 1024
-		if pageSize == 0 {
-			pageSize = 4096
-		}
+		pageSize = r.pageSizeBytes()
 		aligned = addr &^ (pageSize - 1)
 		// The page must lie fully within [base, base+size). The first clause
 		// (aligned >= base) is what prevents the aligned-base underflow.

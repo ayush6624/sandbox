@@ -10,8 +10,8 @@ func TestResolvePage(t *testing.T) {
 	// Two regions: the first backed from mem-file offset 0, the second from a
 	// nonzero offset (as a multi-region snapshot would lay them out).
 	regions := []guestRegion{
-		{BaseHostVirtAddr: 0x1000_0000, Size: 0x10000, Offset: 0, PageSizeKiB: 4},
-		{BaseHostVirtAddr: 0x2000_0000, Size: 0x10000, Offset: 0x10000, PageSizeKiB: 4},
+		{BaseHostVirtAddr: 0x1000_0000, Size: 0x10000, Offset: 0, PageSize: 4},
+		{BaseHostVirtAddr: 0x2000_0000, Size: 0x10000, Offset: 0x10000, PageSize: 4},
 	}
 
 	tests := []struct {
@@ -94,7 +94,7 @@ func TestResolvePageDefaultPageSize(t *testing.T) {
 func TestResolvePageNoUnderflow(t *testing.T) {
 	// Region base is 0x800 into a page; a fault at base aligns down to 0x...000,
 	// which is below base.
-	regions := []guestRegion{{BaseHostVirtAddr: 0x1000_0800, Size: 0x10000, Offset: 0, PageSizeKiB: 4}}
+	regions := []guestRegion{{BaseHostVirtAddr: 0x1000_0800, Size: 0x10000, Offset: 0, PageSize: 4}}
 	if _, srcOff, _, ok := resolvePage(regions, 0x1000_0800); ok {
 		t.Fatalf("expected no match (aligned below base), got srcOff=%#x", srcOff)
 	}
@@ -104,7 +104,7 @@ func TestResolvePageNoUnderflow(t *testing.T) {
 // whose -2 MiB underflow surfaced the bug on the fleet.
 func TestResolvePageHugePage(t *testing.T) {
 	const twoMiB = 2 * 1024 * 1024
-	regions := []guestRegion{{BaseHostVirtAddr: 0x4000_0000, Size: 0x4000_0000, Offset: 0, PageSizeKiB: 2048}}
+	regions := []guestRegion{{BaseHostVirtAddr: 0x4000_0000, Size: 0x4000_0000, Offset: 0, PageSize: 2048}}
 	aligned, srcOff, page, ok := resolvePage(regions, 0x4020_1234)
 	if !ok {
 		t.Fatal("expected hit")
@@ -122,9 +122,46 @@ func TestResolvePageHugePage(t *testing.T) {
 func TestResolvePagePageStraddlesEnd(t *testing.T) {
 	// size is one byte into the last page, so the aligned last page + pageSize
 	// exceeds base+size.
-	regions := []guestRegion{{BaseHostVirtAddr: 0x2000_0000, Size: 0x1001, Offset: 0, PageSizeKiB: 4}}
+	regions := []guestRegion{{BaseHostVirtAddr: 0x2000_0000, Size: 0x1001, Offset: 0, PageSize: 4}}
 	if _, _, _, ok := resolvePage(regions, 0x2000_1000); ok {
 		t.Fatal("expected no match: page straddles region end")
+	}
+}
+
+// TestPageSizeBytes pins the unit normalization, including Firecracker v1.15's
+// real behavior: page_size_kib carries BYTES (4096), not KiB.
+func TestPageSizeBytes(t *testing.T) {
+	cases := []struct {
+		field uint64
+		want  uint64
+	}{
+		{0, 4096},       // absent → 4 KiB default
+		{4, 4096},       // documented KiB unit: 4 KiB
+		{2048, 2 << 20}, // KiB unit: 2 MiB huge page
+		{4096, 4096},    // FC v1.15 actual: bytes, 4 KiB page (the crash's origin)
+	}
+	for _, c := range cases {
+		if got := (guestRegion{PageSize: c.field}).pageSizeBytes(); got != c.want {
+			t.Errorf("pageSizeBytes(%d) = %d, want %d", c.field, got, c.want)
+		}
+	}
+}
+
+// TestResolvePageRealFirecracker replays the exact region the fleet logged
+// (base 4 KiB-page-aligned host VA, 1 GiB, page_size_kib=4096-as-bytes): a
+// fault must page in at true 4 KiB granularity, not 4 MiB.
+func TestResolvePageRealFirecracker(t *testing.T) {
+	base := uint64(124664269504512) // 0x716c00000000, from the fleet log
+	regions := []guestRegion{{BaseHostVirtAddr: base, Size: 1 << 30, Offset: 0, PageSize: 4096}}
+	aligned, srcOff, page, ok := resolvePage(regions, base+0x1234)
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	if page != 4096 {
+		t.Fatalf("pageSize = %d, want 4096 (4 KiB, not 4 MiB)", page)
+	}
+	if aligned != base+0x1000 || srcOff != 0x1000 {
+		t.Fatalf("aligned=%#x srcOff=%#x, want base+0x1000 / 0x1000", aligned, srcOff)
 	}
 }
 
@@ -139,7 +176,7 @@ func TestGuestRegionJSON(t *testing.T) {
 		t.Fatalf("got %d regions", len(regions))
 	}
 	r := regions[0]
-	if r.BaseHostVirtAddr != 123456 || r.Size != 65536 || r.Offset != 4096 || r.PageSizeKiB != 4 {
+	if r.BaseHostVirtAddr != 123456 || r.Size != 65536 || r.Offset != 4096 || r.PageSize != 4 {
 		t.Fatalf("bad decode: %+v", r)
 	}
 }
