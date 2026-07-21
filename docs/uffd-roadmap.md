@@ -151,12 +151,23 @@ order, each independently shippable + measurable):**
   chunk buffers are safe — the same fact that lets B2 decompress into a buffer.
   Behavior identical to mmap; default off. darwin `go test ./...` + linux
   cross-build/vet green.
-- **B2 — GCS chunk source (same host first).** At hibernate, upload chunks
-  (compressed, content-hash keyed for dedup; only re-upload dirty chunks — CoW)
-  to the existing snapshot bucket alongside a chunk manifest. On wake, fetch
-  chunks lazily from local cache → GCS. Prove correctness + measure **p99** (not
-  mean) page-in on a *cold* (cache-dropped) wake — this is finally where UFFD
-  beats File, because File would download the whole 1 GiB first.
+- **B2 — GCS chunk source (same host first). DESIGN WRITTEN — see
+  `docs/uffd-b2-design.md` (awaiting review).** At hibernate, upload chunks
+  (gzip, content-hash keyed → dedup/CoW; all-zero chunks are a never-stored
+  sentinel) to the existing snapshot bucket alongside a positional chunk manifest
+  (`hib/<id>/manifest.json`, written last as the commit marker). On wake, only
+  `chunkedSource.load` changes: local disk cache → GCS `GetBytes(chunks/<hash>)`
+  → decompress, with async chunk-level prefetch to hide the RTT. Ships the
+  **kill-VM-on-fetch-failure** gate (an `onFatal` closure that SIGKILLs FC, so an
+  unservable fault stops the guest instead of hanging forever) — the prerequisite
+  to turning UFFD on anywhere. Codec decided: gzip (reuse `gcsblob`'s codec, zero
+  new deps; manifest carries `"codec"` so zstd is a later format-compatible swap
+  if p99 gunzip dominates). Proposed sub-order: **B2a** read path + kill-on-fail +
+  concurrency-safe cache + prefetch (local manifest, no network); **B2b** hibernate
+  upload + GCS fetch + dedup; **B2c** cache-dropped wake **p99** vs File — finally
+  where UFFD beats File (File downloads/rebases the whole 1 GiB first). Blast
+  radius stays inside `internal/server` + the new source; no `gcsblob` transport
+  changes needed (per-chunk objects use existing `PutBytes`/`GetBytes`/`Exists`).
 - **B3 — working-set prewarm, done right.** The Phase A attempt failed because
   the hibernate snapshot faults the WHOLE guest through the handler, polluting
   the recorded set. Fix: add a **seal-recording-before-snapshot** signal from
