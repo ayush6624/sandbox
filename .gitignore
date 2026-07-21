@@ -4,3 +4,4 @@ Makefile.local
 bin/sandbox.sandbox-token
 graphify-out
 *.tgz
+.DS_Store

@@ -37,23 +37,6 @@ import (
 // artifacts (mem + device state; the rootfs needs no frozen copy).
 func hibID(id string) string { return "hib-" + id }
 
-// wsFile is the stable per-sandbox UFFD working-set file. It lives OUTSIDE the
-// hib-<id> dir (which a wake consumes and cleans up) so the recorded working
-// set survives from one wake to the next. Cleaned up on destroy.
-func (s *Server) wsFile(id string) string {
-	return filepath.Join(s.cfg.Provisioner.SnapshotDir, "ws", id+".bits")
-}
-
-// wsPath returns wsFile(id) after ensuring its directory exists, or "" if that
-// fails — in which case prewarm just disables itself (never fatal to a wake).
-func (s *Server) wsPath(id string) string {
-	if err := os.MkdirAll(filepath.Dir(s.wsFile(id)), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] uffd working-set dir: %v\n", id, err)
-		return ""
-	}
-	return s.wsFile(id)
-}
-
 // hibDiffMarker is the file recording, beside a diff hibernation's mem file,
 // the golden snapshot id the diff must be rebased onto at wake. Its absence
 // means the mem file is a full, directly loadable snapshot.
@@ -421,10 +404,9 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 	)
 	if s.cfg.UFFDRestore {
 		// UFFD backend: LoadSnapshot + resume happen inside RestoreUFFD, and the
-		// guest faults its RAM in lazily from memPath instead of paying a full
-		// eager fault-in before resume (uffd_linux.go). wsPath persists this
-		// sandbox's working set across wakes for prewarm.
-		m, rt, err = vm.RestoreUFFD(s.vmCtx, opts, memPath, statePath, s.wsPath(sb.ID))
+		// guest faults its RAM in lazily from memPath (with fault-ahead) instead
+		// of paying a full eager fault-in before resume (uffd_linux.go).
+		m, rt, err = vm.RestoreUFFD(s.vmCtx, opts, memPath, statePath)
 		if err != nil {
 			return fmt.Errorf("restore (uffd): %w", err)
 		}

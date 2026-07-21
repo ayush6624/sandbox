@@ -25,7 +25,7 @@ func StartClone(_ context.Context, _ RunOptions, _ CloneParams) (*Machine, Runti
 	return nil, RuntimeConfig{}, ErrLinuxOnly
 }
 
-func RestoreUFFD(_ context.Context, _ RunOptions, _, _, _ string) (*Machine, RuntimeConfig, error) {
+func RestoreUFFD(_ context.Context, _ RunOptions, _, _ string) (*Machine, RuntimeConfig, error) {
 	return nil, RuntimeConfig{}, ErrLinuxOnly
 }
 

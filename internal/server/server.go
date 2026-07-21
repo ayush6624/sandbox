@@ -688,7 +688,6 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	defer mu.Unlock()
 	defer s.act.forget(id)
 	defer s.diffBase.Delete(id)
-	defer func() { _ = os.Remove(s.wsFile(id)) }() // UFFD working-set file (if any)
 
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
