@@ -82,11 +82,29 @@ the per-fault round-trip regression is gone. It's parity, not a win: a small
 page-cache-warm guest gives lazy loading nothing to save. Cold first-wake is
 still ~520 ms vs File's ~197 ms.
 
-**Working-set prewarm: TODO — the next increment, and what the cold path needs.**
-Record which pages the guest faults during a wake, persist the set beside the
-snapshot, and on the next wake bulk-`UFFDIO_COPY` exactly those pages up front
-so the cold fault-storm becomes one sequential read. This is also the bridge to
-Phase B (the recorded set is what you prefetch over the network).
+**Working-set prewarm: ATTEMPTED, then PARKED for Phase B (commit 63094b0).**
+Built record+persist+prewarm, but hit a design wall that makes naive recording
+useless: **snapshotting a UFFD-restored VM faults in the ENTIRE guest memory
+through the handler** — `hibernate`'s `PUT /snapshot/create` reads every guest
+page to write the new mem file, so a page not already present faults to us. The
+recorded "working set" therefore captures the whole guest (from the snapshot
+read, not guest execution), and prewarm always trips its >50% skip. Recording
+the true startup set needs a **seal-recording-before-snapshot** signal from the
+hibernate path into the handler — real design work that belongs with the Phase B
+remote source (where prewarm actually pays off and the recorded set is what you
+prefetch over the network). Reverted the wiring; kept the two wins below.
+
+Two things this increment DID land and keep:
+- **`poll()`-driven fault loop** (commit 3759dcf): a blocking `read()` on the
+  uffd does not reliably wake when Firecracker exits, so `serve()` never returned
+  and its cleanup (mmap unmap, fd close) leaked one 1 GiB mapping + fd per wake.
+  `poll()` sees `POLLHUP` on teardown and exits deterministically. Latent leak
+  fixed; also the epoll-style shape the scaling best-practice wants.
+- **fault-ahead** stays as above.
+
+Lesson for when Phase B builds working-set properly: (1) stop recording before
+the hibernate snapshot (seal signal), and (2) persistence must key off a
+deterministic `serve()` exit — the `poll()` fix is the prerequisite.
 
 ### Phase B — Remote/chunked page source (the real prize: multi-host)
 Introduce a `pageSource` interface behind the handler (the local mmap is one
