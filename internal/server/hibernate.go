@@ -397,6 +397,7 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 	opts := s.cfg.VMTemplate
 	opts.RootfsPath = sb.RootfsPath
 	opts.SocketPath = ""
+	opts.UFFDChunkBytes = s.cfg.UFFDChunkBytes
 	var (
 		m   *vm.Machine
 		rt  vm.RuntimeConfig

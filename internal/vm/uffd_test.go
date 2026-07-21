@@ -3,6 +3,7 @@ package vm
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -288,6 +289,114 @@ func TestLocalSource(t *testing.T) {
 			t.Fatal("at() must return a subslice of the mmap, not a copy")
 		}
 	})
+}
+
+// TestChunkedSourceIndexing exercises the chunk-offset math and boundary
+// clamping with an injected loader (no file), asserting a run never spans two
+// chunks and the returned bytes match the image.
+func TestChunkedSourceIndexing(t *testing.T) {
+	const chunkSz = 4096 * 4      // 16 KiB
+	const total = chunkSz*2 + 500 // 2 full chunks + a short third (500 B)
+	image := make([]byte, total)
+	for i := range image {
+		image[i] = byte(i*13 + 1)
+	}
+	loads := make(map[uint64]int)
+	load := func(idx uint64) ([]byte, error) {
+		start := idx * chunkSz
+		if start >= total {
+			return nil, nil
+		}
+		loads[idx]++
+		n := uint64(chunkSz)
+		if n > total-start {
+			n = total - start
+		}
+		return image[start : start+n], nil
+	}
+	cs := newChunkedSource(total, chunkSz, load, nil)
+
+	// A within-chunk run returns exactly the requested bytes.
+	if b, err := cs.at(100, 200); err != nil || !bytes.Equal(b, image[100:300]) {
+		t.Fatalf("within-chunk: len=%d err=%v", len(b), err)
+	}
+	// A run that would straddle the chunk-0/chunk-1 boundary is clamped to the
+	// end of chunk 0 (the tail refaults into chunk 1).
+	off := uint64(chunkSz - 8)
+	b, err := cs.at(off, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uint64(len(b)) != 8 || !bytes.Equal(b, image[off:chunkSz]) {
+		t.Fatalf("boundary clamp: len=%d want 8", len(b))
+	}
+	// The refaulted tail is served from chunk 1.
+	if b, err := cs.at(chunkSz, 4096); err != nil || !bytes.Equal(b, image[chunkSz:chunkSz+4096]) {
+		t.Fatalf("next chunk: len=%d err=%v", len(b), err)
+	}
+	// The short last chunk clamps to the image end.
+	if b, err := cs.at(chunkSz*2+100, 4096); err != nil || uint64(len(b)) != 400 || !bytes.Equal(b, image[chunkSz*2+100:total]) {
+		t.Fatalf("short last chunk: len=%d err=%v", len(b), err)
+	}
+	// Past the image → nil.
+	if b, err := cs.at(total, 4096); err != nil || b != nil {
+		t.Fatalf("past end: b=%v err=%v", b, err)
+	}
+	// Cache: chunk 0 was loaded once despite multiple faults into it.
+	if loads[0] != 1 {
+		t.Fatalf("chunk 0 loaded %d times, want 1 (cache miss then hit)", loads[0])
+	}
+}
+
+// TestChunkedSourceLoadError surfaces a loader error as an at() error (an
+// unserved fault the handler must escalate, not swallow).
+func TestChunkedSourceLoadError(t *testing.T) {
+	boom := errors.New("fetch failed")
+	cs := newChunkedSource(1<<20, 4096, func(uint64) ([]byte, error) { return nil, boom }, nil)
+	if _, err := cs.at(0, 4096); !errors.Is(err, boom) {
+		t.Fatalf("at() err = %v, want %v", err, boom)
+	}
+}
+
+// TestLocalChunkedSource covers the file-backed loader end to end, including a
+// short last chunk and rounding a non-page-multiple chunk size down to 4 KiB.
+func TestLocalChunkedSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mem")
+	data := make([]byte, 4096*10+123) // 10 pages + a short tail
+	for i := range data {
+		data[i] = byte(i*31 + 5)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5000 bytes rounds down to 4096 (one page).
+	cs, err := newLocalChunkedSource(path, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.close()
+	if cs.chunkSz != 4096 {
+		t.Fatalf("chunkSz = %d, want 4096 (rounded down)", cs.chunkSz)
+	}
+
+	// Read every byte back through faults of assorted lengths and lengths that
+	// straddle chunk boundaries, reassembling the image and comparing.
+	got := make([]byte, 0, len(data))
+	for off := uint64(0); off < uint64(len(data)); {
+		b, err := cs.at(off, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) == 0 {
+			t.Fatalf("empty read at off=%d", off)
+		}
+		got = append(got, b...)
+		off += uint64(len(b))
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("reassembled image != original")
+	}
 }
 
 // TestGuestRegionJSON pins the wire field names Firecracker sends.

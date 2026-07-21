@@ -482,7 +482,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 
 	// The handler must be listening before the load call — Firecracker dials it
 	// during LoadSnapshot to hand over the uffd.
-	h, err := startUffdHandler(uffdSock, memPath)
+	h, err := startUffdHandler(uffdSock, memPath, opts.UFFDChunkBytes)
 	if err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("start uffd handler: %w", err)
 	}

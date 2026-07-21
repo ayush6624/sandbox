@@ -50,13 +50,23 @@ type uffdHandler struct {
 // startUffdHandler binds the handler socket and opens the page source, then
 // serves Firecracker's connection in the background. It must be listening before
 // the snapshot-load call (Firecracker dials it during load).
-func startUffdHandler(sockPath, memPath string) (*uffdHandler, error) {
+//
+// chunkBytes selects the page source: 0 uses the default localSource (whole-file
+// mmap); >0 uses a chunkedSource that reads the mem file in fixed chunks of that
+// size on demand (roadmap Phase B1 — the same indexing/cache the GCS source will
+// reuse). Behavior is identical either way; only the fetch granularity differs.
+func startUffdHandler(sockPath, memPath string, chunkBytes uint64) (*uffdHandler, error) {
 	_ = os.Remove(sockPath)
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
 	if err != nil {
 		return nil, fmt.Errorf("listen uffd socket: %w", err)
 	}
-	src, err := newLocalSource(memPath)
+	var src pageSource
+	if chunkBytes > 0 {
+		src, err = newLocalChunkedSource(memPath, chunkBytes)
+	} else {
+		src, err = newLocalSource(memPath)
+	}
 	if err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)

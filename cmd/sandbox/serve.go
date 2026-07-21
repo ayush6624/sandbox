@@ -111,6 +111,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		MemBudgetMIB:      cfg.MemBudgetMIB,
 		HibernateAfter:    time.Duration(cfg.HibernateAfterSec) * time.Second,
 		UFFDRestore:       cfg.UFFDRestore,
+		UFFDChunkBytes:    uint64(cfg.UFFDChunkKiB) * 1024,
 		SnapshotBucket:    cfg.SnapshotBucket,
 		GatewayURL:        cfg.GatewayURL,
 		GatewayToken:      cfg.GatewayToken,

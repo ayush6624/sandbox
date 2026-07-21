@@ -58,6 +58,10 @@ type Config struct {
 	// memory backend (lazy page-in) instead of the eager File backend. See
 	// config.UFFDRestore and uffd_linux.go.
 	UFFDRestore bool
+	// UFFDChunkBytes selects the UFFD page source: 0 = whole-file mmap, >0 = lazy
+	// per-chunk reads of that size through a chunk cache (roadmap Phase B1). See
+	// config.UFFDChunkKiB and vm.RunOptions.UFFDChunkBytes.
+	UFFDChunkBytes uint64
 	// SnapshotBucket enables GCS snapshot durability: user snapshots upload
 	// in the background and restore/fanout pull missing snapshots down from
 	// the bucket, so any host can serve them. Empty = host-local only.

@@ -132,9 +132,25 @@ order, each independently shippable + measurable):**
   Unit-tested `localSource` (bounds, short-clamp, overflow-safe past-end, zero-copy
   aliasing). Linux cross-compile + darwin `go test ./...` both green. Everything
   below is now additive behind this seam.
-- **B1 — chunked local source.** Split the mem image into fixed chunks (start
-  1–2 MiB), serve faults out of a chunk cache still backed by the local file.
-  Proves chunk indexing + fault-over-chunks with zero network risk.
+- **B1 — chunked local source. DONE.** `chunkedSource` (`uffd_source.go`, still
+  untagged) indexes the mem image into fixed chunks, maps a fault to
+  (chunk idx, offset-in-chunk), materializes a chunk on first touch via an
+  injectable `load(idx)`, caches it (no eviction in B1), and serves the fault as a
+  zero-copy subslice **clamped to the chunk end** — a straddling run returns short
+  and the tail refaults into the next chunk, which keeps the copy length
+  page-aligned (chunkSz is a 4 KiB multiple). `newLocalChunkedSource` wires
+  `load` to on-demand `ReadAt`s of the mem file (no whole-file mmap), which is the
+  exact shape B2 reuses: only `load` changes (ReadAt → lazy GCS fetch). Selected
+  by `uffd_chunk_kib` in the config (0 = today's mmap `localSource`, default),
+  threaded config → `server.Config.UFFDChunkBytes` → `RunOptions.UFFDChunkBytes` →
+  `startUffdHandler` → source pick. Unit-tested: indexing/boundary-clamp with an
+  injected loader + load-count assertion (cache hit), a loader error surfacing as
+  an `at()` error (unserved fault the handler must escalate), and a file-backed
+  round-trip that reassembles the whole image through faults. Correctness note
+  locked in: **UFFDIO_COPY requires dst + len page-aligned but NOT src**, so heap
+  chunk buffers are safe — the same fact that lets B2 decompress into a buffer.
+  Behavior identical to mmap; default off. darwin `go test ./...` + linux
+  cross-build/vet green.
 - **B2 — GCS chunk source (same host first).** At hibernate, upload chunks
   (compressed, content-hash keyed for dedup; only re-upload dirty chunks — CoW)
   to the existing snapshot bucket alongside a chunk manifest. On wake, fetch

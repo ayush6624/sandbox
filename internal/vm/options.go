@@ -25,6 +25,13 @@ type RunOptions struct {
 	// name; TapDevice/MacAddress/GuestCIDR are ignored on the restore path.
 	SnapshotMemPath   string
 	SnapshotStatePath string
+
+	// UFFDChunkBytes selects the UFFD page source on the UFFD restore path
+	// (RestoreUFFD): 0 = whole-file mmap (localSource, the default), >0 = read the
+	// mem file in fixed chunks of this many bytes on demand (chunkedSource — the
+	// indexing/cache a remote GCS source will reuse; roadmap Phase B1). Ignored
+	// off the UFFD path.
+	UFFDChunkBytes uint64
 }
 
 // RuntimeConfig captures identifiers after the SDK config is built.
