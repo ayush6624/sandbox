@@ -28,65 +28,51 @@ import (
 // tracks the working set, not the guest size, and wake I/O collapses to the
 // pages actually read. See docs/scale-to-zero.md.
 //
-// The handler mmaps the mem file read-only and serves faults straight out of
-// the page cache, so it doubles as lazy disk I/O: a guest page fault reads the
-// backing file page only if it isn't already cached. The page source is
-// deliberately just "the local mem file" for now; the same fault path is where
-// a remote/GCS-backed source would slot in for cross-host restore (Model B in
-// the scale-to-zero doc).
+// The page bytes come from a pageSource (uffd_source.go). The default
+// localSource mmaps the mem file read-only and serves faults straight out of the
+// page cache, so it doubles as lazy disk I/O: a guest page fault reads the
+// backing file page only if it isn't already cached. The source is deliberately
+// just "the local mem file" for now; a remote/GCS-backed source slots in behind
+// the same interface for cross-host restore (Model B in the scale-to-zero doc,
+// roadmap Phase B) without touching the fault loop below.
 
-// uffdHandler services page faults for one restored VM out of its snapshot mem
-// file, for the lifetime of that VM.
+// uffdHandler services page faults for one restored VM out of its page source,
+// for the lifetime of that VM.
 type uffdHandler struct {
 	sockPath string
 	ln       *net.UnixListener
-	memFile  *os.File
-	mem      []byte // read-only mmap of the whole mem file
+	src      pageSource
 
 	closeOnce sync.Once // guards listener close + socket removal
-	memOnce   sync.Once // guards mem unmap + file close (owned by the fault goroutine)
+	srcOnce   sync.Once // guards src.close() (owned by the fault goroutine)
 }
 
-// startUffdHandler binds the handler socket and mmaps the mem file, then serves
-// Firecracker's connection in the background. It must be listening before the
-// snapshot-load call (Firecracker dials it during load).
+// startUffdHandler binds the handler socket and opens the page source, then
+// serves Firecracker's connection in the background. It must be listening before
+// the snapshot-load call (Firecracker dials it during load).
 func startUffdHandler(sockPath, memPath string) (*uffdHandler, error) {
 	_ = os.Remove(sockPath)
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
 	if err != nil {
 		return nil, fmt.Errorf("listen uffd socket: %w", err)
 	}
-	f, err := os.Open(memPath)
+	src, err := newLocalSource(memPath)
 	if err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
-		return nil, fmt.Errorf("open mem file: %w", err)
+		return nil, err
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		_ = ln.Close()
-		_ = os.Remove(sockPath)
-		return nil, fmt.Errorf("stat mem file: %w", err)
-	}
-	mem, err := unix.Mmap(int(f.Fd()), 0, int(fi.Size()), unix.PROT_READ, unix.MAP_PRIVATE)
-	if err != nil {
-		_ = f.Close()
-		_ = ln.Close()
-		_ = os.Remove(sockPath)
-		return nil, fmt.Errorf("mmap mem file: %w", err)
-	}
-	h := &uffdHandler{sockPath: sockPath, ln: ln, memFile: f, mem: mem}
+	h := &uffdHandler{sockPath: sockPath, ln: ln, src: src}
 	go h.accept()
 	return h, nil
 }
 
 // accept waits for Firecracker's single connection and serves it. The fault
-// goroutine owns the mem mapping's lifetime: it unmaps only after serve()
-// returns (Firecracker gone), so a page copy can never race an unmap — unlike
-// close(), which runs from other goroutines and must not touch the mapping.
+// goroutine owns the page source's lifetime: it closes only after serve()
+// returns (Firecracker gone), so a page copy can never race the unmap — unlike
+// close(), which runs from other goroutines and must not touch the source.
 func (h *uffdHandler) accept() {
-	defer h.releaseMem()
+	defer h.releaseSource()
 	conn, err := h.ln.AcceptUnix()
 	if err != nil {
 		return // listener closed before Firecracker connected (restore failed)
@@ -204,28 +190,27 @@ func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
 	h.copyRange(uffd, dst, srcOff, length)
 }
 
-// copyRange copies [srcOff, srcOff+length) of the mem file to guest host addr
-// dst in one UFFDIO_COPY, bounds-clamped. Shared by fault-ahead and prewarm.
+// copyRange asks the page source for [srcOff, srcOff+length) and installs those
+// bytes at guest host addr dst in one UFFDIO_COPY. Shared by fault-ahead and
+// prewarm. The source clamps the run (short read → the tail refaults later) and
+// owns the bytes' lifetime for the duration of the copy.
 func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
-	// Overflow-safe bounds check: srcOff+length can wrap past 2^64 and silently
-	// pass a naive `> len` comparison (this is what let the original underflow
-	// panic reach the slice index). Compare without adding, and clamp the run to
-	// the mem file — a short copy just means the tail pages refault later.
-	memLen := uint64(len(h.mem))
-	if srcOff >= memLen {
-		fmt.Fprintf(os.Stderr, "uffd: src %#x past mem (len %d) — skipping\n", srcOff, memLen)
+	buf, err := h.src.at(srcOff, length)
+	if err != nil {
+		// The source could not supply the page, so this fault is left UNSERVED
+		// and Firecracker waits forever on it. localSource never returns an
+		// error; a remote source that can fail must escalate to killing the VM
+		// (roadmap Phase B/D) rather than hang here. Log for now.
+		fmt.Fprintf(os.Stderr, "uffd: source at %#x len %d: %v\n", srcOff, length, err)
 		return
 	}
-	if length > memLen-srcOff {
-		length = memLen - srcOff
-	}
-	if length == 0 {
-		return
+	if len(buf) == 0 {
+		return // nothing at this offset (past image end); guest refaults if needed
 	}
 	arg := uffdioCopyArg{
 		Dst: dst,
-		Src: uint64(uintptr(unsafe.Pointer(&h.mem[srcOff]))),
-		Len: length,
+		Src: uint64(uintptr(unsafe.Pointer(&buf[0]))),
+		Len: uint64(len(buf)),
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(uffd), uintptr(uffdioCopy), uintptr(unsafe.Pointer(&arg)))
 	// EEXIST: part of the run was already populated (prewarm, a prior fault-ahead,
@@ -233,15 +218,15 @@ func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
 	// copied up to the first present page, so the guest still progresses.
 	// EAGAIN: the mapping changed under us (removed) — the guest will refault.
 	if errno != 0 && errno != unix.EEXIST && errno != unix.EAGAIN {
-		fmt.Fprintf(os.Stderr, "uffd: copy %d bytes @%#x: %v\n", length, dst, errno)
+		fmt.Fprintf(os.Stderr, "uffd: copy %d bytes @%#x: %v\n", len(buf), dst, errno)
 	}
 }
 
 // close unblocks a pending accept() and removes the socket. It deliberately
-// does NOT unmap the mem file: Firecracker may still fault pages during its own
-// shutdown, so the mapping lives until the fault goroutine sees the VM exit and
-// calls releaseMem(). Idempotent; safe to call from any goroutine (restore
-// failure, machine stop, the wait goroutine on Firecracker exit).
+// does NOT close the page source: Firecracker may still fault pages during its
+// own shutdown, so the source (and its mmap) lives until the fault goroutine
+// sees the VM exit and calls releaseSource(). Idempotent; safe to call from any
+// goroutine (restore failure, machine stop, the wait goroutine on FC exit).
 func (h *uffdHandler) close() {
 	if h == nil {
 		return
@@ -254,15 +239,15 @@ func (h *uffdHandler) close() {
 	})
 }
 
-// releaseMem unmaps the mem file and closes it. Called only from the fault
-// goroutine's defer, after serve() has returned — so no page copy is in flight.
-func (h *uffdHandler) releaseMem() {
-	h.memOnce.Do(func() {
-		if h.mem != nil {
-			_ = unix.Munmap(h.mem)
-		}
-		if h.memFile != nil {
-			_ = h.memFile.Close()
+// releaseSource closes the page source (unmap + file close for localSource).
+// Called only from the fault goroutine's defer, after serve() has returned — so
+// no page copy is in flight.
+func (h *uffdHandler) releaseSource() {
+	h.srcOnce.Do(func() {
+		if h.src != nil {
+			if err := h.src.close(); err != nil {
+				fmt.Fprintf(os.Stderr, "uffd: close page source: %v\n", err)
+			}
 		}
 	})
 }

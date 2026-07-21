@@ -1,7 +1,10 @@
 package vm
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -213,6 +216,76 @@ func TestFaultWindow(t *testing.T) {
 	t.Run("no region", func(t *testing.T) {
 		if _, _, _, ok := faultWindow(regions, 0x2000_0000, 4); ok {
 			t.Fatal("expected no match")
+		}
+	})
+}
+
+// TestLocalSource covers the default page source: mmap of a mem file, byte-range
+// fetch with overflow-safe clamping, and zero-copy aliasing of the mapping.
+func TestLocalSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mem")
+	data := make([]byte, 3*4096) // 12 KiB, three "pages"
+	for i := range data {
+		data[i] = byte(i * 7) // deterministic, non-trivial pattern
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := newLocalSource(path)
+	if err != nil {
+		t.Fatalf("newLocalSource: %v", err)
+	}
+	defer s.close()
+
+	t.Run("full read within bounds", func(t *testing.T) {
+		b, err := s.at(0, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(b, data[:4096]) {
+			t.Fatalf("bytes mismatch (len %d)", len(b))
+		}
+	})
+	t.Run("offset read", func(t *testing.T) {
+		b, err := s.at(4096, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(b, data[4096:4196]) {
+			t.Fatalf("bytes mismatch (len %d)", len(b))
+		}
+	})
+	t.Run("clamped past end returns a short slice", func(t *testing.T) {
+		off := uint64(len(data)) - 10
+		b, err := s.at(off, 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) != 10 || !bytes.Equal(b, data[off:]) {
+			t.Fatalf("len = %d, want 10 (short-clamped)", len(b))
+		}
+	})
+	t.Run("off exactly at end returns nil", func(t *testing.T) {
+		b, err := s.at(uint64(len(data)), 4096)
+		if err != nil || b != nil {
+			t.Fatalf("b = %v err = %v, want nil, nil", b, err)
+		}
+	})
+	t.Run("off past end (overflow-safe) returns nil", func(t *testing.T) {
+		// off + length would wrap past 2^64 — the check must not add them.
+		b, err := s.at(^uint64(0)-100, 4096)
+		if err != nil || b != nil {
+			t.Fatalf("b = %v err = %v, want nil, nil", b, err)
+		}
+	})
+	t.Run("zero-copy: returned slice aliases the mmap", func(t *testing.T) {
+		b, err := s.at(4096, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if &b[0] != &s.mem[4096] {
+			t.Fatal("at() must return a subslice of the mmap, not a copy")
 		}
 	})
 }

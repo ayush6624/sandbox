@@ -118,12 +118,20 @@ so a cold remote wake doesn't fault-storm over the network.
 **Starting point for the fresh session (de-risked ordering — build in this
 order, each independently shippable + measurable):**
 
-- **B0 — `pageSource` seam (pure refactor, no behavior change).** Extract the
-  handler's page fetch into an interface:
-  `type pageSource interface { at(off, length uint64) ([]byte, error) }`.
-  Reimplement today's `mmap` path as `localSource`. `copyRange` becomes "ask the
-  source for the bytes, then `UFFDIO_COPY`." Unit-test `localSource`. This makes
-  everything below additive.
+- **B0 — `pageSource` seam (pure refactor, no behavior change). DONE.** Extracted
+  the handler's page fetch into `type pageSource interface { at(off, length
+  uint64) ([]byte, error); close() error }` (`internal/vm/uffd_source.go`, kept
+  untagged so it compiles + unit-tests on macOS via `x/sys/unix`). Today's mmap
+  path is now `localSource` (owns the mmap + file, does the overflow-safe clamp);
+  `copyRange` asks `h.src.at(...)` for the bytes, then `UFFDIO_COPY`s
+  `buf[0]..len(buf)`. The lifetime contract is documented on the interface: `at`
+  returns a slice valid until the copy completes (localSource → a zero-copy
+  subslice of the mmap; a remote source → an owned/cached buffer). The handler's
+  `mem`/`memFile` fields collapsed to one `src pageSource`; `releaseMem` →
+  `releaseSource` (fault-goroutine-owned, still guards the close via `srcOnce`).
+  Unit-tested `localSource` (bounds, short-clamp, overflow-safe past-end, zero-copy
+  aliasing). Linux cross-compile + darwin `go test ./...` both green. Everything
+  below is now additive behind this seam.
 - **B1 — chunked local source.** Split the mem image into fixed chunks (start
   1–2 MiB), serve faults out of a chunk cache still backed by the local file.
   Proves chunk indexing + fault-over-chunks with zero network risk.
