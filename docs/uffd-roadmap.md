@@ -112,8 +112,51 @@ impl). Add a GCS-chunk impl: chunked+compressed mem in the existing snapshot
 bucket, lazy per-chunk fetch on fault, local chunk cache, CoW `.dirty` chunks,
 dedup on re-upload. Wire the **clone-path wake** (`wakeClone`) and a new
 "wake on any host" path to it. Requires async/pipelined fetch (never block the
-fault thread on a bare network RTT) + working-set prewarm from Phase A so a cold
-remote wake doesn't fault-storm over the network.
+fault thread on a bare network RTT) + working-set prewarm (done right this time)
+so a cold remote wake doesn't fault-storm over the network.
+
+**Starting point for the fresh session (de-risked ordering — build in this
+order, each independently shippable + measurable):**
+
+- **B0 — `pageSource` seam (pure refactor, no behavior change).** Extract the
+  handler's page fetch into an interface:
+  `type pageSource interface { at(off, length uint64) ([]byte, error) }`.
+  Reimplement today's `mmap` path as `localSource`. `copyRange` becomes "ask the
+  source for the bytes, then `UFFDIO_COPY`." Unit-test `localSource`. This makes
+  everything below additive.
+- **B1 — chunked local source.** Split the mem image into fixed chunks (start
+  1–2 MiB), serve faults out of a chunk cache still backed by the local file.
+  Proves chunk indexing + fault-over-chunks with zero network risk.
+- **B2 — GCS chunk source (same host first).** At hibernate, upload chunks
+  (compressed, content-hash keyed for dedup; only re-upload dirty chunks — CoW)
+  to the existing snapshot bucket alongside a chunk manifest. On wake, fetch
+  chunks lazily from local cache → GCS. Prove correctness + measure **p99** (not
+  mean) page-in on a *cold* (cache-dropped) wake — this is finally where UFFD
+  beats File, because File would download the whole 1 GiB first.
+- **B3 — working-set prewarm, done right.** The Phase A attempt failed because
+  the hibernate snapshot faults the WHOLE guest through the handler, polluting
+  the recorded set. Fix: add a **seal-recording-before-snapshot** signal from
+  `hibernate()` into the handler (stop recording once `Pause`+`Snapshot` begin),
+  so the set is only guest-execution faults. Then bulk-prefetch that set (over
+  chunks, pipelined) before/around resume. Reuse the parked bitset code from
+  git history (commit eda7f63).
+- **B4 — cross-host wake.** The architectural piece: hibernated sandboxes are
+  host-pinned today (reconcile skips them; port listeners re-bind on the owner).
+  Make the state file + chunk manifest durable in GCS, let a *different* host
+  pull the state and serve mem via the GCS source, and extend gateway
+  placement/routing to wake off-host. Do this LAST, once B2/B3 prove the source.
+
+**Correctness gotchas locked in from Phase A (do not relearn the hard way):**
+- FC waits **forever** on an unserved fault → a GCS fetch that fails after
+  retries must **kill the VM**, never silently skip. Pair with the existing
+  `poll()` loop + `recover()`.
+- Never block the single fault thread on a bare network RTT — pipeline fetches,
+  multiple in-flight, and lean on B3 prewarm. Measure p99.
+- `page_size_kib` is BYTES in FC v1.15 (`pageSizeBytes()` handles it); regions
+  matched by aligned addr (no underflow) — all already in `uffd.go`.
+
+**First task on resume: B0** (the `pageSource` refactor) — small, safe, and it's
+the seam everything else hangs off.
 
 ### Phase C — Density via overcommit (balloon + UFFD)
 Wire a virtio-balloon device (FC supports it), handle `UFFD_EVENT_REMOVE`
