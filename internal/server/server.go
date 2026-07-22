@@ -265,6 +265,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes/{id}/shell", s.handleShellProxy())
 	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("POST /sandboxes/{id}/hibernate", s.handleHibernate)
+	// Cross-host wake (roadmap B4): the gateway dispatches adopt (reconstruct +
+	// wake here) on a route miss or a drain, and release (freeze + drop local,
+	// keep GCS) on the drain source.
+	mux.HandleFunc("POST /sandboxes/{id}/adopt", s.handleAdopt)
+	mux.HandleFunc("POST /sandboxes/{id}/release", s.handleRelease)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/rename", s.handleRenameSnapshot)
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)

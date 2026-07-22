@@ -297,11 +297,29 @@ order, each independently shippable + measurable):**
     `uploadMemChunks` the orchestrator composes. Gated on the existing
     `uffd_chunk_gcs`. Pure record builder + CAS unit-tested; darwin tests + vet +
     linux cross-build green.
-  - **B4b — host-side adopt/release + fence. NEXT.** `POST /sandboxes/{id}/adopt`
-    (reconstruct-from-GCS → clone-wake, or reconstruct-as-hibernated for a
-    drain), `POST /sandboxes/{id}/release`, the owner-fence CAS, and reconcile/
-    registration relinquish-on-stale-fence. Then B4c (gateway resolve-on-miss +
-    drain + the cross-host A/B vs File).
+  - **B4b — host-side adopt/release + fence. SHIPPED (host-side; fleet
+    verification pending — needs the gateway dispatch from B4c, or a manual
+    two-host adopt).** `POST /sandboxes/{id}/adopt` reconstructs a hibernated
+    sandbox from GCS on any host (`hib_adopt.go`): pull record.json → CAS the
+    owner fence (`hib_fence.go`) → stage state + rootfs (reflink base + overlay
+    diff, or full-sparse) + mem (assemble chunks, or rebase diff) → `reg.Create`
+    a fresh local identity → `wakeClone` (clone-path reidentify) → re-expose extra
+    ports. `POST /sandboxes/{id}/release` freezes if running, waits for the
+    durable record.json, then drops the LOCAL row + artifacts (GCS untouched) —
+    the drain source side, aborting rather than dropping if durability can't be
+    confirmed. `reconcile` now relinquishes a local hibernated row whose owner
+    fence names another host (adopted away while we were down), closing the
+    split-brain window. Unit-tested: `nextOwner` epoch monotonicity (absent→1,
+    bump, corrupt→0). **File backend for the adopt wake** — it materializes the
+    full mem locally first; the LAZY UFFD-chunk clone wake (`vm.StartCloneUFFD`,
+    resume-then-stream — the actual cross-host perf win) is deferred to B4c.
+  - **B4c — gateway resolve-on-miss + drain + measurement + lazy clone wake.
+    NEXT.** Gateway route-miss → dispatch `/adopt`; a `/drain` control op →
+    `/release`-then-`/adopt`; honor the fence on route claims. Add
+    `vm.StartCloneUFFD` so the adopt wake streams from the GCS chunk source
+    instead of pre-materializing. Then the cross-host A/B vs File (dead-host
+    recovery wake-to-first-exec — the number that closes the roadmap thesis) + a
+    drain-a-host timing.
 
 **Correctness gotchas locked in from Phase A (do not relearn the hard way):**
 - FC waits **forever** on an unserved fault → a GCS fetch that fails after
