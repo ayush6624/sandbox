@@ -247,16 +247,23 @@ order, each independently shippable + measurable):**
     set before the guest faults its tail. The set recorded correctly (78 chunks;
     seal excluded the snapshot fault-in — Phase A bug fixed) and the teardown fix
     held.
-  - **OPEN BUG: `uffd_chunk_prefetch=32` reliably crashes the wake.** Bumped
-    prefetch to warm the tail faster; every wake then died at exactly `faults=7`,
-    FC exiting on its own (NOT our kill-on-fault, no handler panic), both cold and
-    warm cache — deterministic, not latency/starvation. Root cause UNDIAGNOSED
-    (reverted the fleet before capturing `firecracker-<vmid>.log`; served bytes come
-    from the in-memory cache not the disk file, so it's not the temp-file race).
-    Default `prefetch=4` is safe. Next time: reproduce at prefetch 16/32 and read
-    the FC crash log FIRST. A concurrency-hygiene fix landed alongside (unique temp
-    file per chunk-cache write) but is NOT this crash. Fleet reverted to 98a7eaf
-    (UFFD off); test artifacts cleaned.
+  - **`uffd_chunk_prefetch=32` crash — DIAGNOSED + FIXED + fleet-verified (commit
+    54a71e2).** Root cause (from `firecracker-<vmid>.log`, which lives in `/tmp`,
+    not the task dir): **FC panics on resume** — `available virtio descriptors N >
+    queue size: 256` (`devices/mod.rs`) — during its "artificially kick devices"
+    step, which reads the virtio rings out of guest memory (UFFD-served).
+    Isolation nailed the trigger: `prefetchAhead@32` (post-resume) is fine and
+    `prewarm@4` is fine; only `prewarm@32` crashes — so it's high-concurrency
+    prewarm fetches racing FC's **resume-time** ring reads, not concurrency per se.
+    Fix: `newChunkedSource` no longer launches prewarm in the constructor (which ran
+    at/before `LoadSnapshot`); it stores the indices and `RestoreUFFD` calls
+    `startPrewarm()` AFTER the load+resume API returns, so prewarm races only the
+    guest's own faults (like fault-ahead). **Re-verified on the fleet: prewarm@32
+    now wakes cleanly AND collapses the tail — cold-cache p99 65ms → 128µs** (max
+    ~79ms from a few un-prewarmed chunks). The concurrency-hygiene fix (unique temp
+    per chunk-cache write, 6259fda) also stands. Fleet reverted to 98a7eaf (UFFD
+    off); test artifacts cleaned. **Net B3 result: prewarm works, and at adequate
+    concurrency (≥~32) it collapses the cold-wake fault tail ~500×.**
 - **B4 — cross-host wake.** The architectural piece: hibernated sandboxes are
   host-pinned today (reconcile skips them; port listeners re-bind on the owner).
   Make the state file + chunk manifest durable in GCS, let a *different* host
