@@ -264,11 +264,24 @@ order, each independently shippable + measurable):**
     per chunk-cache write, 6259fda) also stands. Fleet reverted to 98a7eaf (UFFD
     off); test artifacts cleaned. **Net B3 result: prewarm works, and at adequate
     concurrency (≥~32) it collapses the cold-wake fault tail ~500×.**
-- **B4 — cross-host wake.** The architectural piece: hibernated sandboxes are
+- **B4 — cross-host wake. DESIGN WRITTEN — see `docs/uffd-b4-design.md`
+  (awaiting review).** The architectural piece: hibernated sandboxes are
   host-pinned today (reconcile skips them; port listeners re-bind on the owner).
   Make the state file + chunk manifest durable in GCS, let a *different* host
   pull the state and serve mem via the GCS source, and extend gateway
   placement/routing to wake off-host. Do this LAST, once B2/B3 prove the source.
+  The design closes four durability gaps (device state, rootfs, registry record,
+  owner fence — mem is already chunked to GCS from B2), reuses the existing
+  clone-path wake (`wakeClone`) + `handleRestore`-shaped reconstruct-from-GCS,
+  and keeps the gateway stateless (resolve-on-miss dispatches an internal
+  `/adopt` to a live host). Proposed sub-order **B4a** durable record+state+
+  rootfs upload → **B4b** host-side adopt+wake + split-brain fence (gateway is
+  sole dispatcher + `hib/<id>/owner` epoch + reconcile-relinquish, optionally a
+  new `gcsblob` CAS) → **B4c** gateway resolve-on-miss + the cross-host A/B vs
+  File (the number that closes the roadmap thesis) → **B4d** GC (stretch). Four
+  open decisions flagged in the doc: off-host-wake scope (dead-host-only vs
+  rebalance), gateway↔GCS coupling, cold-boot/diff-freeze durability, and
+  whether to add `gcsblob` CAS. **Review the doc + decide those before B4a.**
 
 **Correctness gotchas locked in from Phase A (do not relearn the hard way):**
 - FC waits **forever** on an unserved fault → a GCS fetch that fails after

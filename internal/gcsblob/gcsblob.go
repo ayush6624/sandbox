@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -46,12 +47,18 @@ const (
 	sparseMagic   = "SBSPARSE"
 	sparseVersion = 1
 
-	metadataTokenURL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
-	storageBase      = "https://storage.googleapis.com/storage/v1"
-	uploadBase       = "https://storage.googleapis.com/upload/storage/v1"
+	metadataTokenURL   = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+	defaultStorageBase = "https://storage.googleapis.com/storage/v1"
+	defaultUploadBase  = "https://storage.googleapis.com/upload/storage/v1"
 
 	putAttempts = 3
 )
+
+// ErrPreconditionFailed is returned by PutBytesIfGenerationMatch when the
+// object's live generation no longer matches the one the caller expected —
+// another writer got there first. It is a definitive CAS loss, NOT a transient
+// error: callers re-read and re-decide, they must not blindly retry.
+var ErrPreconditionFailed = errors.New("gcs precondition failed (generation mismatch)")
 
 // Range is a [Off, Off+Len) byte range of a file to include in a diff upload.
 type Range struct {
@@ -63,6 +70,11 @@ type Range struct {
 type Client struct {
 	bucket string
 	hc     *http.Client
+	// storageBase/uploadBase are the JSON-API and upload endpoints. Fields (not
+	// the package consts) so tests can point the client at an httptest server;
+	// production leaves them at the GCS defaults.
+	storageBase string
+	uploadBase  string
 
 	mu     sync.Mutex
 	tok    string
@@ -71,7 +83,12 @@ type Client struct {
 
 // New returns a client for bucket. No network I/O happens until first use.
 func New(bucket string) *Client {
-	return &Client{bucket: bucket, hc: &http.Client{}}
+	return &Client{
+		bucket:      bucket,
+		hc:          &http.Client{},
+		storageBase: defaultStorageBase,
+		uploadBase:  defaultUploadBase,
+	}
 }
 
 // Bucket returns the bucket this client targets.
@@ -126,14 +143,14 @@ func (c *Client) newReq(ctx context.Context, method, rawURL string, body io.Read
 }
 
 func (c *Client) objectURL(object string) string {
-	return fmt.Sprintf("%s/b/%s/o/%s", storageBase, url.PathEscape(c.bucket), url.PathEscape(object))
+	return fmt.Sprintf("%s/b/%s/o/%s", c.storageBase, url.PathEscape(c.bucket), url.PathEscape(object))
 }
 
 // PutBytes uploads data as object, overwriting any existing object.
 func (c *Client) PutBytes(ctx context.Context, object string, data []byte) error {
 	return c.retry(ctx, func() error {
 		u := fmt.Sprintf("%s/b/%s/o?uploadType=media&name=%s",
-			uploadBase, url.PathEscape(c.bucket), url.QueryEscape(object))
+			c.uploadBase, url.PathEscape(c.bucket), url.QueryEscape(object))
 		req, err := c.newReq(ctx, "POST", u, bytes.NewReader(data))
 		if err != nil {
 			return err
@@ -149,6 +166,100 @@ func (c *Client) PutBytes(ctx context.Context, object string, data []byte) error
 		}
 		return nil
 	})
+}
+
+// GetBytesGen downloads object and returns its live GCS generation alongside the
+// bytes, so a caller can CAS-update it with PutBytesIfGenerationMatch. A missing
+// object is ErrNotExist with gen 0 (feed that 0 to a create-only put). Unlike
+// GetBytes this is a single attempt: it's used to read-then-CAS a small control
+// object (the owner fence), where a stale read just loses the CAS and retries.
+func (c *Client) GetBytesGen(ctx context.Context, object string) ([]byte, int64, error) {
+	req, err := c.newReq(ctx, "GET", c.objectURL(object)+"?alt=media", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer drainClose(resp)
+	switch resp.StatusCode {
+	case 200:
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, 0, err
+		}
+		gen, _ := strconv.ParseInt(resp.Header.Get("X-Goog-Generation"), 10, 64)
+		return b, gen, nil
+	case 404:
+		return nil, 0, ErrNotExist
+	default:
+		return nil, 0, fmt.Errorf("download %s: HTTP %d", object, resp.StatusCode)
+	}
+}
+
+// PutBytesIfGenerationMatch uploads data as object only if the object's live
+// generation equals gen. Pass gen=0 to create-only (succeed iff the object does
+// NOT yet exist). On success it returns the new generation. On a lost race —
+// the object's generation moved since gen was read — it returns
+// ErrPreconditionFailed (a 412 from GCS), which is NOT retried: the whole point
+// is that exactly one concurrent writer wins. This is the compare-and-swap the
+// cross-host ownership fence is built on (roadmap B4).
+//
+// Transient failures (5xx, network) ARE retried, like PutBytes; only the 412
+// precondition result is terminal.
+func (c *Client) PutBytesIfGenerationMatch(ctx context.Context, object string, data []byte, gen int64) (int64, error) {
+	u := fmt.Sprintf("%s/b/%s/o?uploadType=media&name=%s&ifGenerationMatch=%d",
+		c.uploadBase, url.PathEscape(c.bucket), url.QueryEscape(object), gen)
+	// Own retry loop (not the shared retry()) because a 412 is terminal: spinning
+	// on a lost CAS would waste putAttempts sleeps and could mask a concurrent
+	// winner's write. Retry only transient failures (5xx / network / build).
+	var lastErr error
+	for i := 0; i < putAttempts; i++ {
+		req, err := c.newReq(ctx, "POST", u, bytes.NewReader(data))
+		if err != nil {
+			lastErr = err
+		} else if resp, derr := c.hc.Do(req); derr != nil {
+			lastErr = derr
+		} else {
+			gen, err := c.parseCASResponse(object, resp)
+			if err == nil {
+				return gen, nil
+			}
+			if errors.Is(err, ErrPreconditionFailed) {
+				return 0, err // terminal: someone else won
+			}
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, lastErr
+		case <-time.After(time.Duration(i+1) * time.Second):
+		}
+	}
+	return 0, lastErr
+}
+
+// parseCASResponse maps a CAS upload response to (new generation, err): 200 →
+// the object's fresh generation, 412 → ErrPreconditionFailed (terminal), any
+// other status → a retryable error. It drains+closes resp.
+func (c *Client) parseCASResponse(object string, resp *http.Response) (int64, error) {
+	defer drainClose(resp)
+	switch resp.StatusCode {
+	case 200:
+		var meta struct {
+			Generation string `json:"generation"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+			return 0, fmt.Errorf("decode cas upload response for %s: %w", object, err)
+		}
+		gen, _ := strconv.ParseInt(meta.Generation, 10, 64)
+		return gen, nil
+	case http.StatusPreconditionFailed:
+		return 0, ErrPreconditionFailed
+	default:
+		return 0, fmt.Errorf("cas upload %s: HTTP %d", object, resp.StatusCode)
+	}
 }
 
 // GetBytes downloads object. Returns ErrNotExist for a missing object.
@@ -255,7 +366,7 @@ func (c *Client) putRanges(ctx context.Context, object string, f *os.File, range
 			pw.CloseWithError(encodeSparse(pw, f, fi.Size(), ranges))
 		}()
 		u := fmt.Sprintf("%s/b/%s/o?uploadType=media&name=%s",
-			uploadBase, url.PathEscape(c.bucket), url.QueryEscape(object))
+			c.uploadBase, url.PathEscape(c.bucket), url.QueryEscape(object))
 		req, err := c.newReq(ctx, "POST", u, pr)
 		if err != nil {
 			pr.Close()
