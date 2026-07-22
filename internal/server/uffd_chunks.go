@@ -201,19 +201,17 @@ func (s *Server) markChunkUploaded(hash string) {
 	s.chunkUpMu.Unlock()
 }
 
-// uploadHibChunks chunks a full hibernation mem image and ships the missing
-// chunks + the manifest to GCS in the background (manifest last, as the commit
-// marker). Failures log and leave the sandbox host-local-only — local wake still
-// works — so this is purely additive durability.
-func (s *Server) uploadHibChunks(id, memPath string, chunkSz uint64, workingSet []uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
-	defer cancel()
+// uploadMemChunks chunks a FULL hibernation mem image and ships the missing
+// chunks + the manifest to GCS (manifest last, as the commit marker). Returns an
+// error so the durable-hibernation orchestrator (uploadHibernation) can abort the
+// record before writing its commit marker; a failure still leaves the sandbox
+// host-local-wakeable, so durability is purely additive.
+func (s *Server) uploadMemChunks(ctx context.Context, id, memPath string, chunkSz uint64, workingSet []uint64) error {
 	t0 := time.Now()
 
 	m, comp, err := buildChunkManifest(memPath, chunkSz)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] chunk upload aborted: build manifest: %v\n", id, err)
-		return
+		return fmt.Errorf("build manifest: %w", err)
 	}
 	// Persist the recorded working set (chunk indices the guest faulted last wake)
 	// so the next wake can prewarm it. Uploaded before the manifest; a missing/
@@ -233,8 +231,7 @@ func (s *Server) uploadHibChunks(id, memPath string, chunkSz uint64, workingSet 
 			continue
 		}
 		if err := s.blob.PutBytes(ctx, chunkObj(hash), gz); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] chunk upload aborted at %s: %v\n", id, hash[:12], err)
-			return
+			return fmt.Errorf("upload chunk %s: %w", hash[:12], err)
 		}
 		s.markChunkUploaded(hash)
 		uploaded++
@@ -245,11 +242,11 @@ func (s *Server) uploadHibChunks(id, memPath string, chunkSz uint64, workingSet 
 		err = s.blob.PutBytes(ctx, hibManifestObj(id), meta)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] chunk upload: write manifest: %v\n", id, err)
-		return
+		return fmt.Errorf("write manifest: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[%s] chunk-uploaded to gs://%s: %d chunks (%d new, %d deduped) %dMiB in %s\n",
 		id, s.blob.Bucket(), len(m.Chunks), uploaded, skipped, upBytes>>20, time.Since(t0).Round(time.Millisecond))
+	return nil
 }
 
 // fetchChunkManifest pulls the chunk manifest for a hibernated sandbox. Absent

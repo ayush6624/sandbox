@@ -278,10 +278,30 @@ order, each independently shippable + measurable):**
   rootfs upload → **B4b** host-side adopt+wake + split-brain fence (gateway is
   sole dispatcher + `hib/<id>/owner` epoch + reconcile-relinquish, optionally a
   new `gcsblob` CAS) → **B4c** gateway resolve-on-miss + the cross-host A/B vs
-  File (the number that closes the roadmap thesis) → **B4d** GC (stretch). Four
-  open decisions flagged in the doc: off-host-wake scope (dead-host-only vs
-  rebalance), gateway↔GCS coupling, cold-boot/diff-freeze durability, and
-  whether to add `gcsblob` CAS. **Review the doc + decide those before B4a.**
+  File (the number that closes the roadmap thesis) → **B4d** GC (stretch).
+  Four decisions resolved 2026-07-22 (recorded in the doc): off-host wake covers
+  **dead-host recovery AND drain/rebalance**; the **gateway stays GCS-free**;
+  **diff freezes are cross-host wakeable too** (far host rebases onto the golden
+  base); **add `gcsblob` CAS** for the owner fence.
+  - **B4a — durable upload + CAS. SHIPPED (unit-tested; not yet fleet-verified —
+    nothing reads it until B4b).** `gcsblob.PutBytesIfGenerationMatch` +
+    `GetBytesGen` + `ErrPreconditionFailed` (create-if-absent via gen=0,
+    generation-match update; 412 terminal via its own retry loop; base URLs made
+    overridable → unit-tested against an httptest fake GCS). Durable record
+    upload (`internal/server/hib_durable.go`): a freeze now also ships
+    `hib/<id>/state.sz`, `hib/<id>/rootfs.sz` (diff extents vs the golden base
+    when base-derived+durable, else full-sparse), `hib/<id>/mem.diff.sz` (diff
+    freezes; full-freeze mem still chunks via B2), and `hib/<id>/record.json`
+    LAST as the commit marker — for BOTH full and diff freezes (was full-only).
+    `uploadHibChunks` refactored to a ctx-taking, error-returning
+    `uploadMemChunks` the orchestrator composes. Gated on the existing
+    `uffd_chunk_gcs`. Pure record builder + CAS unit-tested; darwin tests + vet +
+    linux cross-build green.
+  - **B4b — host-side adopt/release + fence. NEXT.** `POST /sandboxes/{id}/adopt`
+    (reconstruct-from-GCS → clone-wake, or reconstruct-as-hibernated for a
+    drain), `POST /sandboxes/{id}/release`, the owner-fence CAS, and reconcile/
+    registration relinquish-on-stale-fence. Then B4c (gateway resolve-on-miss +
+    drain + the cross-host A/B vs File).
 
 **Correctness gotchas locked in from Phase A (do not relearn the hard way):**
 - FC waits **forever** on an unserved fault → a GCS fetch that fails after

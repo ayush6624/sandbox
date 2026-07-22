@@ -293,12 +293,15 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	fmt.Fprintf(os.Stderr, "[%s] hibernated in %s (idle sandbox frozen, slot freed)\n",
 		id, time.Since(t0).Round(time.Millisecond))
 
-	// Ship the full mem image to GCS as content-addressed chunks so a wake (this
-	// host or, later, another) can fault it in lazily. Background + best-effort:
-	// failure leaves the sandbox wakeable locally. Only FULL freezes — a diff mem
-	// file holds just dirty pages, so chunking it would misencode the base pages.
-	if s.cfg.UFFDChunkGCS && s.blob != nil && snapType == vm.SnapshotFull {
-		go s.uploadHibChunks(id, memPath, roundChunkSize(s.cfg.UFFDChunkBytes), workingSet)
+	// Make the frozen sandbox durable in GCS so a wake — this host, or (roadmap
+	// B4) a different one — can reconstruct and page it in. Background +
+	// best-effort: a failure leaves the sandbox wakeable locally. Both freeze
+	// forms are made durable: a full freeze's mem ships as content-addressed
+	// chunks (lazy fault-in), a diff freeze's mem ships as a sparse overlay that
+	// the far host rebases onto the durable golden base. diffBaseID is the golden
+	// a diff mem/rootfs rebases onto ("" for a full freeze).
+	if s.cfg.UFFDChunkGCS && s.blob != nil {
+		go s.uploadHibernation(id, sb, memPath, statePath, snapType, diffBaseID, workingSet)
 	}
 	return nil
 }
