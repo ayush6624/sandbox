@@ -223,13 +223,23 @@ order, each independently shippable + measurable):**
     (`serving:1 / exiting:1`, was 0), and a local-mem UFFD wake histogram read
     `faults=9050 p50≤2µs p99≤2µs max=28µs` (confirms local UFFD faults are sub-µs
     page-cache-warm reads). A running summary every 512 faults (27b9cc3) is kept too.
-- **B3 — working-set prewarm, done right.** The Phase A attempt failed because
-  the hibernate snapshot faults the WHOLE guest through the handler, polluting
-  the recorded set. Fix: add a **seal-recording-before-snapshot** signal from
-  `hibernate()` into the handler (stop recording once `Pause`+`Snapshot` begin),
-  so the set is only guest-execution faults. Then bulk-prefetch that set (over
-  chunks, pipelined) before/around resume. Reuse the parked bitset code from
-  git history (commit eda7f63).
+- **B3 — working-set prewarm, done right. SHIPPED (commit 4e9b424); fleet A/B
+  pending.** Done chunk-granular (not the parked page bitset — the payoff is the
+  GCS chunk source): `chunkedSource` records the chunk indices the guest FAULTS
+  in `at()` (NOT the prefetch path — the working set is what the guest touched,
+  not what we speculated). The **seal** fixes the Phase A pollution bug:
+  `hibernate()` calls `vm.SealUFFDRecording(m)` BEFORE `Pause`+`Snapshot`, so the
+  snapshot's whole-guest read doesn't get recorded, and captures
+  `vm.UFFDWorkingSet(m)`; the chunk upload persists it to
+  `hib/<id>/workingset.json`. On the next chunk wake, `gcsChunkSource` fetches it
+  into `UFFDChunkSource.Prewarm` and `newChunkedSource` spawns ≤`prefetch` bounded
+  workers that bulk-fetch those chunks in the background as the guest resumes —
+  cold fault-storm → warm cache. `recordingSource` is an optional interface
+  (localSource no-ops). Unit-tested (record/seal/dedup/prefetch-exclusion +
+  background prewarm), both platforms green. **Pending: fleet A/B** — cold wake
+  WITH prewarm vs the B2c number (p99 ≤65ms without it): prewarm should collapse
+  the tail because the working-set chunks are fetched concurrently up front
+  instead of one-RTT-at-a-time on the fault path.
 - **B4 — cross-host wake.** The architectural piece: hibernated sandboxes are
   host-pinned today (reconcile skips them; port listeners re-bind on the owner).
   Make the state file + chunk manifest durable in GCS, let a *different* host
