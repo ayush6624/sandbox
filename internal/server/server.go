@@ -60,8 +60,16 @@ type Config struct {
 	UFFDRestore bool
 	// UFFDChunkBytes selects the UFFD page source: 0 = whole-file mmap, >0 = lazy
 	// per-chunk reads of that size through a chunk cache (roadmap Phase B1). See
-	// config.UFFDChunkKiB and vm.RunOptions.UFFDChunkBytes.
+	// config.UFFDChunkKiB and vm.RunOptions.UFFDChunkBytes. Also the chunk size
+	// used for GCS chunk upload/fetch when UFFDChunkGCS is on (0 → 2 MiB default).
 	UFFDChunkBytes uint64
+	// UFFDChunkGCS backs UFFD faults with GCS-resident chunks (roadmap Phase B2):
+	// full hibernation freezes upload chunks+manifest, same-identity wakes fault
+	// lazily from local cache → GCS. Needs a snapshot bucket. See config.UFFDChunkGCS.
+	UFFDChunkGCS bool
+	// UFFDChunkPrefetch is the chunk-level fault-ahead window for the GCS source
+	// (0 → 4). See config.UFFDChunkPrefetch.
+	UFFDChunkPrefetch int
 	// SnapshotBucket enables GCS snapshot durability: user snapshots upload
 	// in the background and restore/fanout pull missing snapshots down from
 	// the bucket, so any host can serve them. Empty = host-local only.
@@ -97,6 +105,11 @@ type Server struct {
 	// pullMu/pulls serialize concurrent GCS pulls of the same snapshot id.
 	pullMu sync.Mutex
 	pulls  map[string]*sync.Mutex
+	// chunkUpMu/chunksUploaded remember content-addressed chunks this process has
+	// already pushed, so re-hibernations skip re-uploading unchanged chunks
+	// without an Exists round-trip each (roadmap Phase B2 dedup/CoW).
+	chunkUpMu      sync.Mutex
+	chunksUploaded map[string]bool
 
 	// act tracks per-sandbox API activity for idle hibernation; wakesMu/wakes
 	// serialize hibernate/wake/destroy per sandbox id.
@@ -145,7 +158,7 @@ const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
-		act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
+		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
 	sem := cfg.CreateConcurrency
 	if sem <= 0 {
 		sem = 2 * runtime.NumCPU()

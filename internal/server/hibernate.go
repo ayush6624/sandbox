@@ -285,6 +285,14 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	s.act.forget(id)
 	fmt.Fprintf(os.Stderr, "[%s] hibernated in %s (idle sandbox frozen, slot freed)\n",
 		id, time.Since(t0).Round(time.Millisecond))
+
+	// Ship the full mem image to GCS as content-addressed chunks so a wake (this
+	// host or, later, another) can fault it in lazily. Background + best-effort:
+	// failure leaves the sandbox wakeable locally. Only FULL freezes — a diff mem
+	// file holds just dirty pages, so chunking it would misencode the base pages.
+	if s.cfg.UFFDChunkGCS && s.blob != nil && snapType == vm.SnapshotFull {
+		go s.uploadHibChunks(id, memPath, roundChunkSize(s.cfg.UFFDChunkBytes))
+	}
 	return nil
 }
 
@@ -398,6 +406,16 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 	opts.RootfsPath = sb.RootfsPath
 	opts.SocketPath = ""
 	opts.UFFDChunkBytes = s.cfg.UFFDChunkBytes
+	// Prefer the GCS chunk source when enabled and a manifest exists: the guest
+	// faults its RAM in from local-cache → GCS, so wake I/O tracks the working set
+	// (and works off-host). Falls back to the local mem file otherwise.
+	if s.cfg.UFFDRestore && s.cfg.UFFDChunkGCS {
+		if cs := s.gcsChunkSource(ctx, sb.ID); cs != nil {
+			opts.UFFDChunks = cs
+		} else {
+			fmt.Fprintf(os.Stderr, "[%s] wake: no GCS chunk manifest, using local mem\n", sb.ID)
+		}
+	}
 	var (
 		m   *vm.Machine
 		rt  vm.RuntimeConfig

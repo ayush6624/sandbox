@@ -217,6 +217,20 @@ func newLocalChunkedSource(memPath string, chunkBytes uint64) (*chunkedSource, e
 	return newChunkedSource(total, chunkSz, 0, load, f.Close), nil // local: no prefetch
 }
 
+// buildUFFDSource picks the page source for a UFFD restore from the run options:
+// an externally supplied chunk source (GCS, roadmap B2) wins; else a local
+// chunked source if a chunk size is set (B1); else the whole-file mmap (default).
+func buildUFFDSource(opts RunOptions, memPath string) (pageSource, error) {
+	if c := opts.UFFDChunks; c != nil {
+		// Injected loader (server's GCS fetch); no local backing store to close.
+		return newChunkedSource(c.Total, c.ChunkSize, c.Prefetch, c.Load, nil), nil
+	}
+	if opts.UFFDChunkBytes > 0 {
+		return newLocalChunkedSource(memPath, opts.UFFDChunkBytes)
+	}
+	return newLocalSource(memPath)
+}
+
 // at returns a zero-copy subslice of the chunk containing off, clamped to the
 // chunk's end (a straddling run returns short; the tail refaults into the next
 // chunk). Overflow-safe: off ≥ total returns nil before any arithmetic. After

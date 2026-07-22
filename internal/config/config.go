@@ -79,6 +79,21 @@ type Config struct {
 	// (GCS) memory source will reuse for cross-host wake (roadmap Phase B). Rounded
 	// down to a 4 KiB multiple, floored at one page. Typical: 1024 or 2048.
 	UFFDChunkKiB int `json:"uffd_chunk_kib"`
+	// UFFDChunkGCS turns the chunk source into a GCS-backed remote memory source
+	// (roadmap Phase B2), requires a snapshot bucket and UFFDRestore. When on: a
+	// FULL hibernation freeze uploads its mem image as content-addressed,
+	// gzip-compressed chunks + a manifest to the bucket (dedup: unchanged chunks
+	// are skipped), and a same-identity wake faults pages lazily from a local
+	// chunk cache → GCS instead of the local mem file — so wake I/O tracks the
+	// working set, not the whole guest, and works even off the creating host. Off
+	// = local mem file (whole-file or local-chunk per UFFDChunkKiB). Diff freezes
+	// are not chunk-uploaded (they hold only dirty pages); those wake locally.
+	UFFDChunkGCS bool `json:"uffd_chunk_gcs"`
+	// UFFDChunkPrefetch is the chunk-level fault-ahead window for the GCS source:
+	// on a fault it kicks off background fetches of the next N chunks to hide the
+	// per-chunk RTT behind sequential access. 0 = default (4). Ignored unless
+	// UFFDChunkGCS is on.
+	UFFDChunkPrefetch int `json:"uffd_chunk_prefetch"`
 	// MemBudgetMIB caps the SUM of committed guest memory (each running
 	// sandbox's effective mem_mib + per-VM firecracker overhead) so mem_mib
 	// overrides can't oversubscribe the host past its cgroup/RAM — admission

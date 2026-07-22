@@ -480,10 +480,16 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	vmID := uuid.NewString()
 	uffdSock := opts.SocketPath + ".uffd"
 
-	// The handler must be listening before the load call — Firecracker dials it
-	// during LoadSnapshot to hand over the uffd.
-	h, err := startUffdHandler(uffdSock, memPath, opts.UFFDChunkBytes)
+	// Build the page source (local mmap, local chunks, or an injected GCS chunk
+	// source), then start the handler listening before the load call — Firecracker
+	// dials it during LoadSnapshot to hand over the uffd.
+	src, err := buildUFFDSource(opts, memPath)
 	if err != nil {
+		return nil, RuntimeConfig{}, fmt.Errorf("build uffd source: %w", err)
+	}
+	h, err := startUffdHandler(uffdSock, src)
+	if err != nil {
+		_ = src.close()
 		return nil, RuntimeConfig{}, fmt.Errorf("start uffd handler: %w", err)
 	}
 	defer func() {

@@ -179,9 +179,25 @@ order, each independently shippable + measurable):**
     down) instead of hanging forever on an unserved page. Unit-tested (race-clean):
     single-flight load-count, prefetch-window warming + close-drain, `fatalOnce`
     once-semantics.
-  - **Next: B2b** — hibernate chunk upload (gzip, content-hash dedup/CoW, all-zero
-    sentinel) + GCS `load` (local cache → `GetBytes` → decompress) + manifest; then
-    **B2c** cache-dropped p99 measurement.
+  - **B2b SHIPPED** (hibernate upload + GCS fetch + dedup): new
+    `internal/server/uffd_chunks.go`. A **full** hibernation freeze background-uploads
+    its mem image as gzip, content-addressed `chunks/<sha256>` (dedup via a process
+    known-set + `Exists`; all-zero chunks are a never-stored sentinel) + a positional
+    `hib/<id>/manifest.json` written last as the commit marker. A same-identity wake
+    with `uffd_chunk_gcs` on builds a `vm.UFFDChunkSource` from the manifest whose
+    `Load` = local chunk cache (decompressed, content-addressed, under `SnapshotDir`)
+    → GCS `GetBytes` → gunzip → write-through, feeding B2a's prefetch/single-flight/
+    kill-on-fault. Falls back to the local mem file when no manifest (diff freezes
+    aren't chunked — they hold only dirty pages). Config: `uffd_chunk_gcs`,
+    `uffd_chunk_prefetch` (→4), chunk size from `uffd_chunk_kib` (→2 MiB). vm stays
+    free of gcsblob: source is injected via `RunOptions.UFFDChunks`; `startUffdHandler`
+    now takes a pre-built `pageSource` (`buildUFFDSource` picks GCS/local-chunk/mmap).
+    Unit-tested (race-clean): manifest build (geometry, zero sentinel, dedup, short
+    tail), gzip round-trip, `newChunkLoad` (cache write-through + warm hit + zero +
+    error-propagation + past-end) with a fake fetcher, `roundChunkSize`.
+  - **Next: B2c** — cache-dropped-wake **p99** vs File on the fleet (needs a
+    deployed host + bucket; can't run from the laptop). Add a per-fault latency
+    histogram to the handler first. This is the number that proves UFFD > File.
 - **B3 — working-set prewarm, done right.** The Phase A attempt failed because
   the hibernate snapshot faults the WHOLE guest through the handler, polluting
   the recorded set. Fix: add a **seal-recording-before-snapshot** signal from

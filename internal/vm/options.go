@@ -30,8 +30,26 @@ type RunOptions struct {
 	// (RestoreUFFD): 0 = whole-file mmap (localSource, the default), >0 = read the
 	// mem file in fixed chunks of this many bytes on demand (chunkedSource — the
 	// indexing/cache a remote GCS source will reuse; roadmap Phase B1). Ignored
-	// off the UFFD path.
+	// off the UFFD path, and superseded by UFFDChunks when that is set.
 	UFFDChunkBytes uint64
+
+	// UFFDChunks, when non-nil, serves the UFFD restore from this externally
+	// supplied chunk source (the server's GCS-backed loader; roadmap Phase B2)
+	// instead of the local mem file. Its Load is called on each chunk fault.
+	UFFDChunks *UFFDChunkSource
+}
+
+// UFFDChunkSource describes a chunked UFFD page source whose chunk bytes come
+// from an injected loader — the seam that lets the server back UFFD faults with
+// GCS-resident chunks without the vm package importing gcsblob. Total/ChunkSize
+// come from the chunk manifest; Prefetch is the chunk-level fault-ahead window;
+// Load returns the decompressed bytes of chunk idx (nil past the image, error =
+// unservable fault → the VM is killed).
+type UFFDChunkSource struct {
+	Total     uint64
+	ChunkSize uint64
+	Prefetch  uint64
+	Load      func(idx uint64) ([]byte, error)
 }
 
 // RuntimeConfig captures identifiers after the SDK config is built.
