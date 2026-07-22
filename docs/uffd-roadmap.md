@@ -236,10 +236,27 @@ order, each independently shippable + measurable):**
   workers that bulk-fetch those chunks in the background as the guest resumes —
   cold fault-storm → warm cache. `recordingSource` is an optional interface
   (localSource no-ops). Unit-tested (record/seal/dedup/prefetch-exclusion +
-  background prewarm), both platforms green. **Pending: fleet A/B** — cold wake
-  WITH prewarm vs the B2c number (p99 ≤65ms without it): prewarm should collapse
-  the tail because the working-set chunks are fetched concurrently up front
-  instead of one-RTT-at-a-time on the fault path.
+  background prewarm), both platforms green.
+  - **Fleet A/B (2026-07-22): prewarm CONFIRMED to help; tail-collapse needs more
+    concurrency (which has an OPEN crash).** Same sandbox, two cold-local-chunk-
+    cache wakes (chunk cache `rm`'d between them so prewarm is the only warming):
+    baseline (no working set yet) `faults=512 mean=2753µs p99≤65ms max=104ms`, wake
+    **1.709s**; WITH prewarm @`prefetch=4` `faults=512 mean=1294µs max=82ms`, wake
+    **1.198s** — **~30% faster wake, ~2× lower mean fault latency.** But **p99
+    stayed in the ≤65ms bucket**: 4 prewarm workers can't warm the 78-chunk working
+    set before the guest faults its tail. The set recorded correctly (78 chunks;
+    seal excluded the snapshot fault-in — Phase A bug fixed) and the teardown fix
+    held.
+  - **OPEN BUG: `uffd_chunk_prefetch=32` reliably crashes the wake.** Bumped
+    prefetch to warm the tail faster; every wake then died at exactly `faults=7`,
+    FC exiting on its own (NOT our kill-on-fault, no handler panic), both cold and
+    warm cache — deterministic, not latency/starvation. Root cause UNDIAGNOSED
+    (reverted the fleet before capturing `firecracker-<vmid>.log`; served bytes come
+    from the in-memory cache not the disk file, so it's not the temp-file race).
+    Default `prefetch=4` is safe. Next time: reproduce at prefetch 16/32 and read
+    the FC crash log FIRST. A concurrency-hygiene fix landed alongside (unique temp
+    file per chunk-cache write) but is NOT this crash. Fleet reverted to 98a7eaf
+    (UFFD off); test artifacts cleaned.
 - **B4 — cross-host wake.** The architectural piece: hibernated sandboxes are
   host-pinned today (reconcile skips them; port listeners re-bind on the owner).
   Make the state file + chunk manifest durable in GCS, let a *different* host
