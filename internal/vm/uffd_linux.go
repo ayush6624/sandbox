@@ -330,3 +330,12 @@ func (h *uffdHandler) workingSet() []uint64 {
 	}
 	return nil
 }
+
+// startPrewarm launches background working-set prewarm on the source (no-op
+// unless it's a prewarmStarter). Called by RestoreUFFD AFTER resume so prewarm
+// concurrency never overlaps FC's resume-time virtio-ring reads.
+func (h *uffdHandler) startPrewarm() {
+	if p, ok := h.src.(prewarmStarter); ok {
+		p.startPrewarm()
+	}
+}

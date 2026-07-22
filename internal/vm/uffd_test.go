@@ -483,6 +483,9 @@ func TestChunkedSourcePrewarmSet(t *testing.T) {
 	}
 	cs := newChunkedSource(chunkSz*20, chunkSz, 3, load, nil, []uint64{1, 3, 7})
 	defer cs.close()
+	// Prewarm no longer runs in the constructor (that raced FC's resume); it's
+	// launched explicitly post-resume.
+	cs.startPrewarm()
 
 	deadline := time.Now().Add(time.Second)
 	for {

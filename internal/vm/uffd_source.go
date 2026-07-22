@@ -52,6 +52,11 @@ type recordingSource interface {
 	workingSet() []uint64 // chunk indices the guest faulted, sorted
 }
 
+// prewarmStarter is a pageSource that can bulk-fetch a persisted working set on
+// demand (chunkedSource). The handler triggers it AFTER resume — never during —
+// so prewarm concurrency can't corrupt FC's resume-time virtio-ring reads.
+type prewarmStarter interface{ startPrewarm() }
+
 // localSource serves faults from a read-only mmap of the whole local mem file,
 // straight out of the page cache — so a guest page fault reads the backing file
 // page only if it isn't already resident. This is the original (and default)
@@ -165,9 +170,10 @@ type chunkedSource struct {
 	// of fault-storming GCS one chunk at a time. recording is switched off by
 	// seal() just before the hibernate snapshot, whose whole-guest read would
 	// otherwise pollute the set with every chunk (the Phase A bug).
-	recording atomic.Bool
-	touchedMu sync.Mutex
-	touched   map[uint64]struct{}
+	recording  atomic.Bool
+	touchedMu  sync.Mutex
+	touched    map[uint64]struct{}
+	prewarmIdx []uint64 // last wake's working set, launched by startPrewarm() post-resume
 }
 
 // chunkLoad is one in-flight chunk load, shared by every caller that races for
@@ -196,10 +202,15 @@ func newChunkedSource(total, chunkSz, prefetch uint64, load func(uint64) ([]byte
 		touched:  make(map[uint64]struct{}),
 	}
 	cs.recording.Store(true)
+	cs.prewarmIdx = prewarm
 	if prefetch > 0 {
 		cs.sem = make(chan struct{}, prefetch)
 	}
-	cs.prewarm(prewarm)
+	// NB: prewarm is NOT launched here. It must start only AFTER Firecracker's
+	// resume completes — running 32 concurrent chunk fetches during resume's
+	// "artificially kick devices" step corrupted the virtio-ring page reads and
+	// panicked FC ("available virtio descriptors N > queue size 256"). RestoreUFFD
+	// calls startPrewarm() after the load+resume API call returns. See roadmap B3.
 	return cs
 }
 
@@ -398,14 +409,19 @@ func (cs *chunkedSource) workingSet() []uint64 {
 	return out
 }
 
-// prewarm bulk-fetches last wake's working-set chunks in the background so the
-// guest's fault storm hits a warm cache instead of paying a per-chunk GCS RTT
+// startPrewarm bulk-fetches last wake's working-set chunks in the background so
+// the guest's fault storm hits a warm cache instead of paying a per-chunk GCS RTT
 // serially. It spawns up to `prefetch` dedicated workers that drain the index
 // list through chunk() (single-flight + cache), so the whole set is covered at
-// bounded concurrency without ever blocking the caller (the constructor, on the
-// wake path). Best-effort: fetch errors are dropped (the real fault re-loads and
-// escalates); close() drains the workers via wg.
-func (cs *chunkedSource) prewarm(indices []uint64) {
+// bounded concurrency without ever blocking the caller. Best-effort: fetch errors
+// are dropped (the real fault re-loads and escalates); close() drains the workers
+// via wg.
+//
+// MUST be called only AFTER Firecracker's resume completes — never during the
+// resume/device-kick window, where concurrent chunk fetches corrupted the
+// virtio-ring reads and panicked FC. RestoreUFFD invokes it post-resume.
+func (cs *chunkedSource) startPrewarm() {
+	indices := cs.prewarmIdx
 	if len(indices) == 0 || cs.prefetch == 0 {
 		return // nothing to prewarm, or no worker pool (local source)
 	}

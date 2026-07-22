@@ -561,6 +561,12 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	if err = fcAPI(ctx, client, "PUT", "/snapshot/load", load); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("load snapshot (uffd): %w", err)
 	}
+	// Resume is done (the load call above resumed and kicked devices). Only NOW is
+	// it safe to launch working-set prewarm: doing it earlier put concurrent chunk
+	// fetches in flight during FC's resume-time virtio-ring reads and panicked FC
+	// at high concurrency (roadmap B3). Post-resume it races only the guest's own
+	// faults, exactly like fault-ahead prefetch (which is safe at high concurrency).
+	h.startPrewarm()
 	return &Machine{raw: rm, diffCapable: false}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
 }
 
