@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -42,7 +43,8 @@ type uffdHandler struct {
 	sockPath string
 	ln       *net.UnixListener
 	src      pageSource
-	fatal    fatalOnce // kills the VM if a fault can't be served (see below)
+	fatal    fatalOnce   // kills the VM if a fault can't be served (see below)
+	hist     latencyHist // per-fault source-fetch latency (logged at teardown)
 
 	closeOnce sync.Once // guards listener close + socket removal
 	srcOnce   sync.Once // guards src.close() (owned by the fault goroutine)
@@ -115,6 +117,7 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 	}
 
 	h.faultLoop(uffd, regions)
+	fmt.Fprintf(os.Stderr, "uffd: handler exiting: %s\n", h.hist.summary())
 }
 
 // faultLoop reads pagefault events off the uffd and copies each faulting page
@@ -191,7 +194,9 @@ func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
 // prewarm. The source clamps the run (short read → the tail refaults later) and
 // owns the bytes' lifetime for the duration of the copy.
 func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
+	t0 := time.Now()
 	buf, err := h.src.at(srcOff, length)
+	h.hist.record(time.Since(t0)) // source-fetch latency the faulting vCPU waited on
 	if err != nil {
 		// The source could not supply the page (after its own retries), so this
 		// fault is left UNSERVED and Firecracker would wait forever on it. Kill

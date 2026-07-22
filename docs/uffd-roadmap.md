@@ -195,9 +195,15 @@ order, each independently shippable + measurable):**
     Unit-tested (race-clean): manifest build (geometry, zero sentinel, dedup, short
     tail), gzip round-trip, `newChunkLoad` (cache write-through + warm hit + zero +
     error-propagation + past-end) with a fake fetcher, `roundChunkSize`.
-  - **Next: B2c** — cache-dropped-wake **p99** vs File on the fleet (needs a
-    deployed host + bucket; can't run from the laptop). Add a per-fault latency
-    histogram to the handler first. This is the number that proves UFFD > File.
+  - **B2c INSTRUMENTATION SHIPPED; measurement pending fleet.** Per-fault latency
+    histogram (`uffd_metrics.go`, `latencyHist` — lock-free log2-µs buckets, two
+    clock reads + atomic adds per fault) records the source-fetch latency the
+    faulting vCPU waits on (warm cache = fast, cold GCS fetch = the tail), logged
+    at handler teardown as `faults=… mean=… p50≤… p99≤… max=…`. Prefetch loads are
+    excluded (only the faulting thread's wait counts). The remaining B2c work is
+    the actual **cache-dropped-wake p99 vs File** run — needs a deployed host +
+    bucket; can't run from the laptop (tailnet VPC route unapproved — probe from
+    sandbox-control). This is the number that proves UFFD > File.
 - **B3 — working-set prewarm, done right.** The Phase A attempt failed because
   the hibernate snapshot faults the WHOLE guest through the handler, polluting
   the recorded set. Fix: add a **seal-recording-before-snapshot** signal from

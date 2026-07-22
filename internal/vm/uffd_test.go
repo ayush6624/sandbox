@@ -465,6 +465,41 @@ func TestFatalOnce(t *testing.T) {
 	}
 }
 
+// TestLatencyHist checks the histogram's count/mean/max and that the percentile
+// estimate lands in the right bucket for a skewed distribution (many fast faults,
+// a few slow ones — the shape a warm cache with cold-fetch tails produces).
+func TestLatencyHist(t *testing.T) {
+	var h latencyHist
+	// 95 fast faults at ~10µs, 5 slow at ~50ms (the slow tail is >1%, so p99
+	// must reach it; a single slow sample would be p100/max, not p99).
+	for i := 0; i < 95; i++ {
+		h.record(10 * time.Microsecond)
+	}
+	for i := 0; i < 5; i++ {
+		h.record(50 * time.Millisecond)
+	}
+
+	if got := h.count.Load(); got != 100 {
+		t.Fatalf("count = %d, want 100", got)
+	}
+	if got := h.maxUS.Load(); got != 50000 {
+		t.Fatalf("maxUS = %d, want 50000", got)
+	}
+	// p50 sits among the 10µs faults: bucket for 10µs is floor(log2 10)=3
+	// ([8,16)µs), upper edge 16.
+	if p50 := h.percentileUS(0.50); p50 != 16 {
+		t.Errorf("p50 = %dµs, want 16 (bucket ceiling for ~10µs)", p50)
+	}
+	// p99 must reach the slow tail: 50000µs → floor(log2 50000)=15 ([32768,65536)),
+	// upper edge 65536.
+	if p99 := h.percentileUS(0.99); p99 < 32768 {
+		t.Errorf("p99 = %dµs, want ≥32768 (should include the 50ms tail)", p99)
+	}
+	if h.summary() == "no faults served" {
+		t.Error("summary should report faults")
+	}
+}
+
 // TestLocalChunkedSource covers the file-backed loader end to end, including a
 // short last chunk and rounding a non-page-multiple chunk size down to 4 KiB.
 func TestLocalChunkedSource(t *testing.T) {
