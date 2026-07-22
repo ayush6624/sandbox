@@ -197,6 +197,12 @@ func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
 	t0 := time.Now()
 	buf, err := h.src.at(srcOff, length)
 	h.hist.record(time.Since(t0)) // source-fetch latency the faulting vCPU waited on
+	// Running summary every 512 faults: the teardown log depends on faultLoop
+	// exiting (POLLHUP), which isn't guaranteed on every FC teardown, so this
+	// surfaces p50/p99 during the wake itself.
+	if c := h.hist.count.Load(); c%512 == 0 {
+		fmt.Fprintf(os.Stderr, "uffd: fault progress: %s\n", h.hist.summary())
+	}
 	if err != nil {
 		// The source could not supply the page (after its own retries), so this
 		// fault is left UNSERVED and Firecracker would wait forever on it. Kill
