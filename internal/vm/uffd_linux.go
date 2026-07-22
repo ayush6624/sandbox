@@ -46,8 +46,17 @@ type uffdHandler struct {
 	fatal    fatalOnce   // kills the VM if a fault can't be served (see below)
 	hist     latencyHist // per-fault source-fetch latency (logged at teardown)
 
-	closeOnce sync.Once // guards listener close + socket removal
-	srcOnce   sync.Once // guards src.close() (owned by the fault goroutine)
+	// stopFD is an eventfd in faultLoop's poll set; close() signals it to make the
+	// loop exit deterministically when Firecracker goes away. We do NOT rely on the
+	// uffd delivering POLLHUP on FC exit — measured on the fleet, it does not fire
+	// reliably, so the loop hung and leaked the fault goroutine + the page-source
+	// mapping (a 1 GiB mmap for localSource) on every wake. FC's process exit IS
+	// reliably observed (cmd.Wait → close()), so that drives teardown instead.
+	stopFD int
+	stopMu sync.Mutex // serializes signalStop vs closeStop (no write-after-close)
+
+	closeOnce sync.Once // guards listener close + stop signal + socket removal
+	srcOnce   sync.Once // guards src.close() + stopFD close (owned by fault goroutine)
 }
 
 // startUffdHandler binds the handler socket and serves Firecracker's connection
@@ -60,7 +69,13 @@ func startUffdHandler(sockPath string, src pageSource) (*uffdHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen uffd socket: %w", err)
 	}
-	h := &uffdHandler{sockPath: sockPath, ln: ln, src: src}
+	efd, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+		return nil, fmt.Errorf("uffd stop eventfd: %w", err)
+	}
+	h := &uffdHandler{sockPath: sockPath, ln: ln, src: src, stopFD: efd}
 	go h.accept()
 	return h, nil
 }
@@ -103,9 +118,9 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 	uffd := fds[0]
 	defer unix.Close(uffd)
 	// Non-blocking + poll(): a blocking read does NOT reliably wake when
-	// Firecracker exits, so serve() would hang forever and its defers (working
-	// set persist, mem unmap) would never run. poll() reports POLLHUP on the
-	// uffd when FC's mm goes away, giving faultLoop a deterministic exit.
+	// Firecracker exits. poll() over the uffd plus the stop eventfd (signaled by
+	// close() on FC process-exit) gives faultLoop a deterministic exit — the uffd's
+	// own POLLHUP is unreliable on FC teardown (see the stopFD comment).
 	if err := unix.SetNonblock(uffd, true); err != nil {
 		fmt.Fprintf(os.Stderr, "uffd: set nonblock: %v\n", err)
 	}
@@ -138,17 +153,28 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 	// so a wrong assumption is diagnosable from the logs, not just a crash.
 	fmt.Fprintf(os.Stderr, "uffd: serving %d region(s): %+v\n", len(regions), regions)
 	buf := make([]byte, uffdMsgSize*16) // batch several events per read
-	pfd := []unix.PollFd{{Fd: int32(uffd), Events: unix.POLLIN}}
+	// Poll the uffd for faults AND the stop eventfd for teardown. The stop fd is
+	// the reliable exit (close() signals it on FC process-exit); the uffd's own
+	// POLLHUP is kept as a belt-and-suspenders secondary but is not depended on.
+	pfd := []unix.PollFd{
+		{Fd: int32(uffd), Events: unix.POLLIN},
+		{Fd: int32(h.stopFD), Events: unix.POLLIN},
+	}
 	for {
-		pfd[0].Revents = 0
+		pfd[0].Revents, pfd[1].Revents = 0, 0
 		if _, err := unix.Poll(pfd, -1); err != nil {
 			if err == unix.EINTR {
 				continue
 			}
 			return
 		}
-		// POLLHUP/POLLERR = Firecracker's mm is gone (VM exited). Stop, letting
-		// serve()'s defers persist the working set and unmap.
+		// Stop eventfd signaled by close() = Firecracker exited. Return so serve()
+		// logs the summary and releaseSource() unmaps — the fix for the leak.
+		if pfd[1].Revents&unix.POLLIN != 0 {
+			return
+		}
+		// POLLHUP/POLLERR = Firecracker's mm is gone (secondary signal; may not
+		// fire on every kernel/FC — hence the stop eventfd above).
 		if pfd[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
 			return
 		}
@@ -242,6 +268,7 @@ func (h *uffdHandler) close() {
 		return
 	}
 	h.closeOnce.Do(func() {
+		h.signalStop() // wake faultLoop's poll() so it exits and releaseSource runs
 		if h.ln != nil {
 			_ = h.ln.Close()
 		}
@@ -249,9 +276,32 @@ func (h *uffdHandler) close() {
 	})
 }
 
-// releaseSource closes the page source (unmap + file close for localSource).
-// Called only from the fault goroutine's defer, after serve() has returned — so
-// no page copy is in flight.
+// signalStop wakes faultLoop's poll() by writing the stop eventfd. Guarded by
+// stopMu against closeStop so it never writes a since-closed (possibly reused)
+// fd. Safe to call before faultLoop starts (the write just stays pending).
+func (h *uffdHandler) signalStop() {
+	h.stopMu.Lock()
+	defer h.stopMu.Unlock()
+	if h.stopFD >= 0 {
+		_, _ = unix.Write(h.stopFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+	}
+}
+
+// closeStop closes the stop eventfd. Called only from releaseSource (the fault
+// goroutine), after faultLoop has returned — so no poll or signalStop can still
+// be using it.
+func (h *uffdHandler) closeStop() {
+	h.stopMu.Lock()
+	defer h.stopMu.Unlock()
+	if h.stopFD >= 0 {
+		_ = unix.Close(h.stopFD)
+		h.stopFD = -1
+	}
+}
+
+// releaseSource closes the page source (unmap + file close for localSource) and
+// the stop eventfd. Called only from the fault goroutine's defer, after serve()
+// has returned — so no page copy is in flight and faultLoop is done polling.
 func (h *uffdHandler) releaseSource() {
 	h.srcOnce.Do(func() {
 		if h.src != nil {
@@ -259,5 +309,6 @@ func (h *uffdHandler) releaseSource() {
 				fmt.Fprintf(os.Stderr, "uffd: close page source: %v\n", err)
 			}
 		}
+		h.closeStop()
 	})
 }
