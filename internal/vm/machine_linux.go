@@ -502,6 +502,12 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
 	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), uffd: h}
+	// If the page source can't serve a fault (e.g. a GCS chunk fetch fails after
+	// retries), Firecracker would hang forever on the unserved page. Kill it
+	// instead: the wake fails cleanly and the sandbox stays hibernated for a
+	// retry. Set before LoadSnapshot (which is when FC connects and the fault
+	// goroutine starts), so the fault path always observes the callback.
+	h.fatal.set(func(error) { _ = cmd.Process.Kill() })
 	// When Firecracker exits, the uffd read fails and faultLoop returns on its
 	// own — but tear the handler down explicitly too, to unmap the mem file and
 	// remove the socket.

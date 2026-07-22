@@ -6,7 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestResolvePage(t *testing.T) {
@@ -314,7 +316,7 @@ func TestChunkedSourceIndexing(t *testing.T) {
 		}
 		return image[start : start+n], nil
 	}
-	cs := newChunkedSource(total, chunkSz, load, nil)
+	cs := newChunkedSource(total, chunkSz, 0, load, nil)
 
 	// A within-chunk run returns exactly the requested bytes.
 	if b, err := cs.at(100, 200); err != nil || !bytes.Equal(b, image[100:300]) {
@@ -352,9 +354,114 @@ func TestChunkedSourceIndexing(t *testing.T) {
 // unserved fault the handler must escalate, not swallow).
 func TestChunkedSourceLoadError(t *testing.T) {
 	boom := errors.New("fetch failed")
-	cs := newChunkedSource(1<<20, 4096, func(uint64) ([]byte, error) { return nil, boom }, nil)
+	cs := newChunkedSource(1<<20, 4096, 0, func(uint64) ([]byte, error) { return nil, boom }, nil)
 	if _, err := cs.at(0, 4096); !errors.Is(err, boom) {
 		t.Fatalf("at() err = %v, want %v", err, boom)
+	}
+}
+
+// TestChunkedSourceSingleFlight proves concurrent faults+prefetches for the same
+// chunk share one load (a slow network fetch runs at most once per chunk).
+func TestChunkedSourceSingleFlight(t *testing.T) {
+	const chunkSz = 4096
+	var mu sync.Mutex
+	loads := 0
+	release := make(chan struct{})
+	load := func(idx uint64) ([]byte, error) {
+		mu.Lock()
+		loads++
+		mu.Unlock()
+		<-release // hold the load open so all callers pile onto the one in-flight
+		return make([]byte, chunkSz), nil
+	}
+	cs := newChunkedSource(chunkSz*4, chunkSz, 0, load, nil)
+
+	const racers = 8
+	var wg sync.WaitGroup
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		go func() { defer wg.Done(); _, _ = cs.at(0, chunkSz) }()
+	}
+	// Give the racers time to converge on the single in-flight load, then release.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if loads != 1 {
+		t.Fatalf("load called %d times for one chunk, want 1 (single-flight)", loads)
+	}
+}
+
+// TestChunkedSourcePrefetch verifies a fault warms the next `prefetch` chunks in
+// the background and that close() drains those goroutines.
+func TestChunkedSourcePrefetch(t *testing.T) {
+	const chunkSz = 4096
+	const nChunks = 10
+	var mu sync.Mutex
+	loaded := map[uint64]bool{}
+	load := func(idx uint64) ([]byte, error) {
+		mu.Lock()
+		loaded[idx] = true
+		mu.Unlock()
+		return make([]byte, chunkSz), nil
+	}
+	cs := newChunkedSource(chunkSz*nChunks, chunkSz, 3, load, nil) // prefetch 3
+
+	if _, err := cs.at(0, chunkSz); err != nil { // fault chunk 0 → prefetch 1,2,3
+		t.Fatal(err)
+	}
+	// Prefetch is async; poll briefly for chunks 1..3 to warm.
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		got := loaded[1] && loaded[2] && loaded[3]
+		mu.Unlock()
+		if got || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := uint64(1); i <= 3; i++ {
+		if !loaded[i] {
+			t.Errorf("chunk %d was not prefetched", i)
+		}
+	}
+	if loaded[5] {
+		t.Error("chunk 5 prefetched but window was only 3")
+	}
+	// close() must return promptly (drains prefetch goroutines, no hang).
+	done := make(chan struct{})
+	go func() { _ = cs.close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("close() did not drain prefetch goroutines in time")
+	}
+}
+
+// TestFatalOnce pins the kill-once semantics the fault path relies on.
+func TestFatalOnce(t *testing.T) {
+	var f fatalOnce
+	// fire before set: no callback, reports not-fired.
+	if f.fire(errors.New("x")) {
+		t.Fatal("fire with no callback should report false")
+	}
+	calls := 0
+	f.set(func(error) { calls++ })
+	// The pre-set fire already marked it fired, so a real fire now won't run.
+	// Reset for a clean assertion of the once-semantics on a fresh instance.
+	var g fatalOnce
+	g.set(func(error) { calls++ })
+	if !g.fire(errors.New("boom")) {
+		t.Fatal("first fire should report true")
+	}
+	if g.fire(errors.New("again")) {
+		t.Fatal("second fire should report false (already fired)")
+	}
+	if calls != 1 {
+		t.Fatalf("callback ran %d times, want exactly 1", calls)
 	}
 }
 

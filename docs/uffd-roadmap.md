@@ -168,6 +168,20 @@ order, each independently shippable + measurable):**
   where UFFD beats File (File downloads/rebases the whole 1 GiB first). Blast
   radius stays inside `internal/server` + the new source; no `gcsblob` transport
   changes needed (per-chunk objects use existing `PutBytes`/`GetBytes`/`Exists`).
+  - **B2a SHIPPED** (read-path machinery + kill-on-fail, no network): `chunkedSource`
+    now single-flights `chunk(idx)` (a fault + any prefetches for the same index
+    share one in-flight `load()`), does chunk-level async prefetch of the next
+    `prefetch` chunks bounded by a semaphore (local sources set `prefetch=0` → no
+    goroutines, behaviour identical to B1), and `close()` drains outstanding
+    prefetches before releasing the store. Kill-on-fault gate landed: a `fatalOnce`
+    on `uffdHandler`, set in `RestoreUFFD` to SIGKILL Firecracker, fires when
+    `src.at()` errors — the guest stops cleanly (poll() sees POLLHUP, serve() tears
+    down) instead of hanging forever on an unserved page. Unit-tested (race-clean):
+    single-flight load-count, prefetch-window warming + close-drain, `fatalOnce`
+    once-semantics.
+  - **Next: B2b** — hibernate chunk upload (gzip, content-hash dedup/CoW, all-zero
+    sentinel) + GCS `load` (local cache → `GetBytes` → decompress) + manifest; then
+    **B2c** cache-dropped p99 measurement.
 - **B3 — working-set prewarm, done right.** The Phase A attempt failed because
   the hibernate snapshot faults the WHOLE guest through the handler, polluting
   the recorded set. Fix: add a **seal-recording-before-snapshot** signal from

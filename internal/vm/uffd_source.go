@@ -111,7 +111,7 @@ func (s *localSource) close() error {
 // two chunks (the tail refaults into the next chunk). This is the indexing +
 // cache + fault-over-chunks machinery B2's GCS source reuses unchanged: only
 // load() changes (local ReadAt → lazy per-chunk GCS fetch). See
-// docs/uffd-roadmap.md Phase B.
+// docs/uffd-roadmap.md Phase B and docs/uffd-b2-design.md.
 //
 // Correctness: chunkSz MUST be a multiple of the guest page size so a
 // boundary-clamped run stays a whole number of pages — UFFDIO_COPY requires a
@@ -121,30 +121,61 @@ func (s *localSource) close() error {
 // multiple; a hugepage (2 MiB) guest would need a 2 MiB-multiple chunk — not a
 // concern for the current 4 KiB-page fleet, but noted for when it is.
 //
-// B1 never evicts, so a cached chunk's backing array is stable for the VM's life,
+// Concurrency (B2a): load() may be slow (a GCS fetch), so chunk() single-flights
+// per index — a fault and any number of prefetches for the same chunk share one
+// in-flight load and its result. prefetch>0 makes a fault kick off background
+// loads of the next `prefetch` chunks (bounded by a semaphore) to hide the
+// per-chunk RTT behind sequential access; the fault thread only ever blocks on
+// its own chunk. Local sources set prefetch=0 (no RTT to hide → no goroutines,
+// behaviour identical to B1).
+//
+// No eviction yet: a cached chunk's backing array is stable for the VM's life,
 // satisfying the pageSource lifetime contract. Adding eviction later must not
-// free a chunk while a UFFDIO_COPY from it is in flight.
+// free a chunk while a UFFDIO_COPY from it is in flight. close() first stops new
+// prefetches and drains in-flight ones, so no background load touches the backing
+// store (or the cache) after it is released.
 type chunkedSource struct {
-	total   uint64                           // mem image size in bytes
-	chunkSz uint64                           // fixed chunk size (last chunk may be short)
-	load    func(idx uint64) ([]byte, error) // materialize chunk idx (nil = past image)
-	closer  func() error                     // release the backing store
+	total    uint64                           // mem image size in bytes
+	chunkSz  uint64                           // fixed chunk size (last chunk may be short)
+	prefetch uint64                           // chunk-level fault-ahead window; 0 = none
+	load     func(idx uint64) ([]byte, error) // materialize chunk idx (nil = past image)
+	closer   func() error                     // release the backing store
 
-	mu    sync.RWMutex
-	cache map[uint64][]byte // chunk idx → materialized bytes (never evicted in B1)
+	mu       sync.Mutex
+	cache    map[uint64][]byte     // chunk idx → materialized bytes (never evicted yet)
+	inflight map[uint64]*chunkLoad // chunk idx → in-flight load (single-flight)
+	sem      chan struct{}         // bounds concurrent prefetch loads (nil if prefetch==0)
+	wg       sync.WaitGroup        // tracks prefetch goroutines, drained by close()
+	closed   bool
+}
+
+// chunkLoad is one in-flight chunk load, shared by every caller that races for
+// the same index; done closes when buf/err are set.
+type chunkLoad struct {
+	done chan struct{}
+	buf  []byte
+	err  error
 }
 
 // newChunkedSource builds a chunked source over an injected chunk loader. The
 // file-backed constructor (newLocalChunkedSource) wires load/closer to a mem
 // file; tests inject a fake loader to exercise indexing + caching without I/O.
-func newChunkedSource(total, chunkSz uint64, load func(uint64) ([]byte, error), closer func() error) *chunkedSource {
-	return &chunkedSource{
-		total:   total,
-		chunkSz: chunkSz,
-		load:    load,
-		closer:  closer,
-		cache:   make(map[uint64][]byte),
+// prefetch is the chunk-level fault-ahead window (0 = none; the GCS source sets
+// it >0 to pipeline sequential faults).
+func newChunkedSource(total, chunkSz, prefetch uint64, load func(uint64) ([]byte, error), closer func() error) *chunkedSource {
+	cs := &chunkedSource{
+		total:    total,
+		chunkSz:  chunkSz,
+		prefetch: prefetch,
+		load:     load,
+		closer:   closer,
+		cache:    make(map[uint64][]byte),
+		inflight: make(map[uint64]*chunkLoad),
 	}
+	if prefetch > 0 {
+		cs.sem = make(chan struct{}, prefetch)
+	}
+	return cs
 }
 
 // newLocalChunkedSource opens the mem file and serves chunks by ReadAt-ing them
@@ -183,20 +214,23 @@ func newLocalChunkedSource(memPath string, chunkBytes uint64) (*chunkedSource, e
 		}
 		return buf, nil
 	}
-	return newChunkedSource(total, chunkSz, load, f.Close), nil
+	return newChunkedSource(total, chunkSz, 0, load, f.Close), nil // local: no prefetch
 }
 
 // at returns a zero-copy subslice of the chunk containing off, clamped to the
 // chunk's end (a straddling run returns short; the tail refaults into the next
-// chunk). Overflow-safe: off ≥ total returns nil before any arithmetic.
+// chunk). Overflow-safe: off ≥ total returns nil before any arithmetic. After
+// serving the faulting chunk it kicks off prefetch of the following chunks.
 func (cs *chunkedSource) at(off, length uint64) ([]byte, error) {
 	if off >= cs.total {
 		return nil, nil // past the image; caller skips
 	}
-	chunk, err := cs.chunk(off / cs.chunkSz)
+	idx := off / cs.chunkSz
+	chunk, err := cs.chunk(idx)
 	if err != nil {
 		return nil, err
 	}
+	cs.prefetchAhead(idx)
 	within := off % cs.chunkSz
 	clen := uint64(len(chunk))
 	if within >= clen {
@@ -208,37 +242,86 @@ func (cs *chunkedSource) at(off, length uint64) ([]byte, error) {
 	return chunk[within : within+length], nil
 }
 
-// chunk returns chunk idx from the cache, loading and caching it on a miss.
+// chunk returns chunk idx from the cache, single-flighting the load: a fault and
+// any prefetches racing for the same index share one in-flight load() and its
+// result, so a slow (network) load runs at most once per chunk.
 func (cs *chunkedSource) chunk(idx uint64) ([]byte, error) {
-	cs.mu.RLock()
-	c, ok := cs.cache[idx]
-	cs.mu.RUnlock()
-	if ok {
+	cs.mu.Lock()
+	if c, ok := cs.cache[idx]; ok {
+		cs.mu.Unlock()
 		return c, nil
 	}
-	c, err := cs.load(idx)
-	if err != nil {
-		return nil, err
+	if cl, ok := cs.inflight[idx]; ok {
+		cs.mu.Unlock()
+		<-cl.done // someone else is loading it; wait for their result
+		return cl.buf, cl.err
 	}
-	if c == nil {
-		return nil, nil // past the image
-	}
-	// A concurrent miss may have loaded the same chunk; keep whichever landed in
-	// the map so every caller after this converges on one backing array. Either
-	// buffer is a correct, immutable copy, so a caller holding the loser is still
-	// safe for its in-flight copy.
-	cs.mu.Lock()
-	if existing, ok := cs.cache[idx]; ok {
-		c = existing
-	} else {
-		cs.cache[idx] = c
-	}
+	cl := &chunkLoad{done: make(chan struct{})}
+	cs.inflight[idx] = cl
 	cs.mu.Unlock()
-	return c, nil
+
+	cl.buf, cl.err = cs.load(idx)
+
+	cs.mu.Lock()
+	if cl.err == nil && cl.buf != nil && !cs.closed {
+		cs.cache[idx] = cl.buf
+	}
+	delete(cs.inflight, idx)
+	cs.mu.Unlock()
+	close(cl.done)
+	return cl.buf, cl.err
 }
 
-// close drops the chunk cache and releases the backing store. Idempotent.
+// prefetchAhead launches background loads of the next `prefetch` chunks that are
+// not already cached or in flight, bounded by the semaphore. Best-effort: if the
+// pool is full it skips (the fault path will fetch on demand), and a prefetch
+// error is dropped — the real fault into that chunk re-loads and escalates.
+func (cs *chunkedSource) prefetchAhead(idx uint64) {
+	if cs.prefetch == 0 {
+		return
+	}
+	for i := idx + 1; i <= idx+cs.prefetch; i++ {
+		if i*cs.chunkSz >= cs.total {
+			break // past the image
+		}
+		cs.mu.Lock()
+		_, cached := cs.cache[i]
+		_, loading := cs.inflight[i]
+		skip := cs.closed || cached || loading
+		if !skip {
+			cs.wg.Add(1) // registered under the lock so close() can't race the drain
+		}
+		cs.mu.Unlock()
+		if skip {
+			continue
+		}
+		select {
+		case cs.sem <- struct{}{}: // acquired a worker slot
+			go func(i uint64) {
+				defer cs.wg.Done()
+				defer func() { <-cs.sem }()
+				_, _ = cs.chunk(i)
+			}(i)
+		default:
+			cs.wg.Done() // pool full; don't prefetch this one
+		}
+	}
+}
+
+// close stops new prefetches, drains in-flight ones, drops the cache, and
+// releases the backing store. Draining before releasing guarantees no background
+// load touches the store or cache after this returns. Idempotent.
 func (cs *chunkedSource) close() error {
+	cs.mu.Lock()
+	if cs.closed {
+		cs.mu.Unlock()
+		return nil
+	}
+	cs.closed = true
+	cs.mu.Unlock()
+
+	cs.wg.Wait() // let outstanding prefetch loads finish (no lock held → no deadlock)
+
 	cs.mu.Lock()
 	cs.cache = nil
 	cs.mu.Unlock()
@@ -246,4 +329,37 @@ func (cs *chunkedSource) close() error {
 		return cs.closer()
 	}
 	return nil
+}
+
+// fatalOnce invokes a kill callback at most once. The UFFD fault path uses it to
+// stop a guest whose fault cannot be served (the page source returned an error):
+// Firecracker waits forever on an unserved fault, so the only safe response is to
+// kill the VM (the wake then fails cleanly, like a failed File-backend wake)
+// rather than leave a hung guest. See docs/uffd-b2-design.md.
+type fatalOnce struct {
+	mu    sync.Mutex
+	fn    func(error)
+	fired bool
+}
+
+// set installs the kill callback. Called before Firecracker connects, so the
+// fault goroutine (which only runs after connect) always observes it.
+func (f *fatalOnce) set(fn func(error)) {
+	f.mu.Lock()
+	f.fn = fn
+	f.mu.Unlock()
+}
+
+// fire invokes the callback if one is set and it hasn't fired yet; reports
+// whether it actually fired this call.
+func (f *fatalOnce) fire(err error) bool {
+	f.mu.Lock()
+	fn, fired := f.fn, f.fired
+	f.fired = true
+	f.mu.Unlock()
+	if fired || fn == nil {
+		return false
+	}
+	fn(err)
+	return true
 }

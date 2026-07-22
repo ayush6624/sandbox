@@ -42,6 +42,7 @@ type uffdHandler struct {
 	sockPath string
 	ln       *net.UnixListener
 	src      pageSource
+	fatal    fatalOnce // kills the VM if a fault can't be served (see below)
 
 	closeOnce sync.Once // guards listener close + socket removal
 	srcOnce   sync.Once // guards src.close() (owned by the fault goroutine)
@@ -207,11 +208,14 @@ func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
 func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
 	buf, err := h.src.at(srcOff, length)
 	if err != nil {
-		// The source could not supply the page, so this fault is left UNSERVED
-		// and Firecracker waits forever on it. localSource never returns an
-		// error; a remote source that can fail must escalate to killing the VM
-		// (roadmap Phase B/D) rather than hang here. Log for now.
+		// The source could not supply the page (after its own retries), so this
+		// fault is left UNSERVED and Firecracker would wait forever on it. Kill
+		// the VM instead — the wake fails cleanly, exactly like a failed
+		// File-backend wake, rather than hanging the guest. localSource never
+		// errors; the GCS source (B2) does. fatal fires once, then poll() sees
+		// POLLHUP as FC dies and serve() tears down normally.
 		fmt.Fprintf(os.Stderr, "uffd: source at %#x len %d: %v\n", srcOff, length, err)
+		h.fatal.fire(err)
 		return
 	}
 	if len(buf) == 0 {
