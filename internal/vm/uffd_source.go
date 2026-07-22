@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -40,6 +42,14 @@ type pageSource interface {
 	// close releases the source (unmap, file close, cache). Called once, from the
 	// fault goroutine, after it has stopped servicing faults.
 	close() error
+}
+
+// recordingSource is a pageSource that records the guest's working set for
+// prewarm across wakes (chunkedSource implements it; localSource does not — the
+// handler type-asserts and no-ops when absent). See roadmap B3.
+type recordingSource interface {
+	seal()                // stop recording (before the hibernate snapshot)
+	workingSet() []uint64 // chunk indices the guest faulted, sorted
 }
 
 // localSource serves faults from a read-only mmap of the whole local mem file,
@@ -147,6 +157,17 @@ type chunkedSource struct {
 	sem      chan struct{}         // bounds concurrent prefetch loads (nil if prefetch==0)
 	wg       sync.WaitGroup        // tracks prefetch goroutines, drained by close()
 	closed   bool
+
+	// Working-set recording (roadmap B3): the chunk indices the guest actually
+	// FAULTS (not prefetched) between wake and seal() are the working set. The
+	// server persists it at hibernate and feeds it back as `prewarm` on the next
+	// wake, so a cold remote wake bulk-fetches its working set concurrently instead
+	// of fault-storming GCS one chunk at a time. recording is switched off by
+	// seal() just before the hibernate snapshot, whose whole-guest read would
+	// otherwise pollute the set with every chunk (the Phase A bug).
+	recording atomic.Bool
+	touchedMu sync.Mutex
+	touched   map[uint64]struct{}
 }
 
 // chunkLoad is one in-flight chunk load, shared by every caller that races for
@@ -161,8 +182,9 @@ type chunkLoad struct {
 // file-backed constructor (newLocalChunkedSource) wires load/closer to a mem
 // file; tests inject a fake loader to exercise indexing + caching without I/O.
 // prefetch is the chunk-level fault-ahead window (0 = none; the GCS source sets
-// it >0 to pipeline sequential faults).
-func newChunkedSource(total, chunkSz, prefetch uint64, load func(uint64) ([]byte, error), closer func() error) *chunkedSource {
+// it >0 to pipeline sequential faults). prewarm is last wake's working set (chunk
+// indices) to bulk-fetch immediately in the background so this wake starts warm.
+func newChunkedSource(total, chunkSz, prefetch uint64, load func(uint64) ([]byte, error), closer func() error, prewarm []uint64) *chunkedSource {
 	cs := &chunkedSource{
 		total:    total,
 		chunkSz:  chunkSz,
@@ -171,10 +193,13 @@ func newChunkedSource(total, chunkSz, prefetch uint64, load func(uint64) ([]byte
 		closer:   closer,
 		cache:    make(map[uint64][]byte),
 		inflight: make(map[uint64]*chunkLoad),
+		touched:  make(map[uint64]struct{}),
 	}
+	cs.recording.Store(true)
 	if prefetch > 0 {
 		cs.sem = make(chan struct{}, prefetch)
 	}
+	cs.prewarm(prewarm)
 	return cs
 }
 
@@ -214,7 +239,7 @@ func newLocalChunkedSource(memPath string, chunkBytes uint64) (*chunkedSource, e
 		}
 		return buf, nil
 	}
-	return newChunkedSource(total, chunkSz, 0, load, f.Close), nil // local: no prefetch
+	return newChunkedSource(total, chunkSz, 0, load, f.Close, nil), nil // local: no prefetch/prewarm
 }
 
 // buildUFFDSource picks the page source for a UFFD restore from the run options:
@@ -223,7 +248,7 @@ func newLocalChunkedSource(memPath string, chunkBytes uint64) (*chunkedSource, e
 func buildUFFDSource(opts RunOptions, memPath string) (pageSource, error) {
 	if c := opts.UFFDChunks; c != nil {
 		// Injected loader (server's GCS fetch); no local backing store to close.
-		return newChunkedSource(c.Total, c.ChunkSize, c.Prefetch, c.Load, nil), nil
+		return newChunkedSource(c.Total, c.ChunkSize, c.Prefetch, c.Load, nil, c.Prewarm), nil
 	}
 	if opts.UFFDChunkBytes > 0 {
 		return newLocalChunkedSource(memPath, opts.UFFDChunkBytes)
@@ -240,6 +265,14 @@ func (cs *chunkedSource) at(off, length uint64) ([]byte, error) {
 		return nil, nil // past the image; caller skips
 	}
 	idx := off / cs.chunkSz
+	// Record the faulting chunk as working set (recorded here, in at(), NOT in the
+	// prefetch path — the working set is what the guest actually touched, not what
+	// we speculatively fetched). seal() stops this before the hibernate snapshot.
+	if cs.recording.Load() {
+		cs.touchedMu.Lock()
+		cs.touched[idx] = struct{}{}
+		cs.touchedMu.Unlock()
+	}
 	chunk, err := cs.chunk(idx)
 	if err != nil {
 		return nil, err
@@ -343,6 +376,66 @@ func (cs *chunkedSource) close() error {
 		return cs.closer()
 	}
 	return nil
+}
+
+// seal stops working-set recording. hibernate() calls it (via the handler) just
+// before Pause+Snapshot, so the snapshot's whole-guest read — which faults every
+// not-yet-present chunk through at() — does NOT pollute the set with the entire
+// guest. Without this the recorded set is always ~the whole guest and prewarm is
+// useless (the Phase A bug that parked this feature).
+func (cs *chunkedSource) seal() { cs.recording.Store(false) }
+
+// workingSet returns the chunk indices the guest faulted (recorded up to seal),
+// sorted. This is what the server persists to prewarm the next wake.
+func (cs *chunkedSource) workingSet() []uint64 {
+	cs.touchedMu.Lock()
+	out := make([]uint64, 0, len(cs.touched))
+	for idx := range cs.touched {
+		out = append(out, idx)
+	}
+	cs.touchedMu.Unlock()
+	slices.Sort(out)
+	return out
+}
+
+// prewarm bulk-fetches last wake's working-set chunks in the background so the
+// guest's fault storm hits a warm cache instead of paying a per-chunk GCS RTT
+// serially. It spawns up to `prefetch` dedicated workers that drain the index
+// list through chunk() (single-flight + cache), so the whole set is covered at
+// bounded concurrency without ever blocking the caller (the constructor, on the
+// wake path). Best-effort: fetch errors are dropped (the real fault re-loads and
+// escalates); close() drains the workers via wg.
+func (cs *chunkedSource) prewarm(indices []uint64) {
+	if len(indices) == 0 || cs.prefetch == 0 {
+		return // nothing to prewarm, or no worker pool (local source)
+	}
+	work := make(chan uint64, len(indices))
+	for _, idx := range indices {
+		if idx*cs.chunkSz < cs.total {
+			work <- idx
+		}
+	}
+	close(work)
+
+	workers := cs.prefetch
+	if n := uint64(len(indices)); n < workers {
+		workers = n
+	}
+	cs.wg.Add(int(workers))
+	for w := uint64(0); w < workers; w++ {
+		go func() {
+			defer cs.wg.Done()
+			for idx := range work {
+				cs.mu.Lock()
+				closed := cs.closed
+				cs.mu.Unlock()
+				if closed {
+					return // teardown in progress; stop draining
+				}
+				_, _ = cs.chunk(idx)
+			}
+		}()
+	}
 }
 
 // fatalOnce invokes a kill callback at most once. The UFFD fault path uses it to

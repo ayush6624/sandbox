@@ -48,8 +48,9 @@ const (
 	defaultChunkPrefetch = 4
 )
 
-func chunkObj(hash string) string     { return "chunks/" + hash }
-func hibManifestObj(id string) string { return "hib/" + id + "/manifest.json" }
+func chunkObj(hash string) string       { return "chunks/" + hash }
+func hibManifestObj(id string) string   { return "hib/" + id + "/manifest.json" }
+func hibWorkingSetObj(id string) string { return "hib/" + id + "/workingset.json" }
 
 // chunkEntry is one manifest entry: the content hash of chunk i and its
 // compressed object size (for logging/prefetch budgeting). CLen is 0 for a zero
@@ -204,7 +205,7 @@ func (s *Server) markChunkUploaded(hash string) {
 // chunks + the manifest to GCS in the background (manifest last, as the commit
 // marker). Failures log and leave the sandbox host-local-only — local wake still
 // works — so this is purely additive durability.
-func (s *Server) uploadHibChunks(id, memPath string, chunkSz uint64) {
+func (s *Server) uploadHibChunks(id, memPath string, chunkSz uint64, workingSet []uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
 	defer cancel()
 	t0 := time.Now()
@@ -213,6 +214,16 @@ func (s *Server) uploadHibChunks(id, memPath string, chunkSz uint64) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] chunk upload aborted: build manifest: %v\n", id, err)
 		return
+	}
+	// Persist the recorded working set (chunk indices the guest faulted last wake)
+	// so the next wake can prewarm it. Uploaded before the manifest; a missing/
+	// stale working set just means no prewarm (correctness unaffected). Roadmap B3.
+	if len(workingSet) > 0 {
+		if wsBytes, werr := json.Marshal(workingSet); werr == nil {
+			if werr = s.blob.PutBytes(ctx, hibWorkingSetObj(id), wsBytes); werr != nil {
+				fmt.Fprintf(os.Stderr, "[%s] working-set upload failed (no prewarm next wake): %v\n", id, werr)
+			}
+		}
 	}
 	var uploaded, skipped int
 	var upBytes int64
@@ -257,6 +268,28 @@ func (s *Server) fetchChunkManifest(ctx context.Context, id string) (*chunkManif
 		return nil, fmt.Errorf("chunk manifest for %s is degenerate (size=%d chunk=%d)", id, m.MemSize, m.ChunkSize)
 	}
 	return &m, nil
+}
+
+// fetchWorkingSet pulls the persisted working set (chunk indices from the last
+// wake) to prewarm this one. Best-effort: a missing set (first wake) or any error
+// returns nil (no prewarm). Indices past the current chunk count are dropped, so
+// a changed image size can't feed prewarm an out-of-range chunk.
+func (s *Server) fetchWorkingSet(ctx context.Context, id string, numChunks uint64) []uint64 {
+	b, err := s.blob.GetBytes(ctx, hibWorkingSetObj(id))
+	if err != nil {
+		return nil
+	}
+	var ws []uint64
+	if err := json.Unmarshal(b, &ws); err != nil {
+		return nil
+	}
+	out := ws[:0]
+	for _, idx := range ws {
+		if idx < numChunks {
+			out = append(out, idx)
+		}
+	}
+	return out
 }
 
 // chunkCacheDir is the host-local cache of materialized (decompressed) chunks,
@@ -335,5 +368,6 @@ func (s *Server) gcsChunkSource(ctx context.Context, id string) *vm.UFFDChunkSou
 		ChunkSize: m.ChunkSize,
 		Prefetch:  uint64(prefetch),
 		Load:      newChunkLoad(m, s.chunkCacheDir(), fetch),
+		Prewarm:   s.fetchWorkingSet(ctx, id, uint64(len(m.Chunks))),
 	}
 }

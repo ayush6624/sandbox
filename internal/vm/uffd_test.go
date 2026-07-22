@@ -316,7 +316,7 @@ func TestChunkedSourceIndexing(t *testing.T) {
 		}
 		return image[start : start+n], nil
 	}
-	cs := newChunkedSource(total, chunkSz, 0, load, nil)
+	cs := newChunkedSource(total, chunkSz, 0, load, nil, nil)
 
 	// A within-chunk run returns exactly the requested bytes.
 	if b, err := cs.at(100, 200); err != nil || !bytes.Equal(b, image[100:300]) {
@@ -354,7 +354,7 @@ func TestChunkedSourceIndexing(t *testing.T) {
 // unserved fault the handler must escalate, not swallow).
 func TestChunkedSourceLoadError(t *testing.T) {
 	boom := errors.New("fetch failed")
-	cs := newChunkedSource(1<<20, 4096, 0, func(uint64) ([]byte, error) { return nil, boom }, nil)
+	cs := newChunkedSource(1<<20, 4096, 0, func(uint64) ([]byte, error) { return nil, boom }, nil, nil)
 	if _, err := cs.at(0, 4096); !errors.Is(err, boom) {
 		t.Fatalf("at() err = %v, want %v", err, boom)
 	}
@@ -374,7 +374,7 @@ func TestChunkedSourceSingleFlight(t *testing.T) {
 		<-release // hold the load open so all callers pile onto the one in-flight
 		return make([]byte, chunkSz), nil
 	}
-	cs := newChunkedSource(chunkSz*4, chunkSz, 0, load, nil)
+	cs := newChunkedSource(chunkSz*4, chunkSz, 0, load, nil, nil)
 
 	const racers = 8
 	var wg sync.WaitGroup
@@ -405,7 +405,7 @@ func TestChunkedSourcePrefetch(t *testing.T) {
 		mu.Unlock()
 		return make([]byte, chunkSz), nil
 	}
-	cs := newChunkedSource(chunkSz*nChunks, chunkSz, 3, load, nil) // prefetch 3
+	cs := newChunkedSource(chunkSz*nChunks, chunkSz, 3, load, nil, nil) // prefetch 3
 
 	if _, err := cs.at(0, chunkSz); err != nil { // fault chunk 0 → prefetch 1,2,3
 		t.Fatal(err)
@@ -438,6 +438,72 @@ func TestChunkedSourcePrefetch(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("close() did not drain prefetch goroutines in time")
+	}
+}
+
+// TestChunkedSourceWorkingSet checks that at() records the FAULTED chunks (not
+// prefetched ones), seal() stops recording, and workingSet() is sorted+deduped.
+func TestChunkedSourceWorkingSet(t *testing.T) {
+	const chunkSz = 4096
+	load := func(uint64) ([]byte, error) { return make([]byte, chunkSz), nil }
+	cs := newChunkedSource(chunkSz*20, chunkSz, 2, load, nil, nil) // prefetch 2
+
+	for _, off := range []uint64{5 * chunkSz, 2 * chunkSz, 5 * chunkSz} { // fault 5,2,5
+		if _, err := cs.at(off, chunkSz); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Let any prefetch settle so we'd catch it if prefetched chunks were recorded.
+	time.Sleep(30 * time.Millisecond)
+	if got := cs.workingSet(); len(got) != 2 || got[0] != 2 || got[1] != 5 {
+		t.Fatalf("workingSet = %v, want [2 5] (faults only, sorted+deduped, no prefetch)", got)
+	}
+	// After seal, further faults are not recorded.
+	cs.seal()
+	if _, err := cs.at(9*chunkSz, chunkSz); err != nil {
+		t.Fatal(err)
+	}
+	if got := cs.workingSet(); len(got) != 2 {
+		t.Fatalf("workingSet after seal = %v, want unchanged [2 5]", got)
+	}
+	_ = cs.close()
+}
+
+// TestChunkedSourcePrewarmSet verifies the constructor bulk-fetches the supplied
+// working set into the cache in the background (so a later fault hits it warm).
+func TestChunkedSourcePrewarmSet(t *testing.T) {
+	const chunkSz = 4096
+	var mu sync.Mutex
+	loads := map[uint64]int{}
+	load := func(idx uint64) ([]byte, error) {
+		mu.Lock()
+		loads[idx]++
+		mu.Unlock()
+		return make([]byte, chunkSz), nil
+	}
+	cs := newChunkedSource(chunkSz*20, chunkSz, 3, load, nil, []uint64{1, 3, 7})
+	defer cs.close()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		warm := loads[1] == 1 && loads[3] == 1 && loads[7] == 1
+		mu.Unlock()
+		if warm || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Faulting a prewarmed chunk hits the cache — load not called again.
+	if _, err := cs.at(3*chunkSz, chunkSz); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, idx := range []uint64{1, 3, 7} {
+		if loads[idx] != 1 {
+			t.Errorf("chunk %d loaded %d times, want 1 (prewarmed once, then cache hit)", idx, loads[idx])
+		}
 	}
 }
 

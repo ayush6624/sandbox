@@ -312,3 +312,21 @@ func (h *uffdHandler) releaseSource() {
 		h.closeStop()
 	})
 }
+
+// seal stops working-set recording on the page source (no-op unless it's a
+// recordingSource, i.e. a chunk source). Called just before the hibernate
+// snapshot so the snapshot's whole-guest read doesn't pollute the set.
+func (h *uffdHandler) seal() {
+	if r, ok := h.src.(recordingSource); ok {
+		r.seal()
+	}
+}
+
+// workingSet returns the recorded working-set chunk indices, or nil for a
+// non-recording source.
+func (h *uffdHandler) workingSet() []uint64 {
+	if r, ok := h.src.(recordingSource); ok {
+		return r.workingSet()
+	}
+	return nil
+}

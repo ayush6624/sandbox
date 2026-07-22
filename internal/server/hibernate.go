@@ -244,6 +244,13 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 			snapType, diffBaseID = vm.SnapshotDiff, base.ID
 		}
 	}
+	// Seal working-set recording BEFORE Pause+Snapshot: the snapshot reads the
+	// whole guest, faulting every not-yet-present chunk through the UFFD handler,
+	// which would otherwise record the entire guest as the working set (the Phase A
+	// bug). After the seal the set is frozen — capture it now to persist for the
+	// next wake's prewarm (nil for non-UFFD-chunk machines). Roadmap B3.
+	vm.SealUFFDRecording(m)
+	workingSet := vm.UFFDWorkingSet(m)
 	if err := vm.Pause(ctx, m); err != nil {
 		return fmt.Errorf("pause: %w", err)
 	}
@@ -291,7 +298,7 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	// failure leaves the sandbox wakeable locally. Only FULL freezes — a diff mem
 	// file holds just dirty pages, so chunking it would misencode the base pages.
 	if s.cfg.UFFDChunkGCS && s.blob != nil && snapType == vm.SnapshotFull {
-		go s.uploadHibChunks(id, memPath, roundChunkSize(s.cfg.UFFDChunkBytes))
+		go s.uploadHibChunks(id, memPath, roundChunkSize(s.cfg.UFFDChunkBytes), workingSet)
 	}
 	return nil
 }

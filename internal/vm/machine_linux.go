@@ -45,6 +45,27 @@ type Machine struct {
 // snapshot.
 func DiffCapable(m *Machine) bool { return m != nil && m.diffCapable }
 
+// SealUFFDRecording stops working-set recording on a UFFD-restored machine's
+// page source. Call it just before a hibernate snapshot: the snapshot reads the
+// whole guest, faulting every not-yet-present chunk through the handler, which
+// would otherwise record the entire guest as "working set" (roadmap B3). No-op
+// for non-UFFD machines or non-recording sources.
+func SealUFFDRecording(m *Machine) {
+	if m != nil && m.raw != nil && m.raw.uffd != nil {
+		m.raw.uffd.seal()
+	}
+}
+
+// UFFDWorkingSet returns the chunk indices the guest faulted since wake (up to
+// the seal), for the server to persist and prewarm the next wake. nil for
+// non-UFFD machines or non-recording sources.
+func UFFDWorkingSet(m *Machine) []uint64 {
+	if m != nil && m.raw != nil && m.raw.uffd != nil {
+		return m.raw.uffd.workingSet()
+	}
+	return nil
+}
+
 // rawMachine is a Firecracker process we manage directly (clone path, and the
 // UFFD restore path), driving its API over the unix socket instead of through
 // the SDK.

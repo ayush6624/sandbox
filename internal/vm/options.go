@@ -50,6 +50,10 @@ type UFFDChunkSource struct {
 	ChunkSize uint64
 	Prefetch  uint64
 	Load      func(idx uint64) ([]byte, error)
+	// Prewarm is last wake's working set (chunk indices) to bulk-fetch in the
+	// background as the guest resumes, so a cold wake doesn't fault-storm GCS one
+	// chunk at a time (roadmap B3). Empty on the first wake (nothing recorded yet).
+	Prewarm []uint64
 }
 
 // RuntimeConfig captures identifiers after the SDK config is built.
