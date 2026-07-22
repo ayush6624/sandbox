@@ -212,16 +212,17 @@ order, each independently shippable + measurable):**
     source resumes immediately and streams only the working set. B2 is proven correct
     and lazy end-to-end; the cross-host A/B that shows the actual win is B4. Fleet was
     reverted to the prior release (98a7eaf, UFFD off) + test artifacts cleaned up.
-  - **Bug found during B2c (fix before relying on UFFD anywhere): `faultLoop` does
-    not exit on FC teardown here** — 0 teardown summaries across the UFFD wakes, i.e.
-    the `poll()` POLLHUP exit (commit 3759dcf) is NOT firing on this kernel/FC even
-    though FC's process is dead (`vm.Wait` returned). Consequences: (a) the
-    teardown histogram never logs — worked around with a **running** summary every 512
-    faults (commit 27b9cc3); (b) a per-wake **fault-goroutine + page-source leak**
-    (for `localSource`, a 1 GiB mmap) that 3759dcf was believed to fix but evidently
-    doesn't here. Fix: give `faultLoop` an explicit stop signal on teardown (close a
-    stop eventfd added to the poll set, or have `close()` shut down the uffd read
-    side) rather than relying on POLLHUP; verify serve()'s teardown summary then fires.
+  - **Bug found during B2c, now FIXED + fleet-verified (commit f68733c): `faultLoop`
+    did not exit on FC teardown** — the `poll()` POLLHUP exit (commit 3759dcf) does
+    NOT fire on this kernel/FC even though FC's process is dead, so the loop hung,
+    leaking the fault goroutine + page-source mapping (1 GiB mmap for `localSource`)
+    per wake, and the teardown summary never logged. Fix: a **stop eventfd** in
+    faultLoop's poll set that `close()` signals on FC process-exit (`cmd.Wait`, which
+    IS reliable); `signalStop`/`closeStop` are `stopMu`-guarded against fd-reuse.
+    POLLHUP kept as a secondary. Verified on the fleet: teardown summary now fires
+    (`serving:1 / exiting:1`, was 0), and a local-mem UFFD wake histogram read
+    `faults=9050 p50≤2µs p99≤2µs max=28µs` (confirms local UFFD faults are sub-µs
+    page-cache-warm reads). A running summary every 512 faults (27b9cc3) is kept too.
 - **B3 — working-set prewarm, done right.** The Phase A attempt failed because
   the hibernate snapshot faults the WHOLE guest through the handler, polluting
   the recorded set. Fix: add a **seal-recording-before-snapshot** signal from
