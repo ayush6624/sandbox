@@ -195,15 +195,33 @@ order, each independently shippable + measurable):**
     Unit-tested (race-clean): manifest build (geometry, zero sentinel, dedup, short
     tail), gzip round-trip, `newChunkLoad` (cache write-through + warm hit + zero +
     error-propagation + past-end) with a fake fetcher, `roundChunkSize`.
-  - **B2c INSTRUMENTATION SHIPPED; measurement pending fleet.** Per-fault latency
-    histogram (`uffd_metrics.go`, `latencyHist` — lock-free log2-µs buckets, two
-    clock reads + atomic adds per fault) records the source-fetch latency the
-    faulting vCPU waits on (warm cache = fast, cold GCS fetch = the tail), logged
-    at handler teardown as `faults=… mean=… p50≤… p99≤… max=…`. Prefetch loads are
-    excluded (only the faulting thread's wait counts). The remaining B2c work is
-    the actual **cache-dropped-wake p99 vs File** run — needs a deployed host +
-    bucket; can't run from the laptop (tailnet VPC route unapproved — probe from
-    sandbox-control). This is the number that proves UFFD > File.
+  - **B2c MEASURED on the fleet (2026-07-22).** Deployed the B2 build fleet-wide with
+    `uffd_chunk_gcs` on, created a sandbox, forced a full freeze (wake→re-hibernate,
+    since hot-clones freeze as diffs), which uploaded **512 chunks / 1 GiB: ~60–93
+    unique non-zero (26–50 MiB gzip), ~419 all-zero sentinels**; re-freeze deduped
+    15–22 chunks (CoW working). Then woke it from a **cold local chunk cache** so
+    every touched chunk was fetched from GCS. Per-fault latency (running histogram):
+    `p50 ≤ 2µs, p99 ≤ 65 ms, max ~99 ms`, end-to-end wake **~1.4–2.1 s**. Reading:
+    **p50 ≈ 0 = the prefetch + single-flight cache is doing its job** (most faults hit
+    an already-materialized chunk); the **p99/max tail is the cold GCS GetBytes +
+    gunzip of one 2 MiB chunk** (~65–99 ms each). For comparison, a local-mem UFFD
+    wake of the same sandbox was ~0.5 s and same-host File is ~0.2 s (page-cache-warm
+    local mem). **So on the SAME host the chunk source is slower — as expected: it
+    pays GCS fetches the local backends avoid. Its win is CROSS-HOST (B4)**, where
+    File must first download+rebase the whole 1 GiB before resuming while the chunk
+    source resumes immediately and streams only the working set. B2 is proven correct
+    and lazy end-to-end; the cross-host A/B that shows the actual win is B4. Fleet was
+    reverted to the prior release (98a7eaf, UFFD off) + test artifacts cleaned up.
+  - **Bug found during B2c (fix before relying on UFFD anywhere): `faultLoop` does
+    not exit on FC teardown here** — 0 teardown summaries across the UFFD wakes, i.e.
+    the `poll()` POLLHUP exit (commit 3759dcf) is NOT firing on this kernel/FC even
+    though FC's process is dead (`vm.Wait` returned). Consequences: (a) the
+    teardown histogram never logs — worked around with a **running** summary every 512
+    faults (commit 27b9cc3); (b) a per-wake **fault-goroutine + page-source leak**
+    (for `localSource`, a 1 GiB mmap) that 3759dcf was believed to fix but evidently
+    doesn't here. Fix: give `faultLoop` an explicit stop signal on teardown (close a
+    stop eventfd added to the poll set, or have `close()` shut down the uffd read
+    side) rather than relying on POLLHUP; verify serve()'s teardown summary then fires.
 - **B3 — working-set prewarm, done right.** The Phase A attempt failed because
   the hibernate snapshot faults the WHOLE guest through the handler, polluting
   the recorded set. Fix: add a **seal-recording-before-snapshot** signal from
