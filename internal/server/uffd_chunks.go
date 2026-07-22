@@ -330,13 +330,25 @@ func newChunkLoad(m *chunkManifest, cacheDir string, fetch func(hash string) ([]
 		if uint64(len(raw)) != clen {
 			return nil, fmt.Errorf("chunk %d (%s) is %d bytes, manifest says %d", idx, e.Hash, len(raw), clen)
 		}
-		// Write-through cache, best-effort (tmp+rename so a crash never leaves a
-		// truncated chunk). A cache write failure is non-fatal — the fault is
-		// already served from raw.
+		// Write-through cache, best-effort. Use a UNIQUE temp file per write, not a
+		// fixed cacheDir/<hash>.tmp: two DIFFERENT chunk indices that dedup to the
+		// same content hash are loaded by separate single-flight entries (chunk() is
+		// keyed by index, not hash), so they can fetch+write concurrently. A shared
+		// temp path lets those concurrent writes truncate/interleave, leaving a torn
+		// cache file — benign to what the guest receives (that comes from the
+		// in-memory `raw`, and a torn file fails the len-check on the next read and
+		// re-fetches) but wasteful. CreateTemp gives each writer its own file; the
+		// rename is atomic and, since both wrote identical bytes, either winning is
+		// correct.
 		if err := os.MkdirAll(cacheDir, 0o755); err == nil {
-			tmp := cpath + ".tmp"
-			if os.WriteFile(tmp, raw, 0o644) == nil {
-				_ = os.Rename(tmp, cpath)
+			if tf, terr := os.CreateTemp(cacheDir, "."+e.Hash+".tmp-*"); terr == nil {
+				_, werr := tf.Write(raw)
+				cerr := tf.Close()
+				if werr == nil && cerr == nil {
+					_ = os.Rename(tf.Name(), cpath)
+				} else {
+					_ = os.Remove(tf.Name())
+				}
 			}
 		}
 		return raw, nil

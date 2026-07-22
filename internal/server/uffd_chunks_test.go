@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -136,6 +137,59 @@ func TestNewChunkLoad(t *testing.T) {
 	// Past the image → nil, nil.
 	if b, err := load(3); err != nil || b != nil {
 		t.Fatalf("load(past end): b=%v err=%v", b, err)
+	}
+}
+
+// TestNewChunkLoadConcurrentSameHash stresses the write-through cache with two
+// chunk indices that dedup to one content hash, loaded concurrently (as prewarm
+// does at high concurrency). The cached file must end up complete and correct,
+// with no leftover temp files — the unique-temp-per-writer guarantee.
+func TestNewChunkLoadConcurrentSameHash(t *testing.T) {
+	cacheDir := t.TempDir()
+	const chunkSz = 1 << 20 // 1 MiB — big enough that a torn write would be visible
+	data := bytes.Repeat([]byte{0x5A}, chunkSz)
+	gz, err := gzipBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two indices, one shared hash.
+	m := &chunkManifest{
+		Version: chunkManifestVersion, MemSize: chunkSz * 2, ChunkSize: chunkSz, Codec: chunkCodecGzip,
+		Chunks: []chunkEntry{{Hash: "dup", CLen: len(gz)}, {Hash: "dup", CLen: len(gz)}},
+	}
+	fetch := func(string) ([]byte, error) { return gz, nil }
+	load := newChunkLoad(m, cacheDir, fetch)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); checkLoad(t, load, 0, data) }()
+		go func() { defer wg.Done(); checkLoad(t, load, 1, data) }()
+	}
+	wg.Wait()
+
+	// The published cache file is complete and correct (not a torn interleave).
+	cached, err := os.ReadFile(filepath.Join(cacheDir, "dup"))
+	if err != nil {
+		t.Fatalf("cache file missing: %v", err)
+	}
+	if !bytes.Equal(cached, data) {
+		t.Fatalf("cached chunk corrupt: len %d, want %d", len(cached), len(data))
+	}
+	// No leftover temp files.
+	ents, _ := os.ReadDir(cacheDir)
+	for _, e := range ents {
+		if e.Name() != "dup" {
+			t.Errorf("leftover temp file in cache dir: %s", e.Name())
+		}
+	}
+}
+
+func checkLoad(t *testing.T, load func(uint64) ([]byte, error), idx uint64, want []byte) {
+	t.Helper()
+	b, err := load(idx)
+	if err != nil || !bytes.Equal(b, want) {
+		t.Errorf("load(%d): err=%v equal=%v", idx, err, bytes.Equal(b, want))
 	}
 }
 
