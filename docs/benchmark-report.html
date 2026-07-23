@@ -145,7 +145,7 @@
   <p class="dek">Create, wake, restore, and fork latencies for our e2b-style microVM
   sandbox — with an honest comparison against e2b, Modal, Daytona, Vercel, Fly,
   Morph, CodeSandbox/Together, and Cloudflare.</p>
-  <p class="stamp">updated 2026-07-18 · measurements 2026-07-01 → 07-12 · GCP n2-standard-8 hosts · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
+  <p class="stamp">updated 2026-07-23 · headline measurements 2026-07-01 → 07-12 (release b801d6d+) · latest end-to-end re-run 2026-07-23 (commit 06f5c16, 2×48-slot fleet) · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
 
   <div class="tiles">
     <div class="tile ours" data-tip="<b>Hot create</b>199–271 ms server-side (golden-snapshot clone + GARP readiness). ~0.55 s end-to-end via gateway from a tailnet client. Clock: create request → in-guest agent answers.">
@@ -206,6 +206,42 @@
     </div>
     <div class="axis"><span>0</span><span>1800</span><span>3600 ms</span></div>
   </div>
+
+  <h2>Latest fleet re-run <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-23 · commit 06f5c16</small></h2>
+  <p>A full SDK re-run on the current autoscaling fleet — <strong>2 workers ×
+  48 slots</strong>, guests 2 vCPU / 1 GB. The client ran on the control VM, in
+  the same VPC as the workers, so these are <strong>end-to-end</strong>
+  wall-times — time until you can <code>exec</code> — with the WAN / tailnet hop
+  removed. They complement the instrumented server-side numbers above, not
+  replace them.</p>
+  <div class="chart">
+    <h3>End-to-end latency, VPC-local client</h3>
+    <p class="sub">milliseconds · lower is better · SDK wall-time to a usable sandbox</p>
+    <div class="row" data-tip="<b>Hot create — 478 ms p50</b>Sandbox.create() end-to-end (golden-snapshot clone), client in the same VPC. 20 iterations: mean 479, p90 509, max 518. Server-side is still ~250 ms; the tailnet end-to-end was ~0.55 s.">
+      <span class="lab">hot create</span>
+      <span class="track"><span class="bar ours" style="width:79.7%"></span></span>
+      <span class="val">478 p50</span>
+    </div>
+    <div class="row" data-tip="<b>Snapshot restore — 84 ms p50</b>Sandbox.restore() end-to-end. 20 iterations: mean 95, p90 88, max 305. 5.7× faster than a hot create — warm page cache plus near-instant XFS reflink on the current fleet.">
+      <span class="lab">snapshot restore</span>
+      <span class="track"><span class="bar ours" style="width:14.0%"></span></span>
+      <span class="val">84 p50</span>
+    </div>
+    <div class="row" data-tip="<b>Fan-out — 83 ms/clone at N=32</b>32 identity-neutral clones from one snapshot in 2.66 s, 32/32 usable. 1.8× a 32-way cold boot (147 ms/boot), and matches the historical 84 ms — no regression.">
+      <span class="lab">fan-out <small>(per clone, ×32)</small></span>
+      <span class="track"><span class="bar ours" style="width:13.8%"></span></span>
+      <span class="val">83</span>
+    </div>
+    <div class="axis"><span>0</span><span>300</span><span>600 ms</span></div>
+  </div>
+  <p class="note"><strong>Throughput, via the gateway across both hosts.</strong>
+  64 concurrent creates → 64/64 usable, create p50 1.28 s / p95 2.0 s, zero
+  failures. A 200-sandbox churn burst at concurrency 96 → 200/200 ok, 7.9
+  creates/s sustained, with zero capacity, pool-exhaustion, or agent-timeout
+  errors; create p50 rises to 5.2 s under saturation — the per-host create
+  semaphore queueing the flood instead of boot-storming — and kill p50 is
+  186 ms. A single-sandbox SQLite + filesystem workload: create 0.52 s, full
+  suite 4.10 s.</p>
 
   <h2>Create → command running, across providers</h2>
   <p>The only independent cross-provider dataset is the
