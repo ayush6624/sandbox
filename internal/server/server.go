@@ -149,6 +149,24 @@ type Server struct {
 	// disabled). Mirrors what reg.SetMemAccounting was given; kept here so
 	// validateResources/handleInfo can clamp the per-sandbox override too.
 	memBudgetMIB int64
+
+	// met holds process-lifetime lifecycle counters exposed on /metrics as
+	// Prometheus counters (monotonic; reset only on a server restart).
+	met serverMetrics
+
+	// startedAt stamps process start so /metrics can export uptime.
+	startedAt time.Time
+}
+
+// serverMetrics are monotonic counts of lifecycle events, incremented at the
+// single choke point for each transition. All access is via the atomics, so no
+// lock is needed on the scrape path.
+type serverMetrics struct {
+	createsOK    atomic.Int64 // POST /sandboxes that returned 201 (hot clone or cold boot)
+	createsErr   atomic.Int64 // POST /sandboxes that failed to bring a sandbox up (post-validation)
+	hibernations atomic.Int64 // sandboxes frozen to disk (idle reaper, manual, or shutdown)
+	wakes        atomic.Int64 // successful thaws from hibernation
+	wakeFailures atomic.Int64 // wake attempts that rolled back to hibernated
 }
 
 // fcOverheadMIB is the per-VM memory charged on top of the guest's mem_mib:
@@ -158,7 +176,8 @@ const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
-		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{}}
+		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
+		startedAt: time.Now()}
 	sem := cfg.CreateConcurrency
 	if sem <= 0 {
 		sem = 2 * runtime.NumCPU()
@@ -249,6 +268,7 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /info", s.handleInfo)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /sandboxes", s.handleCreate)
 	mux.HandleFunc("GET /sandboxes", s.handleList)
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)
@@ -432,6 +452,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
 		sb, err := s.createFromSnapshot(ctx, *snap, body.Name, expiresAt, body.HibernateAfterSec)
 		if err == nil {
+			s.met.createsOK.Add(1)
 			writeJSON(w, 201, s.effectiveResources(sb))
 			return
 		}
@@ -440,9 +461,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	sb, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
 	if err != nil {
+		s.met.createsErr.Add(1)
 		capacityOrHTTPError(w, 500, err)
 		return
 	}
+	s.met.createsOK.Add(1)
 	writeJSON(w, 201, s.effectiveResources(sb))
 }
 

@@ -26,6 +26,8 @@ SA_NAME="sandbox-control-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 GW_PORT="${GW_PORT:-9090}"
 PROM_PORT="${PROM_PORT:-9091}"
+GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+GRAFANA_VERSION="${GRAFANA_VERSION:-11.1.0}"
 PROM_VERSION="${PROMETHEUS_VERSION:-2.53.0}"
 AUTOSCALER_VERSION="${AUTOSCALER_VERSION:-0.4.6}"
 NOMAD_VERSION="${NOMAD_VERSION:-1.7.7}"
@@ -93,7 +95,7 @@ cmd_deploy() {
   echo ">> build-linux + push sandbox binary, configs, and control assets"
   ( cd "$REPO" && make build-linux )
   rsync -az -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-    "$REPO/bin/sandbox" "$REPO/configs" "$DIR/nomad" "$DIR/prometheus" \
+    "$REPO/bin/sandbox" "$REPO/configs" "$DIR/nomad" "$DIR/prometheus" "$DIR/grafana" \
     "${SSH_USER}@${NAME}:${REMOTE_DIR}/"
 
   echo ">> install Nomad server + Prometheus + autoscaler + gateway on $NAME"
@@ -107,6 +109,8 @@ cmd_deploy() {
        PROJECT='$PROJECT' ZONE='$ZONE' MIG_NAME='${MIG_NAME:-sandbox-workers}' \
        MIG_MIN='${MIG_MIN:-1}' MIG_MAX='${MIG_MAX:-8}' \
        QUEUE_WAIT='${QUEUE_WAIT:-180s}' QUEUE_MAX='${QUEUE_MAX:-4096}' \
+       GRAFANA_VERSION='$GRAFANA_VERSION' GRAFANA_PORT='$GRAFANA_PORT' \
+       GRAFANA_ADMIN_PASSWORD='${GRAFANA_ADMIN_PASSWORD:-sandbox}' \
        REMOTE_DIR='$REMOTE_DIR' bash -s" < "$DIR/control-install.sh"
 
   cmd_status
@@ -118,11 +122,12 @@ cmd_status() {
   [ -f "$SECRETS" ] && source "$SECRETS"
   echo
   echo ">> Control plane on $NAME (tailnet $tsip, internal $IP)"
-  sshx "$NAME" 'for u in nomad-server sandbox-gateway prometheus nomad-autoscaler; do
+  sshx "$NAME" 'for u in nomad-server sandbox-gateway prometheus nomad-autoscaler grafana; do
       printf "   %-18s %s\n" "$u" "$(systemctl is-active $u 2>/dev/null)"; done' 2>/dev/null || true
   echo
   echo ">> Drive from laptop:"
   echo "   SANDBOX_API_URL=http://${tsip}:${GW_PORT} SANDBOX_API_KEY=${GATEWAY_TOKEN:-<token>}"
+  echo "   Grafana: http://${tsip}:${GRAFANA_PORT} (dashboard: Sandbox / Sandbox Fleet)"
 }
 
 cmd_down() {

@@ -145,6 +145,11 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /info", g.handleInfo)
 	mux.HandleFunc("GET /hosts", g.handleHosts)
 	mux.HandleFunc("GET /metrics", g.handleMetrics)
+	// Per-host detail, federated: the gateway scrapes each live host's /metrics
+	// (it already holds their addr+token) and re-exports every series with a
+	// host="<id>" label. Prometheus keeps scraping only the gateway, and the
+	// dynamic worker fleet needs no service discovery.
+	mux.HandleFunc("GET /metrics/hosts", g.handleHostMetrics)
 	mux.HandleFunc("POST /sandboxes", g.handleCreate)
 	mux.HandleFunc("GET /sandboxes", g.handleList)
 	// Drain moves a host's sandboxes elsewhere (release on the source, adopt on

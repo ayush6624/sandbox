@@ -1,0 +1,15 @@
+# Provisioned by control-install.sh. Grafana and Prometheus both run on the
+# control VM, so the datasource points at localhost. The uid is fixed so the
+# provisioned dashboard can reference it by uid rather than by name.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: sandbox-prom
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:${PROM_PORT}
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 10s

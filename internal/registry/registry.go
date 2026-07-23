@@ -210,6 +210,57 @@ func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
 	return free, nil
 }
 
+// Stats is a point-in-time snapshot of a host's occupancy, for the /metrics
+// endpoint. It mirrors the counts FreeSlots derives capacity from, but exposes
+// the raw numbers (per-pool used/total, committed memory) so an operator can
+// see WHICH pool is the binding constraint, not just the free-slot minimum.
+type Stats struct {
+	Running    int // status=running: holds a tap, IP, port, and guest memory
+	Hibernated int // status=hibernated: holds only its primary port
+	SlotsFree  int // == FreeSlots: smallest per-pool availability, mem-bounded
+
+	// Pool occupancy. Taps/IPs are held only by running sandboxes; primary
+	// ports are held by running AND hibernated (the wake-on-connect listener
+	// stays bound across the freeze); extra ports draw from the same pool.
+	TapUsed, TapTotal   int
+	IPUsed, IPTotal     int
+	PortUsed, PortTotal int // PortUsed = primary (running+hibernated) + extra
+
+	CommittedMemMIB int64 // sum of running sandboxes' effective mem_mib + overhead
+	MemBudgetMIB    int64 // admission ceiling; 0 = disabled
+}
+
+// Stats returns the host occupancy snapshot in a single query. It is cheap
+// (four COUNT/SUMs over the small sandboxes tables) and read-only, safe to hit
+// on every Prometheus scrape.
+func (r *Registry) Stats(ctx context.Context) (Stats, error) {
+	var s Stats
+	var portsHeld, extraPorts int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM sandboxes WHERE status = ?1),
+			(SELECT COUNT(*) FROM sandboxes WHERE status = ?2),
+			(SELECT COUNT(*) FROM sandboxes WHERE status IN (?1, ?2)),
+			(SELECT COUNT(*) FROM sandbox_ports),
+			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?3 ELSE mem_mib END + ?4), 0)
+			   FROM sandboxes WHERE status = ?1)`,
+		StatusRunning, StatusHibernated, r.mem.TemplateMemMIB, r.mem.OverheadMIB,
+	).Scan(&s.Running, &s.Hibernated, &portsHeld, &extraPorts, &s.CommittedMemMIB)
+	if err != nil {
+		return Stats{}, err
+	}
+	free, err := r.FreeSlots(ctx)
+	if err != nil {
+		return Stats{}, err
+	}
+	s.SlotsFree = free
+	s.TapUsed, s.TapTotal = s.Running, r.pools.TapMax
+	s.IPUsed, s.IPTotal = s.Running, r.pools.ipPoolSize()
+	s.PortUsed, s.PortTotal = portsHeld+extraPorts, r.pools.PortMax-r.pools.PortMin+1
+	s.MemBudgetMIB = r.mem.BudgetMIB
+	return s, nil
+}
+
 // MemAccounting configures memory-aware admission: the sum of committed guest
 // memory (each running sandbox's effective mem_mib + OverheadMIB of VMM
 // overhead) must stay within BudgetMIB. Hibernated sandboxes hold no memory —

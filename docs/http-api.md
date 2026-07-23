@@ -144,6 +144,35 @@ UI label resources without guessing.
 Against a **gateway**, `/info` is answered by one live host (fleet hosts
 share a template config); `503` when no host is live.
 
+### `GET /metrics`
+
+Prometheus text exposition format (`text/plain; version=0.0.4`) — this host's
+occupancy and lifecycle counters. Behind the same bearer auth as the rest of
+the TCP listener; auth-free over the Unix socket. (The **gateway** exposes its
+own fleet-aggregate `/metrics` — see [Gateway differences](#gateway-differences);
+this is the per-host detail a heartbeat elides.)
+
+Gauges:
+
+- `sandbox_running`, `sandbox_hibernated` — sandbox counts by state.
+- `sandbox_slots_free` — allocatable slots right now (smallest per-pool
+  availability, memory-bounded); what the heartbeat advertises.
+- `sandbox_pool_used{pool="tap|ip|port"}` / `sandbox_pool_total{pool=…}` —
+  per-pool occupancy, so you can see *which* pool binds. Taps/IPs are held by
+  running sandboxes only; ports by running **and** hibernated (the
+  wake-on-connect listener stays bound) plus extra exposed ports.
+- `sandbox_committed_mem_mib` / `sandbox_mem_budget_mib` — committed guest
+  memory vs the admission ceiling (`0` = admission disabled).
+- `sandbox_golden_ready` — `1` when the golden snapshot is staged (hot create
+  available).
+- `sandbox_create_inflight` / `sandbox_create_concurrency` — bring-ups
+  currently holding a create slot vs the semaphore size.
+- `sandbox_uptime_seconds` — since process start.
+
+Counters (reset only on restart): `sandbox_creates_ok_total`,
+`sandbox_creates_error_total`, `sandbox_hibernations_total`,
+`sandbox_wakes_total`, `sandbox_wake_failures_total`.
+
 ## Sandboxes
 
 ### Create — `POST /sandboxes`
@@ -365,6 +394,7 @@ The gateway fronts N hosts with the same API, plus:
 | `GET /info` | Forwarded to one live host (fleet hosts share a template config); `503` when none is live |
 | `GET /hosts` | Fleet state: `[{"id","addr","slots_total","slots_used","hibernated","free","alive","last_seen_ms_ago"}]` |
 | `GET /metrics` | Prometheus text format: `sandbox_hosts_live`, `sandbox_slots_total/used/free`, `sandbox_create_queue_depth`, per-host gauges |
+| `GET /metrics/hosts` | Federated per-host metrics: the gateway scrapes each live host's `/metrics` (using the addr+token from its heartbeat) and re-exports every series with a `host="<id>"` label, grouped into valid exposition. `sandbox_host_scrape_ok{host}` flags any host it couldn't reach. Lets Prometheus collect per-host detail while scraping only the gateway — no worker service discovery |
 | `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |
 | `GET /sandboxes` | Merged across all hosts |
 | `/sandboxes/{id}/…` | Proxied to the owning host (includes exec, exec/stream, files, dir, `/shell`, ports, `/snapshot`, `/hibernate`); unknown id → `404` |

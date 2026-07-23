@@ -4,7 +4,8 @@
 # $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
 # PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SLOTS_PER_HOST
 # HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
-# QUEUE_WAIT QUEUE_MAX REMOTE_DIR
+# QUEUE_WAIT QUEUE_MAX REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
+# GRAFANA_ADMIN_PASSWORD
 set -euo pipefail
 
 need() { command -v "$1" >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$1"; }
@@ -107,9 +108,50 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
 
+# --- 5. Grafana ---
+# Runs alongside Prometheus on the control VM; view over the tailnet at
+# http://<control-tailnet-ip>:${GRAFANA_PORT}. Anonymous viewing is on (private
+# tailnet, internal tool); the admin login still exists for editing.
+GRAFANA_VERSION="${GRAFANA_VERSION:-11.1.0}"
+GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+if [ ! -f "/opt/grafana/VERSION" ] || [ "$(cat /opt/grafana/VERSION 2>/dev/null)" != "$GRAFANA_VERSION" ]; then
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/g.tgz" "https://dl.grafana.com/oss/release/grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz"
+  rm -rf /opt/grafana && mkdir -p /opt/grafana
+  tar xzf "$tmp/g.tgz" -C /opt/grafana --strip-components=1
+  echo "$GRAFANA_VERSION" > /opt/grafana/VERSION
+  rm -rf "$tmp"
+fi
+# Provisioning: datasource (envsubst PROM_PORT), dashboard provider, dashboards.
+mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+PROM_PORT="$PROM_PORT" envsubst < "${REMOTE_DIR}/grafana/provisioning/datasources/datasource.yml" \
+  > /etc/grafana/provisioning/datasources/datasource.yml
+install -m 0644 "${REMOTE_DIR}/grafana/provisioning/dashboards/provider.yml" /etc/grafana/provisioning/dashboards/provider.yml
+install -m 0644 "${REMOTE_DIR}/grafana/dashboards/"*.json /var/lib/grafana/dashboards/
+cat >/etc/systemd/system/grafana.service <<UNIT
+[Unit]
+Description=Grafana
+After=network-online.target prometheus.service
+Wants=network-online.target
+[Service]
+ExecStart=/opt/grafana/bin/grafana server --homepath /opt/grafana
+Environment=GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+Environment=GF_PATHS_DATA=/var/lib/grafana
+Environment=GF_SERVER_HTTP_PORT=${GRAFANA_PORT}
+Environment=GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-sandbox}
+Environment=GF_AUTH_ANONYMOUS_ENABLED=true
+Environment=GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+Environment=GF_ANALYTICS_REPORTING_ENABLED=false
+Environment=GF_LOG_MODE=console
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 systemctl daemon-reload
-systemctl enable nomad-server sandbox-gateway prometheus nomad-autoscaler
+systemctl enable nomad-server sandbox-gateway prometheus nomad-autoscaler grafana
 # restart (not enable --now): a redeploy must pick up new binaries/config on
 # already-running services. Gateway routes rebuild from heartbeats in <=5s.
-systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler
+systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler grafana
 echo ">> control-install done"

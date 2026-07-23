@@ -1,0 +1,153 @@
+{
+  "uid": "sandbox-fleet",
+  "title": "Sandbox Fleet",
+  "tags": ["sandbox"],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    { "type": "row", "title": "Fleet overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100, "collapsed": false },
+
+    {
+      "type": "stat", "title": "Running sandboxes", "id": 1,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(sandbox_running{job=\"sandbox-hosts\"})" } ]
+    },
+    {
+      "type": "stat", "title": "Hibernated", "id": 2,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(sandbox_hibernated{job=\"sandbox-hosts\"})" } ]
+    },
+    {
+      "type": "stat", "title": "Slots free (fleet)", "id": 3,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 1 }, { "color": "green", "value": 10 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(sandbox_slots_free{job=\"sandbox-hosts\"})" } ]
+    },
+    {
+      "type": "stat", "title": "Hosts live", "id": 4,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sandbox_hosts_live" } ]
+    },
+
+    {
+      "type": "stat", "title": "Create queue depth", "id": 5,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 50 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sandbox_create_queue_depth" } ]
+    },
+    {
+      "type": "stat", "title": "Hosts reachable (scrape)", "id": 6,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 5 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(sandbox_host_scrape_ok)" } ]
+    },
+    {
+      "type": "stat", "title": "Golden-ready hosts", "id": 7,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 5 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "orange", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(sandbox_golden_ready)" } ]
+    },
+    {
+      "type": "stat", "title": "Create errors (5m)", "id": 8,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 5 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(increase(sandbox_creates_error_total{job=\"sandbox-hosts\"}[5m]))" } ]
+    },
+
+    { "type": "row", "title": "Capacity & pools", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "id": 101, "collapsed": false },
+
+    {
+      "type": "timeseries", "title": "Fleet slots: used vs free vs total", "id": 9,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_slots_used", "legendFormat": "used" },
+        { "refId": "B", "expr": "sandbox_slots_free", "legendFormat": "free" },
+        { "refId": "C", "expr": "sandbox_slots_total", "legendFormat": "total" }
+      ]
+    },
+    {
+      "type": "bargauge", "title": "Pool utilization by host (used / total)", "id": 10,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.95 } ] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sandbox_pool_used{job=\"sandbox-hosts\"} / sandbox_pool_total{job=\"sandbox-hosts\"}", "legendFormat": "{{host}} {{pool}}" } ]
+    },
+
+    {
+      "type": "timeseries", "title": "Committed memory vs budget (MiB, by host)", "id": 11,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "mbytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_committed_mem_mib{job=\"sandbox-hosts\"} * 1024 * 1024", "legendFormat": "{{host}} committed" },
+        { "refId": "B", "expr": "sandbox_mem_budget_mib{job=\"sandbox-hosts\"} * 1024 * 1024", "legendFormat": "{{host}} budget" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Lifecycle rate (fleet, events/min)", "id": 12,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(sandbox_creates_ok_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "creates ok" },
+        { "refId": "B", "expr": "sum(rate(sandbox_creates_error_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "creates error" },
+        { "refId": "C", "expr": "sum(rate(sandbox_hibernations_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "hibernations" },
+        { "refId": "D", "expr": "sum(rate(sandbox_wakes_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "wakes" },
+        { "refId": "E", "expr": "sum(rate(sandbox_wake_failures_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "wake failures" }
+      ]
+    },
+
+    { "type": "row", "title": "Health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }, "id": 102, "collapsed": false },
+
+    {
+      "type": "timeseries", "title": "Create-slot saturation by host (inflight vs capacity)", "id": 13,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_create_inflight{job=\"sandbox-hosts\"}", "legendFormat": "{{host}} inflight" },
+        { "refId": "B", "expr": "sandbox_create_concurrency{job=\"sandbox-hosts\"}", "legendFormat": "{{host}} capacity" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Per-host scrape health (1=ok)", "id": 14,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "expr": "sandbox_host_scrape_ok", "legendFormat": "{{host}}" } ]
+    }
+  ]
+}

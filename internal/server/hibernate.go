@@ -290,6 +290,7 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 		return fmt.Errorf("mark hibernated (sandbox is frozen but row is stale!): %w", err)
 	}
 	s.act.forget(id)
+	s.met.hibernations.Add(1)
 	fmt.Fprintf(os.Stderr, "[%s] hibernated in %s (idle sandbox frozen, slot freed)\n",
 		id, time.Since(t0).Round(time.Millisecond))
 
@@ -371,9 +372,11 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 	if err != nil {
 		// Roll the row back to hibernated — the artifacts are untouched, so
 		// the sandbox stays wakeable (or destroyable) later.
+		s.met.wakeFailures.Add(1)
 		s.rollbackWake(sb)
 		return sb, fmt.Errorf("wake %s: %w", id, err)
 	}
+	s.met.wakes.Add(1)
 
 	// The port listeners persisted through hibernation (that's what routed the
 	// waking connection here); this re-sync only repairs drift, e.g. a bind
