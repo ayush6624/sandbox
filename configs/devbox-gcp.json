@@ -16,6 +16,8 @@
   "mem_mib":         1024,
   "hibernate_after_sec": 300,
   "uffd_restore": false,
+  "uffd_chunk_gcs": true,
+  "uffd_chunk_prefetch": 32,
   "pools": {
     "TapPrefix":  "fc",
     "TapMax":     48,

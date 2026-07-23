@@ -313,6 +313,20 @@ order, each independently shippable + measurable):**
     bump, corrupt→0). **File backend for the adopt wake** — it materializes the
     full mem locally first; the LAZY UFFD-chunk clone wake (`vm.StartCloneUFFD`,
     resume-then-stream — the actual cross-host perf win) is deferred to B4c.
+  - **B4 cross-host wake — FLEET-VERIFIED end to end (2026-07-23).** Deployed
+    3c16f11 fleet-wide (`uffd_chunk_gcs` on) on the 2-worker GCP fleet. Created a
+    sandbox on worker 1pwg, wrote a rootfs marker, hibernated it → **durable diff
+    freeze**: `hib/<id>/{mem.diff.sz,state.sz,rootfs.sz,record.json}` = **3.53 MiB
+    total** (record.json last, no host-side identity leaked). Then
+    `POST /hosts/1pwg/drain` → release on 1pwg + adopt on **sm0b** (a host that
+    never created it): reconstructed rootfs (reflink golden base + overlay diff)
+    + mem (pull diff + rebase on base pulled from GCS) + state, clone-wake with
+    fresh IP 172.16.0.10, owner fence CAS'd to `{sm0b, epoch 1}`, gateway route
+    moved. `cat /root/b4-marker.txt` → `hello-from-b4` on sm0b — **rootfs + guest
+    survived the cross-host move**; whole drain took ~16 s (incl. sm0b's one-time
+    golden-base pull). This proves B4a durability + B4b adopt/release/fence + B4c
+    gateway drain, all on the File-backend adopt. Test sandbox + GCS artifacts
+    cleaned up; fleet left on 3c16f11.
   - **B4c — gateway dispatch. SHIPPED (gateway half; lazy wake + measurement
     still pending — both fleet-gated).** `handleProxyByID` now, on a route miss
     (owning host gone), dispatches `POST /sandboxes/{id}/adopt` to a live host
