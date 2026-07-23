@@ -313,13 +313,24 @@ order, each independently shippable + measurable):**
     bump, corrupt→0). **File backend for the adopt wake** — it materializes the
     full mem locally first; the LAZY UFFD-chunk clone wake (`vm.StartCloneUFFD`,
     resume-then-stream — the actual cross-host perf win) is deferred to B4c.
-  - **B4c — gateway resolve-on-miss + drain + measurement + lazy clone wake.
-    NEXT.** Gateway route-miss → dispatch `/adopt`; a `/drain` control op →
-    `/release`-then-`/adopt`; honor the fence on route claims. Add
-    `vm.StartCloneUFFD` so the adopt wake streams from the GCS chunk source
-    instead of pre-materializing. Then the cross-host A/B vs File (dead-host
-    recovery wake-to-first-exec — the number that closes the roadmap thesis) + a
-    drain-a-host timing.
+  - **B4c — gateway dispatch. SHIPPED (gateway half; lazy wake + measurement
+    still pending — both fleet-gated).** `handleProxyByID` now, on a route miss
+    (owning host gone), dispatches `POST /sandboxes/{id}/adopt` to a live host
+    and routes through on success (`internal/gateway/adopt.go`): single-flighted
+    per id, negative-cached on a definitive 404 (no durable record), and failing
+    over on capacity/connection errors with the same reserve/penalize machinery
+    as create. `POST /hosts/{host}/drain` releases each sandbox on a host and
+    re-adopts it elsewhere (excluding the drained source). `client.Adopt` /
+    `client.Release` added. Unit-tested: adopt-success routes + consumes a slot,
+    404 negative-caches (no re-dispatch), capacity failover, drain excludes the
+    source. darwin tests+vet + linux build green.
+  - **B4c remaining (FLEET-GATED, do with the fleet reachable):** (1) add
+    `vm.StartCloneUFFD` so the adopt wake **streams** from the GCS chunk source
+    instead of pre-materializing the full mem (today's File-backend adopt is
+    correct but downloads the whole image — same care as the prefetch=32 FC
+    resume panic); (2) the cross-host A/B vs File (dead-host recovery
+    wake-to-first-exec — the number that closes the roadmap thesis) + a
+    drain-a-host timing; (3) two-host split-brain fence race verification.
 
 **Correctness gotchas locked in from Phase A (do not relearn the hard way):**
 - FC waits **forever** on an unserved fault → a GCS fetch that fails after

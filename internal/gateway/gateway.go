@@ -103,6 +103,16 @@ type Gateway struct {
 	route     map[string]string // sandbox id → host id (derived from heartbeats)
 	snapRoute map[string]string // snapshot id → host id (derived from heartbeats)
 
+	// Cross-host wake (roadmap B4). When an id-scoped request finds no live
+	// route (the owning host is gone), the gateway dispatches an /adopt to a
+	// live host, which reconstructs the sandbox from GCS. adopts single-flights
+	// concurrent misses for the same id onto one adopt; notFound briefly caches
+	// a definitive 404 (no durable record) so a storm of requests for a dead id
+	// doesn't fan /adopt out to every host.
+	adoptMu  sync.Mutex
+	adopts   map[string]*adoptInflight
+	notFound sync.Map // sandbox id → time.Time (negative-cache expiry)
+
 	// proxies caches one ReverseProxy per host id (self-invalidating on
 	// addr/token change; pruned with the host). Rebuilding a proxy + three
 	// closures per proxied request is pure allocation churn at high fan-out.
@@ -122,6 +132,7 @@ func New(token string, ttl time.Duration, queueWait time.Duration, queueMax int)
 		hosts:     map[string]*host{},
 		route:     map[string]string{},
 		snapRoute: map[string]string{},
+		adopts:    map[string]*adoptInflight{},
 	}
 }
 
@@ -136,6 +147,9 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /metrics", g.handleMetrics)
 	mux.HandleFunc("POST /sandboxes", g.handleCreate)
 	mux.HandleFunc("GET /sandboxes", g.handleList)
+	// Drain moves a host's sandboxes elsewhere (release on the source, adopt on
+	// a target) — maintenance, or rebalancing (roadmap B4).
+	mux.HandleFunc("POST /hosts/{host}/drain", g.handleDrain)
 	// Every id-scoped request (GET/DELETE /sandboxes/{id} and all
 	// /sandboxes/{id}/... subpaths, including the /shell WebSocket and the
 	// /exec/stream NDJSON stream) is reverse-proxied to the owning host.
@@ -665,6 +679,20 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 	}
 	g.mu.RUnlock()
 
+	if h == nil {
+		// No live route: the owning host may be gone. Try to adopt the sandbox
+		// onto a live host from its durable GCS record (roadmap B4). Adopt can
+		// take seconds (reconstruct + wake), so this blocks the request like a
+		// wake-on-connect; concurrent misses for the same id single-flight.
+		if hid, ok := g.resolveViaAdopt(id, nil); ok {
+			g.mu.RLock()
+			if ah := g.hosts[hid]; ah != nil {
+				snap = *ah
+				h = ah
+			}
+			g.mu.RUnlock()
+		}
+	}
 	if h == nil {
 		err := fmt.Errorf("sandbox %s not found on any host", id)
 		if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseNotFound, err.Error()) == nil {

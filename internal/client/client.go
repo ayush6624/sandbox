@@ -147,6 +147,25 @@ func (c *Client) Hibernate(ctx context.Context, id string) (registry.Sandbox, er
 	return sb, nil
 }
 
+// Adopt asks this host to reconstruct a hibernated sandbox from the snapshot
+// bucket and wake it locally under a fresh identity (roadmap B4 cross-host wake).
+// Gateway-internal: dispatched on a route miss (owner host gone) or a drain. A
+// 404 means no durable record exists for the id anywhere.
+func (c *Client) Adopt(ctx context.Context, id string) (registry.Sandbox, error) {
+	var sb registry.Sandbox
+	if err := c.do(ctx, "POST", "/sandboxes/"+id+"/adopt", nil, &sb); err != nil {
+		return registry.Sandbox{}, err
+	}
+	return sb, nil
+}
+
+// Release asks this host to freeze a sandbox (if running), confirm it is durable
+// in the snapshot bucket, then drop its local copy so another host can adopt it.
+// Gateway-internal: the source side of a drain.
+func (c *Client) Release(ctx context.Context, id string) error {
+	return c.do(ctx, "POST", "/sandboxes/"+id+"/release", nil, nil)
+}
+
 // Exec runs a shell command inside the sandbox via the guest agent.
 func (c *Client) Exec(ctx context.Context, id string, req agentapi.ExecRequest) (agentapi.ExecResult, error) {
 	var res agentapi.ExecResult
