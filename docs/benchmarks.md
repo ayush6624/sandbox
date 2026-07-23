@@ -1,7 +1,10 @@
 # Benchmarks
 
-**Updated 2026-07-18** (numbers measured 2026-07-01 → 2026-07-12, server release
-`b801d6d`+). Interactive version: [`benchmark-report.html`](./benchmark-report.html)
+**Updated 2026-07-23.** The instrumented headline/detail numbers were measured
+2026-07-01 → 2026-07-12 (server release `b801d6d`+); a full end-to-end SDK
+re-run on the current fleet (commit `06f5c16`) is in
+[2026-07-23 fleet re-run](#2026-07-23-fleet-re-run-commit-06f5c16) below.
+Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 (published at <https://claude.ai/code/artifact/f14de3c5-96c3-45d1-bc7d-1a4ce4ccf6b3>).
 
 ## Headline
@@ -81,6 +84,50 @@ retry+backoff; 0 pool-exhaustion errors after gateway reserve-at-pick, clean
 503s under overload. Sustained overload (500 held alive) ramped the autoscaler
 3→8 hosts over ~450 s and cleanly rejected the rest. Full write-up:
 <https://claude.ai/code/artifact/0cfd2df8-177f-4793-b415-0f4260b51b8b>.
+
+### 2026-07-23 fleet re-run (commit `06f5c16`)
+
+Full SDK re-run on the current autoscaling fleet — **2 workers × 48 slots** (GCP
+nested-KVM, XFS reflink), guests 2 vCPU / 1 GB, Firecracker v1.15. The client ran
+**on the control VM, in the same VPC as the workers** (sub-ms network), so these
+are SDK **end-to-end** wall-times — "time until you can `exec`" — with the WAN /
+tailnet hop stripped out. They complement, not replace, the instrumented
+server-side numbers above.
+
+Create & restore latency (worker-local, 20 iters):
+
+| Path | p50 | mean | p90 | max |
+|---|--:|--:|--:|--:|
+| Hot create (`Sandbox.create`, golden clone) | 478 ms | 479 ms | 509 ms | 518 ms |
+| Snapshot restore (`Sandbox.restore`) | **84 ms** | 95 ms | 88 ms | 305 ms |
+
+Restore is **5.7×** faster than a hot create end-to-end; the hot create itself
+beats the ~0.55 s tallied from a tailnet client, since this run has no WAN hop
+(server-side is still ~0.25 s).
+
+Fan-out (one host, N clones from one snapshot):
+
+| N | batch | per-clone | usable |
+|--:|--:|--:|--:|
+| 1 | 337 ms | 337 ms | 1/1 |
+| 8 | 663 ms | 83 ms | 8/8 |
+| 16 | 1.28 s | 80 ms | 16/16 |
+| 32 | 2.66 s | **83 ms** | 32/32 |
+
+vs 32 cold boots at 147 ms/boot (4.69 s batch) → **1.8×**, all clones usable.
+
+Fleet & burst (via the gateway, bin-packed across both hosts):
+
+| Test | Result |
+|---|---|
+| 64 concurrent creates + in-guest workload | 64/64 created, 64/64 workload ok; create p50 **1.28 s** / p95 2.0 s; **0 failures** |
+| Churn burst 200 @ concurrency 96 | 200/200 ok, **7.9 creates/s** sustained (25.5 s wall); **0** capacity/pool/agent-timeout errors; create p50 5.2 s under saturation, kill p50 186 ms |
+| Single-sandbox SQLite+FS workload | create 0.52 s; full suite 4.10 s mean/run (batch-insert 0.83 s, LIKE scan 1.42 s, 64 MB fs write 84 ms) |
+
+The burst's create p50 rising to 5.2 s at 96-in-flight — with **zero** 503s, pool
+exhaustion, or agent timeouts — is the per-host create semaphore working as
+designed: a flood queues instead of boot-storming the hosts into timeouts. Raw
+JSON: `sdk/typescript/benchmarks/results/06f5c16/`.
 
 ## Versus hosted sandbox providers
 
