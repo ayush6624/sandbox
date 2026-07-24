@@ -25,7 +25,14 @@ func (s *Server) ensureGolden(ctx context.Context) {
 	// returns: the heartbeat may start advertising real free slots. A failed
 	// build just means cold creates (slower, still functional); never leave the
 	// host permanently unplaceable.
-	defer close(s.warmed)
+	//
+	// This is the phase that dominates a cold worker's warm-up when the golden
+	// has to be BUILT (cold boot + snapshot) and near-free when it's ADOPTED
+	// from a baked data disk — the boot-phase timeline separates the two.
+	defer func() {
+		s.phases.mark(phaseGoldenSettled)
+		close(s.warmed)
+	}()
 
 	snap, err := s.reg.GoldenSnapshot(ctx)
 	if err != nil {

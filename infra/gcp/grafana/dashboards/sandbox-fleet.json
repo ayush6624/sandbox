@@ -148,6 +148,27 @@
       "fieldConfig": { "defaults": { "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [ { "refId": "A", "expr": "sandbox_host_scrape_ok", "legendFormat": "{{host}}" } ]
+    },
+
+    { "type": "row", "title": "Autoscale: worker readiness", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }, "id": 103, "collapsed": false },
+
+    {
+      "type": "stat", "title": "Worker ready: boot -> capacity (slowest host)", "id": 15,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 36 },
+      "description": "Seconds from kernel boot until the host first advertised free slots to the gateway — the span autoscale latency work targets. Absent for a host that has not warmed yet (never a misleading 0).",
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 60 }, { "color": "red", "value": 120 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "max(sandbox_worker_ready_seconds)" } ]
+    },
+    {
+      "type": "bargauge", "title": "Boot phase offsets by host (s from kernel boot)", "id": 16,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 36 },
+      "description": "Each phase's completion time relative to the boot anchor; the gap between adjacent phases is that stage's cost. Order: startup_script_entered, data_disk_ready, rootfs_staged, nomad_started, serve_task_started (Nomad schedule + GCS artifact pull), serve_process_start, reconcile_done, golden_settled (adopt vs cold build), first_heartbeat_ok, capacity_advertised. Absolute timestamps underneath, so the 10s scrape does not blur the boundaries.",
+      "fieldConfig": { "defaults": { "min": 0, "unit": "s", "decimals": 1, "color": { "mode": "continuous-GrYlRd" } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sandbox_boot_phase_seconds", "legendFormat": "{{host}} / {{phase}}" } ]
     }
   ]
 }

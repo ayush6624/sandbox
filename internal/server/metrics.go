@@ -68,6 +68,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_wakes_total", "Sandboxes successfully thawed from hibernation.", s.met.wakes.Load())
 	counter("sandbox_wake_failures_total", "Wake attempts that rolled back to hibernated.", s.met.wakeFailures.Load())
 
+	// Worker boot/readiness timeline — the autoscale critical path, per stage.
+	s.writeBootPhaseMetrics(&b)
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
 }

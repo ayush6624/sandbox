@@ -123,5 +123,17 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		fmt.Fprintf(os.Stderr, "heartbeat: gateway returned %s\n", resp.Status)
+		return
+	}
+
+	// Boot-phase stamps (see bootphase.go). first_heartbeat_ok is when the
+	// gateway can ROUTE to this host; capacity_advertised is when it can PLACE
+	// on it — the two differ by the golden warm-up, because an unwarmed host
+	// deliberately advertises slots_free=0. capacity_advertised is the real
+	// "new capacity is online" moment the autoscale timeline should be measured
+	// to. Both are first-write-wins, so the 5s ticker can't overwrite them.
+	s.phases.mark(phaseFirstHeartbeat)
+	if hb.SlotsFree != nil && *hb.SlotsFree > 0 {
+		s.phases.mark(phaseCapacityAdv)
 	}
 }

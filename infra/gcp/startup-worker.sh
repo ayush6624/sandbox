@@ -17,6 +17,20 @@ meta() {
     "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1" 2>/dev/null || true
 }
 
+# Boot-phase instrumentation: append "<phase>\t<epoch_ms>" so `sandbox serve`
+# can export the worker's readiness timeline on /metrics (see
+# internal/server/bootphase.go). This is what turns the autoscale profile's
+# opaque ~26s "worker becomes usable" block into per-stage numbers. tmpfs, so a
+# freshly booted instance always starts with an empty timeline. Never fatal —
+# diagnostics must not be able to fail a boot.
+PHASE_FILE=/run/sandbox/boot-phases
+phase() {
+  mkdir -p "$(dirname "$PHASE_FILE")" 2>/dev/null || return 0
+  printf '%s\t%s\n' "$1" "$(date +%s%3N)" >> "$PHASE_FILE" 2>/dev/null || true
+}
+
+phase startup_script_entered
+
 NOMAD_SERVER_IP="$(meta nomad-server-ip)"
 [ -n "$NOMAD_SERVER_IP" ] || { echo "FATAL: no nomad-server-ip metadata"; exit 1; }
 
@@ -43,6 +57,7 @@ mountpoint -q "$XFS_MNT" || mount "$XFS_MNT"
 # disks, or equal sizes), so it's safe on every boot.
 xfs_growfs "$XFS_MNT" || true
 mkdir -p "$XFS_MNT"/{base,rootfs,snapshots}
+phase data_disk_ready
 
 #############################################
 # 2. Stage the base rootfs onto the data disk
@@ -62,11 +77,17 @@ if [ ! -f "$XFS_MNT/base/devbox-rootfs.ext4" ] && [ -f /opt/fc/devbox-rootfs.ext
     cp --preserve=mode,timestamps /opt/fc/devbox-rootfs.ext4.agent-stamp "$XFS_MNT/base/devbox-rootfs.ext4.agent-stamp"
   fi
 fi
+# Stamped unconditionally: on a data disk seeded from the golden image the copy
+# is skipped entirely, and knowing THAT is the point (it's the ~2 GB the baked
+# golden image saves).
+phase rootfs_staged
 
 #############################################
 # 3. Render Nomad client config + start Nomad
 #############################################
 sed -i "s|__NOMAD_SERVER_IP__|${NOMAD_SERVER_IP}|g" /etc/nomad.d/client.hcl
 systemctl enable --now nomad
+phase nomad_started
 
+phase startup_script_done
 echo "startup-worker finished OK (nomad server ${NOMAD_SERVER_IP})"

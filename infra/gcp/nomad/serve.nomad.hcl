@@ -65,6 +65,13 @@ job "sandbox-serve" {
 set -euo pipefail
 cd "$${NOMAD_TASK_DIR}"
 chmod +x bin/sandbox bin/sandboxd
+# Boot-phase stamp (internal/server/bootphase.go). Nomad fetches the `artifact`
+# blocks BEFORE running this script, so reaching here means "alloc placed +
+# release binaries downloaded" — the gap from nomad_started to here is the
+# Nomad scheduling + GCS artifact-pull cost on the scale-out path. serve reads
+# this file moments later and exports the whole timeline on /metrics.
+mkdir -p /run/sandbox 2>/dev/null || true
+printf '%s\t%s\n' serve_task_started "$(date +%s%3N)" >> /run/sandbox/boot-phases 2>/dev/null || true
 # sandboxd is baked into the base rootfs at IMAGE BUILD time (bake-image.sh
 # [3b/6]); the golden snapshot is built from that rootfs and its validity is
 # keyed on the base rootfs mtime+size (goldenUsable). So the base rootfs MUST

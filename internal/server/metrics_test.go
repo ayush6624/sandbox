@@ -29,6 +29,13 @@ func parseMetrics(t *testing.T, body string) map[string]int64 {
 		}
 		v, err := strconv.ParseInt(line[i+1:], 10, 64)
 		if err != nil {
+			// The boot-phase families (sandbox_boot_phase_*,
+			// sandbox_worker_ready_seconds) are legitimately fractional. Skip
+			// well-formed floats so this integer-oriented helper stays usable,
+			// but still fail on output that isn't a number at all.
+			if _, ferr := strconv.ParseFloat(line[i+1:], 64); ferr == nil {
+				continue
+			}
 			t.Fatalf("value in %q: %v", line, err)
 		}
 		out[line[:i]] = v

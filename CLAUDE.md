@@ -437,6 +437,44 @@ scripts/              Host setup shell scripts
   to a full `cp --sparse=always` only when the filesystem can't reflink (e.g. ext4, where
   it's ~2 GB-sparse copy in ~1 s and I/O scales linearly with N). Don't share the rootfs
   between VMs — ext4 corrupts under concurrent mount.
+- **The worker boot/readiness path is instrumented per stage** (`internal/server/bootphase.go`).
+  Autoscale latency is ~10 s of control loop plus a much larger "make this host usable" span
+  that used to be one opaque block in the profile. Three writers that can't share memory
+  contribute phases: `startup-worker.sh` and the Nomad task's `run.sh` append
+  `"<phase>\t<epoch_ms>"` to **`/run/sandbox/boot-phases`** (fixed path — the startup script
+  runs before any config is read; `SANDBOX_BOOT_PHASES` overrides for tests), serve marks its
+  own (`serve_process_start`, `reconcile_done`, `golden_settled`, `first_heartbeat_ok`,
+  `capacity_advertised`), and `kernel_boot` comes from `/proc/stat` btime as a free stand-in
+  for "GCE reported RUNNING". `/metrics` exports `sandbox_boot_phase_timestamp_seconds{phase}`,
+  `sandbox_boot_phase_seconds{phase}` (offset from the anchor) and the headline
+  `sandbox_worker_ready_seconds`; all federate through `/metrics/hosts` with a `host` label
+  automatically (`injectHostLabel` merges into existing labels). **These are absolute
+  timestamps, not rates — so the normal 10 s scrape recovers ms-accurate boundaries and
+  profiling needs no special scrape interval.** Marks are first-write-wins (the 5 s heartbeat
+  re-marks forever). `capacity_advertised`, not `first_heartbeat_ok`, is the real "new capacity
+  online" moment: an unwarmed host deliberately heartbeats `slots_free=0`. Note `/run` is
+  tmpfs, so a *stopped* standby worker gets a clean timeline on boot while a *suspended* one
+  keeps its original boot's file — correct, since a resumed worker re-runs neither the startup
+  script nor serve. NB `parseMetrics` in the server tests skips float-valued lines for these
+  families; it still fails on genuinely malformed output.
+- **The autoscaler's scale-out confirmation budget is a scale-up BLACKOUT, so it's tuned
+  SHORT.** The gce-mig target polls for MIG-wide stability after a resize, and while that runs
+  the policy sits in `StateScaling` where every evaluation is dropped ("skipping scaling,
+  target still scaling"). The upstream default of 15 attempts × 10 s meant **150 s during which
+  a growing burst could not add a second wave of hosts**, and it always ended in
+  `failed to confirm scale out GCE Instance Group: reached retry limit` — because with a
+  standby pool, stability is unreachable by construction: the MIG keeps replenishing suspended
+  workers in the background (~190 s). We don't need GCE's confirmation, since real readiness
+  arrives on the gateway heartbeat (now measured by `sandbox_worker_ready_seconds`). So
+  `retry_attempts` is set from `AUTOSCALER_RETRY_ATTEMPTS` (default 3 = a 30 s blackout).
+  Failing fast is safe: on confirm failure the handler returns to Idle **without** entering
+  cooldown, and the next evaluation compares desired against the MIG target size the resize
+  already set, so it no-ops unless demand genuinely grew. Requires **autoscaler ≥ 0.4.8**
+  (older builds silently ignore the key and keep 150 s) — hence the bump to 0.5.0, which also
+  brings 0.4.9's "don't issue scaling requests when no change is needed" and 0.5.0's scale-in
+  node-selection fix. `control-install.sh` now compares the installed binary's version and
+  re-fetches on mismatch; it previously guarded with `command -v nomad-autoscaler ||`, so
+  **bumping `AUTOSCALER_VERSION` never actually upgraded anything**.
 - **Build tags**: `//go:build linux` for SDK code, `//go:build !linux` for the stub. Keep the
   signatures identical in both files.
 - **`disableValidation` arg on `NewMachine`** lets you build the SDK config on non-Linux for

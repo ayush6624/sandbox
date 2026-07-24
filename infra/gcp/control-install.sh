@@ -88,12 +88,33 @@ WantedBy=multi-user.target
 UNIT
 
 # --- 4. Nomad autoscaler ---
-command -v nomad-autoscaler >/dev/null || \
+# VERSION-AWARE (was `command -v nomad-autoscaler ||`, which never re-fetched, so
+# bumping AUTOSCALER_VERSION silently left the old binary installed forever).
+# Compares the running binary's reported version and re-fetches on mismatch,
+# mirroring the Grafana block below.
+installed_autoscaler_version() {
+  /usr/local/bin/nomad-autoscaler --version 2>/dev/null |
+    grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v
+}
+have_autoscaler="$(installed_autoscaler_version)"
+if [ "$have_autoscaler" != "$AUTOSCALER_VERSION" ]; then
+  echo ">> installing nomad-autoscaler ${AUTOSCALER_VERSION} (was ${have_autoscaler:-none})"
   fetch_unzip "https://releases.hashicorp.com/nomad-autoscaler/${AUTOSCALER_VERSION}/nomad-autoscaler_${AUTOSCALER_VERSION}_linux_amd64.zip" /usr/local/bin/nomad-autoscaler
+fi
+
+# retry_attempts in the gce-mig target block needs >= 0.4.8; older builds ignore
+# it and keep the hard-coded 15 attempts (150s of post-action scale-up blackout).
+# Warn loudly rather than fail — an old pin still autoscales, just slower to
+# react to a second burst wave.
+case "$AUTOSCALER_VERSION" in
+  0.4.[0-7]|0.[0-3].*) echo "WARNING: autoscaler ${AUTOSCALER_VERSION} < 0.4.8 ignores retry_attempts; scale-up blackout stays at 150s per action" >&2 ;;
+esac
+
 mkdir -p /etc/nomad-autoscaler/policies
 PROM_PORT="$PROM_PORT" envsubst < "${REMOTE_DIR}/nomad/autoscaler.hcl.tpl" > /etc/nomad-autoscaler/autoscaler.hcl
 PROJECT="$PROJECT" ZONE="$ZONE" MIG_NAME="$MIG_NAME" MIG_MIN="$MIG_MIN" MIG_MAX="$MIG_MAX" \
   SCALE_DOWN_WINDOW="$SCALE_DOWN_WINDOW" \
+  AUTOSCALER_RETRY_ATTEMPTS="${AUTOSCALER_RETRY_ATTEMPTS:-3}" \
   envsubst < "${REMOTE_DIR}/nomad/policies/workers.hcl.tpl" > /etc/nomad-autoscaler/policies/workers.hcl
 cat >/etc/systemd/system/nomad-autoscaler.service <<UNIT
 [Unit]

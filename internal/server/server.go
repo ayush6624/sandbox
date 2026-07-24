@@ -156,6 +156,11 @@ type Server struct {
 
 	// startedAt stamps process start so /metrics can export uptime.
 	startedAt time.Time
+
+	// phases records the worker boot/readiness timeline (see bootphase.go) so
+	// the autoscale "host becomes usable" span is attributable per stage
+	// instead of one opaque block.
+	phases *phaseRecorder
 }
 
 // serverMetrics are monotonic counts of lifecycle events, incremented at the
@@ -177,7 +182,7 @@ const fcOverheadMIB = 156
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
 		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
-		startedAt: time.Now()}
+		startedAt: time.Now(), phases: newPhaseRecorder()}
 	sem := cfg.CreateConcurrency
 	if sem <= 0 {
 		sem = 2 * runtime.NumCPU()
@@ -237,7 +242,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	defer vmCancel()
 	s.vmCtx = vmCtx
 
+	// Fold in the boot scripts' phase stamps + the kernel-boot anchor before
+	// anything else, so the timeline is complete even if startup below fails.
+	s.initBootPhases()
+
 	s.reconcile(ctx)
+	s.phases.mark(phaseReconcileDone)
 	// Hibernated sandboxes survived reconcile; re-bind their port-forward
 	// listeners or wake-on-connect breaks after a server restart.
 	s.reopenPortListeners(ctx)

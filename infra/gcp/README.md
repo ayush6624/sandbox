@@ -92,6 +92,30 @@ capacity ahead of forecast bursts; preserving initialized worker memory gives
 the fastest scale-out. Stopped standby remains supported as a cheaper fallback,
 but the production configuration intentionally sets its target to zero.
 
+**Scale-out confirmation is deliberately short-circuited.** The gce-mig target
+polls for MIG-wide stability after each resize, and the policy is frozen in
+`StateScaling` for that whole window — every evaluation inside it is dropped with
+`skipping scaling, target still scaling`. So the confirmation budget is really a
+*scale-up blackout*, and the upstream default (15 attempts × 10 s = 150 s) blocked
+a second wave of hosts mid-burst while always ending in
+`failed to confirm scale out GCE Instance Group: reached retry limit` — with a
+standby pool, MIG stability is unreachable by construction, since the pool spends
+~190 s replenishing a replacement suspended worker in the background. We don't
+need GCE's confirmation (readiness shows up on the gateway heartbeat, measured by
+`sandbox_worker_ready_seconds`), so `AUTOSCALER_RETRY_ATTEMPTS` defaults to `3`
+(30 s). Failing fast is safe: a failed confirm returns the policy to Idle **without
+cooldown**, and the next evaluation no-ops unless demand actually grew, because the
+resize already moved the MIG's target size.
+
+This needs **autoscaler ≥ 0.4.8** — older builds ignore `retry_attempts` and keep
+the 150 s blackout — so `AUTOSCALER_VERSION` is now `0.5.0`. **`config.env` is
+gitignored: bump `AUTOSCALER_VERSION` (and optionally add
+`AUTOSCALER_RETRY_ATTEMPTS`) in your live `config.env`, then
+`./control.sh install`**; `control-install.sh` compares the installed binary's
+version and re-fetches on mismatch, and warns if the pin is too old for the key.
+(It previously guarded the download with `command -v nomad-autoscaler ||`, so a
+version bump alone silently kept the old binary.)
+
 **Scale-in freezes running sandboxes on the removed host**: server shutdown
 hibernates them (diff snapshots — a full host freezes inside the 120 s stop
 window), so they come back wakeable if that VM ever starts again (standby-pool
@@ -103,8 +127,10 @@ placement + the window minimize how often scale-in hits an in-use host.
 capacity; overflow creates wait in the gateway's bounded queue
 (`QUEUE_WAIT`/`QUEUE_MAX`) instead of 503ing, and the queue depth itself feeds
 `sandbox:workers_desired` — computed from **effective occupancy**
-(`slots_total − slots_free`, so memory admission and still-warming hosts count
-as demand) — so the autoscaler scales up
+(`slots_used + hibernated`, NOT `slots_total − slots_free`: a warming host
+advertises `slots_free=0` as a placement gate while running zero sandboxes, and
+`total − free` misread that as a full host, inflating desired by ~one host) — so
+the autoscaler scales up
 immediately; the MIG resumes suspended standby workers first, then starts
 stopped workers, and finally creates fresh VMs when both pools run dry. A fresh host
 advertises `slots_free=0` until its golden snapshot is built, so it is never
@@ -119,6 +145,53 @@ buckets persist — remove with `gcloud` if you're fully done).
 
 **Ops:** `./control.sh status`, `./mig.sh status`, and on the control VM
 `nomad job status sandbox-serve` / `nomad node status`.
+
+### Profiling a scale-up (worker readiness)
+
+Autoscale latency splits into a **decision** span (demand → MIG resize, ~10 s:
+scrape 10 s + rule eval 10 s + `evaluation_interval` 10 s) and a **readiness**
+span (resize → the new host advertises capacity), which dominates. The readiness
+span is instrumented per stage and exported on every host's `/metrics`, federated
+to Prometheus with a `host` label:
+
+```promql
+sandbox_worker_ready_seconds                  # headline: kernel boot -> capacity advertised
+sandbox_boot_phase_seconds{phase="..."}       # each phase, seconds from the boot anchor
+sandbox_boot_phase_timestamp_seconds{phase=".."}  # the same as absolute unix time
+```
+
+Phase order (adjacent gaps are the per-stage costs):
+
+| phase | written by | the gap before it measures |
+|---|---|---|
+| `kernel_boot` | serve (`/proc/stat` btime) | — (anchor) |
+| `startup_script_entered` | startup-worker.sh | GCE boot → startup script |
+| `data_disk_ready` | startup-worker.sh | XFS mkfs/mount/growfs |
+| `rootfs_staged` | startup-worker.sh | base rootfs copy (≈free on a golden-seeded disk) |
+| `nomad_started` | startup-worker.sh | Nomad client start |
+| `serve_task_started` | run.sh (Nomad task) | Nomad join + schedule + GCS artifact pull |
+| `serve_process_start` | serve | process exec |
+| `reconcile_done` | serve | stale-state cleanup |
+| `golden_settled` | serve | golden **adopt** (fast) vs **cold build** (slow) |
+| `first_heartbeat_ok` | serve | gateway can route here |
+| `capacity_advertised` | serve | gateway can **place** here ← the real "capacity online" |
+
+Because these are absolute timestamps rather than rates, **the normal 10 s scrape
+already yields millisecond-accurate boundaries** — no special scrape interval is
+needed for a profiling run. Read them straight off a host too:
+
+```bash
+curl -sH "Authorization: Bearer $HOST_TOKEN" http://<worker-ip>:8080/metrics | grep boot_phase
+```
+
+Grafana: the **Autoscale: worker readiness** row on the Sandbox Fleet dashboard.
+
+Two caveats. `/run` is tmpfs, so the file is per-boot: a **stopped** standby
+worker produces a full fresh timeline, while a **resumed suspended** worker keeps
+its original boot's phases — correct, because a resumed worker re-runs neither the
+startup script nor `serve`, and its readiness path is just resume → network →
+next heartbeat. And a host that never warms has no `capacity_advertised`, so
+`sandbox_worker_ready_seconds` is absent rather than misleadingly 0.
 
 ---
 

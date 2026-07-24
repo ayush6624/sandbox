@@ -1,5 +1,5 @@
 # Rendered by control-install.sh (envsubst): ${PROJECT} ${ZONE} ${MIG_NAME}
-# ${MIG_MIN} ${MIG_MAX} ${SCALE_DOWN_WINDOW}.
+# ${MIG_MIN} ${MIG_MAX} ${SCALE_DOWN_WINDOW} ${AUTOSCALER_RETRY_ATTEMPTS}.
 #
 # Cluster (node-count) scaling policy for the worker MIG. The query is the
 # recording rule sandbox:workers_desired, wrapped in max_over_time so:
@@ -45,6 +45,17 @@ scaling "sandbox_workers" {
       project                = "${PROJECT}"
       zone                   = "${ZONE}"
       mig_name               = "${MIG_NAME}"
+      # Confirmation budget = scale-up blackout: the policy stays in
+      # StateScaling while the target polls for MIG-wide stability, dropping
+      # every evaluation in that window ("skipping scaling, target still
+      # scaling"). The 15-attempt default (150s) is why scale-outs logged
+      # "failed to confirm scale out ... reached retry limit" ~2m24s in — and
+      # with a standby pool it can never confirm, since background replenish
+      # keeps the MIG unstable ~190s. Fail fast instead: readiness is observed
+      # from the gateway heartbeat, and a failed confirm returns to Idle with no
+      # cooldown, so a second burst wave can scale within ~30s instead of ~150s.
+      # Requires autoscaler >= 0.4.8; older builds ignore this key.
+      retry_attempts         = "${AUTOSCALER_RETRY_ATTEMPTS}"
       node_class             = "sandbox-worker"
       node_drain_deadline    = "2m"
       node_purge             = "true"
