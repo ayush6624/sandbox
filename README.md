@@ -157,7 +157,7 @@ Endpoints (both listeners):
 | Method & path | Description |
 |---|---|
 | `GET /info` | Host template defaults (`default_vcpus`, `default_mem_mib`) and per-sandbox override limits |
-| `POST /sandboxes` | Create a sandbox; optional `{"timeout_sec": N}` body sets an auto-destroy TTL. Returns when the in-guest agent is healthy |
+| `POST /sandboxes` | Create a sandbox; optional `timeout_sec` sets an auto-destroy TTL and `hibernate_after_sec` overrides idle hibernation (`-1` disables). Returns when the in-guest agent is healthy |
 | `GET /sandboxes` | List running sandboxes |
 | `GET /sandboxes/{id}` | Get one sandbox |
 | `DELETE /sandboxes/{id}` | Graceful guest shutdown + resource cleanup |
@@ -193,6 +193,7 @@ Default config at `configs/devbox.json`. Anything omitted falls back to defaults
 | `rootfs_dir` | `/var/lib/sandbox/rootfs` | Per-sandbox copies (XFS/btrfs → instant reflink clones) |
 | `snapshot_dir` | `/var/lib/sandbox/snapshots` | Snapshot artifacts (memory + state + frozen rootfs) |
 | `disable_hot_create` | `false` | `true` = always cold-boot creates instead of cloning the golden snapshot |
+| `hibernate_after_sec` | `600` in shipped configs | Hibernate after externally idle seconds; `0` disables the host default |
 | `bridge` | `br-fc` | Host bridge for tap devices |
 | `gateway_ip` | `172.16.0.1` | Bridge IP / guest default gateway |
 | `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | VM identity and explicit-forwarding pools |

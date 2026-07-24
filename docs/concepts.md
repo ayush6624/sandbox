@@ -76,7 +76,19 @@ called on the owning host directly. Gateway routing for snapshots is roadmap.
 
 ## Lifecycle and TTLs
 
-Sandboxes live until killed — unless you give them a timeout:
+The shipped configs hibernate a sandbox after 10 minutes without observable
+external activity. Agent API requests, shells, and forwarded-port connections
+reset the idle clock; in-flight requests and open connections pin the sandbox.
+Hibernation snapshots memory and processes, releases its running slot, and wakes
+transparently on the next supported interaction.
+
+Guest process activity is intentionally not inspected. A detached background
+job can be paused once the external idle window passes. Use
+`{"hibernate_after_sec": -1}` for unattended work that must keep running
+continuously; otherwise its process state resumes on wake, but external
+connections may have expired.
+
+TTL deletion is an independent hard backstop:
 
 - `POST /sandboxes {"timeout_sec": 600}` — auto-destroy in 10 minutes.
 - `POST /sandboxes/{id}/timeout {"timeout_sec": N}` — replace the TTL,

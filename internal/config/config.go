@@ -53,10 +53,12 @@ type Config struct {
 	// mechanism), falling back to cold boot. Set true to always cold-boot.
 	DisableHotCreate bool `json:"disable_hot_create"`
 	// HibernateAfterSec freezes a sandbox idle this many seconds to disk
-	// (memory snapshot + kill), releasing its slot/tap/IP/port; the next
-	// exec/files/shell request wakes it transparently (~1-2 s). Only API
-	// activity counts — traffic on forwarded host ports does not reset the
-	// idle clock, nor does it wake a hibernated sandbox. 0 disables.
+	// (memory snapshot + kill), releasing its slot/tap/IP; explicitly exposed
+	// host ports remain reserved so they can wake the sandbox. Observable
+	// external interaction counts as activity: agent API requests, shells, and
+	// forwarded-port connections. Guest processes, CPU/I/O, and outbound
+	// traffic are deliberately not inspected. 0 disables the host default;
+	// shipped configs use 600 seconds.
 	HibernateAfterSec int `json:"hibernate_after_sec"`
 	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
 	// golden clones); excess creates queue in-process so a burst can't

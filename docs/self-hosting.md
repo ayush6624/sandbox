@@ -137,6 +137,7 @@ the file.
 | `rootfs_dir` | `/var/lib/sandbox/rootfs` | per-sandbox disks (put on XFS for reflink) |
 | `snapshot_dir` | `/var/lib/sandbox/snapshots` | snapshot artifacts (same FS as `rootfs_dir` for reflink) |
 | `disable_hot_create` | `false` | `true` = always cold-boot creates |
+| `hibernate_after_sec` | `600` in shipped configs | hibernate after externally idle seconds; `0` disables the host default |
 | `bridge` / `gateway_ip` | `br-fc` / `172.16.0.1` | host bridge and guest default gateway |
 | `nameservers` | `8.8.8.8` | guest DNS (comma-separated; match your network's egress rules) |
 | `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | VM identity and explicit-forwarding pools |

@@ -53,7 +53,7 @@ extras — see [gateway differences](#gateway-differences).
   "status": "running",
   "created_at": "2026-07-02T10:56:51Z",
   "expires_at": "2026-07-02T11:06:51Z",
-  "hibernate_after_sec": 300,
+  "hibernate_after_sec": 600,
   "vcpus": 4,
   "mem_mib": 4096,
   "base_snapshot_id": "…",
@@ -127,7 +127,7 @@ UI label resources without guessing.
   "max_vcpus": 16,
   "max_mem_mib": 64312,
   "hot_create": true,
-  "hibernate_after_sec": 300,
+  "hibernate_after_sec": 600,
   "host_id": "testvm-1"
 }
 ```
@@ -174,7 +174,7 @@ Counters (reset only on restart): `sandbox_creates_ok_total`,
 Body (optional — empty body is fine):
 
 ```json
-{"name": "my devbox", "timeout_sec": 600, "hibernate_after_sec": 300, "vcpus": 4, "mem_mib": 4096}
+{"name": "my devbox", "timeout_sec": 3600, "hibernate_after_sec": 600, "vcpus": 4, "mem_mib": 4096}
 ```
 
 - `name` — display label, at most 64 bytes, no control characters;
@@ -192,6 +192,25 @@ golden snapshot when available (~0.3–0.5 s), cold boot otherwise (~2–3.5 s).
 **A `vcpus`/`mem_mib` override always cold-boots** — Firecracker bakes
 resources into the golden snapshot, so an override can't be served from it.
 Give the request a generous client timeout (the SDK uses 90 s).
+
+#### Idle-hibernation activity contract
+
+The shipped host configs hibernate after 10 minutes without observable external
+activity. Agent API requests (exec, files, directories), an open shell, and
+connections through explicitly forwarded ports count as activity. In-flight
+requests and open connections pin the sandbox; its idle clock restarts when the
+last one closes.
+
+Processes running only inside the guest do not count as activity. The server
+does not infer intent from process lists, CPU, disk I/O, or outbound network
+traffic. A detached `tmux` job can therefore be hibernated; its memory and
+process state resume on the next API, shell, or forwarded-port connection, but
+external TCP sessions may have timed out. Set `hibernate_after_sec: -1` for
+unattended workloads that must remain continuously running.
+
+Idle hibernation is independent of `timeout_sec`: hibernation is recoverable,
+whereas the TTL destroys the sandbox when it expires, whether it is running or
+hibernated.
 
 ### List — `GET /sandboxes` → `200 [Sandbox…]`
 
