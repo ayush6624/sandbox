@@ -9,6 +9,14 @@
 # without being "used". Counting it makes hibernation-heavy fleets scale up
 # instead of silently shrinking.
 #
+# The slots terms MUST be scoped to {job="sandbox-gateway"} (the gateway's
+# fleet-aggregate /metrics). Without it, sum(sandbox_slots_free) also picks up
+# the per-host federated series (job="sandbox-hosts", from /metrics/hosts),
+# DOUBLE-COUNTING free slots — while sandbox_slots_total is gateway-only — so the
+# occupancy term goes negative (e.g. 96 - 192 = -96 when idle) and suppresses
+# scale-up entirely. queue_depth/rejected are gateway-only and creates_ok is
+# host-only, so only the two slots terms need the filter.
+#
 # Queued creates (the gateway's bounded create queue) are demand that found no
 # slot — counting them makes a burst larger than the headroom pull scale-up
 # immediately, while the queue holds those creates until the new host boots.
@@ -42,4 +50,4 @@ groups:
     interval: 10s
     rules:
       - record: sandbox:workers_desired
-        expr: clamp_min(ceil((sum(sandbox_slots_total) - sum(sandbox_slots_free) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_ok_total[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
+        expr: clamp_min(ceil((sum(sandbox_slots_total{job="sandbox-gateway"}) - sum(sandbox_slots_free{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_ok_total[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
