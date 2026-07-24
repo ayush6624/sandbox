@@ -1,4 +1,5 @@
-# Rendered by control-install.sh (envsubst): ${HEADROOM_SLOTS}, ${SLOTS_PER_HOST}.
+# Rendered by control-install.sh (envsubst): ${HEADROOM_SLOTS}, ${SLOTS_PER_HOST},
+# ${LEAD_SECONDS}.
 # sandbox:workers_desired is the scaling signal: how many worker hosts we want
 # so that OCCUPIED capacity PLUS queued creates PLUS a headroom buffer fit.
 #
@@ -18,6 +19,18 @@
 # outstanding overflow; `or vector(0)` keeps the rule alive against an old
 # gateway that doesn't export the counter yet. sum() strips instance labels
 # so the label-less vector(0) can participate in the arithmetic.
+# The headroom term LEADS demand instead of being a flat buffer: it reserves
+# enough spare slots to absorb the creates expected to arrive during one host's
+# reaction window (detection + warm-up), i.e. rate(creates)·LEAD_SECONDS, but
+# never drops below the static floor HEADROOM_SLOTS. So an idle fleet keeps the
+# fixed floor (rate≈0 → clamp_min(0, HEADROOM) = HEADROOM, unchanged), while a
+# sustained ramp pre-provisions ahead of the curve so the create queue rarely
+# forms. creates_ok is a per-host counter federated with a host label; sum(rate)
+# is the fleet create rate (rate() handles hosts appearing/disappearing and
+# serve-restart counter resets). `or vector(0)` keeps the term at the floor if
+# the series is absent (old gateway / no creates yet). Set LEAD_SECONDS=0 to
+# disable the lead and fall back to the pure static floor.
+#
 # Clamped to >=1 (never scale to zero). The autoscaler reads this and (via
 # max_over_time in its policy) makes scale-up instant and scale-down slow. If
 # the gateway/Prometheus is down the series is absent and the query errors, so
@@ -29,4 +42,4 @@ groups:
     interval: 10s
     rules:
       - record: sandbox:workers_desired
-        expr: clamp_min(ceil((sum(sandbox_slots_total) - sum(sandbox_slots_free) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + ${HEADROOM_SLOTS}) / ${SLOTS_PER_HOST}), 1)
+        expr: clamp_min(ceil((sum(sandbox_slots_total) - sum(sandbox_slots_free) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_ok_total[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
