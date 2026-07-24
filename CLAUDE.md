@@ -213,12 +213,16 @@ scripts/              Host setup shell scripts
   failure mode — absent/corrupt manifest, stale artifacts, insert error — returns
   "not ok" and cold-builds**, so a bad or missing manifest is never worse than today. This
   removes the ~2 GB rootfs copy, the golden cold-build, AND the `slots_free=0` warming window
-  from the scale-up path. It relies on the base rootfs mtime being STABLE across the image →
-  data-disk copy: the image bakes sandboxd into `/opt/fc` (`bake-image.sh [3b/6]`) and
-  `startup-worker.sh` stages with `--preserve=timestamps` + the `.agent-stamp` sidecar, so the
-  boot-time `install-agent` is a no-op (short-circuits before the mount that would bump mtime).
+  from the scale-up path. It relies on the base rootfs mtime being STABLE at boot (goldenUsable
+  keys on base rootfs mtime+size): the image bakes sandboxd into `/opt/fc` (`bake-image.sh
+  [3b/6]`), so **`run.sh` does NOT run `install-agent`** — doing so re-bakes whenever the GCS
+  release sandboxd differs from the baked one (two independent build paths differ by build-stamp
+  bytes ALONE), bumping the mtime and forcing every host to cold-build the golden. **sandboxd is
+  image-pinned: to ship a new agent, rebake (`./bake-image.sh bake && golden`) and roll.**
   `mig.sh` seeds each worker's data disk from `$GOLDEN_DATA_IMAGE_FAMILY` when it exists (blank
-  disk + cold build otherwise). Rebake both images together (a drifted pair just cold-rebuilds).
+  disk + cold build otherwise). The `sandbox` SERVER binary is still pulled from the GCS release,
+  so a host can only ADOPT if that release has `importGoldenManifest` (deploy ≥ this change).
+  Rebake both images together (a drifted pair just cold-rebuilds).
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
   `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
   `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override
