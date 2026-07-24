@@ -5,7 +5,9 @@ import type { AddressInfo } from 'node:net'
 
 import {
   AuthenticationError,
+  CapacityError,
   CommandExitError,
+  ConflictError,
   NotFoundError,
   Sandbox,
   SandboxError,
@@ -14,6 +16,9 @@ import {
 
 const API_KEY = 'test-key'
 const SANDBOX_ID = '0f5e3a1c-1111-2222-3333-444455556666'
+const SNAPSHOT_ID = '7b2c9d4e-aaaa-bbbb-cccc-ddddeeeeffff'
+const GOLDEN_SNAPSHOT_ID = '1a1a1a1a-golden-0000-0000-000000000000'
+const RESTORED_ID = 'c0ffee00-5555-6666-7777-888899990000'
 
 // The server always reports effective resources: the template defaults
 // (2 vCPUs / 1024 MiB here) unless the create carried an override.
@@ -32,6 +37,9 @@ const sandboxRecord = {
   created_at: '2026-06-10T12:00:00Z',
   vcpus: TEMPLATE_VCPUS,
   mem_mib: TEMPLATE_MEM_MIB,
+  // Hot creates are clones of the golden snapshot, so the server reports the
+  // base they came from; restores and fan-out clones have none.
+  base_snapshot_id: GOLDEN_SNAPSHOT_ID,
 }
 
 const hostInfoRecord = {
@@ -54,6 +62,17 @@ let sandboxResources: { vcpus?: number; mem_mib?: number } = {}
 let lastExecBody: Record<string, unknown> | undefined
 let lastCreateBody: Record<string, unknown> | undefined
 let lastTimeoutBody: Record<string, unknown> | undefined
+let lastSnapshotBody: Record<string, unknown> | undefined
+let lastRestoreBody: Record<string, unknown> | undefined
+let lastFanoutBody: Record<string, unknown> | undefined
+let snapshotTaken = false
+let snapshotName: string | undefined
+/**
+ * When set, `POST /sandboxes` answers with this status instead of creating —
+ * lets a test drive the capacity (503 + Retry-After) and conflict (409) paths
+ * the real server uses to distinguish "full" from "broken".
+ */
+let createFailure: { status: number; retryAfter?: string; error: string } | undefined
 
 let server: http.Server
 let apiUrl: string
@@ -67,6 +86,43 @@ function currentSandboxRecord(): Record<string, unknown> {
     ...(sandboxName ? { name: sandboxName } : {}),
     ...(sandboxExpiresAt !== undefined ? { expires_at: sandboxExpiresAt } : {}),
   }
+}
+
+/**
+ * A user snapshot of a hot-created sandbox: stored as a diff against the
+ * golden base, carrying the source's baked resources.
+ */
+function currentSnapshotRecord(): Record<string, unknown> {
+  return {
+    id: SNAPSHOT_ID,
+    source_id: SANDBOX_ID,
+    tap_device: 'fc0',
+    guest_ip: '172.16.0.10',
+    mem_path: '/opt/fc/snapshots/mem',
+    state_path: '/opt/fc/snapshots/state',
+    rootfs_path: '/opt/fc/snapshots/rootfs.ext4',
+    source_rootfs_path: '/opt/fc/instances/test.ext4',
+    created_at: '2026-06-10T12:10:00Z',
+    format: 'diff',
+    base_id: GOLDEN_SNAPSHOT_ID,
+    vcpus: 4,
+    mem_mib: 2048,
+    ...(snapshotName ? { name: snapshotName } : {}),
+  }
+}
+
+/** The server-managed golden snapshot, which `GET /snapshots` also returns. */
+const goldenSnapshotRecord = {
+  id: GOLDEN_SNAPSHOT_ID,
+  source_id: 'throwaway-source',
+  tap_device: 'fc99',
+  guest_ip: '172.16.0.99',
+  mem_path: '/opt/fc/snapshots/golden/mem',
+  state_path: '/opt/fc/snapshots/golden/state',
+  rootfs_path: '/opt/fc/snapshots/golden/rootfs.ext4',
+  source_rootfs_path: '/opt/fc/devbox-rootfs.ext4',
+  created_at: '2026-06-10T11:00:00Z',
+  golden: true,
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
@@ -95,6 +151,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (req.method === 'POST' && path === '/sandboxes') {
     const raw = (await readBody(req)).toString()
     lastCreateBody = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined
+    if (createFailure) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (createFailure.retryAfter !== undefined) headers['Retry-After'] = createFailure.retryAfter
+      res.writeHead(createFailure.status, headers)
+      res.end(JSON.stringify({ error: createFailure.error }))
+      return
+    }
     sandboxAlive = true
     sandboxName =
       typeof lastCreateBody?.name === 'string' && lastCreateBody.name !== ''
@@ -115,6 +178,110 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
 
   if (req.method === 'GET' && path === '/info') {
     sendJson(res, 200, hostInfoRecord)
+    return
+  }
+
+  // Gateway-only fleet view.
+  if (req.method === 'GET' && path === '/hosts') {
+    sendJson(res, 200, [
+      {
+        id: 'testvm-1',
+        addr: '10.160.0.7:8080',
+        slots_total: 64,
+        slots_used: 12,
+        hibernated: 3,
+        free: 50,
+        alive: true,
+        last_seen_ms_ago: 1200,
+      },
+      {
+        id: 'testvm-2',
+        addr: '10.160.0.8:8080',
+        slots_total: 64,
+        slots_used: 64,
+        hibernated: 0,
+        free: 0,
+        alive: false,
+        last_seen_ms_ago: 31_000,
+      },
+    ])
+    return
+  }
+
+  // --- snapshots ---
+
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/snapshot`) {
+    const raw = (await readBody(req)).toString()
+    lastSnapshotBody = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined
+    if (!sandboxAlive) {
+      sendJson(res, 409, { error: `sandbox ${SANDBOX_ID} is not running in this server` })
+      return
+    }
+    snapshotTaken = true
+    snapshotName =
+      typeof lastSnapshotBody?.name === 'string' && lastSnapshotBody.name !== ''
+        ? lastSnapshotBody.name
+        : undefined
+    sendJson(res, 201, currentSnapshotRecord())
+    return
+  }
+
+  if (req.method === 'GET' && path === '/snapshots') {
+    sendJson(res, 200, [
+      goldenSnapshotRecord,
+      ...(snapshotTaken ? [currentSnapshotRecord()] : []),
+    ])
+    return
+  }
+
+  if (req.method === 'POST' && path === `/snapshots/${SNAPSHOT_ID}/rename`) {
+    const body = JSON.parse((await readBody(req)).toString()) as Record<string, unknown>
+    snapshotName = typeof body.name === 'string' && body.name !== '' ? body.name : undefined
+    sendJson(res, 200, currentSnapshotRecord())
+    return
+  }
+
+  if (req.method === 'POST' && path === `/snapshots/${SNAPSHOT_ID}/restore`) {
+    const raw = (await readBody(req)).toString()
+    lastRestoreBody = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined
+    // A restore reuses the snapshot's baked identity, so a live source is 409.
+    if (sandboxAlive) {
+      sendJson(res, 409, { error: 'source sandbox still running' })
+      return
+    }
+    const record = { ...currentSandboxRecord(), id: RESTORED_ID, vcpus: 4, mem_mib: 2048 }
+    // Restores are not golden clones: resources come from the snapshot, and
+    // there is no base to diff against.
+    delete (record as Record<string, unknown>).base_snapshot_id
+    sendJson(res, 201, record)
+    return
+  }
+
+  if (req.method === 'POST' && path === `/snapshots/${SNAPSHOT_ID}/fanout`) {
+    const body = JSON.parse((await readBody(req)).toString()) as Record<string, unknown>
+    lastFanoutBody = body
+    const count = Number(body.count ?? 0)
+    // Partial success is normal: the last clone always fails here.
+    const clones = Array.from({ length: Math.max(0, count - 1) }, (_, i) => ({
+      ...currentSandboxRecord(),
+      id: `clone-${i}`,
+      guest_ip: `172.16.0.${20 + i}`,
+      vcpus: 4,
+      mem_mib: 2048,
+    }))
+    sendJson(res, 201, clones)
+    return
+  }
+
+  if (req.method === 'DELETE' && path === `/snapshots/${SNAPSHOT_ID}`) {
+    if (!snapshotTaken) {
+      sendJson(res, 404, { error: 'snapshot not found' })
+      return
+    }
+    snapshotTaken = false
+    snapshotName = undefined
+    res.writeHead(204)
+    res.end()
     return
   }
 
@@ -617,4 +784,250 @@ test('missing apiUrl/apiKey fail fast with helpful messages', async () => {
     if (savedUrl !== undefined) process.env.SANDBOX_API_URL = savedUrl
     if (savedKey !== undefined) process.env.SANDBOX_API_KEY = savedKey
   }
+})
+
+test('create with sshPubkey sends ssh_pubkey', async () => {
+  const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample me@laptop'
+  const sbx = await Sandbox.create({ ...opts(), sshPubkey: key })
+  assert.equal(lastCreateBody?.ssh_pubkey, key)
+  // The key is only useful once :22 is forwarded out.
+  const addr = await sbx.exposePort(22)
+  assert.match(addr, /^127\.0\.0\.1:\d+$/)
+  await sbx.kill()
+
+  const plain = await Sandbox.create(opts())
+  assert.equal(lastCreateBody, undefined)
+  await plain.kill()
+})
+
+test('create surfaces baseSnapshotId for golden clones', async () => {
+  const sbx = await Sandbox.create(opts())
+  assert.equal(sbx.info.baseSnapshotId, GOLDEN_SNAPSHOT_ID)
+  await sbx.kill()
+})
+
+test('snapshot lifecycle: take → list → rename → delete', async () => {
+  const sbx = await Sandbox.create(opts())
+
+  const snap = await sbx.snapshot({ name: 'deps-installed' })
+  assert.equal(lastSnapshotBody?.name, 'deps-installed')
+  assert.equal(snap.snapshotId, SNAPSHOT_ID)
+  assert.equal(snap.sourceId, SANDBOX_ID)
+  assert.equal(snap.name, 'deps-installed')
+  assert.ok(snap.createdAt instanceof Date)
+  // Diff metadata and the snapshot's baked resources come through.
+  assert.equal(snap.format, 'diff')
+  assert.equal(snap.baseId, GOLDEN_SNAPSHOT_ID)
+  assert.equal(snap.vcpus, 4)
+  assert.equal(snap.memMib, 2048)
+  assert.equal(snap.golden, undefined)
+
+  // The golden snapshot is listed like any other, flagged so a UI can hide it.
+  const listed = await Sandbox.listSnapshots(opts())
+  assert.equal(listed.length, 2)
+  const golden = listed.find((s) => s.snapshotId === GOLDEN_SNAPSHOT_ID)
+  assert.equal(golden?.golden, true)
+  assert.equal(golden?.format, undefined) // absent = full
+  assert.equal(listed.find((s) => s.snapshotId === SNAPSHOT_ID)?.golden, undefined)
+
+  const renamed = await Sandbox.renameSnapshot(SNAPSHOT_ID, 'ready', opts())
+  assert.equal(renamed.name, 'ready')
+  const cleared = await Sandbox.renameSnapshot(SNAPSHOT_ID, '', opts())
+  assert.equal(cleared.name, undefined)
+
+  await Sandbox.deleteSnapshot(SNAPSHOT_ID, opts())
+  assert.deepEqual(
+    (await Sandbox.listSnapshots(opts())).map((s) => s.snapshotId),
+    [GOLDEN_SNAPSHOT_ID]
+  )
+  await assert.rejects(
+    () => Sandbox.deleteSnapshot(SNAPSHOT_ID, opts()),
+    (err: unknown) => err instanceof NotFoundError
+  )
+  await sbx.kill()
+})
+
+test('snapshot of a sandbox that is not running throws ConflictError', async () => {
+  const sbx = await Sandbox.create(opts())
+  await sbx.kill()
+  await assert.rejects(
+    () => sbx.snapshot(),
+    (err: unknown) => {
+      assert.ok(err instanceof ConflictError)
+      assert.equal(err.status, 409)
+      assert.match(err.message, /not running/)
+      return true
+    }
+  )
+})
+
+test('restore sends timeout_sec + hibernate_after_sec and reports the snapshot resources', async () => {
+  const sbx = await Sandbox.create(opts())
+  await sbx.snapshot()
+
+  // A live source still owns the snapshot's baked identity → 409.
+  await assert.rejects(
+    () => Sandbox.restore(SNAPSHOT_ID, opts()),
+    (err: unknown) => err instanceof ConflictError
+  )
+  await sbx.kill()
+
+  const restored = await Sandbox.restore(SNAPSHOT_ID, {
+    ...opts(),
+    name: 'from-snapshot',
+    timeoutMs: 600_000,
+    hibernateAfterMs: 120_500,
+  })
+  assert.equal(lastRestoreBody?.name, 'from-snapshot')
+  assert.equal(lastRestoreBody?.timeout_sec, 600)
+  assert.equal(lastRestoreBody?.hibernate_after_sec, 121) // ceil(120.5)
+  // Never sent — the server 400s resource overrides on restore.
+  assert.equal('vcpus' in (lastRestoreBody ?? {}), false)
+  assert.equal('mem_mib' in (lastRestoreBody ?? {}), false)
+  assert.equal(restored.sandboxId, RESTORED_ID)
+  assert.equal(restored.info.vcpus, 4)
+  assert.equal(restored.info.memMib, 2048)
+  assert.equal(restored.info.baseSnapshotId, undefined)
+
+  // hibernateAfterMs: -1 ("never") passes through unscaled here too.
+  await Sandbox.restore(SNAPSHOT_ID, { ...opts(), hibernateAfterMs: -1 })
+  assert.equal(lastRestoreBody?.hibernate_after_sec, -1)
+
+  // An empty options object sends no body fields at all.
+  await Sandbox.restore(SNAPSHOT_ID, opts())
+  assert.equal(lastRestoreBody, undefined)
+})
+
+test('fanout sends count + hibernate_after_sec and tolerates partial success', async () => {
+  const clones = await Sandbox.fanout(SNAPSHOT_ID, 4, {
+    ...opts(),
+    timeoutMs: 300_000,
+    hibernateAfterMs: -1,
+  })
+  assert.equal(lastFanoutBody?.count, 4)
+  assert.equal(lastFanoutBody?.timeout_sec, 300)
+  assert.equal(lastFanoutBody?.hibernate_after_sec, -1)
+  // The mock fails one clone, mirroring the API's documented partial success.
+  assert.equal(clones.length, 3)
+  assert.deepEqual(
+    clones.map((c) => c.sandboxId),
+    ['clone-0', 'clone-1', 'clone-2']
+  )
+  assert.equal(clones[0]?.info.vcpus, 4)
+
+  await assert.rejects(() => Sandbox.fanout(SNAPSHOT_ID, 0, opts()), /count must be a positive integer/)
+})
+
+test('refresh() re-reads the sandbox and updates info in place', async () => {
+  const sbx = await Sandbox.create({ ...opts(), timeoutMs: 60_000, name: 'before' })
+  const info = sbx.info
+  assert.ok(info.expiresAt instanceof Date)
+  assert.equal(info.name, 'before')
+
+  // Change state out of band, the way the reaper or another client would.
+  await Sandbox.kill(SANDBOX_ID, opts())
+  await assert.rejects(
+    () => sbx.refresh(),
+    (err: unknown) => err instanceof NotFoundError
+  )
+
+  const live = await Sandbox.create({ ...opts(), name: 'after' })
+  const refreshed = await live.refresh()
+  assert.equal(refreshed, live.info) // same object — held references stay live
+  assert.equal(refreshed.name, 'after')
+  // A cleared TTL is dropped, not left stale.
+  assert.equal(refreshed.expiresAt, undefined)
+  await live.kill()
+})
+
+test('a full fleet surfaces CapacityError with the Retry-After hint', async () => {
+  createFailure = {
+    status: 503,
+    retryAfter: '5',
+    error: 'no host with free capacity; retry shortly',
+  }
+  try {
+    await assert.rejects(
+      () => Sandbox.create(opts()),
+      (err: unknown) => {
+        assert.ok(err instanceof CapacityError)
+        assert.ok(err instanceof SandboxError)
+        assert.equal(err.status, 503)
+        assert.equal(err.retryAfterMs, 5000)
+        assert.match(err.message, /free capacity/)
+        return true
+      }
+    )
+
+    // 429 is the same class; a missing Retry-After just leaves the hint unset.
+    createFailure = { status: 429, error: 'too many creates in flight' }
+    await assert.rejects(
+      () => Sandbox.create(opts()),
+      (err: unknown) => {
+        assert.ok(err instanceof CapacityError)
+        assert.equal(err.status, 429)
+        assert.equal(err.retryAfterMs, undefined)
+        return true
+      }
+    )
+
+    // A genuine server error stays a plain SandboxError — not retryable.
+    createFailure = { status: 500, error: 'vm boot failure' }
+    await assert.rejects(
+      () => Sandbox.create(opts()),
+      (err: unknown) => {
+        assert.ok(err instanceof SandboxError)
+        assert.equal(err instanceof CapacityError, false)
+        assert.equal(err.status, 500)
+        return true
+      }
+    )
+  } finally {
+    createFailure = undefined
+  }
+})
+
+test('hosts() maps the gateway fleet view to camelCase', async () => {
+  const hosts = await Sandbox.hosts(opts())
+  assert.deepEqual(hosts, [
+    {
+      hostId: 'testvm-1',
+      addr: '10.160.0.7:8080',
+      slotsTotal: 64,
+      slotsUsed: 12,
+      hibernated: 3,
+      free: 50,
+      alive: true,
+      lastSeenMsAgo: 1200,
+    },
+    {
+      hostId: 'testvm-2',
+      addr: '10.160.0.8:8080',
+      slotsTotal: 64,
+      slotsUsed: 64,
+      hibernated: 0,
+      free: 0,
+      alive: false,
+      lastSeenMsAgo: 31_000,
+    },
+  ])
+})
+
+test('errors carry the HTTP status they came from', async () => {
+  await assert.rejects(
+    () => Sandbox.connect('nope', opts()),
+    (err: unknown) => {
+      assert.ok(err instanceof NotFoundError)
+      assert.equal(err.status, 404)
+      return true
+    }
+  )
+  await assert.rejects(
+    () => Sandbox.list({ apiUrl, apiKey: 'wrong' }),
+    (err: unknown) => {
+      assert.ok(err instanceof AuthenticationError)
+      assert.equal(err.status, 401)
+      return true
+    }
+  )
 })

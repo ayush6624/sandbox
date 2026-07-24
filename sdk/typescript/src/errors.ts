@@ -2,11 +2,20 @@ import type { CommandResult } from './types.js'
 
 /**
  * Base class for all errors thrown by the sandbox SDK.
+ *
+ * When the error came from an API response, {@link status} carries the HTTP
+ * status the server answered with. Errors raised on WebSocket endpoints carry
+ * the status the server encoded in the close code (`4000 + status`), so the
+ * same `status` checks work on both transports.
  */
 export class SandboxError extends Error {
-  constructor(message: string) {
+  /** HTTP status behind this error; absent for client-side failures. */
+  readonly status?: number
+
+  constructor(message: string, status?: number) {
     super(message)
     this.name = 'SandboxError'
+    if (status !== undefined) this.status = status
   }
 }
 
@@ -15,8 +24,8 @@ export class SandboxError extends Error {
  * the API key is missing, invalid, or not authorized.
  */
 export class AuthenticationError extends SandboxError {
-  constructor(message: string) {
-    super(message)
+  constructor(message: string, status?: number) {
+    super(message, status)
     this.name = 'AuthenticationError'
   }
 }
@@ -26,9 +35,43 @@ export class AuthenticationError extends SandboxError {
  * or a file path that does not exist in the guest.
  */
 export class NotFoundError extends SandboxError {
-  constructor(message: string) {
-    super(message)
+  constructor(message: string, status?: number) {
+    super(message, status)
     this.name = 'NotFoundError'
+  }
+}
+
+/**
+ * Thrown when the API responds with 409 — the operation conflicts with the
+ * sandbox's current state. Common cases: snapshotting or hibernating a
+ * sandbox that isn't running on its host, or restoring a snapshot whose
+ * source (or a previous restore) still holds its baked network identity.
+ */
+export class ConflictError extends SandboxError {
+  constructor(message: string, status?: number) {
+    super(message, status)
+    this.name = 'ConflictError'
+  }
+}
+
+/**
+ * Thrown when the fleet is out of capacity rather than broken (429/503):
+ * every host is full and the gateway's create queue timed out, a host's
+ * tap/IP/port pool is exhausted, or a wake was refused by memory admission.
+ *
+ * This is the retryable failure class — unlike a plain {@link SandboxError},
+ * the same request may well succeed shortly after, once a sandbox is
+ * destroyed or the autoscaler adds a host. {@link retryAfterMs} carries the
+ * server's `Retry-After` hint when it sent one.
+ */
+export class CapacityError extends SandboxError {
+  /** Server's `Retry-After` hint in milliseconds; absent when it sent none. */
+  readonly retryAfterMs?: number
+
+  constructor(message: string, status?: number, retryAfterMs?: number) {
+    super(message, status)
+    this.name = 'CapacityError'
+    if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs
   }
 }
 
@@ -38,8 +81,8 @@ export class NotFoundError extends SandboxError {
  * hit the client-side request timeout.
  */
 export class TimeoutError extends SandboxError {
-  constructor(message: string) {
-    super(message)
+  constructor(message: string, status?: number) {
+    super(message, status)
     this.name = 'TimeoutError'
   }
 }

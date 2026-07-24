@@ -3,19 +3,45 @@ import { Commands } from './commands.js'
 import { SandboxError } from './errors.js'
 import { Files } from './files.js'
 import { Pty } from './pty.js'
-import { toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
+import { toFleetHostInfo, toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
 import type {
+  ApiFleetHost,
   ApiHostInfo,
   ApiPortMapping,
   ApiSandbox,
   ApiSnapshot,
+  FleetHostInfo,
   HostInfo,
   PortMapping,
   SandboxCreateOpts,
+  SandboxFanoutOpts,
   SandboxInfo,
   SandboxOpts,
+  SandboxRestoreOpts,
   SnapshotInfo,
 } from './types.js'
+
+/**
+ * Builds the JSON body shared by create/restore/fanout from the options they
+ * have in common. Absent options are omitted rather than zeroed — `0` is a
+ * meaningful value on both fields (clear the TTL / inherit the host's
+ * hibernation default).
+ */
+function bringUpBody(opts: {
+  timeoutMs?: number
+  hibernateAfterMs?: number
+}): Record<string, number | string> {
+  const body: Record<string, number | string> = {}
+  if (opts.timeoutMs !== undefined) {
+    body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
+  }
+  if (opts.hibernateAfterMs !== undefined) {
+    // -1 is the "never hibernate" sentinel, passed through unscaled.
+    body.hibernate_after_sec =
+      opts.hibernateAfterMs < 0 ? -1 : Math.ceil(opts.hibernateAfterMs / 1000)
+  }
+  return body
+}
 
 /**
  * A Firecracker microVM sandbox running Ubuntu 24.04 with Node 22, pnpm,
@@ -69,28 +95,25 @@ export class Sandbox {
    * @param opts API URL/key overrides (default to the `SANDBOX_API_URL` /
    *             `SANDBOX_API_KEY` environment variables) plus an optional
    *             `timeoutMs` after which the sandbox is auto-destroyed, an
-   *             optional `hibernateAfterMs` idle-hibernation override, and
-   *             optional `vcpus`/`memMib` resource overrides.
+   *             optional `hibernateAfterMs` idle-hibernation override,
+   *             optional `vcpus`/`memMib` resource overrides, and an optional
+   *             `sshPubkey` to authorize for root SSH.
+   * @throws {CapacityError} when the fleet has no free slot (retryable).
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
-    const body: Record<string, number | string> = {}
+    const body = bringUpBody(opts)
     if (opts.name !== undefined) {
       body.name = opts.name
-    }
-    if (opts.timeoutMs !== undefined) {
-      body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
-    }
-    if (opts.hibernateAfterMs !== undefined) {
-      // -1 is the "never hibernate" sentinel, passed through unscaled.
-      body.hibernate_after_sec =
-        opts.hibernateAfterMs < 0 ? -1 : Math.ceil(opts.hibernateAfterMs / 1000)
     }
     if (opts.vcpus !== undefined) {
       body.vcpus = opts.vcpus
     }
     if (opts.memMib !== undefined) {
       body.mem_mib = opts.memMib
+    }
+    if (opts.sshPubkey !== undefined) {
+      body.ssh_pubkey = opts.sshPubkey
     }
     const res = await client.request('POST', '/sandboxes', {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
@@ -126,7 +149,24 @@ export class Sandbox {
   }
 
   /**
-   * Lists all running sandboxes.
+   * Lists the hosts behind a fleet gateway with their live capacity — what the
+   * gateway itself places against. Useful for dashboards and for deciding
+   * whether a {@link CapacityError} is worth retrying.
+   *
+   * Gateway-only: a single host has no fleet view of itself and answers 404.
+   *
+   * @throws {NotFoundError} when the API URL points at a host, not a gateway.
+   */
+  static async hosts(opts: SandboxOpts = {}): Promise<FleetHostInfo[]> {
+    const client = new ApiClient(opts)
+    const res = await client.request('GET', '/hosts')
+    const raw = (await res.json()) as ApiFleetHost[] | null
+    return (raw ?? []).map(toFleetHostInfo)
+  }
+
+  /**
+   * Lists all sandboxes — `running` and `hibernated` alike (a hibernated
+   * sandbox is still addressable; its next request wakes it).
    */
   static async list(opts: SandboxOpts = {}): Promise<SandboxInfo[]> {
     const client = new ApiClient(opts)
@@ -159,16 +199,16 @@ export class Sandbox {
    * it is taken, so a restore always runs with the source sandbox's resources.
    *
    * @param snapshotId Id returned by {@link Sandbox#snapshot}.
-   * @param opts API overrides plus an optional `timeoutMs` auto-destroy.
+   * @param opts API overrides plus an optional `timeoutMs` auto-destroy and
+   *             `hibernateAfterMs` idle-hibernation override.
+   * @throws {ConflictError} when the snapshot's baked identity is still in use
+   *                         by its source sandbox or an earlier restore.
    */
-  static async restore(snapshotId: string, opts: SandboxCreateOpts = {}): Promise<Sandbox> {
+  static async restore(snapshotId: string, opts: SandboxRestoreOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
-    const body: Record<string, number | string> = {}
+    const body = bringUpBody(opts)
     if (opts.name !== undefined) {
       body.name = opts.name
-    }
-    if (opts.timeoutMs !== undefined) {
-      body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
     }
     const res = await client.request('POST', `/snapshots/${snapshotId}/restore`, {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
@@ -189,20 +229,22 @@ export class Sandbox {
    * The source sandbox the snapshot was taken from must no longer be running.
    *
    * @param snapshotId Id returned by {@link Sandbox#snapshot}.
+   * Fan-out is **partially successful by design**: the returned array holds
+   * every clone that came up and may be shorter than `count` (failures are
+   * logged server-side and their resources reclaimed). Check `.length`.
+   *
    * @param count Number of clones to start (>= 1).
-   * @param opts API overrides plus an optional `timeoutMs` auto-destroy applied to every clone.
+   * @param opts API overrides plus an optional `timeoutMs` auto-destroy and
+   *             `hibernateAfterMs` idle-hibernation override, applied to every clone.
    * @returns One {@link Sandbox} per clone that came up successfully.
    */
-  static async fanout(snapshotId: string, count: number, opts: SandboxCreateOpts = {}): Promise<Sandbox[]> {
+  static async fanout(snapshotId: string, count: number, opts: SandboxFanoutOpts = {}): Promise<Sandbox[]> {
     if (!Number.isInteger(count) || count < 1) throw new Error('count must be a positive integer')
     const client = new ApiClient(opts)
     const res = await client.request('POST', `/snapshots/${snapshotId}/fanout`, {
       // The server holds the request open until every clone is up; scale with count.
       timeoutMs: opts.requestTimeoutMs ?? Math.max(CREATE_REQUEST_TIMEOUT_MS, count * 3_000),
-      json: {
-        count,
-        ...(opts.timeoutMs !== undefined ? { timeout_sec: Math.ceil(opts.timeoutMs / 1000) } : {}),
-      },
+      json: { count, ...bringUpBody(opts) },
     })
     const raw = (await res.json()) as ApiSandbox[]
     return raw.map((r) => new Sandbox(client, toSandboxInfo(r)))
@@ -268,6 +310,30 @@ export class Sandbox {
    */
   private get hostname(): string {
     return this.info.hostAddr ?? this.client.apiHostname
+  }
+
+  /**
+   * Re-reads this sandbox from the API and updates {@link info} in place, so
+   * references already handed out see the fresh values.
+   *
+   * {@link info} is otherwise a snapshot from when the handle was made, and
+   * `status` in particular drifts on its own: the idle reaper can hibernate
+   * the sandbox, and any later command wakes it again. Call this before
+   * trusting `status`, `expiresAt`, or `hostAddr`.
+   *
+   * @throws {NotFoundError} when the sandbox no longer exists (killed or expired).
+   */
+  async refresh(): Promise<SandboxInfo> {
+    const res = await this.client.request('GET', `/sandboxes/${this.sandboxId}`)
+    const fresh = toSandboxInfo((await res.json()) as ApiSandbox)
+    // Drop fields the server no longer reports (e.g. a cleared TTL) before
+    // copying the new ones over, so `info` never keeps a stale value.
+    const bag = this.info as unknown as Record<string, unknown>
+    for (const key of Object.keys(bag)) {
+      if (!(key in fresh)) delete bag[key]
+    }
+    Object.assign(this.info, fresh)
+    return this.info
   }
 
   /**

@@ -101,7 +101,7 @@ interface Rec {
 function pctl(xs: number[], p: number): number {
   if (xs.length === 0) return NaN
   const s = [...xs].sort((a, b) => a - b)
-  return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))]
+  return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))] ?? NaN
 }
 function stat(label: string, xs: number[]): string {
   if (xs.length === 0) return `${label}: (none)`
@@ -185,24 +185,29 @@ async function runHold(args: Args, expected: string): Promise<Rec[]> {
   // Phase 2: run math in every survivor concurrently.
   await mapLimit(args.count, args.concurrency, async (i) => {
     const sbx = live[i]
-    if (!sbx || recs[i].outcome !== 'ok') return null
+    const rec = recs[i]
+    if (!sbx || !rec || rec.outcome !== 'ok') return null
     const t1 = Date.now()
     try {
       const res = await sbx.commands.run(MATH_CMD)
-      recs[i].execMs = Date.now() - t1
-      if (res.stdout.trim() !== expected) { recs[i].outcome = 'other'; recs[i].err = 'bad math result' }
+      rec.execMs = Date.now() - t1
+      if (res.stdout.trim() !== expected) { rec.outcome = 'other'; rec.err = 'bad math result' }
     } catch (e) {
-      recs[i].outcome = classify(e)
-      recs[i].err = String((e as Error)?.message ?? e).slice(0, 160)
+      rec.outcome = classify(e)
+      rec.err = String((e as Error)?.message ?? e).slice(0, 160)
     }
     return null
   })
   // Phase 3: tear everything down.
   await mapLimit(args.count, args.concurrency, async (i) => {
     const sbx = live[i]
+    const rec = recs[i]
     if (!sbx) return null
     const tk = Date.now()
-    try { await sbx.kill(); recs[i].killMs = Date.now() - tk } catch { /* best effort */ }
+    try {
+      await sbx.kill()
+      if (rec) rec.killMs = Date.now() - tk
+    } catch { /* best effort */ }
     return null
   })
   return recs

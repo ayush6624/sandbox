@@ -104,7 +104,7 @@ before(async () => {
 
     // A live shell: greet in a binary frame, then react to client frames.
     socket.write(frame(2, Buffer.from('sandbox$ ')))
-    let pending = Buffer.alloc(0)
+    let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0)
     socket.on('data', (chunk: Buffer) => {
       pending = Buffer.concat([pending, chunk])
       for (;;) {

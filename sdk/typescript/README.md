@@ -13,7 +13,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v0.3.0/sandbox-0.3.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v0.4.0/sandbox-0.4.0.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -105,6 +105,32 @@ await sbx.setTimeout(0)         // remove the timeout entirely
 
 `timeoutMs` is rounded up to whole seconds (the API speaks `timeout_sec`).
 
+### Hibernation
+
+Idle sandboxes are frozen to disk automatically — **the shipped hosts do this
+after 10 minutes** — and woken transparently by the next command, file
+operation, shell, or connection to a forwarded port. Memory and running
+processes come back exactly as they were (~50 ms typical), so this is a cost
+optimization, not a lifecycle event you have to handle:
+
+```ts
+const sbx = await Sandbox.create({ hibernateAfterMs: 30 * 60_000 }) // 30 min
+const never = await Sandbox.create({ hibernateAfterMs: -1 })        // never freeze
+await sbx.hibernate()                                               // freeze now
+console.log(sbx.info.status)                                        // 'hibernated'
+await sbx.commands.run('echo back')                                 // wakes it
+```
+
+What counts as activity is **external** traffic: API calls, an open shell or
+exec stream, and connections through exposed ports. Work happening only inside
+the guest does not — a detached `tmux` job can be hibernated mid-run. It
+resumes on the next request, but external TCP sessions it held may have timed
+out, so pass `hibernateAfterMs: -1` for unattended workloads that must stay
+continuously live.
+
+Hibernation is independent of `timeoutMs`: freezing is recoverable, while the
+TTL destroys the sandbox whether it is running or hibernated.
+
 ### Names
 
 Sandboxes and snapshots take an optional free-form display name — a label
@@ -195,8 +221,21 @@ const clones = await Sandbox.fanout(snap.snapshotId, 32, { timeoutMs: 600_000 })
 
 // Housekeeping
 const snaps = await Sandbox.listSnapshots()
+await Sandbox.renameSnapshot(snap.snapshotId, 'deps-installed')
 await Sandbox.deleteSnapshot(snap.snapshotId)
 ```
+
+`fanout` is **partially successful by design**: the returned array holds every
+clone that came up and can be shorter than `count`, so check `.length` rather
+than assuming N. Both `restore` and `fanout` accept `timeoutMs` and
+`hibernateAfterMs`, but not `vcpus`/`memMib` — resources are baked into the
+snapshot (`snap.vcpus` / `snap.memMib` report them).
+
+`listSnapshots()` also returns the server's **golden** snapshot, flagged
+`golden: true` — the pristine image plain `create` clones from. Hide or badge
+it in a UI, and don't delete it: creates fall back to cold boot until the
+server next restarts. A snapshot whose `format` is `'diff'` is stored as a
+delta against `baseId`, which must still exist for it to restore.
 
 `restore` reuses the network identity baked into the snapshot, so only one
 restore of a given snapshot can run at a time. `fanout` gives every clone a
@@ -213,16 +252,85 @@ Multi-host works transparently: when `SANDBOX_API_URL` points at a gateway
 `deleteSnapshot` are forwarded to the snapshot's owning host (or, with GCS
 durability configured, to any live host if the owner is gone).
 
+### SSH into a sandbox
+
+Pass an OpenSSH public key at create time and expose guest port 22:
+
+```ts
+import { readFile } from 'node:fs/promises'
+
+const sbx = await Sandbox.create({
+  sshPubkey: await readFile(`${process.env.HOME}/.ssh/id_ed25519.pub`, 'utf8'),
+})
+const addr = await sbx.exposePort(22)     // e.g. "100.75.186.35:5200"
+const [host, port] = addr.split(':')
+console.log(`ssh -p ${port} root@${host}`)
+```
+
+Key-only root login; the key lands in `/root/.ssh/authorized_keys` inside the
+guest, so it survives hibernation and wake. If the key can't be installed the
+create fails outright rather than handing back an unreachable sandbox.
+
+Because the forwarded port carries wake-on-connect, an incoming SSH connection
+wakes a hibernated sandbox and pins it for the session. In fleet mode the
+gateway proxies HTTP only, so SSH needs a `ProxyJump` through the owning
+worker (`sbx.info.hostAddr` names it).
+
+### Fleet capacity
+
+Against a gateway, `Sandbox.hosts()` returns the same fleet view the gateway
+places against — useful for dashboards and for deciding whether to retry:
+
+```ts
+for (const h of await Sandbox.hosts()) {
+  console.log(h.hostId, `${h.slotsUsed}/${h.slotsTotal} used`, `${h.free} free`,
+              h.hibernated, 'hibernated', h.alive ? 'live' : 'stale')
+}
+```
+
+`free` is what placement trusts: tap/IP availability bounded by memory
+admission, so it can be lower than `slotsTotal - slotsUsed` when
+large-memory sandboxes are running. Host-only URLs answer 404 here (a single
+host has no fleet view of itself).
+
+### Refreshing a handle
+
+`sbx.info` is a snapshot from when the handle was made, and `status` drifts on
+its own — the idle reaper hibernates the sandbox, and the next command wakes
+it. `refresh()` re-reads the sandbox and updates `info` **in place**, so
+references you already handed out stay live:
+
+```ts
+await sbx.refresh()
+console.log(sbx.info.status)      // "running" | "hibernated"
+console.log(sbx.info.expiresAt)   // undefined once the TTL is cleared
+```
+
 ### Errors
 
-All errors extend `SandboxError`:
+All errors extend `SandboxError`, which carries the HTTP `status` it came from
+(WebSocket failures map their `4000 + status` close code back onto it):
 
 | Class | Thrown when |
 | --- | --- |
 | `AuthenticationError` | API responds 401/403 (bad or missing key) |
 | `NotFoundError` | API responds 404 (unknown sandbox, missing file) |
+| `ConflictError` | API responds 409 — the sandbox isn't in a state the operation allows (snapshot/hibernate of a sandbox not running on its host, restoring a snapshot whose identity is still in use) |
+| `CapacityError` | API responds 429/503 — the fleet is **full, not broken**. Carries `retryAfterMs` when the server sent a `Retry-After`. This is the retryable class: the same call often succeeds shortly after |
 | `TimeoutError` | a command hits its `timeoutMs` budget, or an HTTP request times out |
 | `CommandExitError` | a command exits non-zero; carries the full `CommandResult` (`.exitCode`, `.stdout`, `.stderr`, `.result`) |
+
+```ts
+try {
+  return await Sandbox.create()
+} catch (err) {
+  if (err instanceof CapacityError) {
+    await new Promise((r) => setTimeout(r, err.retryAfterMs ?? 5_000))
+    return await Sandbox.create()      // the autoscaler may have added a host
+  }
+  throw err
+}
+```
 
 ## Migrating from e2b
 
@@ -248,7 +356,10 @@ All errors extend `SandboxError`:
 | `sbx.betaPause()` / resume | `sbx.snapshot()` + `Sandbox.restore(snapshotId)` — full memory+disk capture |
 | — | `Sandbox.fanout(snapshotId, n)` — N live clones of one snapshot |
 | `sbx.pty.create({ onData, cols, rows })` | `sbx.pty.create({ onData, cols, rows, cwd })` — `sendInput` / `resize` / `kill` / `await pty.exited` |
-| `sbx.getInfo()` template resources | `sbx.info.vcpus` / `sbx.info.memMib` (always the effective values) + `Sandbox.hostInfo()` for defaults/limits |
+| `sbx.getInfo()` | `sbx.info` (a live object) + `await sbx.refresh()` to re-read it; `sbx.info.vcpus` / `memMib` are always the effective values, and `Sandbox.hostInfo()` gives defaults/limits |
+| — | `Sandbox.create({ sshPubkey })` + `exposePort(22)` — key-only root SSH |
+| — | `Sandbox.hosts()` — fleet capacity behind a gateway |
+| rate-limit errors | `CapacityError` (429/503) with `retryAfterMs` — distinguishes "fleet full" from "broken" |
 
 Not supported (yet): background commands (`commands.run(..., { background: true })`),
 `files.watchDir`, and sandbox metadata/templates.

@@ -1,5 +1,7 @@
 import {
   AuthenticationError,
+  CapacityError,
+  ConflictError,
   NotFoundError,
   SandboxError,
   TimeoutError,
@@ -82,8 +84,9 @@ export class ApiClient {
   /**
    * Performs an authenticated request against the API and returns the raw
    * `Response`. Non-2xx responses are mapped to SDK error classes
-   * ({@link AuthenticationError}, {@link NotFoundError}, {@link SandboxError});
-   * client-side timeouts throw {@link TimeoutError}.
+   * ({@link AuthenticationError}, {@link NotFoundError}, {@link ConflictError},
+   * {@link CapacityError}, {@link SandboxError}); client-side timeouts throw
+   * {@link TimeoutError}.
    */
   async request(method: string, path: string, opts: RequestOpts = {}): Promise<Response> {
     const url = new URL(this.baseUrl + path)
@@ -146,8 +149,25 @@ export class ApiClient {
       // ignore body read failures; keep the status-only message
     }
 
-    if (res.status === 401 || res.status === 403) return new AuthenticationError(message)
-    if (res.status === 404) return new NotFoundError(message)
-    return new SandboxError(message)
+    if (res.status === 401 || res.status === 403) return new AuthenticationError(message, res.status)
+    if (res.status === 404) return new NotFoundError(message, res.status)
+    if (res.status === 409) return new ConflictError(message, res.status)
+    if (res.status === 429 || res.status === 503) {
+      return new CapacityError(message, res.status, retryAfterMs(res.headers.get('Retry-After')))
+    }
+    return new SandboxError(message, res.status)
   }
+}
+
+/**
+ * Parses a `Retry-After` header into milliseconds. The API sends delay-seconds
+ * (`Retry-After: 5`); the HTTP-date form is accepted too, for completeness.
+ */
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined
+  const seconds = Number(header)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const at = Date.parse(header)
+  if (Number.isNaN(at)) return undefined
+  return Math.max(0, at - Date.now())
 }

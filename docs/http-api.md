@@ -174,7 +174,8 @@ Counters (reset only on restart): `sandbox_creates_ok_total`,
 Body (optional — empty body is fine):
 
 ```json
-{"name": "my devbox", "timeout_sec": 3600, "hibernate_after_sec": 600, "vcpus": 4, "mem_mib": 4096}
+{"name": "my devbox", "timeout_sec": 3600, "hibernate_after_sec": 600, "vcpus": 4, "mem_mib": 4096,
+ "ssh_pubkey": "ssh-ed25519 AAAAC3Nza… me@laptop"}
 ```
 
 - `name` — display label, at most 64 bytes, no control characters;
@@ -185,13 +186,27 @@ Body (optional — empty body is fine):
 - `vcpus` / `mem_mib` — per-sandbox resource overrides; 0/omit = the host
   template's defaults. Bounds-checked (400 on negative, more vcpus than host
   cores, mem below 128 MiB or above host RAM).
+- `ssh_pubkey` — a single OpenSSH public key line, installed as
+  `/root/.ssh/authorized_keys` in the guest for key-only root SSH
+  (`400` on multi-line input or an unknown key type). Unlike other
+  create-time extras this is **not** best-effort: if the key can't be
+  installed the sandbox is destroyed and the create fails, so a sandbox
+  handed back with SSH requested is always reachable. The key lives in the
+  rootfs, so it survives hibernation/wake with no re-push. Reach it by
+  exposing guest port 22 (`POST /sandboxes/{id}/ports`) and connecting to
+  the returned `host_port` — the port proxy carries wake-on-connect, so SSH
+  to a hibernated sandbox wakes it. **Fleet caveat:** the gateway proxies
+  HTTP only, so fleet SSH needs a `ProxyJump` through the owning worker
+  (`host_addr`).
 
 Returns `201 Sandbox`. Blocks until the sandbox's in-guest agent is healthy,
 so the sandbox is usable the moment this returns. Served from a pre-booted
 golden snapshot when available (~0.3–0.5 s), cold boot otherwise (~2–3.5 s).
 **A `vcpus`/`mem_mib` override always cold-boots** — Firecracker bakes
 resources into the golden snapshot, so an override can't be served from it.
-Give the request a generous client timeout (the SDK uses 90 s).
+Give the request a generous client timeout — the SDK uses 300 s, which has to
+exceed the gateway's create queue-wait (180 s default) plus bring-up, or a
+burst abandons creates the queue would have served.
 
 #### Idle-hibernation activity contract
 

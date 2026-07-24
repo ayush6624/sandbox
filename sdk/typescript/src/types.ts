@@ -12,14 +12,11 @@ export interface SandboxOpts {
   requestTimeoutMs?: number
 }
 
-/** Options for {@link Sandbox.create}. */
-export interface SandboxCreateOpts extends SandboxOpts {
-  /**
-   * Free-form display name for the sandbox. Not unique and not a lookup
-   * key — purely a label shown in listings. Can be changed later with
-   * `sandbox.rename(name)`.
-   */
-  name?: string
+/**
+ * Options shared by every call that brings up a new sandbox
+ * ({@link Sandbox.create}, {@link Sandbox.restore}, {@link Sandbox.fanout}).
+ */
+export interface SandboxBringUpOpts extends SandboxOpts {
   /**
    * Auto-destroy the sandbox after this many milliseconds (rounded up to
    * whole seconds). Omit for no expiry. Can be changed later with
@@ -34,6 +31,26 @@ export interface SandboxCreateOpts extends SandboxOpts {
    * to never hibernate. Omit to inherit the host's default.
    */
   hibernateAfterMs?: number
+}
+
+/** Options for {@link Sandbox.restore}. */
+export interface SandboxRestoreOpts extends SandboxBringUpOpts {
+  /**
+   * Free-form display name for the restored sandbox. Not unique and not a
+   * lookup key — purely a label shown in listings. Can be changed later with
+   * `sandbox.rename(name)`.
+   */
+  name?: string
+}
+
+/**
+ * Options for {@link Sandbox.fanout}. Unlike a restore, clones are not
+ * individually named — the API applies one body to all N of them.
+ */
+export type SandboxFanoutOpts = SandboxBringUpOpts
+
+/** Options for {@link Sandbox.create}. */
+export interface SandboxCreateOpts extends SandboxRestoreOpts {
   /**
    * Number of vCPUs for this sandbox. Omit for the host template's default.
    * Setting this (or {@link memMib}) forces a full cold boot (~2 s) instead
@@ -46,6 +63,23 @@ export interface SandboxCreateOpts extends SandboxOpts {
    * default. Same cold-boot cost as {@link vcpus}.
    */
   memMib?: number
+  /**
+   * A single OpenSSH public key line (e.g. `ssh-ed25519 AAAA… me@laptop`)
+   * installed as `/root/.ssh/authorized_keys` in the guest, enabling
+   * key-only root SSH. Reach it by exposing guest port 22:
+   *
+   * ```ts
+   * const sbx = await Sandbox.create({ sshPubkey: await readFile('~/.ssh/id_ed25519.pub', 'utf8') })
+   * const addr = await sbx.exposePort(22)   // → "100.75.186.35:5200"
+   * // ssh -p 5200 root@100.75.186.35
+   * ```
+   *
+   * The key lives in the rootfs, so it survives hibernation and wake. Unlike
+   * most create-time extras this is **not** best-effort: if the key can't be
+   * installed the sandbox is destroyed and the create fails, so a sandbox
+   * handed back with SSH requested is always reachable.
+   */
+  sshPubkey?: string
 }
 
 /** Raw sandbox object as returned by the REST API (snake_case). */
@@ -70,6 +104,7 @@ export interface ApiSandbox {
   vcpus?: number
   /** Effective guest memory in MiB; same presence rules as {@link vcpus}. */
   mem_mib?: number
+  base_snapshot_id?: string
   host_addr?: string
 }
 
@@ -102,6 +137,45 @@ export interface HostInfo {
   hostId?: string
 }
 
+/** Raw fleet host entry as returned by the gateway's `GET /hosts` (snake_case). */
+export interface ApiFleetHost {
+  id: string
+  addr: string
+  slots_total: number
+  slots_used: number
+  hibernated: number
+  free: number
+  alive: boolean
+  last_seen_ms_ago: number
+}
+
+/**
+ * One host in the fleet, as reported by {@link Sandbox.hosts}. Gateway-only:
+ * a single host has no fleet view of itself.
+ */
+export interface FleetHostInfo {
+  /** Host identity, as it registers itself with the gateway. */
+  hostId: string
+  /** Address the gateway proxies to, and where this host's forwarded ports live. */
+  addr: string
+  /** Slots this host advertises in total (its tap/IP pool size). */
+  slotsTotal: number
+  /** Slots occupied by running sandboxes. */
+  slotsUsed: number
+  /** Hibernated sandboxes on this host — addressable, but holding no slot. */
+  hibernated: number
+  /**
+   * Slots the gateway will actually place onto: tap/IP availability bounded by
+   * memory admission, so it can be lower than `slotsTotal - slotsUsed` when
+   * large-memory sandboxes are running.
+   */
+  free: number
+  /** Whether the host's heartbeat is still within the gateway's TTL. */
+  alive: boolean
+  /** Age of the host's last heartbeat in milliseconds. */
+  lastSeenMsAgo: number
+}
+
 /** Raw port mapping as returned by the REST API (snake_case). */
 export interface ApiPortMapping {
   guest_port: number
@@ -119,6 +193,11 @@ export interface ApiSnapshot {
   state_path: string
   rootfs_path: string
   created_at: string
+  golden?: boolean
+  format?: string
+  base_id?: string
+  vcpus?: number
+  mem_mib?: number
 }
 
 /** A saved point-in-time image of a sandbox that can be restored. */
@@ -131,6 +210,30 @@ export interface SnapshotInfo {
   sourceId: string
   /** Creation time. */
   createdAt: Date
+  /**
+   * True for the server-managed pristine snapshot that hot creates are cloned
+   * from (at most one per host). It shows up in {@link Sandbox.listSnapshots}
+   * like any other snapshot — hide or badge it in a UI, and don't delete it:
+   * creates fall back to cold boot until the server next restarts.
+   */
+  golden?: boolean
+  /**
+   * How the artifacts are stored: `'full'` (self-contained) or `'diff'` (a
+   * delta against {@link baseId}, which must still exist to restore). Absent
+   * on snapshots taken before the diff format existed — treat as `'full'`.
+   */
+  format?: 'full' | 'diff'
+  /** Snapshot this one is a delta against; absent when `format` is `'full'`. */
+  baseId?: string
+  /**
+   * vCPUs baked into the snapshot. Firecracker fixes resources at snapshot
+   * time, so every restore and clone runs with these — which is why
+   * {@link Sandbox.restore} and {@link Sandbox.fanout} reject overrides.
+   * Absent means the source ran the host template's default.
+   */
+  vcpus?: number
+  /** Guest memory in MiB baked into the snapshot; same presence rules as {@link vcpus}. */
+  memMib?: number
 }
 
 /** One forwarded port: guest port → host port. */
@@ -179,6 +282,12 @@ export interface SandboxInfo {
   vcpus?: number
   /** Effective guest memory in MiB; same presence rules as {@link vcpus}. */
   memMib?: number
+  /**
+   * Golden snapshot this sandbox was cloned from (a hot create). Absent for
+   * cold boots, restores, and fan-out clones. Its presence is what makes a
+   * snapshot of this sandbox storable as a space-efficient diff.
+   */
+  baseSnapshotId?: string
   /**
    * Address of the machine hosting this sandbox. Set when talking to a fleet
    * gateway (forwarded ports live on the host, not the gateway); absent when
@@ -253,7 +362,26 @@ export function toSnapshotInfo(raw: ApiSnapshot): SnapshotInfo {
     createdAt: new Date(raw.created_at),
   }
   if (raw.name) info.name = raw.name
+  if (raw.golden) info.golden = true
+  if (raw.format === 'full' || raw.format === 'diff') info.format = raw.format
+  if (raw.base_id) info.baseId = raw.base_id
+  if (raw.vcpus) info.vcpus = raw.vcpus
+  if (raw.mem_mib) info.memMib = raw.mem_mib
   return info
+}
+
+/** Converts a raw gateway host entry to the public {@link FleetHostInfo} shape. */
+export function toFleetHostInfo(raw: ApiFleetHost): FleetHostInfo {
+  return {
+    hostId: raw.id,
+    addr: raw.addr,
+    slotsTotal: raw.slots_total,
+    slotsUsed: raw.slots_used,
+    hibernated: raw.hibernated,
+    free: raw.free,
+    alive: raw.alive,
+    lastSeenMsAgo: raw.last_seen_ms_ago,
+  }
 }
 
 /** Converts a raw API host info object to the public {@link HostInfo} shape. */
@@ -288,6 +416,7 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
   if (raw.hibernate_after_sec) info.hibernateAfterSec = raw.hibernate_after_sec
   if (raw.vcpus) info.vcpus = raw.vcpus
   if (raw.mem_mib) info.memMib = raw.mem_mib
+  if (raw.base_snapshot_id) info.baseSnapshotId = raw.base_snapshot_id
   if (raw.host_addr) info.hostAddr = raw.host_addr
   return info
 }

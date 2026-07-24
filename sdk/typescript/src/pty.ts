@@ -1,6 +1,8 @@
 import type { ApiClient } from './client.js'
 import {
   AuthenticationError,
+  CapacityError,
+  ConflictError,
   NotFoundError,
   SandboxError,
   TimeoutError,
@@ -54,9 +56,13 @@ const POST_OPEN_GRACE_MS = 100
  */
 function closeError(code: number, reason: string): SandboxError {
   const detail = reason || `WebSocket closed with code ${code}`
-  if (code === 4401 || code === 4403) return new AuthenticationError(detail)
-  if (code === 4404) return new NotFoundError(detail)
-  if (code >= 4000 && code < 5000) return new SandboxError(detail)
+  const status = code - 4000
+  if (code === 4401 || code === 4403) return new AuthenticationError(detail, status)
+  if (code === 4404) return new NotFoundError(detail, status)
+  if (code === 4409) return new ConflictError(detail, status)
+  // 4503 is a wake refused by memory admission — capacity, not breakage.
+  if (code === 4429 || code === 4503) return new CapacityError(detail, status)
+  if (code >= 4000 && code < 5000) return new SandboxError(detail, status)
   return new SandboxError(
     `PTY connection closed unexpectedly (code ${code}${reason ? `: ${reason}` : ''})` +
       (code === 1006
