@@ -45,9 +45,9 @@ type host struct {
 	slotsTotal int
 	slotsUsed  int // running sandboxes, from the last heartbeat
 	// slotsFree is the host's self-reported allocatable capacity — the truth
-	// to place against. It differs from slotsTotal-slotsUsed when hibernated
-	// sandboxes hold ports (no slot, but a create still needs a port) or the
-	// host is still warming up (advertises 0). For old host binaries whose
+	// to place against. It differs from slotsTotal-slotsUsed when memory
+	// admission is binding or the host is still warming up (advertises 0).
+	// For old host binaries whose
 	// heartbeats lack the field, handleRegister falls back to total-used.
 	slotsFree  int
 	hibernated int // idle sandboxes frozen to disk on the host (hold no slot)

@@ -27,7 +27,6 @@ const sandboxRecord = {
   socket_path: '/run/fc-test.sock',
   tap_device: 'fc0',
   guest_ip: '172.16.0.10',
-  host_port: 5200,
   rootfs_path: '/opt/fc/instances/test.ext4',
   status: 'running',
   created_at: '2026-06-10T12:00:00Z',
@@ -40,7 +39,6 @@ const hostInfoRecord = {
   default_mem_mib: TEMPLATE_MEM_MIB,
   max_vcpus: 32,
   max_mem_mib: 64_512,
-  guest_port: 3000,
   hot_create: true,
   hibernate_after_sec: 90,
   host_id: 'testvm-1',
@@ -157,13 +155,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
     const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
     const guestPort = body.guest_port
-    if (guestPort === 3000) {
-      sendJson(res, 200, { guest_port: 3000, host_port: sandboxRecord.host_port })
-      return
-    }
     let hostPort = exposedPorts.get(guestPort)
     if (hostPort === undefined) {
-      hostPort = 5201 + exposedPorts.size
+      hostPort = 5200 + exposedPorts.size
       exposedPorts.set(guestPort, hostPort)
     }
     sendJson(res, 200, { guest_port: guestPort, host_port: hostPort })
@@ -171,10 +165,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (req.method === 'GET' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
-    const mappings = [{ guest_port: 3000, host_port: sandboxRecord.host_port }]
+    const mappings: Array<{ guest_port: number; host_port: number }> = []
     for (const [guestPort, hostPort] of exposedPorts) {
       mappings.push({ guest_port: guestPort, host_port: hostPort })
     }
+    mappings.sort((a, b) => a.guest_port - b.guest_port)
     sendJson(res, 200, mappings)
     return
   }
@@ -319,7 +314,6 @@ const opts = () => ({ apiUrl, apiKey: API_KEY })
 test('full lifecycle: create → exec → write/read/list → kill', async () => {
   const sbx = await Sandbox.create(opts())
   assert.equal(sbx.sandboxId, SANDBOX_ID)
-  assert.equal(sbx.info.hostPort, 5200)
   assert.equal(sbx.info.guestIp, '172.16.0.10')
 
   // exec — success
@@ -390,12 +384,10 @@ test('full lifecycle: create → exec → write/read/list → kill', async () =>
   assert.ok(entries[0]!.modifiedAt instanceof Date)
   assert.equal(entries[0]!.size, 120)
 
-  // getHost
-  assert.equal(sbx.getHost(3000), '127.0.0.1:5200')
-  assert.equal(sbx.getHost(), '127.0.0.1:5200')
+  // No port is forwarded until explicitly exposed.
   assert.throws(
-    () => sbx.getHost(9999),
-    (err: unknown) => err instanceof SandboxError && /3000/.test((err as Error).message)
+    () => sbx.getHost(3000),
+    (err: unknown) => err instanceof SandboxError && /exposePort\(3000\)/.test((err as Error).message)
   )
 
   // static list + connect while running
@@ -510,7 +502,6 @@ test('hostInfo maps the /info payload to camelCase', async () => {
     defaultMemMib: TEMPLATE_MEM_MIB,
     maxVcpus: 32,
     maxMemMib: 64_512,
-    guestPort: 3000,
     hotCreate: true,
     hibernateAfterSec: 90,
     hostId: 'testvm-1',
@@ -563,19 +554,19 @@ test('exposePort allocates a host port and feeds the getHost cache', async () =>
   )
 
   const host = await sbx.exposePort(8000)
-  assert.equal(host, '127.0.0.1:5201')
-  assert.equal(sbx.getHost(8000), '127.0.0.1:5201')
+  assert.equal(host, '127.0.0.1:5200')
+  assert.equal(sbx.getHost(8000), '127.0.0.1:5200')
 
   // idempotent: same guest port → same host port
-  assert.equal(await sbx.exposePort(8000), '127.0.0.1:5201')
+  assert.equal(await sbx.exposePort(8000), '127.0.0.1:5200')
 
-  // exposing the primary port returns the existing primary mapping
-  assert.equal(await sbx.exposePort(3000), '127.0.0.1:5200')
+  // Port 3000 is ordinary and receives a mapping only when requested.
+  assert.equal(await sbx.exposePort(3000), '127.0.0.1:5201')
 
   const ports = await sbx.listPorts()
   assert.deepEqual(ports, [
-    { guestPort: 3000, hostPort: 5200 },
-    { guestPort: 8000, hostPort: 5201 },
+    { guestPort: 3000, hostPort: 5201 },
+    { guestPort: 8000, hostPort: 5200 },
   ])
 
   await sbx.kill()

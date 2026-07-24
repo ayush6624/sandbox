@@ -25,11 +25,12 @@ func (s *Server) reconcile(ctx context.Context) {
 	for _, sb := range rows {
 		// Hibernated sandboxes are the one kind of row that legitimately
 		// outlives a server run: no VM, no tap, no DNAT — just the rootfs
-		// file and the hibernation snapshot, both of which must survive so
+		// file, hibernation snapshot, and explicit port listeners, all of which
+		// must survive so
 		// the sandbox stays wakeable after the restart. EXCEPT one that another
 		// host has adopted away while we were down (roadmap B4): the durable
 		// owner fence then names a different host, and keeping our stale local
-		// row would re-bind its port listener and re-heartbeat the id, splitting
+		// row would re-bind its port listeners and re-heartbeat the id, splitting
 		// ownership. Relinquish it — drop the local row + artifacts, leaving the
 		// GCS artifacts (now the adopter's) untouched. Only on a definitive
 		// "fence names another host" read; any GCS error or absent fence keeps
@@ -44,16 +45,15 @@ func (s *Server) reconcile(ctx context.Context) {
 		// Legacy DNAT cleanup: port forwarding is a userspace proxy now (no
 		// kernel rules to remove), but hosts upgrading from the DNAT scheme
 		// may still carry rules for these rows. Removing a nonexistent rule
-		// is harmless. Read extra port mappings before reg.Destroy deletes
+		// is harmless. Read port mappings before reg.Destroy deletes
 		// their rows.
 		if ports, err := s.reg.Ports(ctx, sb.ID); err == nil {
 			for _, pm := range ports {
 				s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "reconcile: list extra ports for %s: %v\n", sb.ID, err)
+			fmt.Fprintf(os.Stderr, "reconcile: list ports for %s: %v\n", sb.ID, err)
 		}
-		s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 		// A crash mid-hibernate can leave artifacts behind a still-'running' row.

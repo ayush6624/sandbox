@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Extensive benchmark matrix for the sandbox fleet: latency (cold vs restore),
 # fan-out scaling, fleet throughput across workload modes, and memory density.
-# Runs SEQUENTIALLY — every run shares the per-host IP/tap/port pool, so parallel
+# Runs SEQUENTIALLY — every run shares the per-host IP/tap pools, so parallel
 # runs would collide on allocation. Collects one JSON per run for reporting.
 #
 # Usage (from repo root, fleet already up and bootstrapped):

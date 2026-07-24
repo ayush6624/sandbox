@@ -21,11 +21,11 @@ func TestBuildHibRecordDiffFreeze(t *testing.T) {
 		HibernateAfterSec: 300,
 		BaseSnapshotID:    "golden-abc",
 		// host-side identity must NOT leak into the record:
-		TapDevice: "fc-tap-1", GuestIP: "172.16.0.5", HostPort: 41000, RootfsPath: "/opt/fc/rootfs-sb-1.ext4",
+		TapDevice: "fc-tap-1", GuestIP: "172.16.0.5", RootfsPath: "/opt/fc/rootfs-sb-1.ext4",
 	}
 	extras := []registry.PortMapping{{GuestPort: 8080, HostPort: 41001}, {GuestPort: 5432, HostPort: 41002}}
 
-	rec := buildHibRecord(sb, 3000, extras, memFormDiff, "golden-abc", rootfsFormDiff, "golden-abc")
+	rec := buildHibRecord(sb, extras, memFormDiff, "golden-abc", rootfsFormDiff, "golden-abc")
 
 	if rec.Version != hibRecordVersion || rec.ID != "sb-1" || rec.Name != "devbox" {
 		t.Fatalf("identity fields wrong: %+v", rec)
@@ -39,11 +39,8 @@ func TestBuildHibRecordDiffFreeze(t *testing.T) {
 	if rec.RootfsForm != rootfsFormDiff || rec.RootfsBaseID != "golden-abc" {
 		t.Fatalf("rootfs form wrong: %+v", rec)
 	}
-	if rec.PrimaryGuestPort != 3000 {
-		t.Fatalf("primary guest port wrong: %d", rec.PrimaryGuestPort)
-	}
-	if len(rec.ExtraGuestPorts) != 2 || rec.ExtraGuestPorts[0] != 8080 || rec.ExtraGuestPorts[1] != 5432 {
-		t.Fatalf("extra guest ports wrong: %v", rec.ExtraGuestPorts)
+	if len(rec.GuestPorts) != 2 || rec.GuestPorts[0] != 8080 || rec.GuestPorts[1] != 5432 {
+		t.Fatalf("guest ports wrong: %v", rec.GuestPorts)
 	}
 	if rec.ExpiresAtUnix == nil || *rec.ExpiresAtUnix != exp.Unix() {
 		t.Fatalf("expiry not carried: %+v", rec.ExpiresAtUnix)
@@ -73,7 +70,7 @@ func TestBuildHibRecordFullColdBoot(t *testing.T) {
 		CreatedAt: time.Unix(1_700_000_000, 0),
 		// no BaseSnapshotID (cold boot), no expiry
 	}
-	rec := buildHibRecord(sb, 3000, nil, memFormChunked, "", rootfsFormFull, "")
+	rec := buildHibRecord(sb, nil, memFormChunked, "", rootfsFormFull, "")
 
 	if rec.MemForm != memFormChunked || rec.MemBaseID != "" {
 		t.Fatalf("mem form wrong: %+v", rec)
@@ -84,8 +81,8 @@ func TestBuildHibRecordFullColdBoot(t *testing.T) {
 	if rec.ExpiresAtUnix != nil {
 		t.Fatalf("expected no expiry, got %+v", rec.ExpiresAtUnix)
 	}
-	if len(rec.ExtraGuestPorts) != 0 {
-		t.Fatalf("expected no extra ports, got %v", rec.ExtraGuestPorts)
+	if len(rec.GuestPorts) != 0 {
+		t.Fatalf("expected no ports, got %v", rec.GuestPorts)
 	}
 
 	// Round-trip: a chunked-mem cold-boot record must survive JSON byte-for-byte

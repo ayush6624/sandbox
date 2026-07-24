@@ -48,7 +48,7 @@ func hibOwnerObj(id string) string   { return "hib/" + id + "/owner" }
 
 // hibRecord is the durable, host-independent description of a hibernated
 // sandbox: everything a far host needs to reconstruct a local row (via a
-// CreateRestore-shaped insert with fresh tap/IP/port from ITS pools) and locate
+// CreateRestore-shaped insert with a fresh tap/IP from ITS pools) and locate
 // the mem/state/rootfs it must pull. Written last as the commit marker — a
 // sandbox is cross-host-wakeable iff its record.json exists.
 type hibRecord struct {
@@ -68,18 +68,16 @@ type hibRecord struct {
 	BaseSnapshotID string `json:"base_snapshot_id,omitempty"`
 	// Mem durability: MemForm=chunked → read manifest.json; MemForm=diff → pull
 	// mem.diff.sz and rebase onto MemBaseID's base mem.
-	MemForm    string `json:"mem_form"`
-	MemBaseID  string `json:"mem_base_id,omitempty"`
+	MemForm   string `json:"mem_form"`
+	MemBaseID string `json:"mem_base_id,omitempty"`
 	// Rootfs durability: RootfsForm=diff → reflink RootfsBaseID's base rootfs and
 	// overlay rootfs.sz; RootfsForm=full → rootfs.sz IS the whole (sparse) rootfs.
 	RootfsForm   string `json:"rootfs_form"`
 	RootfsBaseID string `json:"rootfs_base_id,omitempty"`
-	// Ports to re-expose on the far host. PrimaryGuestPort is the template's
-	// forwarded port (the one behind sb.HostPort); ExtraGuestPorts are the guest
-	// ports of sandbox_ports rows. Host ports are NOT carried — the adopting host
-	// allocates fresh ones from its own pool.
-	PrimaryGuestPort int   `json:"primary_guest_port"`
-	ExtraGuestPorts  []int `json:"extra_guest_ports,omitempty"`
+	// Explicit guest ports to re-expose on the far host. Host ports are not
+	// carried; the adopting host allocates fresh ones from its own pool.
+	GuestPorts       []int `json:"guest_ports,omitempty"`
+	LegacyGuestPorts []int `json:"extra_guest_ports,omitempty"` // read old records
 }
 
 func unixPtr(t *time.Time) *int64 {
@@ -93,7 +91,7 @@ func unixPtr(t *time.Time) *int64 {
 // buildHibRecord assembles the durable record from a sandbox row + the freeze's
 // durability decisions. Pure (no I/O) so it's unit-testable; the orchestrator
 // fills the *Form/*BaseID fields from what it actually uploaded.
-func buildHibRecord(sb registry.Sandbox, primaryGuestPort int, extraPorts []registry.PortMapping,
+func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
 	memForm, memBaseID, rootfsForm, rootfsBaseID string) hibRecord {
 	rec := hibRecord{
 		Version:           hibRecordVersion,
@@ -109,10 +107,9 @@ func buildHibRecord(sb registry.Sandbox, primaryGuestPort int, extraPorts []regi
 		MemBaseID:         memBaseID,
 		RootfsForm:        rootfsForm,
 		RootfsBaseID:      rootfsBaseID,
-		PrimaryGuestPort:  primaryGuestPort,
 	}
-	for _, pm := range extraPorts {
-		rec.ExtraGuestPorts = append(rec.ExtraGuestPorts, pm.GuestPort)
+	for _, pm := range ports {
+		rec.GuestPorts = append(rec.GuestPorts, pm.GuestPort)
 	}
 	return rec
 }
@@ -162,12 +159,12 @@ func (s *Server) uploadHibernation(id string, sb registry.Sandbox, memPath, stat
 	}
 
 	// --- record (commit marker, written LAST) ---
-	extras, err := s.reg.Ports(ctx, id)
+	ports, err := s.reg.Ports(ctx, id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: list ports: %v\n", id, err)
 		return
 	}
-	rec := buildHibRecord(sb, s.cfg.Provisioner.Network.GuestPort, extras, memForm, memBaseID, rootfsForm, rootfsBaseID)
+	rec := buildHibRecord(sb, ports, memForm, memBaseID, rootfsForm, rootfsBaseID)
 	meta, err := json.Marshal(rec)
 	if err == nil {
 		err = s.blob.PutBytes(ctx, hibRecordObj(id), meta)

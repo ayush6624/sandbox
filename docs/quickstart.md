@@ -40,11 +40,10 @@ await sbx.files.write('/home/sandbox/app/server.js', `
     .listen(3000)
 `)
 
-// 4. Start a server and reach it from outside.
-//    Guest port 3000 is pre-forwarded to a host port at create time.
+// 4. Start a server, explicitly expose its port, and reach it from outside.
 sbx.commands.run('node server.js', { timeoutMs: 600_000 }).catch(() => {})
 await new Promise((r) => setTimeout(r, 500))
-const host = sbx.getHost(3000)                  // e.g. "100.69.9.101:5203"
+const host = await sbx.exposePort(3000)         // e.g. "100.69.9.101:5203"
 console.log(await (await fetch(`http://${host}/`)).text())
 
 // 5. Clean up (or let the TTL reap it)
@@ -72,7 +71,7 @@ The API is plain JSON over HTTP with a bearer token
 # Create (blocks until the sandbox is ready; ~0.5s)
 curl -s -X POST -H "Authorization: Bearer $SANDBOX_API_KEY" \
   $SANDBOX_API_URL/sandboxes -d '{"timeout_sec": 600}'
-# → {"id":"2fdcea66-…","guest_ip":"172.16.0.10","host_port":5200,…}
+# → {"id":"2fdcea66-…","guest_ip":"172.16.0.10",…}
 
 ID=2fdcea66-…   # from the response
 

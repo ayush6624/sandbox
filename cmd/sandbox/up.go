@@ -33,7 +33,7 @@ func upCmd() *cobra.Command {
 	cmd.Flags().IntVar(&hibernateAfter, "hibernate-after", 0, "freeze the sandbox after this many idle seconds (-1 = never, 0 = host default)")
 	cmd.Flags().Int64Var(&vcpus, "vcpus", 0, "vCPU override for this sandbox (0 = host template default; forces a cold boot)")
 	cmd.Flags().Int64Var(&memMIB, "mem", 0, "memory override in MiB for this sandbox (0 = host template default; forces a cold boot)")
-	cmd.Flags().StringVar(&sshKey, "ssh-key", "", "install an SSH public key for root login — a .pub file path or the key literal (then `ssh -p <host_port> root@<host>`)")
+	cmd.Flags().StringVar(&sshKey, "ssh-key", "", "install an SSH public key for root login — expose guest port 22 before connecting")
 	return cmd
 }
 
@@ -71,7 +71,7 @@ func runUp(name string, ttl, hibernateAfter int, vcpus, memMIB int64, sshPubkey 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "sandbox %s ready → http://localhost:%d\n", sb.ID, sb.HostPort)
+	fmt.Fprintf(os.Stderr, "sandbox %s ready\n", sb.ID)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(sb)

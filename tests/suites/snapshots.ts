@@ -122,10 +122,9 @@ suite.test(`fanout ${FANOUT_N}: clones share prepared state, writes are isolated
   assertEq(clones.length, FANOUT_N, 'every requested clone must come up')
   ctx.log(`fanout of ${FANOUT_N} took ${Math.round(ms)}ms (${Math.round(ms / FANOUT_N)}ms/clone)`)
 
-  // Fresh identities: unique ids, IPs, and host ports.
+  // Fresh identities: unique ids and IPs.
   assertEq(new Set(clones.map((c) => c.sandboxId)).size, FANOUT_N, 'clone ids must be unique')
   assertEq(new Set(clones.map((c) => c.info.guestIp)).size, FANOUT_N, 'clone IPs must be unique')
-  assertEq(new Set(clones.map((c) => c.info.hostPort)).size, FANOUT_N, 'clone ports must be unique')
 
   // All clones see the prepared state and are individually reachable.
   const execTimes: number[] = []

@@ -5,11 +5,11 @@
 Firecracker-based microVM sandboxes for development, exposed via a
 local HTTP API over a Unix socket. Each sandbox boots Ubuntu 24.04 with Node 22,
 pnpm, TypeScript, Python 3, and common build tooling (build-essential, git). It's
-a bare sandbox — no app server runs on boot; the primary guest port (3000) is
-forwarded to a host port for whatever you start there. e2b style — but
-self-hosted, on bare metal.
+a bare sandbox — no app server runs on boot and guest ports are reachable only
+after explicit exposure. e2b style — but self-hosted, on bare metal.
 
-Multi-sandbox: each one gets its own tap, IP, host port, and rootfs copy.
+Multi-sandbox: each one gets its own tap, IP, and rootfs copy; host ports are
+allocated only for explicit mappings.
 State is in SQLite at `/var/lib/sandbox/registry.db`. The server (`sandbox serve`)
 owns all running VMs in-process.
 
@@ -165,10 +165,10 @@ scripts/              Host setup shell scripts
   opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
   and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, slots_free,
   sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
-  `registry.FreeSlots`: min per-pool availability, counting hibernated sandboxes' held ports
-  and extra exposed ports) — NOT `slots_total - slots_used`, which overstates capacity
-  whenever hibernated port-holds bind the port pool; a host still building its golden
-  snapshot advertises `slots_free=0` so fresh hosts aren't boot-stormed with cold creates.
+  `registry.FreeSlots`: tap/IP availability bounded by memory admission) — NOT
+  `slots_total - slots_used`, which can overstate capacity when larger memory overrides are
+  running; a host still building its golden snapshot advertises `slots_free=0` so fresh
+  hosts aren't boot-stormed with cold creates.
   The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
   its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
   each host reports. `POST /sandboxes` bin-packs onto the fullest live host with free slots
@@ -382,17 +382,17 @@ scripts/              Host setup shell scripts
   guest's current IP). Heartbeats report hibernated ids for routing but exclude them
   from `slots_used`.
 - **Port forwarding is a userspace TCP proxy, not DNAT**
-  (`internal/server/portproxy.go`). The server binds every mapped host port
-  (primary + `sandbox_ports` rows) with an in-process listener: accept → record
+  (`internal/server/portproxy.go`). The server binds every explicitly mapped
+  host port (`sandbox_ports` rows) with an in-process listener: accept → record
   activity + pin (same `act.begin` mechanism as API requests) → `ensureRunning` (wakes
   if hibernated) → re-read the row for the CURRENT guest IP (a clone-path wake changes
   it — never cache it) → dial guest → bidirectional copy with TCP half-close. Listeners
-  open on create/restore/fanout/expose, persist through hibernation (that's what makes
+  open on expose, persist through hibernation (that's what makes
   wake-on-connect work), re-bind at startup for hibernated rows (`reopenPortListeners`),
   and close on destroy. `RemovePortForward*` (iptables `-D`) is kept and still called in
   destroy/reconcile purely as legacy cleanup for hosts upgrading from the DNAT scheme.
-- **Extra port mappings** live in the `sandbox_ports` table and draw host ports from the
-  same pool as primary ports (`loadUsed` reads both tables). destroy() and reconcile()
+- **Port mappings** live in the `sandbox_ports` table and draw host ports from the
+  configured port pool. destroy() and reconcile()
   must close their listeners (and remove legacy DNAT rules) — read mappings before
   deleting rows. `exposePort` works on a hibernated sandbox without waking it: the new
   listener is just another wake-on-connect entry point.
@@ -400,8 +400,8 @@ scripts/              Host setup shell scripts
   and `vm.Start`, NOT `r.Context()` — the request ctx cancels when the handler returns, and the
   firecracker SDK SIGTERMs the VM when its ctx cancels. This was an early bug that wasted hours.
 - **Pools allocated atomically via SQLite.** `registry.Create` runs INSERT inside a TX with
-  partial unique indexes (`uniq_tap_running`, `uniq_ip_running`, `uniq_port_held` — the port
-  one also binds `hibernated`) guaranteeing no two sandboxes share a tap/IP/port. Concurrent
+  partial unique indexes (`uniq_tap_running`, `uniq_ip_running`) guaranteeing no two
+  running sandboxes share a tap/IP; `sandbox_ports.host_port` is independently unique. Concurrent
   creates that race lose to UNIQUE constraint and surface as 500.
 - **The port pool is sized independently of tap/IP/memory, because hibernation doesn't
   release it.** Taps/IPs/`mem_budget_mib` bound concurrently *running* sandboxes (real

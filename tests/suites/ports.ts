@@ -1,7 +1,6 @@
 /**
- * Port forwarding: the always-on primary mapping (guest 3000), on-demand
- * exposePort, listPorts, and actually reaching guest servers from outside
- * through the forwarded host ports.
+ * Explicit port forwarding: exposePort, listPorts, and actually reaching
+ * guest servers from outside through forwarded host ports.
  */
 
 import { SuiteDef, assert, assertEq, assertThrows, eventually } from '../harness.js'
@@ -34,10 +33,11 @@ async function fetchText(url: string): Promise<string> {
   return res.text()
 }
 
-suite.test('guest port 3000 is reachable via getHost() from outside', async (ctx) => {
+suite.test('guest port 3000 is reachable after explicit exposure', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 3000)
-  const host = sbx.getHost(3000)
+  const host = await sbx.exposePort(3000)
+  assertEq(sbx.getHost(3000), host, 'getHost must cache the explicit mapping')
   assert(/^[\d.]+:\d+$/.test(host), `getHost must return host:port, got ${host}`)
   const body = await eventually(() => fetchText(`http://${host}/hello`), {
     timeoutMs: 15_000,
@@ -51,7 +51,7 @@ suite.test('getHost throws for a port that was never exposed', async (ctx) => {
   await assertThrows(async () => sbx.getHost(8123), 'SandboxError', 'getHost on unexposed port')
 })
 
-suite.test('exposePort forwards an extra guest port end-to-end', async (ctx) => {
+suite.test('exposePort forwards a guest port end-to-end', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 8000)
   const hostPort = await sbx.exposePort(8000)
@@ -72,15 +72,13 @@ suite.test('exposePort is idempotent', async (ctx) => {
   assertEq(second, first, 'exposing the same port twice must return the same mapping')
 })
 
-suite.test('listPorts reports the primary and extra mappings', async (ctx) => {
+suite.test('listPorts reports only explicitly exposed mappings', async (ctx) => {
   const sbx = await ctx.createTracked()
   await sbx.exposePort(8000)
   await sbx.exposePort(9000)
   const ports = await sbx.listPorts()
   const guestPorts = ports.map((p) => p.guestPort).sort((a, b) => a - b)
-  assertEq(JSON.stringify(guestPorts), JSON.stringify([3000, 8000, 9000]), 'guest ports listed')
-  const primary = ports.find((p) => p.guestPort === 3000)
-  assertEq(primary?.hostPort, sbx.info.hostPort, 'primary mapping must match create-time port')
+  assertEq(JSON.stringify(guestPorts), JSON.stringify([8000, 9000]), 'guest ports listed')
   const hostPorts = new Set(ports.map((p) => p.hostPort))
   assertEq(hostPorts.size, ports.length, 'host ports must be distinct')
 })
@@ -88,12 +86,13 @@ suite.test('listPorts reports the primary and extra mappings', async (ctx) => {
 suite.test('two sandboxes get distinct host ports and isolated servers', async (ctx) => {
   const [a, b] = await Promise.all([ctx.createTracked(), ctx.createTracked()])
   await Promise.all([startServer(a, 3000), startServer(b, 3000)])
+  const [hostA, hostB] = await Promise.all([a.exposePort(3000), b.exposePort(3000)])
   const [bodyA, bodyB] = await Promise.all([
-    eventually(() => fetchText(`http://${a.getHost(3000)}/A`), {
+    eventually(() => fetchText(`http://${hostA}/A`), {
       timeoutMs: 15_000,
       what: 'sandbox A server',
     }),
-    eventually(() => fetchText(`http://${b.getHost(3000)}/B`), {
+    eventually(() => fetchText(`http://${hostB}/B`), {
       timeoutMs: 15_000,
       what: 'sandbox B server',
     }),
@@ -101,14 +100,14 @@ suite.test('two sandboxes get distinct host ports and isolated servers', async (
   assertEq(bodyA, 'pong:3000:/A', 'sandbox A must answer its own port')
   assertEq(bodyB, 'pong:3000:/B', 'sandbox B must answer its own port')
   if (a.info.hostAddr === b.info.hostAddr) {
-    assert(a.info.hostPort !== b.info.hostPort, 'same host ⇒ ports must differ')
+    assert(hostA !== hostB, 'same host ⇒ ports must differ')
   }
 })
 
 suite.test('killed sandbox stops answering on its forwarded port', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 3000)
-  const host = sbx.getHost(3000)
+  const host = await sbx.exposePort(3000)
   await eventually(() => fetchText(`http://${host}/up`), {
     timeoutMs: 15_000,
     what: 'server up before kill',
@@ -131,7 +130,7 @@ suite.test('killed sandbox stops answering on its forwarded port', async (ctx) =
 suite.test('connecting to a forwarded port wakes a hibernated sandbox', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 3000)
-  const host = sbx.getHost(3000)
+  const host = await sbx.exposePort(3000)
   await eventually(() => fetchText(`http://${host}/pre-freeze`), {
     timeoutMs: 15_000,
     what: 'guest server up before hibernating',

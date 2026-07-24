@@ -31,11 +31,9 @@ suite.test(`burst: ${BURST} concurrent creates all come up usable`, async (ctx) 
   )
   ctx.log(statLine('create', createTimes))
 
-  // Unique ids, and unique (host, port) pairs — the pools must never collide.
+  // Unique ids and per-host guest IPs — the identity pools must never collide.
   const ids = new Set(sandboxes.map((s) => s.sandboxId))
   assertEq(ids.size, BURST, 'sandbox ids must be unique')
-  const endpoints = new Set(sandboxes.map((s) => `${s.info.hostAddr ?? 'local'}:${s.info.hostPort}`))
-  assertEq(endpoints.size, BURST, 'host:port endpoints must be unique')
   const guestKeys = new Set(sandboxes.map((s) => `${s.info.hostAddr ?? 'local'}|${s.info.guestIp}`))
   assertEq(guestKeys.size, BURST, 'guest IPs must be unique per host')
 

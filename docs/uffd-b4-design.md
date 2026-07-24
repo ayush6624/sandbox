@@ -105,9 +105,9 @@ is tiny. `record.json` names which mem form applies.
 is cross-host-wakeable iff `record.json` exists. It carries everything
 `CreateRestore` needs plus the pointers the wake needs: id, name, vcpus, mem_mib,
 expires_at, hibernate_after_sec, base_snapshot_id, the diff-base golden id (if
-the mem/rootfs are diffs), the chunk geometry codec, and the port mappings
-(primary + `sandbox_ports`) so the adopting host rebinds the same guest→host
-port intent. Base rootfs/mem templates already live under `bases/<golden-id>/…`
+the mem/rootfs are diffs), the chunk geometry codec, and explicit port mappings
+so the adopting host rebinds the same guest-port intent to fresh host ports.
+Base rootfs/mem templates already live under `bases/<golden-id>/…`
 (`snapshot_gcs.go`) and are immutable, so a diff record just references them.
 
 ## Rootfs — the one genuinely new upload cost

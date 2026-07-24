@@ -78,7 +78,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		Network: provisioner.Network{
 			Bridge:      cfg.Bridge,
 			GatewayCIDR: fmt.Sprintf("%s/%d", cfg.GatewayIP, cfg.GuestSubnetBits),
-			GuestPort:   cfg.GuestPort,
 		},
 		RootfsBase:  cfg.RootfsBase,
 		RootfsDir:   cfg.RootfsDir,

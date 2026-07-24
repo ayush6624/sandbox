@@ -57,7 +57,6 @@ export interface ApiSandbox {
   socket_path: string
   tap_device: string
   guest_ip: string
-  host_port: number
   rootfs_path: string
   status: string
   created_at: string
@@ -80,7 +79,6 @@ export interface ApiHostInfo {
   default_mem_mib: number
   max_vcpus: number
   max_mem_mib: number
-  guest_port: number
   hot_create: boolean
   hibernate_after_sec: number
   host_id?: string
@@ -96,8 +94,6 @@ export interface HostInfo {
   maxVcpus: number
   /** Largest accepted per-sandbox `memMib` override. */
   maxMemMib: number
-  /** The primary in-guest port forwarded to a host port at create time. */
-  guestPort: number
   /** Whether creates are served from a pre-booted golden snapshot. */
   hotCreate: boolean
   /** Host default idle-hibernation window in seconds (0 = disabled). */
@@ -159,8 +155,6 @@ export interface SandboxInfo {
   tapDevice: string
   /** IP of the guest on the sandbox bridge. */
   guestIp: string
-  /** Host port forwarding to the primary guest port (3000). */
-  hostPort: number
   /** Path of the per-VM rootfs copy on the host. */
   rootfsPath: string
   /** Firecracker API socket path on the host. */
@@ -269,7 +263,6 @@ export function toHostInfo(raw: ApiHostInfo): HostInfo {
     defaultMemMib: raw.default_mem_mib,
     maxVcpus: raw.max_vcpus,
     maxMemMib: raw.max_mem_mib,
-    guestPort: raw.guest_port,
     hotCreate: raw.hot_create,
     hibernateAfterSec: raw.hibernate_after_sec,
   }
@@ -285,7 +278,6 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
     vmId: raw.vm_id,
     tapDevice: raw.tap_device,
     guestIp: raw.guest_ip,
-    hostPort: raw.host_port,
     rootfsPath: raw.rootfs_path,
     socketPath: raw.socket_path,
     status: raw.status,

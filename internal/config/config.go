@@ -39,7 +39,6 @@ type Config struct {
 	Bridge      string `json:"bridge"`      // e.g. "br-fc"
 	GatewayIP   string `json:"gateway_ip"`  // bridge IP, used as guest default gateway
 	Nameservers string `json:"nameservers"` // comma-separated DNS for the guest
-	GuestPort   int    `json:"guest_port"`  // port the in-guest app listens on, forwarded to a host port
 	// GuestSubnetBits is the prefix length of the guest subnet shared by the
 	// bridge (gateway) and every guest NIC. It caps how many sandboxes can run
 	// concurrently on a host: a /24 holds ~253 usable IPs, a /22 ~1021, a /20
@@ -140,9 +139,6 @@ func (c *Config) Defaults() {
 	}
 	if c.Nameservers == "" {
 		c.Nameservers = "8.8.8.8"
-	}
-	if c.GuestPort == 0 {
-		c.GuestPort = 3000
 	}
 	if c.GuestSubnetBits == 0 {
 		c.GuestSubnetBits = 24

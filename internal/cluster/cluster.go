@@ -22,17 +22,16 @@ type Heartbeat struct {
 	// Token is the bearer token the gateway must present when calling Addr —
 	// i.e. the host's own api_token. Sent over the (Tailscale) control link.
 	Token string `json:"token"`
-	// SlotsTotal is the host's sandbox capacity (min of its tap/IP/port pools).
+	// SlotsTotal is the host's sandbox capacity (min of its tap/IP pools).
 	SlotsTotal int `json:"slots_total"`
 	// SlotsUsed is the number of running sandboxes on the host right now.
 	// Hibernated sandboxes don't count — their resources are released.
 	SlotsUsed int `json:"slots_used"`
 	// SlotsFree is the number of creates the host can actually satisfy right
-	// now — min over its per-pool availability, including port holds by
-	// hibernated sandboxes and extra exposed ports (registry.FreeSlots). The
-	// gateway must place against this, NOT SlotsTotal-SlotsUsed: hibernated
-	// sandboxes hold no slot but do hold their host port, so the difference
-	// overstates capacity. Pointer so the gateway can tell an old host binary
+	// now — tap/IP availability bounded by memory admission
+	// (registry.FreeSlots). The gateway must place against this, not
+	// SlotsTotal-SlotsUsed, because memory overrides can make the latter
+	// overstate capacity. Pointer so the gateway can tell an old host binary
 	// (absent → fall back to SlotsTotal-SlotsUsed) from a genuine zero. A host
 	// still warming up (golden snapshot build) advertises 0 to avoid attracting
 	// a cold-boot storm.

@@ -234,7 +234,7 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 		t := time.Unix(*rec.ExpiresAtUnix, 0)
 		expiresAt = &t
 	}
-	// Fresh identity (tap/IP/port) from THIS host's pools; keep the sandbox's id,
+	// Fresh identity (tap/IP) from THIS host's pools; keep the sandbox's id,
 	// name, resources, expiry, and hibernate window.
 	sb, err := s.reg.Create(ctx, id, rec.Name, rootfsPath, expiresAt, rec.BaseSnapshotID, rec.HibernateAfterSec, rec.Vcpus, rec.MemMIB)
 	if err != nil {
@@ -242,8 +242,8 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 		return registry.Sandbox{}, fmt.Errorf("insert adopted row: %w", err)
 	}
-	// Re-expose the sandbox's extra ports (fresh host ports from this pool).
-	for _, gp := range rec.ExtraGuestPorts {
+	// Re-expose the sandbox's explicit ports (fresh host ports from this pool).
+	for _, gp := range append(rec.GuestPorts, rec.LegacyGuestPorts...) {
 		if _, perr := s.reg.AddPort(ctx, id, gp); perr != nil {
 			fmt.Fprintf(os.Stderr, "[%s] adopt: re-expose guest port %d: %v\n", id, gp, perr)
 		}
@@ -255,7 +255,7 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 		s.adoptRollback(sb)
 		return registry.Sandbox{}, fmt.Errorf("clone wake: %w", err)
 	}
-	// Primary port opened by finishClone; open the extra-port listeners too.
+	// Open the restored explicit-port listeners.
 	if serr := s.syncSandboxPorts(ctx, sb); serr != nil {
 		fmt.Fprintf(os.Stderr, "[%s] adopt: sync port listeners: %v\n", id, serr)
 	}

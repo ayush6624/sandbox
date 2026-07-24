@@ -75,7 +75,7 @@ internal/vm/
   machine_linux.go     Firecracker SDK integration, networking, snapshot-less for now
   machine_stub.go      Non-Linux stub matching the Linux signatures
   options.go           RunOptions (paths + networking) and RuntimeConfig
-configs/devbox.json    Default config (tap0, 172.16.0.2/24, 2 vCPU, 1 GiB, primary port :3000)
+configs/devbox.json    Default config (tap/IP/host-port pools, 2 vCPU, 1 GiB)
 scripts/               Host setup shell scripts
 ```
 

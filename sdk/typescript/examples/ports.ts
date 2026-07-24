@@ -2,9 +2,8 @@
  * Port forwarding: start a server inside the sandbox, expose its guest port to
  * a host port, and reach it from outside via getHost() / exposePort().
  *
- * Guest port 3000 is forwarded automatically at create time; any other port
- * needs an explicit exposePort(). This example serves on 8000 to show the full
- * round trip.
+ * Every port needs an explicit exposePort(). This example serves on 8000 to
+ * show the full round trip.
  *
  * Run with: npm run example:ports
  */
@@ -47,7 +46,7 @@ async function main(): Promise<void> {
     const res = await poll(`http://${hostAddr}/`)
     console.log(`  HTTP ${res.status}: ${(await res.text()).trim()}`)
 
-    step('All forwarded ports (3000 is the auto-forwarded primary):')
+    step('All explicitly forwarded ports:')
     for (const p of await sbx.listPorts()) {
       console.log(`  guest ${p.guestPort} -> host ${p.hostPort}`)
     }

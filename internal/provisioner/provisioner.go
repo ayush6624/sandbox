@@ -10,12 +10,10 @@ import (
 	"strings"
 )
 
-// Network describes the host-side bridge and the guest-side application port
-// that gets forwarded.
+// Network describes the host-side bridge used by sandboxes.
 type Network struct {
 	Bridge      string // e.g. "br-fc" — tap devices attach here
 	GatewayCIDR string // e.g. "172.16.0.1/24" — bridge address; subnet derived from it
-	GuestPort   int    // e.g. 3000 — port the in-guest app listens on
 }
 
 // Provisioner performs host-side setup/teardown for sandboxes:
@@ -267,13 +265,6 @@ func (p *Provisioner) DeleteTap(tap string) error {
 		return fmt.Errorf("delete tap %s: %w: %s", tap, err, out)
 	}
 	return nil
-}
-
-// RemovePortForward removes the legacy primary-port DNAT rules of a sandbox
-// (best-effort — on hosts that never ran the DNAT scheme the rules simply
-// don't exist and the deletes are no-ops).
-func (p *Provisioner) RemovePortForward(hostPort int, guestIP string) {
-	p.RemovePortForwardTo(hostPort, guestIP, p.Network.GuestPort)
 }
 
 // RemovePortForwardTo removes legacy host:hostPort → guestIP:guestPort DNAT

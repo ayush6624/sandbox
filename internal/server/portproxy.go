@@ -212,10 +212,9 @@ func (s *Server) dialGuest(ctx context.Context, id string, guestPort int) (net.C
 	return nil, lastErr
 }
 
-// syncSandboxPorts points the forwarder at a sandbox's current mappings: the
-// primary port plus every sandbox_ports row.
+// syncSandboxPorts points the forwarder at all explicitly exposed mappings.
 func (s *Server) syncSandboxPorts(ctx context.Context, sb registry.Sandbox) error {
-	desired := map[int]int{sb.HostPort: s.cfg.Provisioner.Network.GuestPort}
+	desired := map[int]int{}
 	ports, err := s.reg.Ports(ctx, sb.ID)
 	if err != nil {
 		return err

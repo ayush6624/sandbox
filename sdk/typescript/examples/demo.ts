@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     step('Listing all running sandboxes...')
     const sandboxes = await Sandbox.list()
     for (const s of sandboxes) {
-      console.log(`${s.sandboxId}  ${s.status}  guest=${s.guestIp}  hostPort=${s.hostPort}`)
+      console.log(`${s.sandboxId}  ${s.status}  guest=${s.guestIp}`)
     }
   } finally {
     step(`Killing sandbox ${sbx.sandboxId}...`)

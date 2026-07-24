@@ -8,7 +8,6 @@
   "bridge":          "br-fc",
   "gateway_ip":      "172.16.0.1",
   "nameservers":     "8.8.8.8,8.8.4.4",
-  "guest_port":      3000,
   "firecracker_bin": "/usr/local/bin/firecracker",
   "kernel_image":    "/opt/fc/vmlinux",
   "kernel_args":     "reboot=k panic=1 pci=off root=/dev/vda rw console=ttyS0",

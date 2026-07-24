@@ -12,7 +12,6 @@ suite.test('create returns a usable sandbox with sane info', async (ctx) => {
   const sbx = await ctx.createTracked()
   assert(sbx.sandboxId.length > 0, 'sandboxId must be non-empty')
   assert(sbx.info.guestIp.length > 0, 'guestIp must be set')
-  assert(sbx.info.hostPort > 0, 'hostPort must be allocated')
   assertEq(sbx.info.status, 'running', 'fresh sandbox must be running')
   assert(sbx.info.expiresAt === undefined, 'no TTL requested, expiresAt must be absent')
   // First exec proves the guest agent is genuinely up, not just registered.
@@ -25,7 +24,7 @@ suite.test('connect by id yields a working handle', async (ctx) => {
   const sbx = await ctx.createTracked()
   const again = await Sandbox.connect(sbx.sandboxId)
   assertEq(again.sandboxId, sbx.sandboxId, 'connect must return the same id')
-  assertEq(again.info.hostPort, sbx.info.hostPort, 'hostPort must match')
+  assertEq(again.info.guestIp, sbx.info.guestIp, 'guestIp must match')
   const res = await again.commands.run('hostname')
   assertEq(res.exitCode, 0, 'exec through the connected handle')
 })

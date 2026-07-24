@@ -51,7 +51,7 @@ func metricsTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { reg.Close() })
 	// MemBudgetMIB < 0 disables memory admission, so slots_free is bound purely
-	// by the (deterministic) tap/IP/port pools rather than the host's real RAM.
+	// by the deterministic tap/IP pools rather than the host's real RAM.
 	return New(Config{
 		VMTemplate:   vm.RunOptions{Vcpus: 2, MemMIB: 1024},
 		HotCreate:    false,
@@ -61,7 +61,7 @@ func metricsTestServer(t *testing.T) *Server {
 
 // TestHandleMetrics exercises the endpoint end to end against a real registry:
 // two running sandboxes, one then hibernated, and asserts the pool accounting
-// (tap/IP free on hibernate, port stays held) plus the lifecycle counters.
+// (tap/IP free on hibernate, explicit ports stay held) plus lifecycle counters.
 func TestHandleMetrics(t *testing.T) {
 	s := metricsTestServer(t)
 	ctx := context.Background()
@@ -72,9 +72,12 @@ func TestHandleMetrics(t *testing.T) {
 	if _, err := s.reg.Create(ctx, "sb-b", "", "/tmp/b", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create b: %v", err)
 	}
+	if _, err := s.reg.AddPort(ctx, "sb-b", 3000); err != nil {
+		t.Fatalf("expose b: %v", err)
+	}
 	// Flip one to hibernated directly (no VM needed): the row bookkeeping is
 	// what the metric reads. A hibernated sandbox releases its tap/IP but keeps
-	// its host port reserved for wake-on-connect.
+	// its explicitly exposed port reserved for wake-on-connect.
 	if err := s.reg.Hibernate(ctx, "sb-b"); err != nil {
 		t.Fatalf("hibernate b: %v", err)
 	}
@@ -101,11 +104,11 @@ func TestHandleMetrics(t *testing.T) {
 		"sandbox_hibernated":                1,
 		"sandbox_pool_used{pool=\"tap\"}":   1, // hibernated released its tap
 		"sandbox_pool_used{pool=\"ip\"}":    1, // and its IP
-		"sandbox_pool_used{pool=\"port\"}":  2, // but both still hold a port
+		"sandbox_pool_used{pool=\"port\"}":  1, // explicit mapping stays held
 		"sandbox_pool_total{pool=\"tap\"}":  3,
 		"sandbox_pool_total{pool=\"ip\"}":   3,
 		"sandbox_pool_total{pool=\"port\"}": 3,
-		"sandbox_slots_free":                1, // 3 taps - 1 running (mem admission off)
+		"sandbox_slots_free":                2, // 3 taps - 1 running (mem admission off)
 		"sandbox_mem_budget_mib":            0, // disabled
 		"sandbox_golden_ready":              0,
 		"sandbox_creates_ok_total":          5,

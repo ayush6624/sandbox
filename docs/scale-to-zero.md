@@ -116,7 +116,7 @@ Multi-host adds a third item — see Phase 5.
 
 ### Phase 0 — Measure with what exists (no code)
 Create a sandbox with `hibernate_after_sec: 1`, start a trivial HTTP server in the
-guest on :3000, curl the forwarded port repeatedly, and measure real wake latency
+guest on :3000, explicitly expose it, curl the forwarded port repeatedly, and measure real wake latency
 and freeze cost on the target host. Validates the loop end-to-end and gives us the
 baseline the later phases must beat. **Do this first.**
 

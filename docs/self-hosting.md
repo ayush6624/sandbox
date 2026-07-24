@@ -116,8 +116,8 @@ for gateway + serve, generating stable tokens into `fleet-secrets.env`.
   network only — a VPN/tailnet (Tailscale is what the reference fleet uses),
   a VPC, or localhost. Never a public interface.
 - The Unix socket is mode 0600 (root) and needs no token.
-- Sandbox `host_port`s (5200-5263) bind on the host; firewall them to the
-  audience your in-guest servers expect.
+- Explicitly allocated sandbox host ports (5200-5263) bind on the host;
+  firewall them to the audience your in-guest servers expect.
 
 ## Configuration reference
 
@@ -139,8 +139,7 @@ the file.
 | `disable_hot_create` | `false` | `true` = always cold-boot creates |
 | `bridge` / `gateway_ip` | `br-fc` / `172.16.0.1` | host bridge and guest default gateway |
 | `nameservers` | `8.8.8.8` | guest DNS (comma-separated; match your network's egress rules) |
-| `guest_port` | `3000` | in-guest port pre-forwarded at create |
-| `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | capacity: 64 sandboxes/host |
+| `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | VM identity and explicit-forwarding pools |
 | `vcpus` / `mem_mib` | `2` / `1024` | per-VM resources (template-wide) |
 | `firecracker_bin` / `kernel_image` / `kernel_args` | … | VM template |
 
@@ -151,7 +150,7 @@ the file.
 | `sandbox doctor` fails on KVM | nested virtualization off, or not a KVM-capable machine type |
 | Every create fails "agent never became ready" | base image has no agent — run `install-agent` |
 | Creates are slow (~3 s) | no golden snapshot yet (just restarted?) or `disable_hot_create` on; check server log for `golden snapshot … creates are hot` |
-| `curl localhost:<host_port>` hangs | nothing listening on guest `:3000`, or the host-side NAT rules were flushed — restart the server (it re-ensures networking) |
+| `curl localhost:<host_port>` hangs | nothing listening on the exposed guest port, or the sandbox is still starting |
 | Creates fail with 500 pool errors | host at capacity (64) — add hosts or shorten TTLs |
 | Fan-out slow on this host | disks on ext4 — move `rootfs_dir` + `snapshot_dir` to XFS |
 

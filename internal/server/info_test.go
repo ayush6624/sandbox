@@ -82,6 +82,9 @@ func TestListAndGetReportEffectiveResources(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
+	if strings.Contains(w.Body.String(), `"host_port"`) {
+		t.Fatalf("sandbox response must not contain an implicit host port: %s", w.Body)
+	}
 	want := map[string][2]int64{def.ID: {2, 1024}, ovr.ID: {4, 2048}}
 	for _, sb := range listed {
 		if sb.Vcpus != want[sb.ID][0] || sb.MemMIB != want[sb.ID][1] {
@@ -120,6 +123,9 @@ func TestHandleInfo(t *testing.T) {
 	var info Info
 	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
 		t.Fatalf("decode info: %v", err)
+	}
+	if strings.Contains(w.Body.String(), `"guest_port"`) {
+		t.Fatalf("host info must not advertise an implicit guest port: %s", w.Body)
 	}
 	if info.DefaultVcpus != 2 || info.DefaultMemMIB != 1024 {
 		t.Fatalf("defaults: vcpus=%d mem=%d, want 2/1024", info.DefaultVcpus, info.DefaultMemMIB)

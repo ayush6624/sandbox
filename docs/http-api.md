@@ -49,7 +49,6 @@ extras — see [gateway differences](#gateway-differences).
   "socket_path": "/run/fc-….sock",
   "tap_device": "fc-tap3",
   "guest_ip": "172.16.0.10",
-  "host_port": 5200,
   "rootfs_path": "/opt/fc/rootfs/….ext4",
   "status": "running",
   "created_at": "2026-07-02T10:56:51Z",
@@ -72,13 +71,10 @@ extras — see [gateway differences](#gateway-differences).
   template's defaults are filled in (compare against `GET /info`).
 - `hibernate_after_sec`, `base_snapshot_id` — omitted when zero/empty
   (zero = host default).
-- `host_addr` — **gateway only**: the owning host's address. Use
-  `host_addr:host_port` (not the gateway address) to reach forwarded ports.
+- `host_addr` — **gateway only**: the owning host's address. Pair it with a
+  `host_port` returned by the ports API (not the gateway address).
 - `pid`, `vm_id`, `socket_path`, `tap_device`, `rootfs_path` are host-side
   internals; frontends can ignore them.
-
-`host_port` is the pre-forwarded mapping to the primary guest port **3000** —
-reach an in-guest server at `<api-host>:<host_port>`.
 
 ### Snapshot
 
@@ -130,7 +126,6 @@ UI label resources without guessing.
   "default_mem_mib": 1024,
   "max_vcpus": 16,
   "max_mem_mib": 64312,
-  "guest_port": 3000,
   "hot_create": true,
   "hibernate_after_sec": 300,
   "host_id": "testvm-1"
@@ -158,9 +153,8 @@ Gauges:
 - `sandbox_slots_free` — allocatable slots right now (smallest per-pool
   availability, memory-bounded); what the heartbeat advertises.
 - `sandbox_pool_used{pool="tap|ip|port"}` / `sandbox_pool_total{pool=…}` —
-  per-pool occupancy, so you can see *which* pool binds. Taps/IPs are held by
-  running sandboxes only; ports by running **and** hibernated (the
-  wake-on-connect listener stays bound) plus extra exposed ports.
+  per-pool occupancy. Taps/IPs are held by running sandboxes only; ports are
+  held by explicit mappings, including while their sandbox is hibernated.
 - `sandbox_committed_mem_mib` / `sandbox_mem_budget_mib` — committed guest
   memory vs the admission ceiling (`0` = admission disabled).
 - `sandbox_golden_ready` — `1` when the golden snapshot is staged (hot create
@@ -324,8 +318,8 @@ truncates any existing file (mode 0644).
 ### Expose — `POST /sandboxes/{id}/ports`
 
 Body: `{"guest_port": 8000}` (1–65535). Forwards the guest port to a
-pool-allocated host port. Idempotent — re-exposing (or exposing the primary
-port 3000) returns the existing mapping.
+pool-allocated host port. Idempotent — re-exposing the same guest port returns
+the existing mapping.
 
 ```json
 200 {"guest_port": 8000, "host_port": 5201}
@@ -336,8 +330,8 @@ another wake-on-connect entry point.
 
 ### List — `GET /sandboxes/{id}/ports`
 
-`200 [PortMapping…]` — all forwarded ports, always including the primary
-`3000 → host_port` mapping first.
+`200 [PortMapping…]` — all explicitly forwarded ports. A newly created
+sandbox returns `[]`.
 
 ## Snapshots
 
@@ -368,7 +362,7 @@ the source's resources.
 
 Body: `{"count": 32, "timeout_sec": 600, "hibernate_after_sec": N}`
 (`count` >= 1 required). Starts N identity-neutral clones concurrently — each
-with a fresh IP/ports and copy-on-write disk. Returns `201 [Sandbox…]` with
+with a fresh IP and copy-on-write disk. Returns `201 [Sandbox…]` with
 every clone that came up (**partial success possible** — the array may be
 shorter than `count`; failures are logged server-side and their resources
 reclaimed). `500` only if every clone failed. `vcpus`/`mem_mib` are rejected
@@ -398,7 +392,7 @@ The gateway fronts N hosts with the same API, plus:
 | `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |
 | `GET /sandboxes` | Merged across all hosts |
 | `/sandboxes/{id}/…` | Proxied to the owning host (includes exec, exec/stream, files, dir, `/shell`, ports, `/snapshot`, `/hibernate`); unknown id → `404` |
-| `host_addr` | Sandbox objects gain `"host_addr"`: the owning host's address. Use `host_addr:host_port` (not the gateway) to reach forwarded ports — the SDK's `getHost()` does this |
+| `host_addr` | Sandbox objects gain `"host_addr"`: the owning host's address. Pair it with the `host_port` from an explicit port mapping (not the gateway); the SDK does this |
 | `GET /snapshots` | Merged + deduped across live hosts |
 | `POST /snapshots/{id}/restore` / `/fanout`, `DELETE /snapshots/{id}` | Forwarded to the owning host; if that host is dead/unknown, any live host serves it by pulling the snapshot from GCS (returns `503` if no live host) |
 
@@ -414,7 +408,8 @@ The gateway fronts N hosts with the same API, plus:
 | 503 | gateway only: no live host with capacity (create queue timed out; `Retry-After` set) |
 | 500 | provisioning failure (host out of pool slots, VM boot failure, failed wake, …) |
 
-Capacity: each host has fixed pools (default 64 sandboxes: taps, IPs, host
-ports 5200–5263). Hibernated sandboxes release their tap/IP slot but **keep
-their host ports reserved**. When a host's pool is exhausted, creates fail
-with 500 (or queue at the gateway) — size your fleet or TTLs accordingly.
+Capacity: each host has fixed tap/IP pools (64 sandboxes by default) and a
+separate host-port pool (5200–5263) for explicit mappings. Hibernated
+sandboxes release their tap/IP slot but retain explicitly exposed ports for
+wake-on-connect. Exhausting the port pool prevents further exposure but does
+not prevent sandbox creation.

@@ -290,7 +290,7 @@ func (c *Client) ExposePort(ctx context.Context, id string, guestPort int) (regi
 	return pm, nil
 }
 
-// ListPorts returns every forwarded port of a sandbox, including the primary one.
+// ListPorts returns every explicitly forwarded port of a sandbox.
 func (c *Client) ListPorts(ctx context.Context, id string) ([]registry.PortMapping, error) {
 	var out []registry.PortMapping
 	if err := c.do(ctx, "GET", "/sandboxes/"+id+"/ports", nil, &out); err != nil {

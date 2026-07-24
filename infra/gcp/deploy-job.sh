@@ -63,17 +63,12 @@ if [ "$SLOTS" -lt 1 ] || [ "$SLOTS" -gt "$USABLE" ]; then
 fi
 GIP_MAX="$(int2ip "$GIP_MAX_INT")"
 
-# Ports are sized SEPARATELY from taps/IPs/memory: those three bound
-# concurrently RUNNING sandboxes (real compute capacity, tied to SLOTS), but a
-# hibernated sandbox holds only its port (taps/IPs release on hibernate) — so
-# the port pool is really the ceiling on TOTAL sandboxes (running + hibernated).
-# A fleet whose sandboxes run much smaller than the MEM_PER_SLOT_MIB assumption
-# can sustain far more than 4x SLOTS hibernated at once; PORTS_PER_HOST lets that
-# be sized independently. Defaults to 4x SLOTS so fleets that never set it are
-# unaffected.
+# Ports are sized separately from VM capacity and are allocated only for
+# explicit guest-port mappings. Hibernated sandboxes retain those mappings for
+# wake-on-connect. Default to 4x SLOTS to leave room for multiple services.
 PORTS="${PORTS_PER_HOST:-$((4 * SLOTS))}"
-if [ "$PORTS" -lt "$SLOTS" ]; then
-  echo "error: PORTS_PER_HOST=$PORTS must be >= SLOTS_PER_HOST=$SLOTS (every running sandbox holds one port)"
+if [ "$PORTS" -lt 1 ]; then
+  echo "error: PORTS_PER_HOST=$PORTS must be >= 1"
   exit 1
 fi
 

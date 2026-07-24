@@ -591,12 +591,6 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 		return registry.Sandbox{}, fmt.Errorf("pid: %w", err)
 	}
 
-	if err := s.pf.Open(id, sb.HostPort, s.cfg.Provisioner.Network.GuestPort); err != nil {
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		return registry.Sandbox{}, fmt.Errorf("port forward: %w", err)
-	}
-
 	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
 		s.pf.CloseSandbox(id)
 		_ = vm.StopForce(m)
@@ -662,8 +656,6 @@ type Info struct {
 	// MaxVcpus/MaxMemMIB bound per-sandbox overrides on this host.
 	MaxVcpus  int64 `json:"max_vcpus"`
 	MaxMemMIB int64 `json:"max_mem_mib"`
-	// GuestPort is the primary in-guest port forwarded to a host port at create.
-	GuestPort int `json:"guest_port"`
 	// HotCreate reports whether POST /sandboxes is served from a golden snapshot.
 	HotCreate bool `json:"hot_create"`
 	// HibernateAfterSec is the host's default idle-hibernation window (0 = off).
@@ -673,16 +665,11 @@ type Info struct {
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
-	guestPort := 0
-	if s.cfg.Provisioner != nil {
-		guestPort = s.cfg.Provisioner.Network.GuestPort
-	}
 	writeJSON(w, 200, Info{
 		DefaultVcpus:      s.cfg.VMTemplate.Vcpus,
 		DefaultMemMIB:     s.cfg.VMTemplate.MemMIB,
 		MaxVcpus:          maxVcpus(),
 		MaxMemMIB:         s.maxMemMIB(),
-		GuestPort:         guestPort,
 		HotCreate:         s.cfg.HotCreate,
 		HibernateAfterSec: int(s.cfg.HibernateAfter / time.Second),
 		HostID:            s.cfg.HostID,
@@ -801,10 +788,10 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		return s.reg.Destroy(ctx, id)
 	}
 
-	// Read extra port mappings before reg.Destroy deletes their rows.
+	// Read port mappings before reg.Destroy deletes their rows.
 	ports, err := s.reg.Ports(ctx, id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] list extra ports: %v\n", id, err)
+		fmt.Fprintf(os.Stderr, "[%s] list ports: %v\n", id, err)
 	}
 
 	if v, ok := s.machines.LoadAndDelete(id); ok {
@@ -832,7 +819,6 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	for _, pm := range ports {
 		s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
 	}
-	s.cfg.Provisioner.RemovePortForward(sb.HostPort, sb.GuestIP)
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 	return s.reg.Destroy(ctx, id)

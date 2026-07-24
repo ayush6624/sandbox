@@ -103,8 +103,8 @@ placement + the window minimize how often scale-in hits an in-use host.
 capacity; overflow creates wait in the gateway's bounded queue
 (`QUEUE_WAIT`/`QUEUE_MAX`) instead of 503ing, and the queue depth itself feeds
 `sandbox:workers_desired` — computed from **effective occupancy**
-(`slots_total − slots_free`, so capacity held by hibernated sandboxes' ports
-or still-warming hosts counts as demand) — so the autoscaler scales up
+(`slots_total − slots_free`, so memory admission and still-warming hosts count
+as demand) — so the autoscaler scales up
 immediately; the MIG resumes suspended standby workers first, then starts
 stopped workers, and finally creates fresh VMs when both pools run dry. A fresh host
 advertises `slots_free=0` until its golden snapshot is built, so it is never

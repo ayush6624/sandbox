@@ -61,7 +61,7 @@ Two ways to bring a snapshot back:
   sandbox reuses the network identity baked into the snapshot, so at most one
   restore of a given snapshot runs at a time, and the source must be dead.
 - **Fan-out** (`POST /snapshots/{id}/fanout {"count": N}`) — N independent
-  clones at once. Each clone gets a fresh IP/ports and a copy-on-write disk,
+  clones at once. Each clone gets a fresh IP and a copy-on-write disk,
   then sheds the snapshot's baked identity before joining the network (it
   announces the swap with a gratuitous ARP; the host holds the clone off the
   bridge until then). Clones share the snapshot's memory/disk state but their
@@ -100,12 +100,10 @@ Each sandbox gets a private IP on a host-internal bridge. Three directions:
 
 - **Guest → Internet** works out of the box (NAT). `pnpm install`, `git
   clone`, `curl` — all fine.
-- **You → Guest**: guest port **3000** is pre-forwarded to a dedicated host
-  port at create time (`host_port` in the create response; `getHost(3000)` in
-  the SDK). Start anything on `:3000` inside and it's reachable at
-  `<api-host>:<host_port>`.
-- **More ports on demand**: `POST /sandboxes/{id}/ports {"guest_port": 8000}`
-  forwards another guest port (idempotent; returns the host port).
+- **You → Guest**: ports are private by default. Explicitly expose one with
+  `POST /sandboxes/{id}/ports {"guest_port": 8000}` or
+  `await sbx.exposePort(8000)`. The idempotent operation returns the allocated
+  host port.
 
 Sandboxes on the same host can also reach each other over the bridge — handy
 for multi-service setups, but remember they are only as isolated from each

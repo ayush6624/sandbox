@@ -71,17 +71,17 @@ const text = await sbx.files.read('/home/sandbox/server.js')
 const bytes = await sbx.files.read('/home/sandbox/logo.png', { format: 'bytes' })
 const entries = await sbx.files.list('/home/sandbox')
 
-// Guest port 3000 is forwarded to a dedicated port on the API host at create
-// time; start a server there (nothing runs by default) and reach it via:
-const host = sbx.getHost(3000)                  // e.g. "100.99.183.74:5200"
+// Ports are private until explicitly exposed. Start a server (nothing runs by
+// default), expose its guest port, and use the returned address:
+const host = await sbx.exposePort(3000)         // e.g. "100.99.183.74:5200"
 await fetch(`http://${host}/`)
 
-// Expose additional guest ports on demand. exposePort is idempotent and
+// exposePort is idempotent and
 // returns the externally reachable "host:port"; afterwards the synchronous
 // getHost(port) works for that port too (it reads a per-instance cache —
 // for ports exposed elsewhere, call listPorts() first to refresh it).
 const api = await sbx.exposePort(8000)          // e.g. "100.99.183.74:5201"
-const ports = await sbx.listPorts()             // [{ guestPort: 3000, hostPort: 5200 }, { guestPort: 8000, hostPort: 5201 }]
+const ports = await sbx.listPorts()             // only explicitly exposed mappings
 sbx.getHost(8000)                               // works now; throws for unexposed ports
 
 // Lifecycle
@@ -240,7 +240,7 @@ All errors extend `SandboxError`:
 | `sbx.files.write(path, data)` | `sbx.files.write(path, data)` |
 | `sbx.files.read(path)` / `read(path, { format: 'bytes' })` | same |
 | `sbx.files.list(path)` | `sbx.files.list(path)` |
-| `sbx.getHost(port)` | `sbx.getHost(port)` — 3000 always works; other ports after `await sbx.exposePort(port)` |
+| `sbx.getHost(port)` | `sbx.getHost(port)` after `await sbx.exposePort(port)` |
 | — | `sbx.exposePort(guestPort)` / `sbx.listPorts()` |
 | `sbx.kill()` | `sbx.kill()` |
 | `E2B_API_KEY` env var | `SANDBOX_API_KEY` (+ `SANDBOX_API_URL`) |

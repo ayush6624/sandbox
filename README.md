@@ -31,11 +31,11 @@ Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hoste
 │              └──────────┬───────────────────┘                  │
 │                       br-fc (bridge, NAT)                      │
 │                                                                │
-│  host:5200 → VM#1:3000        host:5201 → VM#2:3000            │
+│  explicit expose: host:5200 → VM#1:3000                         │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-A single long-running server (`sandbox serve`) owns all VMs. Each sandbox gets its own tap device, guest IP, host port, and rootfs copy, allocated atomically from pools in a SQLite registry. Every VM runs `sandboxd`, a small in-guest agent that the host proxies to for command execution and file I/O — so `create` returns only once the sandbox is actually ready to use.
+A single long-running server (`sandbox serve`) owns all VMs. Each sandbox gets its own tap device, guest IP, and rootfs copy, allocated atomically from pools in a SQLite registry. Host ports are allocated only when explicitly exposed. Every VM runs `sandboxd`, a small in-guest agent that the host proxies to for command execution and file I/O — so `create` returns only once the sandbox is actually ready to use.
 
 At startup the server boots one pristine sandbox, snapshots it, and serves every subsequent create by cloning that **golden snapshot** — memory and all — instead of cold-booting. To scale past one machine, `sandbox gateway` fronts any number of hosts with the same API ([concepts](docs/concepts.md#multi-host-fleet-mode)).
 
@@ -89,14 +89,15 @@ On startup the server also reconciles state left over from a crash or reboot: or
 
 ```bash
 sudo ./sandbox up
-# sandbox 890691a8-… ready → http://localhost:5200
+# sandbox 890691a8-… ready
 
 sudo ./sandbox list
 sudo ./sandbox exec 890691a8 -- "node --version && python3 --version"
 echo 'export const x = 1' | sudo ./sandbox write 890691a8 /home/sandbox/x.ts
 sudo ./sandbox read 890691a8 /home/sandbox/x.ts
 sudo ./sandbox ls 890691a8 /home/sandbox
-curl http://localhost:5200          # whatever you've started on guest :3000
+sudo ./sandbox expose 890691a8 3000 # prints the allocated host port
+curl http://localhost:5200          # if expose printed host 5200
 
 sudo ./sandbox down 890691a8
 sudo ./sandbox stop-server       # graceful: tears down all sandboxes
@@ -112,7 +113,7 @@ import { Sandbox } from 'sandbox'   // sdk/typescript
 const sbx = await Sandbox.create({ timeoutMs: 600_000 })
 await sbx.commands.run('pnpm create vite my-app')
 await sbx.files.write('/home/sandbox/app/index.js', code)
-const host = sbx.getHost(3000)      // "your-server:5200"
+const host = await sbx.exposePort(3000) // "your-server:5200"
 await sbx.kill()
 ```
 
@@ -163,15 +164,15 @@ Endpoints (both listeners):
 | `POST /sandboxes/{id}/exec` | `{"cmd": "...", "cwd": "...", "timeout_sec": 60}` → `{stdout, stderr, exit_code, timed_out, duration_ms}` |
 | `POST /sandboxes/{id}/exec/stream` | Same body; NDJSON stream of `{"type":"stdout"\|"stderr","data":…}` events ending with a `{"type":"exit",…}` event |
 | `POST /sandboxes/{id}/timeout` | `{"timeout_sec": N}` resets the TTL (0 clears); a reaper destroys expired sandboxes |
-| `POST /sandboxes/{id}/ports` | `{"guest_port": 8000}` → forwards an extra guest port from a pool-allocated host port (idempotent) |
-| `GET /sandboxes/{id}/ports` | All forwarded ports, including the primary 3000 mapping |
+| `POST /sandboxes/{id}/ports` | `{"guest_port": 8000}` → explicitly forwards a guest port from a pool-allocated host port (idempotent) |
+| `GET /sandboxes/{id}/ports` | All explicitly forwarded ports |
 | `GET /sandboxes/{id}/files?path=` | Read a file (raw bytes) |
 | `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
 | `GET /sandboxes/{id}/dir?path=` | Directory listing (JSON) |
 | `GET /sandboxes/{id}/shell?cols=&rows=&cwd=` | WebSocket upgrade → interactive `bash -l` on a pty. Binary frames carry raw terminal bytes; text frames carry `{"type":"resize","cols":…,"rows":…}`. Closes with reason `exit:<code>`; errors close with code `4000+status` (browsers may auth via `?access_token=`) |
 | `POST /sandboxes/{id}/snapshot` | Capture the running sandbox (memory + processes + disk); it pauses ~1 s and keeps running |
 | `POST /snapshots/{id}/restore` | Boot a new sandbox resuming the snapshot 1:1 (source must be dead) |
-| `POST /snapshots/{id}/fanout` | `{"count": N}` → N identity-neutral clones, each with fresh IP/ports and CoW disk |
+| `POST /snapshots/{id}/fanout` | `{"count": N}` → N identity-neutral clones, each with a fresh IP and CoW disk |
 | `GET /snapshots` / `DELETE /snapshots/{id}` | List / delete saved snapshots |
 
 The exec/file/shell endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM. Full request/response shapes, errors, and limits: [HTTP API reference](docs/http-api.md).
@@ -194,8 +195,7 @@ Default config at `configs/devbox.json`. Anything omitted falls back to defaults
 | `disable_hot_create` | `false` | `true` = always cold-boot creates instead of cloning the golden snapshot |
 | `bridge` | `br-fc` | Host bridge for tap devices |
 | `gateway_ip` | `172.16.0.1` | Bridge IP / guest default gateway |
-| `guest_port` | `3000` | In-guest app port that gets forwarded |
-| `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | Resource pools |
+| `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | VM identity and explicit-forwarding pools |
 | `vcpus`, `mem_mib` | 2, 1024 | Per-VM resources (template-wide) |
 | `firecracker_bin`, `kernel_image`, `kernel_args` | … | VM template |
 
@@ -207,7 +207,7 @@ Guest (172.16.0.x) ←──fcN──→ br-fc (172.16.0.1) ←──NAT──�
 
 - **Guest → Internet**: iptables MASQUERADE through the host's default interface
 - **Host → Guest**: direct via the bridge (this is how exec/files reach sandboxd)
-- **External → Guest**: the server proxies `host:520N` → `guestIP:3000` in userspace — each connection counts as sandbox activity and transparently wakes a hibernated sandbox
+- **External → Guest**: after an explicit port exposure, the server proxies `host:520N` → `guestIP:<requested-port>` in userspace. Each connection counts as sandbox activity and transparently wakes a hibernated sandbox.
 
 Guest IPs are set via the kernel `ip=` boot parameter — no DHCP. The server ensures the bridge, sysctls (`ip_forward`, `route_localnet`), and NAT rules on every startup, so a host reboot needs nothing more than restarting `sandbox serve`.
 

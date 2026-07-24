@@ -18,7 +18,6 @@ const sandboxRecord = {
   socket_path: '/run/fc-test.sock',
   tap_device: 'fc0',
   guest_ip: '172.16.0.10',
-  host_port: 5200,
   rootfs_path: '/opt/fc/instances/test.ext4',
   status: 'running',
   created_at: '2026-06-10T12:00:00Z',

@@ -17,13 +17,10 @@ import type {
   SnapshotInfo,
 } from './types.js'
 
-/** The guest port forwarded to the host at create time (the primary app port). */
-const PRIMARY_GUEST_PORT = 3000
-
 /**
  * A Firecracker microVM sandbox running Ubuntu 24.04 with Node 22, pnpm,
  * TypeScript, Python 3, and common build tooling. No app server runs by
- * default — guest port 3000 is forwarded for whatever you start there.
+ * default, and guest ports are private until explicitly exposed.
  *
  * Mirrors the e2b `Sandbox` API:
  *
@@ -31,7 +28,7 @@ const PRIMARY_GUEST_PORT = 3000
  * const sbx = await Sandbox.create({ timeoutMs: 300_000 })
  * await sbx.commands.run('node --version')
  * await sbx.files.write('/home/sandbox/server.js', code)
- * const host = sbx.getHost(3000)
+ * const host = await sbx.exposePort(3000)
  * const api = await sbx.exposePort(8000)
  * await sbx.kill()
  * ```
@@ -59,7 +56,6 @@ export class Sandbox {
     this.commands = new Commands(client, info.sandboxId)
     this.files = new Files(client, info.sandboxId)
     this.pty = new Pty(client, info.sandboxId)
-    this.portCache.set(PRIMARY_GUEST_PORT, info.hostPort)
   }
 
   /**
@@ -250,19 +246,17 @@ export class Sandbox {
    * Returns the `host:port` to reach a service running inside the sandbox
    * from the outside, e.g. `100.99.183.74:5200`.
    *
-   * Synchronous: works for the primary guest port (always forwarded) and for
-   * any port previously exposed through {@link exposePort} or seen via
-   * {@link listPorts} on this instance.
+   * Synchronous: works for any port previously exposed through
+   * {@link exposePort} or seen via {@link listPorts} on this instance.
    *
-   * @param port Guest port (default 3000).
+   * @param port Guest port previously exposed on this instance.
    * @throws {SandboxError} when the port has not been exposed yet.
    */
-  getHost(port: number = PRIMARY_GUEST_PORT): string {
+  getHost(port: number): string {
     const hostPort = this.portCache.get(port)
     if (hostPort === undefined) {
       throw new SandboxError(
-        `Guest port ${port} is not forwarded to the host. Call \`await sandbox.exposePort(${port})\` ` +
-          `first — only guest port ${PRIMARY_GUEST_PORT} (the primary app port) is forwarded automatically.`
+        `Guest port ${port} is not forwarded to the host. Call \`await sandbox.exposePort(${port})\` first.`
       )
     }
     return `${this.hostname}:${hostPort}`
@@ -293,8 +287,8 @@ export class Sandbox {
   }
 
   /**
-   * Lists every forwarded port of this sandbox, including the always-present
-   * primary mapping. Also refreshes the cache used by {@link getHost}.
+   * Lists every explicitly forwarded port of this sandbox. Also refreshes the
+   * cache used by {@link getHost}.
    */
   async listPorts(): Promise<PortMapping[]> {
     const res = await this.client.request('GET', `/sandboxes/${this.sandboxId}/ports`)

@@ -8,7 +8,7 @@ import (
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
-// handleExposePort forwards an extra guest port to a freshly allocated host
+// handleExposePort forwards a guest port to a freshly allocated host
 // port. Idempotent: exposing an already-mapped guest port returns the
 // existing mapping without opening a second listener.
 func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
@@ -29,19 +29,13 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 	// The proxy listener resolves the guest IP per connection, so exposing a
 	// port needs no live guest — a hibernated sandbox stays frozen and the
 	// new port simply becomes another wake-on-connect entry point.
-	sb, err := s.reg.Get(ctx, id)
+	_, err := s.reg.Get(ctx, id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}
 	done := s.act.begin(id)
 	defer done()
-
-	// The primary guest port is always forwarded at create time.
-	if body.GuestPort == s.cfg.Provisioner.Network.GuestPort {
-		writeJSON(w, 200, registry.PortMapping{GuestPort: body.GuestPort, HostPort: sb.HostPort})
-		return
-	}
 
 	// An existing mapping already has its listener — don't open another.
 	existing, err := s.reg.Ports(ctx, id)
@@ -69,22 +63,21 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, registry.PortMapping{GuestPort: body.GuestPort, HostPort: hostPort})
 }
 
-// handleListPorts returns every forwarded port of a sandbox, including the
-// implicit primary mapping (the primary guest port → the sandbox's host_port).
+// handleListPorts returns every explicitly forwarded port of a sandbox.
 func (s *Server) handleListPorts(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	sb, err := s.reg.Get(r.Context(), id)
+	_, err := s.reg.Get(r.Context(), id)
 	if err != nil {
 		httpError(w, 404, err)
 		return
 	}
-	extra, err := s.reg.Ports(r.Context(), id)
+	ports, err := s.reg.Ports(r.Context(), id)
 	if err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	out := append(
-		[]registry.PortMapping{{GuestPort: s.cfg.Provisioner.Network.GuestPort, HostPort: sb.HostPort}},
-		extra...)
-	writeJSON(w, 200, out)
+	if ports == nil {
+		ports = []registry.PortMapping{}
+	}
+	writeJSON(w, 200, ports)
 }
