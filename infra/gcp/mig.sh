@@ -39,17 +39,21 @@ spot_args() {
   fi
 }
 
-# Standby pool: STANDBY_STOPPED_SIZE pre-created VMs kept STOPPED next to the
-# group. In scale-out-pool mode a resize (the Nomad Autoscaler's scale-up)
-# starts a stopped VM — tens of seconds to serving — instead of paying the full
-# create+boot path (minutes), then the MIG replenishes the pool in the
-# background. Stopped VMs cost only their disks. The initial delay gives
-# startup-worker.sh time to init the data disk + join Nomad before the VM is
-# stopped into the pool, so a wake-up is a plain reboot. 0 disables the pool.
+# Standby pool: pre-created VMs kept SUSPENDED and/or STOPPED next to the group.
+# In scale-out-pool mode a resize (the Nomad Autoscaler's scale-up) resumes a
+# suspended VM first, then starts a stopped VM, instead of paying the full
+# create+boot path. The MIG replenishes both pools in the background. Suspended
+# VMs preserve RAM/device state; stopped VMs preserve disks only. The initial
+# delay lets startup-worker.sh + Nomad + sandbox serve finish initialization.
 standby_args() {
-  local n="${STANDBY_STOPPED_SIZE:-0}"
-  if [ "$n" -gt 0 ]; then
-    echo "--stopped-size=$n --standby-policy-mode=scale-out-pool --standby-policy-initial-delay=${STANDBY_INITIAL_DELAY:-180}"
+  local stopped="${STANDBY_STOPPED_SIZE:-0}"
+  local suspended="${STANDBY_SUSPENDED_SIZE:-0}"
+  if [ "$stopped" -lt 0 ] || [ "$suspended" -lt 0 ]; then
+    echo "error: standby sizes must be >= 0" >&2
+    return 1
+  fi
+  if [ $((stopped + suspended)) -gt 0 ]; then
+    echo "--stopped-size=$stopped --suspended-size=$suspended --standby-policy-mode=scale-out-pool --standby-policy-initial-delay=${STANDBY_INITIAL_DELAY:-180}"
   fi
 }
 
@@ -116,19 +120,19 @@ cmd_up() {
     --zone="$ZONE" --template="$tpl" --size="${MIG_MIN:-1}" \
     $(standby_args)
   echo ">> MIG up. The autoscaler resizes it from the sandbox:workers_desired signal."
-  if [ "${STANDBY_STOPPED_SIZE:-0}" -gt 0 ]; then
-    echo ">> Standby pool: ${STANDBY_STOPPED_SIZE} stopped VMs (scale-out-pool mode)."
+  if [ $((${STANDBY_STOPPED_SIZE:-0} + ${STANDBY_SUSPENDED_SIZE:-0})) -gt 0 ]; then
+    echo ">> Standby pool: ${STANDBY_SUSPENDED_SIZE:-0} suspended + ${STANDBY_STOPPED_SIZE:-0} stopped VMs (scale-out-pool mode)."
   fi
 }
 
 cmd_standby() {
-  echo ">> Apply standby policy to $MIG_NAME (stopped-size=${STANDBY_STOPPED_SIZE:-0})"
-  if [ "${STANDBY_STOPPED_SIZE:-0}" -gt 0 ]; then
+  echo ">> Apply standby policy to $MIG_NAME (suspended-size=${STANDBY_SUSPENDED_SIZE:-0}, stopped-size=${STANDBY_STOPPED_SIZE:-0})"
+  if [ $((${STANDBY_STOPPED_SIZE:-0} + ${STANDBY_SUSPENDED_SIZE:-0})) -gt 0 ]; then
     # shellcheck disable=SC2046
     "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" $(standby_args)
   else
     "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" \
-      --stopped-size=0 --standby-policy-mode=manual
+      --stopped-size=0 --suspended-size=0 --standby-policy-mode=manual
   fi
 }
 
@@ -142,7 +146,7 @@ cmd_roll() {
 
 cmd_status() {
   "${GC[@]}" compute instance-groups managed describe "$MIG_NAME" --zone="$ZONE" \
-    --format="table(name,targetSize,targetStoppedSize,standbyPolicy.mode)" 2>/dev/null || { echo "MIG $MIG_NAME not found"; return; }
+    --format="table(name,targetSize,targetSuspendedSize,targetStoppedSize,standbyPolicy.mode)" 2>/dev/null || { echo "MIG $MIG_NAME not found"; return; }
   "${GC[@]}" compute instance-groups managed list-instances "$MIG_NAME" --zone="$ZONE" \
     --format="table(instance.basename(),instanceStatus,currentAction)"
 }

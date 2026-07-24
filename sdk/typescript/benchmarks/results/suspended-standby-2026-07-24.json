@@ -1,0 +1,56 @@
+{
+  "date": "2026-07-24",
+  "commit": "f99f8d7",
+  "standby": {
+    "suspended": 2,
+    "stopped": 4,
+    "initialDelaySec": 180
+  },
+  "burst": {
+    "requested": 160,
+    "succeeded": 160,
+    "failed": 0,
+    "wallMs": 31106,
+    "latencyMs": {
+      "min": 1605,
+      "p50": 6919,
+      "p90": 28906,
+      "p99": 30803,
+      "max": 30920
+    },
+    "placement": {
+      "10.160.0.51": 47,
+      "10.160.0.57": 48,
+      "10.160.0.41": 48,
+      "10.160.0.42": 17
+    },
+    "usableSample": {
+      "succeeded": 24,
+      "attempted": 24
+    },
+    "cleanup": {
+      "reportedKillFailures": 13,
+      "remainingBenchmarkSandboxesAfterCleanup": 0,
+      "preExistingSandboxes": 1
+    }
+  },
+  "timeline": {
+    "firstCreateUtc": "2026-07-24T15:42:47.370Z",
+    "autoscalerResizeUtc": "2026-07-24T15:42:58.691Z",
+    "autoscalerResizeFrom": 2,
+    "autoscalerResizeTo": 5,
+    "firstSuspendedWorkersRunningUtc": "2026-07-24T15:43:08.468Z",
+    "allCreatesCompleteUtc": "2026-07-24T15:43:18.476Z"
+  },
+  "comparison": {
+    "stoppedStandbyBaselineWallMs": 50020,
+    "wallMsSaved": 18914,
+    "percentFaster": 37.81,
+    "baselineSource": "docs/benchmarks.md, 2026-07-24 held burst"
+  },
+  "notes": [
+    "One pre-existing running sandbox left 95 rather than 96 immediately free slots.",
+    "The desired count reached 5, so GCE also began starting one stopped fallback worker; the burst completed using the original two workers plus the two suspended workers.",
+    "The 13 client-visible kill failures did not leave benchmark sandboxes behind; the gateway listed only the one pre-existing sandbox after cleanup."
+  ]
+}

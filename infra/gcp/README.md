@@ -78,13 +78,20 @@ against the host's real memory — a big-mem sandbox consumes multiple slots'
 worth of `slots_free` and can never OOM the cgroup; max 200 per the /24 guest
 subnet), `HEADROOM_SLOTS` (free slots kept
 ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must stay low before
-scale-in), `STANDBY_STOPPED_SIZE` (pre-created stopped VMs the MIG starts on
-scale-up — tens of seconds to serving instead of the minutes a fresh
-create+boot takes; apply to a live MIG with `./mig.sh standby`), and
+scale-in), `STANDBY_SUSPENDED_SIZE`/`STANDBY_STOPPED_SIZE` (pre-created standby
+VMs; the MIG resumes suspended workers before starting stopped workers, then
+falls back to fresh create+boot; apply to a live MIG with `./mig.sh standby`), and
 `QUEUE_WAIT`/`QUEUE_MAX` (the gateway's create queue — wait must cover standby
 start → nomad join → golden-snapshot build, ~2-3 min). The defaults size the
 fleet for **1000 concurrent sandboxes**: n2-standard-16 workers × 48 slots ×
 MIG_MAX=22. Scale-up is immediate; scale-down waits out the window.
+
+**Standby policy decision:** keep the full standby pool suspended rather than
+mixed with stopped workers. Demand is predictable, so replenish suspended
+capacity ahead of forecast bursts; preserving initialized worker memory gives
+the fastest scale-out. Stopped standby remains supported as a cheaper fallback,
+but the production configuration intentionally sets its target to zero.
+
 **Scale-in freezes running sandboxes on the removed host**: server shutdown
 hibernates them (diff snapshots — a full host freezes inside the 120 s stop
 window), so they come back wakeable if that VM ever starts again (standby-pool
@@ -98,8 +105,8 @@ capacity; overflow creates wait in the gateway's bounded queue
 `sandbox:workers_desired` — computed from **effective occupancy**
 (`slots_total − slots_free`, so capacity held by hibernated sandboxes' ports
 or still-warming hosts counts as demand) — so the autoscaler scales up
-immediately; the MIG serves that resize from the stopped standby pool in
-~30-60 s (falling back to fresh creates when the pool runs dry). A fresh host
+immediately; the MIG resumes suspended standby workers first, then starts
+stopped workers, and finally creates fresh VMs when both pools run dry. A fresh host
 advertises `slots_free=0` until its golden snapshot is built, so it is never
 boot-stormed with cold creates; each host also bounds concurrent bring-ups
 (`create_concurrency`, default 2×cores capped at 16). A create that still hits
