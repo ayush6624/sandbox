@@ -89,6 +89,24 @@ func (p *phaseRecorder) markAt(name string, t time.Time) {
 	}
 }
 
+// replaceAt stamps a phase unconditionally, overwriting an earlier value.
+//
+// Used only when loading the phase FILE, where lines are chronological and the
+// file is append-only for the whole boot: a second Nomad job roll appends a
+// second serve_task_started, and first-write-wins would pin this process's
+// timeline to the PREVIOUS roll's stamp (observed live: serve_task_started 0.000
+// vs serve_process_start 184.683, exactly the gap between two deploys). The most
+// recent occurrence is the one that belongs to the currently running serve.
+// In-process marks stay first-write-wins — the 5 s heartbeat re-marks forever.
+func (p *phaseRecorder) replaceAt(name string, t time.Time) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.at[name] = t
+}
+
 // phaseSample is one phase's absolute time plus its offset from the earliest
 // recorded phase.
 type phaseSample struct {
@@ -154,7 +172,7 @@ func (p *phaseRecorder) loadPhaseFile(path string) {
 		if err != nil || ms <= 0 {
 			continue
 		}
-		p.markAt(name, time.UnixMilli(ms))
+		p.replaceAt(name, time.UnixMilli(ms))
 	}
 }
 

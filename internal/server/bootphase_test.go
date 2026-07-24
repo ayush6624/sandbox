@@ -271,3 +271,46 @@ func TestGenuineBootKeepsReadyGauge(t *testing.T) {
 		t.Errorf("want is_boot 1, got:\n%s", out)
 	}
 }
+
+// TestLoadPhaseFileLastOccurrenceWins covers the append-only-file defect found
+// live: two Nomad job rolls in one boot append two serve_task_started stamps,
+// and keeping the first pinned the new process's timeline to the previous roll.
+func TestLoadPhaseFileLastOccurrenceWins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "boot-phases")
+	body := strings.Join([]string{
+		"startup_script_entered\t1700000000000",
+		"serve_task_started\t1700000010000", // first roll
+		"serve_task_started\t1700000194000", // second roll, 184s later
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newPhaseRecorder()
+	p.loadPhaseFile(path)
+	got := map[string]time.Time{}
+	for _, s := range p.snapshot() {
+		got[s.Name] = s.At
+	}
+	if want := time.UnixMilli(1_700_000_194_000); !got["serve_task_started"].Equal(want) {
+		t.Errorf("serve_task_started: want the LAST stamp %v, got %v", want, got["serve_task_started"])
+	}
+	// A phase that appears once is unaffected.
+	if want := time.UnixMilli(1_700_000_000_000); !got["startup_script_entered"].Equal(want) {
+		t.Errorf("startup_script_entered: want %v, got %v", want, got["startup_script_entered"])
+	}
+}
+
+func TestInProcessMarksStayFirstWriteWins(t *testing.T) {
+	// Guard the asymmetry: only file loading overwrites; in-process marks must
+	// not move, or the 5s heartbeat would keep resetting capacity_advertised.
+	p := newPhaseRecorder()
+	first := time.UnixMilli(1_700_000_000_000)
+	p.markAt(phaseCapacityAdv, first)
+	p.markAt(phaseCapacityAdv, first.Add(time.Minute))
+	if got := p.snapshot()[0].At; !got.Equal(first) {
+		t.Errorf("in-process mark moved: want %v, got %v", first, got)
+	}
+}
