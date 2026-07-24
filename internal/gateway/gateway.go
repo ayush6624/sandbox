@@ -93,6 +93,12 @@ type Gateway struct {
 	// workers_desired (rejected clients retry every Retry-After, so the rate
 	// approximates outstanding unqueued demand).
 	rejected atomic.Int64
+	// createsOK counts sandboxes the gateway successfully brought up (each
+	// release(landed=true)). Exported as sandbox_creates_total — a gateway-side
+	// aggregate on the gateway's own /metrics (scraped every 10s), so the
+	// autoscaler's lead term reads create RATE at 10s resolution instead of the
+	// 30s-federated per-host sandbox_creates_ok_total.
+	createsOK atomic.Int64
 	// slotFreed nudges one queued create to retry placement immediately when
 	// capacity may have appeared (failed create, fresh heartbeat). Buffered,
 	// best-effort; the queue's poll ticker is the backstop.
@@ -419,6 +425,9 @@ func (g *Gateway) release(hostID string, landed bool) {
 		}
 	}
 	g.mu.Unlock()
+	if landed {
+		g.createsOK.Add(1)
+	}
 	if !landed {
 		// A freed reservation is capacity: nudge one queued create to retry
 		// now instead of waiting out its poll tick.

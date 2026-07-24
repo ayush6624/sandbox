@@ -66,6 +66,10 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
 	gauge("sandbox_hibernated", "Idle sandboxes frozen to disk across live hosts (hold no slot).", hibernated)
 	fmt.Fprintf(&b, "# HELP sandbox_create_rejected_total Creates 503'd for capacity (queue full or queue-wait expired). Retrying clients re-increment every Retry-After, so the rate approximates demand the saturated queue can no longer express.\n# TYPE sandbox_create_rejected_total counter\nsandbox_create_rejected_total %d\n", g.rejected.Load())
+	// Gateway-side aggregate of successful creates. Scraped at 10s (gateway
+	// /metrics), so rate() feeds the autoscaler's lead term at 10s resolution —
+	// far fresher than the 30s-federated per-host sandbox_creates_ok_total.
+	fmt.Fprintf(&b, "# HELP sandbox_creates_total Sandboxes the gateway successfully brought up.\n# TYPE sandbox_creates_total counter\nsandbox_creates_total %d\n", g.createsOK.Load())
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))

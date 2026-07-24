@@ -38,11 +38,14 @@
 # never drops below the static floor HEADROOM_SLOTS. So an idle fleet keeps the
 # fixed floor (rate≈0 → clamp_min(0, HEADROOM) = HEADROOM, unchanged), while a
 # sustained ramp pre-provisions ahead of the curve so the create queue rarely
-# forms. creates_ok is a per-host counter federated with a host label; sum(rate)
-# is the fleet create rate (rate() handles hosts appearing/disappearing and
-# serve-restart counter resets). `or vector(0)` keeps the term at the floor if
-# the series is absent (old gateway / no creates yet). Set LEAD_SECONDS=0 to
-# disable the lead and fall back to the pure static floor.
+# forms. sandbox_creates_total is the GATEWAY's own aggregate create counter on
+# its /metrics (scraped every 10s), so rate() estimates the fleet create rate at
+# 10s resolution — far fresher than the 30s-federated per-host
+# sandbox_creates_ok_total it replaces (12 vs ~4 samples across the 2m window,
+# and ≤10s vs ≤30s stale). rate() handles gateway restarts (counter reset).
+# `or vector(0)` keeps the term at the floor if the series is absent (old gateway
+# that predates this counter, or no creates yet). Set LEAD_SECONDS=0 to disable
+# the lead and fall back to the pure static floor.
 #
 # Clamped to >=1 (never scale to zero). The autoscaler reads this and (via
 # max_over_time in its policy) makes scale-up instant and scale-down slow. If
@@ -55,4 +58,4 @@ groups:
     interval: 10s
     rules:
       - record: sandbox:workers_desired
-        expr: clamp_min(ceil((sum(sandbox_slots_used{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_ok_total[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
+        expr: clamp_min(ceil((sum(sandbox_slots_used{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
