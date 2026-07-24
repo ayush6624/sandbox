@@ -89,12 +89,15 @@ type CreateOpts struct {
 	// the golden-snapshot hot path (~250 ms) — snapshots bake vcpus/mem.
 	Vcpus  int64 `json:"vcpus,omitempty"`
 	MemMIB int64 `json:"mem_mib,omitempty"`
+	// SSHPubkey, when set, is installed into the sandbox's root authorized_keys
+	// at create so it's reachable over SSH (one OpenSSH public-key line).
+	SSHPubkey string `json:"ssh_pubkey,omitempty"`
 }
 
 // Create asks the server to provision a new sandbox.
 func (c *Client) Create(ctx context.Context, opts CreateOpts) (registry.Sandbox, error) {
 	var body any
-	if opts.Name != "" || opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 || opts.Vcpus != 0 || opts.MemMIB != 0 {
+	if opts.Name != "" || opts.TimeoutSec > 0 || opts.HibernateAfterSec != 0 || opts.Vcpus != 0 || opts.MemMIB != 0 || opts.SSHPubkey != "" {
 		body = opts
 	}
 	var sb registry.Sandbox

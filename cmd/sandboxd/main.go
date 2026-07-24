@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,6 +42,7 @@ func main() {
 	mux.HandleFunc("GET /dir", handleListDir)
 	mux.HandleFunc("GET /shell", handleShell)
 	mux.HandleFunc("POST /clock", handleClock)
+	mux.HandleFunc("POST /ssh-key", handleSSHKey)
 
 	// Reidentify eth0 from MMDS after a fan-out clone resume (no-op otherwise).
 	go runThawAgent()
@@ -75,6 +77,46 @@ func handleClock(w http.ResponseWriter, r *http.Request) {
 	log.Printf("clock: stepped to unix_nano=%d", req.UnixNano)
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
+
+// handleSSHKey writes the supplied public key to root's authorized_keys so the
+// sandbox is reachable over SSH (login as root, key-only — sshd is configured
+// PermitRootLogin prohibit-password). The host posts this right after the
+// readiness gate on create. Overwrite, not append: one create carries one key,
+// and rewriting keeps the call idempotent across retries. The file lives in the
+// rootfs and thus survives hibernation/wake untouched.
+func handleSSHKey(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.SSHKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	key := strings.TrimSpace(req.PublicKey)
+	if key == "" {
+		httpError(w, 400, errors.New("public_key is required"))
+		return
+	}
+	// One key line only: an embedded newline could smuggle extra authorized_keys
+	// entries or sshd options.
+	if strings.ContainsAny(key, "\r\n") {
+		httpError(w, 400, errors.New("public_key must be a single line"))
+		return
+	}
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		httpError(w, 500, fmt.Errorf("mkdir %s: %w", sshDir, err))
+		return
+	}
+	if err := os.WriteFile(authorizedKeysPath, []byte(key+"\n"), 0o600); err != nil {
+		httpError(w, 500, fmt.Errorf("write authorized_keys: %w", err))
+		return
+	}
+	log.Printf("ssh-key: installed authorized_keys (%d bytes)", len(key))
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+const (
+	sshDir             = "/root/.ssh"
+	authorizedKeysPath = "/root/.ssh/authorized_keys"
+)
 
 func handleExec(w http.ResponseWriter, r *http.Request) {
 	var req agentapi.ExecRequest

@@ -258,6 +258,27 @@ scripts/              Host setup shell scripts
   BYTES (4096), not KiB — `pageSizeBytes()` normalizes it; getting this wrong made 4 MiB
   "pages" and an offset that panicked. The fault loop has a `recover()` so a handler bug
   degrades to a failed wake, never a serve crash. See docs/scale-to-zero.md.
+- **SSH into a sandbox rides the existing port proxy.** The base rootfs bakes
+  `openssh-server` (key-only root login: `PermitRootLogin prohibit-password`,
+  `PasswordAuthentication no`, in `sshd_config.d/sandbox.conf`; host keys via
+  `ssh-keygen -A`, so all golden clones share host keys — fine since each is a
+  distinct host:port), and `ssh.service` is enabled (socket activation disabled)
+  so :22 listens the instant the guest boots. `POST /sandboxes` takes an optional
+  `ssh_pubkey` (one OpenSSH key line, `validateSSHPubkey` in server.go — rejects
+  multi-line/unknown-type); after the create readiness gate (both cold and hot
+  paths), `installSSHKey` (proxy.go) posts it to sandboxd's `POST /ssh-key`, which
+  writes `/root/.ssh/authorized_keys`. It is NOT best-effort like `syncGuestClock`:
+  a key-install failure destroys the sandbox and fails the create, so a box handed
+  back with SSH requested is always reachable. The key lives in the rootfs, so it
+  survives hibernation/wake with no re-push. Reach it by exposing guest :22 as a
+  host port (`sandbox expose <id> 22`) — the userspace TCP proxy forwards it with
+  wake-on-connect, so an incoming SSH connection wakes a hibernated sandbox and
+  pins it for the session, exactly like a forwarded HTTP port — then
+  `ssh -p <host_port> root@<host>`. Old baked sandboxd 404s `/ssh-key` (re-run
+  `install-agent`; rebuild the base for openssh first). **Fleet caveat:** the
+  gateway is an HTTP reverse-proxy and does NOT forward raw TCP, so fleet SSH
+  needs a ProxyJump to the owning worker (or a WS tunnel) — not wired up yet.
+  CLI: `sandbox up --ssh-key ~/.ssh/id_ed25519.pub` (file path or key literal).
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
@@ -407,7 +428,7 @@ scripts/              Host setup shell scripts
 
 - Config merging: JSON file < CLI flags. Only `--config` and `--socket` flags exist now;
   per-VM overrides in `POST /sandboxes` are limited to `name`, `timeout_sec`,
-  `hibernate_after_sec`, `vcpus`, and `mem_mib`.
+  `hibernate_after_sec`, `vcpus`, `mem_mib`, and `ssh_pubkey`.
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
 - Commits: short imperative subject lines (see `git log`). No co-author trailer.
@@ -418,7 +439,7 @@ scripts/              Host setup shell scripts
 
 - **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
   rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
-  `hibernate_after_sec`, `vcpus`, and `mem_mib`.
+  `hibernate_after_sec`, `vcpus`, `mem_mib`, and `ssh_pubkey`.
 - **No memory overcommit.** Guest memory is provisioned 1:1 (admission-enforced via
   `mem_budget_mib` — see the memory-admission note above). Hot-created clones share the
   golden snapshot's page cache and idle guests touch a fraction of their RAM, so real

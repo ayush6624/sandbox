@@ -174,6 +174,37 @@ func syncGuestClock(ctx context.Context, guestIP string) {
 	}
 }
 
+// installSSHKey pushes an SSH public key to the guest agent's POST /ssh-key so
+// the sandbox is reachable over SSH the moment create returns. Called after the
+// readiness gate on both the cold and hot (golden-clone) create paths. Unlike
+// syncGuestClock this is NOT best-effort: a caller that asked for a key expects
+// it, so the error is returned and the caller fails the create. A baked agent
+// too old to know /ssh-key answers 404 — surfaced as an error telling the
+// operator to re-run install-agent.
+func installSSHKey(ctx context.Context, guestIP, pubkey string) error {
+	body, _ := json.Marshal(agentapi.SSHKeyRequest{PublicKey: pubkey})
+	url := fmt.Sprintf("http://%s:%d/ssh-key", guestIP, agentapi.Port)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("install ssh key on %s: %w", guestIP, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("agent on %s has no /ssh-key (old sandboxd — re-run install-agent)", guestIP)
+	}
+	if resp.StatusCode >= 400 {
+		msg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("install ssh key on %s: HTTP %d: %s", guestIP, resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
 // waitForAgent polls the guest agent's /health until it responds or the
 // deadline passes. A fresh VM needs a few seconds for systemd to bring the
 // network and sandboxd up.

@@ -408,6 +408,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		HibernateAfterSec int    `json:"hibernate_after_sec"`
 		Vcpus             int64  `json:"vcpus"`
 		MemMIB            int64  `json:"mem_mib"`
+		SSHPubkey         string `json:"ssh_pubkey"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -426,6 +427,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateName(body.Name); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if err := validateSSHPubkey(body.SSHPubkey); err != nil {
 		httpError(w, 400, err)
 		return
 	}
@@ -449,24 +454,72 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// back to a cold boot, so a create is never worse off than before.
 	// Resource overrides force the cold path: the golden snapshot bakes the
 	// template's vcpus/mem at snapshot time, so a clone can't change them.
+	var sb registry.Sandbox
+	hot := false
 	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
-		sb, err := s.createFromSnapshot(ctx, *snap, body.Name, expiresAt, body.HibernateAfterSec)
+		s2, err := s.createFromSnapshot(ctx, *snap, body.Name, expiresAt, body.HibernateAfterSec)
 		if err == nil {
-			s.met.createsOK.Add(1)
-			writeJSON(w, 201, s.effectiveResources(sb))
+			sb, hot = s2, true
+		} else {
+			fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
+		}
+	}
+	if !hot {
+		s2, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
+		if err != nil {
+			s.met.createsErr.Add(1)
+			capacityOrHTTPError(w, 500, err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
+		sb = s2
 	}
 
-	sb, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
-	if err != nil {
-		s.met.createsErr.Add(1)
-		capacityOrHTTPError(w, 500, err)
-		return
+	// Install the SSH key (both paths return with the agent health-gated). If the
+	// user asked for SSH access and we can't provision it, the sandbox can't serve
+	// its purpose — destroy it and fail the create rather than hand back a
+	// half-provisioned box. The key lands in the rootfs, so it needs no re-push on
+	// a later hibernation wake.
+	if body.SSHPubkey != "" {
+		if err := installSSHKey(ctx, sb.GuestIP, body.SSHPubkey); err != nil {
+			_ = s.destroy(context.Background(), sb.ID)
+			s.met.createsErr.Add(1)
+			httpError(w, 500, fmt.Errorf("sandbox created but ssh key install failed: %w", err))
+			return
+		}
 	}
+
 	s.met.createsOK.Add(1)
 	writeJSON(w, 201, s.effectiveResources(sb))
+}
+
+// sshKeyPrefixes are the authorized_keys key-type tokens we accept.
+var sshKeyPrefixes = []string{
+	"ssh-ed25519 ", "ssh-rsa ", "ssh-dss ", "ecdsa-sha2-",
+	"sk-ecdsa-sha2-", "sk-ssh-ed25519@openssh.com ",
+}
+
+// validateSSHPubkey checks an optional POST /sandboxes ssh_pubkey: empty is
+// fine (no SSH), otherwise it must be a single authorized_keys line with a
+// recognized key type. This is a well-formedness check, not a security boundary
+// — it's the user's own key for their own sandbox — but rejecting embedded
+// newlines stops a multi-line value from smuggling extra authorized_keys
+// entries or sshd options.
+func validateSSHPubkey(key string) error {
+	if key == "" {
+		return nil
+	}
+	if strings.ContainsAny(key, "\r\n") {
+		return errors.New("ssh_pubkey must be a single line")
+	}
+	if len(key) > 8<<10 {
+		return errors.New("ssh_pubkey too long")
+	}
+	for _, p := range sshKeyPrefixes {
+		if strings.HasPrefix(key, p) {
+			return nil
+		}
+	}
+	return errors.New("ssh_pubkey must be an OpenSSH public key (ssh-ed25519, ssh-rsa, ecdsa-sha2-*, …)")
 }
 
 // acquireCreate takes one bring-up slot, blocking until one frees or ctx ends.

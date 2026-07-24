@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build a custom rootfs with Node.js, Python, and common build tooling.
+# Build a custom rootfs with Node.js, Python, common build tooling, popular CLI
+# utilities (htop, jq, ripgrep, gh, …), and AI coding agents (Claude Code, Codex).
 # A bare sandbox — no app server is started on boot; use exec/files (sandboxd)
 # to run whatever you like. Must run on Linux as root (uses debootstrap + chroot).
 # Supports resuming — re-run the script and it skips completed steps.
@@ -57,16 +58,22 @@ else
   sudo touch "$BUILD_DIR/.step2-done"
 fi
 
-# --- Step 3: Install pnpm + TypeScript ---
+# --- Step 3: Install pnpm, TypeScript + AI coding agents ---
 if [ -f "$BUILD_DIR/.step3-done" ]; then
-  echo "==> [3/6] pnpm + TypeScript already installed, skipping"
+  echo "==> [3/6] pnpm + TypeScript + AI CLIs already installed, skipping"
 else
   echo ""
-  echo "==> [3/6] Installing pnpm and TypeScript..."
+  echo "==> [3/6] Installing pnpm, TypeScript, Claude Code, Codex..."
+  # Claude Code (@anthropic-ai/claude-code) and OpenAI Codex (@openai/codex) are
+  # global npm CLIs. Users supply their own API keys/logins at runtime — nothing
+  # secret is baked in. Codex ships a per-platform native binary via npm optional
+  # deps; the linux/amd64 build host resolves the matching linux-x64 package.
   sudo chroot "$BUILD_DIR" bash -c '
-    npm install -g pnpm typescript
+    npm install -g pnpm typescript @anthropic-ai/claude-code @openai/codex
     pnpm --version
     tsc --version
+    claude --version || true
+    codex --version || true
   '
   sudo touch "$BUILD_DIR/.step3-done"
 fi
@@ -90,11 +97,56 @@ APT
   sudo chroot "$BUILD_DIR" bash -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y python3 python3-pip python3-venv build-essential git make
+    apt-get install -y \
+      python3 python3-pip python3-venv build-essential git make openssh-server \
+      htop vim nano tmux jq ripgrep fd-find bat tree ncdu wget unzip zip less rsync man-db
+
+    # GitHub CLI from the official apt repo (not in the Ubuntu archive). The
+    # keyring is a plain .gpg referenced via signed-by, so no gpg import needed.
+    mkdir -p -m 755 /etc/apt/keyrings
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list
+    apt-get update
+    apt-get install -y gh
+
+    # fd/bat ship as fdfind/batcat on Debian/Ubuntu to avoid name clashes; add
+    # the conventional command names.
+    ln -sf /usr/bin/fdfind /usr/local/bin/fd
+    ln -sf /usr/bin/batcat /usr/local/bin/bat
+
     python3 --version
     pip3 --version
     gcc --version | head -1
     git --version
+    gh --version | head -1
+  '
+
+  # --- SSH server ---
+  # Key-only root login. The host installs each sandbox's authorized_keys at
+  # create (POST /sandboxes ssh_pubkey → sandboxd /ssh-key → /root/.ssh), and
+  # the userspace port proxy forwards a host port to guest :22 on demand
+  # (wake-on-connect included). Config drop-in overrides the distro default.
+  sudo tee "$BUILD_DIR/etc/ssh/sshd_config.d/sandbox.conf" > /dev/null <<'SSHD'
+# Managed by build-devbox-rootfs.sh — sandbox SSH access.
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+SSHD
+  sudo chroot "$BUILD_DIR" bash -c '
+    export DEBIAN_FRONTEND=noninteractive
+    # Host keys are not generated in the chroot by the postinst; do it now so
+    # sshd can start on first boot. NB these are baked into the golden image, so
+    # every clone shares host keys — fine for ephemeral dev sandboxes (each is
+    # reached on a distinct host:port, so known_hosts entries do not collide).
+    ssh-keygen -A
+    # Ubuntu 24.04 ships ssh via socket activation; use the always-on service so
+    # the port is listening the instant the guest boots (the host may dial :22
+    # immediately after the readiness gate).
+    systemctl disable ssh.socket 2>/dev/null || true
+    systemctl enable ssh.service 2>/dev/null || true
   '
   # Create the working directory used by exec/files (HOME=/home/sandbox,
   # default exec cwd /home/sandbox/app — sandboxd falls back to / without it).
