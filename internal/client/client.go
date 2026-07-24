@@ -107,6 +107,23 @@ func (c *Client) Create(ctx context.Context, opts CreateOpts) (registry.Sandbox,
 	return sb, nil
 }
 
+// CreateRaw provisions a sandbox from a raw JSON request body, forwarding every
+// field verbatim — including ones this client struct doesn't model. The gateway
+// uses it so a newly added POST /sandboxes field reaches the owning host without
+// needing the gateway rebuilt in lockstep (decoding into CreateOpts would drop
+// unknown fields). An empty body is sent as no body (older clients send none).
+func (c *Client) CreateRaw(ctx context.Context, body []byte) (registry.Sandbox, error) {
+	var raw any
+	if len(body) > 0 {
+		raw = json.RawMessage(body)
+	}
+	var sb registry.Sandbox
+	if err := c.do(ctx, "POST", "/sandboxes", raw, &sb); err != nil {
+		return registry.Sandbox{}, err
+	}
+	return sb, nil
+}
+
 // List returns all running sandboxes.
 func (c *Client) List(ctx context.Context) ([]registry.Sandbox, error) {
 	var out []registry.Sandbox

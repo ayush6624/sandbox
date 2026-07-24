@@ -244,11 +244,23 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 // --- placement & create ---
 
 func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
-	// Optional {timeout_sec} body, forwarded to the chosen host.
-	var body client.CreateOpts
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+	// Forward the create body to the chosen host VERBATIM. Decoding into a typed
+	// struct here would silently drop any field the gateway's client build
+	// doesn't yet model (e.g. ssh_pubkey), so the gateway must not need
+	// rebuilding in lockstep with every new POST /sandboxes field. We still
+	// parse it once — purely to reject malformed JSON with a fast 400 before
+	// reserving a host — but placement and forwarding use the raw bytes.
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpError(w, 400, fmt.Errorf("read body: %w", err))
 		return
+	}
+	if len(raw) > 0 {
+		var probe client.CreateOpts
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			httpError(w, 400, fmt.Errorf("decode body: %w", err))
+			return
+		}
 	}
 
 	// One shared queue deadline across all attempts: a create that fails over
@@ -269,7 +281,7 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		sb, err := client.NewHTTP(h.addr, h.token).Create(r.Context(), body)
+		sb, err := client.NewHTTP(h.addr, h.token).CreateRaw(r.Context(), raw)
 		if err == nil {
 			// Landed: convert the reservation into a used slot and record the
 			// route. The next heartbeat overwrites the host's counts (which now
