@@ -3,19 +3,24 @@
 # sandbox:workers_desired is the scaling signal: how many worker hosts we want
 # so that OCCUPIED capacity PLUS queued creates PLUS a headroom buffer fit.
 #
-# Occupancy is (slots_total - slots_free), not slots_used: slots_free is the
-# hosts' self-reported allocatable capacity, which subtracts port holds by
-# hibernated sandboxes and still-warming hosts — capacity that is consumed
-# without being "used". Counting it makes hibernation-heavy fleets scale up
-# instead of silently shrinking.
+# Occupancy is (slots_used + hibernated), NOT (slots_total - slots_free). A host
+# still WARMING advertises slots_free=0 as a PLACEMENT gate (so it doesn't attract
+# a cold-boot storm), yet it runs ZERO sandboxes — so (total - free) misreads it
+# as fully occupied, a phantom ~SLOTS_PER_HOST spike per warming host that
+# max_over_time then LATCHES into a ~1-host over-scale for the whole scale-down
+# window (observed live: a scale-up to 3 bounced to 4). slots_used is the
+# host-reported RUNNING count (a warming host contributes 0, no phantom); adding
+# hibernated keeps the original intent — scale for hibernation-heavy fleets, whose
+# frozen sandboxes hold ports and will wake — without the warming artifact.
+# (slots_used + hibernated slightly over-counts hibernation vs total-free, but
+# that's conservative and hibernated is ~0 in the steady state.)
 #
-# The slots terms MUST be scoped to {job="sandbox-gateway"} (the gateway's
-# fleet-aggregate /metrics). Without it, sum(sandbox_slots_free) also picks up
-# the per-host federated series (job="sandbox-hosts", from /metrics/hosts),
-# DOUBLE-COUNTING free slots — while sandbox_slots_total is gateway-only — so the
-# occupancy term goes negative (e.g. 96 - 192 = -96 when idle) and suppresses
-# scale-up entirely. queue_depth/rejected are gateway-only and creates_ok is
-# host-only, so only the two slots terms need the filter.
+# Both terms MUST be scoped to {job="sandbox-gateway"} (the gateway's
+# fleet-aggregate /metrics): sandbox_hibernated (and the old slots_free) are ALSO
+# exported per-host by the federation (job="sandbox-hosts", /metrics/hosts), so an
+# unscoped sum() DOUBLE-COUNTS. slots_used is gateway-only, queue_depth/rejected
+# are gateway-only, creates_ok is host-only — but scope the two occupancy terms
+# defensively so a future federation of either can't silently corrupt the signal.
 #
 # Queued creates (the gateway's bounded create queue) are demand that found no
 # slot — counting them makes a burst larger than the headroom pull scale-up
@@ -50,4 +55,4 @@ groups:
     interval: 10s
     rules:
       - record: sandbox:workers_desired
-        expr: clamp_min(ceil((sum(sandbox_slots_total{job="sandbox-gateway"}) - sum(sandbox_slots_free{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_ok_total[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
+        expr: clamp_min(ceil((sum(sandbox_slots_used{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_ok_total[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)

@@ -57,10 +57,11 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_slots_total", "Total sandbox slots across live hosts.", totalSlots)
 	gauge("sandbox_slots_used", "Used sandbox slots across live hosts.", usedSlots)
 	// slots_free is host-reported allocatable capacity (minus in-flight
-	// reservations) — NOT total-used. Hibernated sandboxes hold their host
-	// port without holding a slot, so total-used overstates what the fleet can
-	// actually place; the autoscaler's recording rule uses
-	// (slots_total - slots_free) as effective occupancy for the same reason.
+	// reservations) — the truth to PLACE against. NB the autoscaler's recording
+	// rule does NOT use (slots_total - slots_free) for occupancy: a still-warming
+	// host reports slots_free=0 as a placement gate while running zero sandboxes,
+	// which total-free would misread as fully occupied and over-scale. The rule
+	// uses (slots_used + hibernated) instead. slots_free is for placement only.
 	gauge("sandbox_slots_free", "Allocatable sandbox slots across live hosts (host-reported).", freeSlots)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
 	gauge("sandbox_hibernated", "Idle sandboxes frozen to disk across live hosts (hold no slot).", hibernated)
