@@ -65,7 +65,13 @@ job "sandbox-serve" {
 set -euo pipefail
 cd "$${NOMAD_TASK_DIR}"
 chmod +x bin/sandbox bin/sandboxd
-# Bake the freshly pulled sandboxd into the staged base rootfs (idempotent).
+# Bake the freshly pulled sandboxd into the staged base rootfs. The image now
+# bakes sandboxd at build time (bake-image.sh [3b/6]) and startup-worker.sh
+# preserves the rootfs mtime + .agent-stamp, so in the happy path this is a
+# true no-op (stamp matches -> short-circuits before mount, no mtime bump ->
+# a baked golden stays adoptable). It only does real work if the GCS release
+# sandboxd differs from the baked one, which safely degrades to a golden
+# rebuild — so keep it as a self-healing net for out-of-band sandboxd hotfixes.
 ./bin/sandbox install-agent --config config.json --agent ./bin/sandboxd
 exec ./bin/sandbox serve --config config.json \
   --listen  "$${NODE_IP}:8080" \

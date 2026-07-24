@@ -202,6 +202,23 @@ scripts/              Host setup shell scripts
   mtime+size; a rebuilt base (e.g. `install-agent`) invalidates it on the next server
   restart — restart `serve` after changing the base image. Opt out with
   `"disable_hot_create": true` in the config.
+- **The golden can be BAKED onto a data-disk image so a fresh host adopts instead of
+  building it** (fleet fast-scale; `infra/gcp/bake-image.sh golden`). `buildGolden` writes a
+  self-describing manifest `golden.json` (the snapshot row + `base_mtime`/`base_size`, which
+  are `json:"-"` on the row so the manifest carries them explicitly) into `SnapshotDir`. On
+  startup, when the registry has no golden row (a fresh worker whose data disk was seeded from
+  the golden image but whose SQLite is empty), `ensureGolden` calls `importGoldenManifest`:
+  it reconstructs the row, re-validates via `goldenUsable` (artifacts on disk + base rootfs
+  mtime/size match), `CreateSnapshot`s it, and falls into the normal adopt path. **Every
+  failure mode — absent/corrupt manifest, stale artifacts, insert error — returns
+  "not ok" and cold-builds**, so a bad or missing manifest is never worse than today. This
+  removes the ~2 GB rootfs copy, the golden cold-build, AND the `slots_free=0` warming window
+  from the scale-up path. It relies on the base rootfs mtime being STABLE across the image →
+  data-disk copy: the image bakes sandboxd into `/opt/fc` (`bake-image.sh [3b/6]`) and
+  `startup-worker.sh` stages with `--preserve=timestamps` + the `.agent-stamp` sidecar, so the
+  boot-time `install-agent` is a no-op (short-circuits before the mount that would bump mtime).
+  `mig.sh` seeds each worker's data disk from `$GOLDEN_DATA_IMAGE_FAMILY` when it exists (blank
+  disk + cold build otherwise). Rebake both images together (a drifted pair just cold-rebuilds).
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
   `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
   `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override

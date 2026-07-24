@@ -20,6 +20,7 @@ source "$DIR/config.env"
 
 MIG_NAME="${MIG_NAME:-sandbox-workers}"
 IMAGE_FAMILY="${WORKER_IMAGE_FAMILY:-sandbox-worker}"
+GOLDEN_FAMILY="${GOLDEN_DATA_IMAGE_FAMILY:-sandbox-golden-data}"
 MACHINE="${WORKER_MACHINE_TYPE:-n2-standard-8}"
 DATA_DISK="${WORKER_DATA_DISK_SIZE:-256GB}"
 CONTROL_IP="${CONTROL_INTERNAL_IP:?set CONTROL_INTERNAL_IP in config.env}"
@@ -68,15 +69,37 @@ cmd_init() {
 
 template_name() { echo "${MIG_NAME}-tpl-$(date +%Y%m%d-%H%M%S)"; }
 
+# data_disk_arg builds the --create-disk spec for the per-instance XFS data disk.
+# When a golden data-disk image exists (./bake-image.sh golden), the disk is
+# created FROM it — pre-populated with the base rootfs + a pre-built golden
+# snapshot, so serve adopts instead of copying+cold-building (startup-worker.sh
+# then skips mkfs/copy and just xfs_growfs's to fill the disk). If no such image
+# exists yet, fall back to a blank disk (today's behavior: startup-worker
+# formats it and stages the rootfs, serve cold-builds the golden). Safe to roll
+# the MIG before ever baking a golden.
+data_disk_arg() {
+  local base="device-name=sandbox-xfs,size=${DATA_DISK},type=pd-ssd,auto-delete=yes"
+  if "${GC[@]}" compute images describe-from-family "$GOLDEN_FAMILY" >/dev/null 2>&1; then
+    echo "${base},image-family=${GOLDEN_FAMILY},image-project=${PROJECT}"
+  else
+    echo "$base"
+  fi
+}
+
 create_template() {
   local tpl="$1"
-  echo ">> Create instance template $tpl (image family $IMAGE_FAMILY, spot=$WORKER_SPOT)"
+  local disk_spec; disk_spec="$(data_disk_arg)"
+  echo ">> Create instance template $tpl (boot family $IMAGE_FAMILY, data disk: ${disk_spec#*type=pd-ssd,auto-delete=yes}, spot=$WORKER_SPOT)"
+  case "$disk_spec" in
+    *image-family=*) echo "   data disk seeded from golden image family $GOLDEN_FAMILY (serve adopts the golden)";;
+    *)               echo "   data disk BLANK (no $GOLDEN_FAMILY image yet — worker stages rootfs + cold-builds golden)";;
+  esac
   # shellcheck disable=SC2046
   "${GC[@]}" compute instance-templates create "$tpl" \
     --machine-type="$MACHINE" \
     --image-family="$IMAGE_FAMILY" --image-project="$PROJECT" \
     --boot-disk-size="${WORKER_BOOT_DISK_SIZE:-256GB}" --boot-disk-type=pd-ssd \
-    --create-disk="device-name=sandbox-xfs,size=${DATA_DISK},type=pd-ssd,auto-delete=yes" \
+    --create-disk="$disk_spec" \
     --enable-nested-virtualization \
     --service-account="$SA_EMAIL" --scopes=storage-rw \
     $(spot_args) \

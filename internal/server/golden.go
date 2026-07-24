@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/registry"
@@ -24,19 +26,33 @@ func (s *Server) ensureGolden(ctx context.Context) {
 	// build just means cold creates (slower, still functional); never leave the
 	// host permanently unplaceable.
 	defer close(s.warmed)
-	if snap, err := s.reg.GoldenSnapshot(ctx); err == nil {
-		if s.goldenUsable(snap) {
-			if err := s.stageSnapshotRootfs(snap); err == nil {
-				s.golden.Store(&snap)
-				go s.uploadGoldenBase(snap)
-				fmt.Fprintf(os.Stderr, "golden snapshot %s adopted; creates are hot\n", snap.ID)
-				return
-			}
+
+	snap, err := s.reg.GoldenSnapshot(ctx)
+	if err != nil {
+		// No golden row in the registry. A fresh host booted off a pre-baked
+		// golden data-disk image carries the snapshot artifacts + a manifest
+		// sidecar but an EMPTY DB (each host keeps its own SQLite, and reconcile
+		// treats it as fresh): import the row from the manifest and fall into
+		// the adopt path below. Any other case (no manifest, parse error, stale
+		// artifacts) returns ok=false and we cold-build as before.
+		var ok bool
+		if snap, ok = s.importGoldenManifest(ctx); !ok {
+			s.buildGolden(ctx)
+			return
 		}
-		fmt.Fprintf(os.Stderr, "golden snapshot %s is stale or broken; rebuilding\n", snap.ID)
-		_ = s.reg.DeleteSnapshot(ctx, snap.ID)
-		_ = s.cfg.Provisioner.CleanupSnapshot(snap.ID)
 	}
+
+	if s.goldenUsable(snap) {
+		if err := s.stageSnapshotRootfs(snap); err == nil {
+			s.golden.Store(&snap)
+			go s.uploadGoldenBase(snap)
+			fmt.Fprintf(os.Stderr, "golden snapshot %s adopted; creates are hot\n", snap.ID)
+			return
+		}
+	}
+	fmt.Fprintf(os.Stderr, "golden snapshot %s is stale or broken; rebuilding\n", snap.ID)
+	_ = s.reg.DeleteSnapshot(ctx, snap.ID)
+	_ = s.cfg.Provisioner.CleanupSnapshot(snap.ID)
 	s.buildGolden(ctx)
 }
 
@@ -83,8 +99,82 @@ func (s *Server) buildGolden(ctx context.Context) {
 		return
 	}
 	s.golden.Store(&snap)
+	s.writeGoldenManifest(snap)
 	go s.uploadGoldenBase(snap)
 	fmt.Fprintf(os.Stderr, "golden snapshot %s built in %s; creates are hot\n", snap.ID, time.Since(t0).Round(time.Millisecond))
+}
+
+// goldenManifest is the self-describing sidecar written next to the golden
+// snapshot's artifacts. It lets a fresh host booted off a pre-baked golden
+// data-disk image ADOPT the golden (import the row, then validate + clone)
+// instead of cold-building one. BaseMtime/BaseSize are carried explicitly
+// because registry.Snapshot marks them json:"-" — yet goldenUsable keys the
+// staleness check on exactly those two, so the manifest must persist them.
+type goldenManifest struct {
+	Snapshot  registry.Snapshot `json:"snapshot"`
+	BaseMtime int64             `json:"base_mtime"`
+	BaseSize  int64             `json:"base_size"`
+}
+
+// goldenManifestPath is the fixed on-disk location of the manifest — a stable
+// name (independent of the golden's id) so import can find it without knowing
+// the id. It rides the golden data-disk image because SnapshotDir lives on it.
+func (s *Server) goldenManifestPath() string {
+	return filepath.Join(s.cfg.Provisioner.SnapshotDir, "golden.json")
+}
+
+// writeGoldenManifest records the just-built golden as a data-disk sidecar so a
+// future fresh host can import it. Best-effort (written atomically via a temp +
+// rename): a failure only costs the cross-host adopt fast path, never the run.
+func (s *Server) writeGoldenManifest(snap registry.Snapshot) {
+	m := goldenManifest{Snapshot: snap, BaseMtime: snap.BaseMtime, BaseSize: snap.BaseSize}
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "golden manifest: marshal: %v\n", err)
+		return
+	}
+	path := s.goldenManifestPath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "golden manifest: write %s: %v\n", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		fmt.Fprintf(os.Stderr, "golden manifest: rename %s: %v\n", path, err)
+	}
+}
+
+// importGoldenManifest adopts a golden baked onto the data disk when the
+// registry has no golden row (fresh host from a pre-baked golden data-disk
+// image). It reconstructs the row from the sidecar, validates the artifacts +
+// base rootfs stat (goldenUsable), and re-inserts the row so the normal adopt
+// path can clone it. Returns ok=false — "fall back to cold-building" — for
+// every failure mode (absent/corrupt manifest, stale artifacts, insert error),
+// so a bad or missing manifest can never do worse than today's cold build.
+func (s *Server) importGoldenManifest(ctx context.Context) (registry.Snapshot, bool) {
+	b, err := os.ReadFile(s.goldenManifestPath())
+	if err != nil {
+		return registry.Snapshot{}, false // no manifest: the normal cold-build path
+	}
+	var m goldenManifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		fmt.Fprintf(os.Stderr, "golden manifest: parse: %v (cold-building instead)\n", err)
+		return registry.Snapshot{}, false
+	}
+	snap := m.Snapshot
+	snap.BaseMtime = m.BaseMtime
+	snap.BaseSize = m.BaseSize
+	snap.Golden = true
+	if !s.goldenUsable(snap) {
+		fmt.Fprintf(os.Stderr, "golden manifest %s present but artifacts/base stale; cold-building instead\n", snap.ID)
+		return registry.Snapshot{}, false
+	}
+	if err := s.reg.CreateSnapshot(ctx, snap); err != nil {
+		fmt.Fprintf(os.Stderr, "golden manifest %s: import row: %v (cold-building instead)\n", snap.ID, err)
+		return registry.Snapshot{}, false
+	}
+	fmt.Fprintf(os.Stderr, "golden snapshot %s imported from data-disk manifest\n", snap.ID)
+	return snap, true
 }
 
 // uploadGoldenBase eagerly pushes the golden's base template to GCS (once).

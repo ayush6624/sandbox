@@ -37,6 +37,11 @@ XFS_UUID="$(blkid -s UUID -o value "$XFS_DEV")"
 grep -q "$XFS_UUID" /etc/fstab || \
   echo "UUID=$XFS_UUID $XFS_MNT xfs defaults,nofail 0 2" >> /etc/fstab
 mountpoint -q "$XFS_MNT" || mount "$XFS_MNT"
+# When the data disk is seeded from the golden image (which may be smaller than
+# WORKER_DATA_DISK_SIZE), the XFS only spans the image's original size — grow it
+# to fill the whole block device. No-op when already full (blank/freshly-mkfs'd
+# disks, or equal sizes), so it's safe on every boot.
+xfs_growfs "$XFS_MNT" || true
 mkdir -p "$XFS_MNT"/{base,rootfs,snapshots}
 
 #############################################
@@ -46,7 +51,16 @@ mkdir -p "$XFS_MNT"/{base,rootfs,snapshots}
 # reads it from /mnt/sandbox-data/base. Copy once (fresh data disk each boot on
 # a spot-recreated instance, so this runs on first boot of each instance).
 if [ ! -f "$XFS_MNT/base/devbox-rootfs.ext4" ] && [ -f /opt/fc/devbox-rootfs.ext4 ]; then
-  cp --sparse=always /opt/fc/devbox-rootfs.ext4 "$XFS_MNT/base/devbox-rootfs.ext4"
+  # --preserve=timestamps keeps the rootfs mtime stable across the copy, and the
+  # .agent-stamp sidecar rides along, so the Nomad job's install-agent finds a
+  # matching stamp and short-circuits BEFORE mounting — no mtime bump, which is
+  # what lets a baked golden snapshot (keyed on base rootfs mtime+size) stay
+  # adoptable on a fresh host. Without this the copy reset mtime + dropped the
+  # stamp, forcing a full re-bake (and golden rebuild) on every boot.
+  cp --sparse=always --preserve=mode,timestamps /opt/fc/devbox-rootfs.ext4 "$XFS_MNT/base/devbox-rootfs.ext4"
+  if [ -f /opt/fc/devbox-rootfs.ext4.agent-stamp ]; then
+    cp --preserve=mode,timestamps /opt/fc/devbox-rootfs.ext4.agent-stamp "$XFS_MNT/base/devbox-rootfs.ext4.agent-stamp"
+  fi
 fi
 
 #############################################
