@@ -213,6 +213,24 @@ else
 ::1         localhost ip6-localhost ip6-loopback
 HOSTS
 
+  # Disable IPv6 on the guest NIC. Sandboxes have no IPv6 egress — the host/VPC
+  # is IPv4-only, so the guest only ever gets a link-local fe80:: with no v6
+  # default route. But DNS still returns AAAA records, and an AAAA-first client
+  # (node/claude, etc.) that attempts the unroutable v6 address can stall (best
+  # case it fast-fails ENETUNREACH; on a host where an unrouted global v6
+  # blackholes it hangs until ETIMEDOUT). Disabling v6 on the external NIC makes
+  # AI_ADDRCONFIG-aware clients select IPv4 only; clients that query AAAA without
+  # AI_ADDRCONFIG still fast-fail their v6 attempt with ENETUNREACH. We disable
+  # it on eth0 (the only guest NIC — hardcoded across the codebase) and `default`
+  # (future interfaces) but deliberately NOT on `lo`, so `::1` survives and
+  # localhost-over-v6 dev servers still work (/etc/hosts maps localhost to ::1).
+  # Re-enable by deleting this file and rebuilding if the fleet ever gains v6
+  # egress (see docs / the "enable IPv6" plan).
+  sudo tee "$BUILD_DIR/etc/sysctl.d/99-disable-ipv6.conf" > /dev/null <<'SYSCTL'
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.eth0.disable_ipv6 = 1
+SYSCTL
+
   # Set root password for serial console debugging
   echo "root:devbox" | sudo chroot "$BUILD_DIR" chpasswd
 
