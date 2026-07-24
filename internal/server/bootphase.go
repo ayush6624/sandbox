@@ -197,15 +197,67 @@ func (s *Server) initBootPhases() {
 	s.phases.markAt(phaseServeStart, s.startedAt)
 }
 
+// bootWindow bounds how long after kernel boot `serve` may start for the
+// timeline to still count as a genuine host bring-up. Generous: even a cold
+// golden BUILD settles in ~2-3 min. Past it, serve was (re)started mid-life —
+// a Nomad job roll on a long-running host — and kernel_boot is no longer a
+// meaningful anchor: measured against it, a 6-hour-old host reports a ~21000s
+// "readiness" that is really just its uptime. Observed live on the first deploy
+// of this instrumentation, which is why the guard exists.
+const bootWindow = 15 * time.Minute
+
 // writeBootPhaseMetrics renders the boot timeline in Prometheus exposition
 // format. Two families per phase — the absolute timestamp (joinable with
 // anything else in the TSDB) and the offset from the anchor (the number you
 // actually read off a dashboard) — plus sandbox_worker_ready_seconds, the
 // headline "kernel boot → this host advertised capacity" figure.
+//
+// On a mid-life serve restart the kernel_boot anchor is dropped and the ready
+// gauge is omitted entirely: the per-stage offsets stay useful (serve's own
+// startup cost is still real), but nothing pretends to measure a bring-up that
+// this process didn't participate in. NB a STOPPED standby worker that starts
+// *does* qualify — its kernel_boot is genuinely this boot — even though its
+// baked startup script may predate the script-side phases.
 func (s *Server) writeBootPhaseMetrics(b *strings.Builder) {
 	samples := s.phases.snapshot()
 	if len(samples) == 0 {
 		return
+	}
+
+	// Decide whether serve came up as part of this boot.
+	var kernelAt, serveAt time.Time
+	for _, sm := range samples {
+		switch sm.Name {
+		case phaseKernelBoot:
+			kernelAt = sm.At
+		case phaseServeStart:
+			serveAt = sm.At
+		}
+	}
+	genuineBoot := true
+	if !kernelAt.IsZero() && !serveAt.IsZero() && serveAt.Sub(kernelAt) > bootWindow {
+		genuineBoot = false
+		// Re-anchor on the earliest non-kernel phase and recompute offsets.
+		filtered := make([]phaseSample, 0, len(samples))
+		for _, sm := range samples {
+			if sm.Name != phaseKernelBoot {
+				filtered = append(filtered, sm)
+			}
+		}
+		if len(filtered) == 0 {
+			return
+		}
+		base := filtered[0].At
+		for i := range filtered {
+			filtered[i].Offset = filtered[i].At.Sub(base)
+		}
+		samples = filtered
+	}
+	fmt.Fprintf(b, "# HELP sandbox_boot_timeline_is_boot 1 if this timeline is a genuine host bring-up (serve started within %s of kernel boot), 0 if serve was restarted mid-life.\n# TYPE sandbox_boot_timeline_is_boot gauge\n", bootWindow)
+	if genuineBoot {
+		fmt.Fprintf(b, "sandbox_boot_timeline_is_boot 1\n")
+	} else {
+		fmt.Fprintf(b, "sandbox_boot_timeline_is_boot 0\n")
 	}
 
 	fmt.Fprintf(b, "# HELP sandbox_boot_phase_timestamp_seconds Unix time a worker boot/readiness phase completed (absolute; scrape interval does not affect precision).\n# TYPE sandbox_boot_phase_timestamp_seconds gauge\n")
@@ -219,9 +271,10 @@ func (s *Server) writeBootPhaseMetrics(b *strings.Builder) {
 	}
 
 	// Headline: anchor → capacity advertised. Absent until the host has actually
-	// advertised free slots, so it never reads as a spuriously fast 0.
+	// advertised free slots, so it never reads as a spuriously fast 0 — and
+	// absent on a mid-life restart, where there is no bring-up to measure.
 	for _, s := range samples {
-		if s.Name == phaseCapacityAdv {
+		if s.Name == phaseCapacityAdv && genuineBoot {
 			fmt.Fprintf(b, "# HELP sandbox_worker_ready_seconds Seconds from the boot anchor until this host first advertised free capacity to the gateway.\n# TYPE sandbox_worker_ready_seconds gauge\n")
 			fmt.Fprintf(b, "sandbox_worker_ready_seconds %.3f\n", s.Offset.Seconds())
 			break

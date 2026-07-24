@@ -220,3 +220,54 @@ func TestWriteBootPhaseMetricsEmptyWritesNothing(t *testing.T) {
 		t.Errorf("want no output for an empty recorder, got:\n%s", b.String())
 	}
 }
+
+// TestMidLifeRestartSuppressesReadyGauge covers the defect found on the first
+// live deploy: serve restarted by a Nomad job roll on a host that had been up
+// ~6h anchored on kernel_boot and reported a ~21000s "readiness" that was just
+// the host's uptime.
+func TestMidLifeRestartSuppressesReadyGauge(t *testing.T) {
+	s := &Server{phases: newPhaseRecorder()}
+	boot := time.UnixMilli(1_700_000_000_000)
+	s.phases.markAt(phaseKernelBoot, boot)
+	s.phases.markAt("serve_task_started", boot.Add(6*time.Hour))
+	s.phases.markAt(phaseServeStart, boot.Add(6*time.Hour+20*time.Millisecond))
+	s.phases.markAt(phaseCapacityAdv, boot.Add(6*time.Hour+100*time.Millisecond))
+
+	var b strings.Builder
+	s.writeBootPhaseMetrics(&b)
+	out := b.String()
+
+	if strings.Contains(out, "sandbox_worker_ready_seconds") {
+		t.Errorf("ready gauge must be suppressed on a mid-life restart:\n%s", out)
+	}
+	if !strings.Contains(out, "sandbox_boot_timeline_is_boot 0") {
+		t.Errorf("want is_boot 0, got:\n%s", out)
+	}
+	if strings.Contains(out, `phase="kernel_boot"`) {
+		t.Errorf("kernel_boot must be dropped as anchor on a restart:\n%s", out)
+	}
+	// Re-anchored on serve_task_started: serve start is 20ms in, not 6h in.
+	if !strings.Contains(out, `sandbox_boot_phase_seconds{phase="serve_process_start"} 0.020`) {
+		t.Errorf("want re-anchored 0.020 offset, got:\n%s", out)
+	}
+}
+
+func TestGenuineBootKeepsReadyGauge(t *testing.T) {
+	// A stopped standby worker that starts: kernel_boot IS this boot, so the
+	// ready gauge must survive even with no script-written phases.
+	s := &Server{phases: newPhaseRecorder()}
+	boot := time.UnixMilli(1_700_000_000_000)
+	s.phases.markAt(phaseKernelBoot, boot)
+	s.phases.markAt(phaseServeStart, boot.Add(25*time.Second))
+	s.phases.markAt(phaseCapacityAdv, boot.Add(41*time.Second))
+
+	var b strings.Builder
+	s.writeBootPhaseMetrics(&b)
+	out := b.String()
+	if !strings.Contains(out, "sandbox_worker_ready_seconds 41.000") {
+		t.Errorf("want ready 41s for a genuine boot, got:\n%s", out)
+	}
+	if !strings.Contains(out, "sandbox_boot_timeline_is_boot 1") {
+		t.Errorf("want is_boot 1, got:\n%s", out)
+	}
+}

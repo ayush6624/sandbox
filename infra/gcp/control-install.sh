@@ -92,9 +92,20 @@ UNIT
 # bumping AUTOSCALER_VERSION silently left the old binary installed forever).
 # Compares the running binary's reported version and re-fetches on mismatch,
 # mirroring the Grafana block below.
+# NB pipeline-free on purpose: this script runs under `set -euo pipefail`, where
+# `... | grep | head -1` can SIGPIPE grep once head exits, making the whole
+# command substitution exit 141 and aborting the install with NO error message.
+# Bash regex matching has no such failure mode.
 installed_autoscaler_version() {
-  /usr/local/bin/nomad-autoscaler --version 2>/dev/null |
-    grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v
+  local out=""
+  # 2>&1, NOT 2>/dev/null: nomad-autoscaler prints its version banner on STDERR,
+  # so discarding stderr made this always report "none" and re-download on every
+  # deploy — the exact staleness the version check exists to avoid.
+  out="$(/usr/local/bin/nomad-autoscaler --version 2>&1)" || out=""
+  if [[ $out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+  return 0
 }
 have_autoscaler="$(installed_autoscaler_version)"
 if [ "$have_autoscaler" != "$AUTOSCALER_VERSION" ]; then
