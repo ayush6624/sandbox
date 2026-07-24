@@ -23,8 +23,16 @@ scaling "sandbox_workers" {
   max     = ${MIG_MAX}
 
   policy {
-    cooldown            = "2m"
-    evaluation_interval = "30s"
+    # Tightened for fast scale-up. Detection lag = prometheus scrape (10s) +
+    # rule eval (10s) + this evaluation_interval, so 10s here caps worst-case
+    # signal-to-action at ~30s (was ~55s at 30s). cooldown gates only how soon
+    # the NEXT action can fire — 1m lets successive burst-waves scale up
+    # promptly; scale-DOWN slowness comes from max_over_time(SCALE_DOWN_WINDOW)
+    # in the check below, NOT from cooldown, so a short cooldown can't cause
+    # scale-in flapping. With lever-1 baked-golden adoption a new host warms in
+    # ~60-90s, so shaving ~25s off detection is a meaningful fraction.
+    cooldown            = "1m"
+    evaluation_interval = "10s"
 
     check "workers_desired" {
       source = "prometheus"

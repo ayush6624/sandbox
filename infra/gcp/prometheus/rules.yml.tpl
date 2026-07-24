@@ -24,7 +24,9 @@
 # the autoscaler holds — a safe default.
 groups:
   - name: sandbox
-    interval: 15s
+    # 10s (was 15s): recompute the scale-up signal on the scrape cadence so the
+    # autoscaler (also 10s now) never acts on a stale desired-count.
+    interval: 10s
     rules:
       - record: sandbox:workers_desired
         expr: clamp_min(ceil((sum(sandbox_slots_total) - sum(sandbox_slots_free) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + ${HEADROOM_SLOTS}) / ${SLOTS_PER_HOST}), 1)

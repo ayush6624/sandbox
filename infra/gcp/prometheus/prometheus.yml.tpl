@@ -3,7 +3,9 @@
 # both run on the control VM.
 global:
   scrape_interval: 10s
-  evaluation_interval: 15s
+  # 10s (was 15s) so the sandbox:workers_desired recording rule refreshes on the
+  # same cadence as the scrape — keeps the autoscaler's scale-up signal fresh.
+  evaluation_interval: 10s
 
 rule_files:
   - /etc/prometheus/rules.yml
