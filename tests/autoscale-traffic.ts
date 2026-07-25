@@ -306,12 +306,24 @@ const standbyRefillBoundary: Scenario = {
     )
     await ctx.createMany(count, 'refill')
     await ctx.holdAndProbe(integerEnv('AUTOSCALE_REFILL_HOLD_MS', 240_000, 181_000))
-    ctx.assertHealthy()
-    assertStandbyRefillTimeline(
-      readTimeline(TIMELINE_FILE),
-      started,
-      integerEnv('AUTOSCALE_PLACEMENT_DELAY_MS', 210_000, 1_000)
-    )
+    const placementDelayMs = integerEnv('AUTOSCALE_PLACEMENT_DELAY_MS', 210_000, 1_000)
+    const settleDeadline =
+      Date.now() + integerEnv('AUTOSCALE_REFILL_SETTLE_MS', 240_000, 1_000)
+    for (;;) {
+      ctx.assertHealthy()
+      const pending = pendingStandbyRefillSuspensions(
+        readTimeline(TIMELINE_FILE),
+        started,
+        placementDelayMs
+      )
+      if (!pending.length) break
+      if (Date.now() >= settleDeadline) {
+        throw new Error(
+          `fresh refills did not reach SUSPENDED before settle deadline: ${pending.join(', ')}`
+        )
+      }
+      await ctx.holdAndProbe(Math.min(5_000, settleDeadline - Date.now()))
+    }
   },
 }
 
@@ -624,16 +636,20 @@ function readTimeline(path: string): TimelineEvent[] {
  * immediately; only names first observed after scenario start are refill VMs.
  *
  * For every refill VM, correlate MIG instance name -> Nomad node id -> gateway
- * host id. It must reach SUSPENDED, and any capacity heartbeat must be at
- * least placementDelayMs after the MIG first reports the instance being
- * created. The production gate uses Linux boot age, so Nomad task StartedAt is
- * deliberately not the delay anchor: startup work consumes part of the gate.
+ * host id. Any capacity heartbeat must be at least placementDelayMs after the
+ * MIG first reports the instance being created. The production gate uses
+ * Linux boot age, so Nomad task StartedAt is deliberately not the delay
+ * anchor: startup work consumes part of the gate.
+ *
+ * A refill still creating or suspending is pending lifecycle work, not a hard
+ * violation. The caller keeps holding and probing live sandboxes until this
+ * returns no pending instances or its bounded settle deadline expires.
  */
-function assertStandbyRefillTimeline(
+function pendingStandbyRefillSuspensions(
   events: TimelineEvent[],
   scenarioStartedMs: number,
   placementDelayMs: number
-): void {
+): string[] {
   const migEvents = events.filter((event) => event.event === 'mig_instance_state')
   const baseline = new Set(
     migEvents
@@ -651,6 +667,7 @@ function assertStandbyRefillTimeline(
     throw new Error('standby refill proof observed no newly created MIG instance')
   }
 
+  const pending: string[] = []
   for (const instance of fresh) {
     const firstMigObserved = migEvents
       .filter(
@@ -664,20 +681,36 @@ function assertStandbyRefillTimeline(
       throw new Error(`fresh refill ${instance} has no MIG creation observation`)
     }
 
-    const suspended = migEvents.some(
+    const instanceMigEvents = migEvents.filter(
       (event) =>
         event.ts_ms >= scenarioStartedMs &&
-        event.data.instance === instance &&
-        event.data.status === 'SUSPENDED'
+        event.data.instance === instance
     )
-    if (!suspended) throw new Error(`fresh refill ${instance} did not reach SUSPENDED during hold`)
+    const terminal = instanceMigEvents.find(
+      (event) =>
+        event.data.status === 'TERMINATED' ||
+        event.data.status === 'STOPPED' ||
+        event.data.current_action === 'ABANDONING' ||
+        event.data.current_action === 'DELETING'
+    )
+    if (terminal) {
+      throw new Error(
+        `fresh refill ${instance} entered terminal state ` +
+        `${String(terminal.data.status)}/${String(terminal.data.current_action)}`
+      )
+    }
+
+    const suspended = instanceMigEvents.some((event) => event.data.status === 'SUSPENDED')
 
     const nodeEvent = events.find(
       (event) =>
         event.event === 'nomad_node_state' &&
         String(event.data.name ?? '').split('.')[0] === instance
     )
-    if (!nodeEvent) throw new Error(`fresh refill ${instance} never registered a Nomad node`)
+    if (!nodeEvent) {
+      pending.push(`${instance} (awaiting Nomad registration)`)
+      continue
+    }
     const nodeID = String(nodeEvent.data.node_id ?? '')
 
     const eligible = events
@@ -695,7 +728,9 @@ function assertStandbyRefillTimeline(
         `first MIG creation observation; placement delay requires >=${placementDelayMs}ms`
       )
     }
+    if (!suspended) pending.push(`${instance} (awaiting SUSPENDED)`)
   }
+  return pending
 }
 
 async function assertCleanGateway(): Promise<void> {
