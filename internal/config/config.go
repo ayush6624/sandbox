@@ -47,6 +47,12 @@ type Config struct {
 	// sandboxes at once. Must be the same on the gateway CIDR and the guest
 	// CIDR or guests can't route to the gateway. 0 = default 24.
 	GuestSubnetBits int `json:"guest_subnet_bits"`
+	// AllowInterGuestNetwork permits direct traffic between sandbox tap devices
+	// on the host bridge. It is off by default: production sandboxes are tenant
+	// isolation boundaries and must not be able to address each other merely
+	// because they share a worker. Enable only for trusted, explicitly
+	// multi-service workloads.
+	AllowInterGuestNetwork bool `json:"allow_inter_guest_network"`
 
 	// --- Behavior ---
 	// Hot create is on by default: the server maintains a golden snapshot of a
@@ -122,7 +128,27 @@ type Config struct {
 	KernelArgs     string `json:"kernel_args"`
 	Vcpus          int64  `json:"vcpus"`
 	MemMIB         int64  `json:"mem_mib"`
+	// DisableSeccomp is a development-only escape hatch. Firecracker's built-in
+	// restrictive seccomp filters are enabled by default on every launch path.
+	DisableSeccomp bool `json:"disable_seccomp"`
+	// FirecrackerLogMaxBytes caps each VMM's stdout/stderr file. Guest activity
+	// can influence VMM output, so an unbounded file is a host disk-exhaustion
+	// vector. Zero selects the conservative default.
+	FirecrackerLogMaxBytes int64 `json:"firecracker_log_max_bytes"`
+	// FirecrackerLogRetentionHours bounds retained VMM failure diagnostics by
+	// age. Normal lifecycle exits are deleted immediately. Zero selects the
+	// conservative default.
+	FirecrackerLogRetentionHours int `json:"firecracker_log_retention_hours"`
+	// FirecrackerLogMaxFiles bounds retained VMM failure diagnostics by count.
+	// Active VMM logs are excluded. Zero selects the conservative default.
+	FirecrackerLogMaxFiles int `json:"firecracker_log_max_files"`
 }
+
+const (
+	DefaultFirecrackerLogMaxBytes       int64 = 16 << 20
+	DefaultFirecrackerLogRetentionHours       = 24
+	DefaultFirecrackerLogMaxFiles             = 128
+)
 
 // Defaults fills zero values with conservative defaults.
 func (c *Config) Defaults() {
@@ -168,6 +194,15 @@ func (c *Config) Defaults() {
 	if c.KernelImage == "" {
 		c.KernelImage = "/opt/fc/vmlinux"
 	}
+	if c.FirecrackerLogMaxBytes == 0 {
+		c.FirecrackerLogMaxBytes = DefaultFirecrackerLogMaxBytes
+	}
+	if c.FirecrackerLogRetentionHours == 0 {
+		c.FirecrackerLogRetentionHours = DefaultFirecrackerLogRetentionHours
+	}
+	if c.FirecrackerLogMaxFiles == 0 {
+		c.FirecrackerLogMaxFiles = DefaultFirecrackerLogMaxFiles
+	}
 	if c.Pools.TapPrefix == "" {
 		c.Pools.TapPrefix = "fc"
 	}
@@ -203,6 +238,15 @@ func Load(path string) (*Config, error) {
 	c.Defaults()
 	if c.PlacementDelaySec < 0 {
 		return nil, fmt.Errorf("decode %s: placement_delay_sec must be >= 0", path)
+	}
+	if c.FirecrackerLogMaxBytes < 0 {
+		return nil, fmt.Errorf("decode %s: firecracker_log_max_bytes must be >= 0", path)
+	}
+	if c.FirecrackerLogRetentionHours < 0 {
+		return nil, fmt.Errorf("decode %s: firecracker_log_retention_hours must be >= 0", path)
+	}
+	if c.FirecrackerLogMaxFiles < 0 {
+		return nil, fmt.Errorf("decode %s: firecracker_log_max_files must be >= 0", path)
 	}
 	return &c, nil
 }

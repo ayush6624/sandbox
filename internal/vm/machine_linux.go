@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,6 +35,13 @@ import (
 type Machine struct {
 	*fcsdk.Machine
 	raw *rawMachine
+	log *vmmLog
+	// SDK-backed machines get one process waiter shared by every Wait caller.
+	// It also finalizes the log even when startup fails after the VMM launched
+	// and the caller never reaches its normal lifecycle goroutine.
+	waitOnce sync.Once
+	waitDone chan struct{}
+	waitErr  error
 	// diffCapable is set when the VM was loaded with dirty-page tracking
 	// enabled (StartClone), making Diff snapshots valid against the snapshot
 	// it was loaded from.
@@ -78,6 +86,7 @@ type rawMachine struct {
 	// for cold boots and clones. It must outlive the VM (the guest faults
 	// throughout its run) and be torn down when the VM exits.
 	uffd *uffdHandler
+	log  *vmmLog
 }
 
 func (o *RunOptions) applyDefaults() error {
@@ -93,6 +102,15 @@ func (o *RunOptions) applyDefaults() error {
 	}
 	if o.LogDir == "" {
 		o.LogDir = os.TempDir()
+	}
+	if o.LogMaxBytes <= 0 {
+		o.LogMaxBytes = defaultLogMaxBytes
+	}
+	if o.LogRetention <= 0 {
+		o.LogRetention = defaultLogRetention
+	}
+	if o.LogMaxFiles <= 0 {
+		o.LogMaxFiles = defaultLogMaxFiles
 	}
 	return nil
 }
@@ -134,7 +152,7 @@ func (o RunOptions) fcConfig() (fcsdk.Config, error) {
 		},
 		LogFifo:  logFIFO,
 		LogLevel: "Warn",
-		Seccomp:  fcsdk.SeccompConfig{Enabled: false},
+		Seccomp:  fcsdk.SeccompConfig{Enabled: !o.DisableSeccomp},
 	}
 
 	if o.TapDevice != "" {
@@ -185,24 +203,17 @@ func buildNetworkInterface(o RunOptions) (fcsdk.NetworkInterface, error) {
 	}, nil
 }
 
-func buildCommand(ctx context.Context, fcCfg fcsdk.Config, fcBin, logDir string) *exec.Cmd {
-	builder := fcsdk.VMCommandBuilder{}.
-		WithBin(fcBin).
-		WithSocketPath(fcCfg.SocketPath).
-		AddArgs("--id", fcCfg.VMID)
-	if !fcCfg.Seccomp.Enabled {
-		builder = builder.AddArgs("--no-seccomp")
-	} else if len(fcCfg.Seccomp.Filter) > 0 {
-		builder = builder.AddArgs("--seccomp-filter", fcCfg.Seccomp.Filter)
-	}
-	cmd := builder.Build(ctx)
+func buildCommand(ctx context.Context, fcCfg fcsdk.Config, fcBin, logDir string, logMaxBytes int64, retention time.Duration, maxFiles int) (*exec.Cmd, *vmmLog) {
+	cmd := exec.CommandContext(ctx, fcBin, processArgs(fcCfg.SocketPath, fcCfg.VMID, !fcCfg.Seccomp.Enabled)...)
 	// Capture firecracker's stdout/stderr so we can debug early-exit crashes.
 	logPath := filepath.Join(logDir, fmt.Sprintf("firecracker-%s.log", fcCfg.VMID))
-	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+	var closer *vmmLog
+	if f, err := openVMMLog(logPath, logMaxBytes, retention, maxFiles); err == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f
+		closer = f
 	}
-	return cmd
+	return cmd, closer
 }
 
 func silentLog() *logrus.Entry {
@@ -220,13 +231,20 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 	}
 	fcCfg.DisableValidation = disableValidation
 
-	cmd := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir)
+	cmd, logCloser := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles)
+	// The SDK configures Firecracker's internal warning log through a FIFO.
+	// Feed it into the same bounded sink as stdout/stderr so the FIFO always has
+	// an active consumer and cannot become an unbounded or blocking side path.
+	fcCfg.FifoLogWriter = logCloser
 	m, err := fcsdk.NewMachine(ctx, fcCfg, fcsdk.WithProcessRunner(cmd), fcsdk.WithLogger(silentLog()))
 	if err != nil {
+		if logCloser != nil {
+			_ = logCloser.Close()
+		}
 		return nil, RuntimeConfig{}, err
 	}
 	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
-	return &Machine{Machine: m}, rt, nil
+	return &Machine{Machine: m, log: logCloser, waitDone: make(chan struct{})}, rt, nil
 }
 
 // NewMachineFromSnapshot builds a Machine that loads memPath/statePath and
@@ -244,7 +262,8 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 	}
 	fcCfg.DisableValidation = disableValidation
 
-	cmd := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir)
+	cmd, logCloser := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles)
+	fcCfg.FifoLogWriter = logCloser
 	m, err := fcsdk.NewMachine(ctx, fcCfg,
 		fcsdk.WithProcessRunner(cmd),
 		fcsdk.WithLogger(silentLog()),
@@ -253,10 +272,13 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		}),
 	)
 	if err != nil {
+		if logCloser != nil {
+			_ = logCloser.Close()
+		}
 		return nil, RuntimeConfig{}, err
 	}
 	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
-	return &Machine{Machine: m}, rt, nil
+	return &Machine{Machine: m, log: logCloser, waitDone: make(chan struct{})}, rt, nil
 }
 
 // Start boots the VMM and sends InstanceStart — or, for a snapshot-backed
@@ -265,7 +287,28 @@ func Start(ctx context.Context, m *Machine) error {
 	if m == nil || m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
-	return m.Machine.Start(ctx)
+	if err := m.Machine.Start(ctx); err != nil {
+		_ = m.log.Close()
+		return err
+	}
+	m.startSDKWait()
+	return nil
+}
+
+func (m *Machine) startSDKWait() {
+	if m == nil || m.Machine == nil {
+		return
+	}
+	m.waitOnce.Do(func() {
+		if m.waitDone == nil {
+			m.waitDone = make(chan struct{})
+		}
+		go func() {
+			m.waitErr = m.Machine.Wait(context.Background())
+			m.log.finishExit(m.waitErr)
+			close(m.waitDone)
+		}()
+	})
 }
 
 // StopForce sends SIGTERM to the Firecracker process (fast teardown).
@@ -274,6 +317,7 @@ func StopForce(m *Machine) error {
 		return nil
 	}
 	if m.raw != nil {
+		m.raw.log.markExpectedExit()
 		if m.raw.cmd.Process != nil {
 			err := m.raw.cmd.Process.Signal(syscall.SIGTERM)
 			// Close the UFFD handler's socket (if any); its mem mapping is
@@ -287,6 +331,7 @@ func StopForce(m *Machine) error {
 	if m.Machine == nil {
 		return nil
 	}
+	m.log.markExpectedExit()
 	return m.Machine.StopVMM()
 }
 
@@ -303,6 +348,7 @@ func ShutdownGuest(ctx context.Context, m *Machine) error {
 	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
+	m.log.markExpectedExit()
 	return m.Machine.Shutdown(ctx)
 }
 
@@ -322,7 +368,13 @@ func Wait(ctx context.Context, m *Machine) error {
 	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
-	return m.Machine.Wait(ctx)
+	m.startSDKWait()
+	select {
+	case <-m.waitDone:
+		return m.waitErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // PID returns the Firecracker process PID.
@@ -421,17 +473,26 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	}
 	vmID := uuid.NewString()
 
-	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, "--api-sock", opts.SocketPath, "--id", vmID, "--no-seccomp")
+	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, processArgs(opts.SocketPath, vmID, opts.DisableSeccomp)...)
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
-	if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); ferr == nil {
+	var logCloser *vmmLog
+	if f, ferr := openVMMLog(logPath, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles); ferr == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f
+		logCloser = f
 	}
 	if err = cmd.Start(); err != nil {
+		if logCloser != nil {
+			_ = logCloser.Close()
+		}
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
-	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{})}
-	go func() { rm.waitErr = cmd.Wait(); close(rm.doneCh) }()
+	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), log: logCloser}
+	go func() {
+		rm.waitErr = cmd.Wait()
+		rm.log.finishExit(rm.waitErr)
+		close(rm.doneCh)
+	}()
 	// Kill the process on any error below so we don't leak a firecracker.
 	defer func() {
 		if err != nil {
@@ -519,16 +580,21 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, "--api-sock", opts.SocketPath, "--id", vmID, "--no-seccomp")
+	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, processArgs(opts.SocketPath, vmID, opts.DisableSeccomp)...)
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
-	if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); ferr == nil {
+	var logCloser *vmmLog
+	if f, ferr := openVMMLog(logPath, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles); ferr == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f
+		logCloser = f
 	}
 	if err = cmd.Start(); err != nil {
+		if logCloser != nil {
+			_ = logCloser.Close()
+		}
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
-	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), uffd: h}
+	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), uffd: h, log: logCloser}
 	// If the page source can't serve a fault (e.g. a GCS chunk fetch fails after
 	// retries), Firecracker would hang forever on the unserved page. Kill it
 	// instead: the wake fails cleanly and the sandbox stays hibernated for a
@@ -538,7 +604,12 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	// When Firecracker exits, the uffd read fails and faultLoop returns on its
 	// own — but tear the handler down explicitly too, to unmap the mem file and
 	// remove the socket.
-	go func() { rm.waitErr = cmd.Wait(); h.close(); close(rm.doneCh) }()
+	go func() {
+		rm.waitErr = cmd.Wait()
+		h.close()
+		rm.log.finishExit(rm.waitErr)
+		close(rm.doneCh)
+	}()
 	defer func() {
 		if err != nil {
 			_ = cmd.Process.Kill()

@@ -7,6 +7,9 @@ set -euo pipefail
 BRIDGE="${BRIDGE:-br-fc}"
 BRIDGE_CIDR="${BRIDGE_CIDR:-172.16.0.1/24}"
 GUEST_SUBNET="${GUEST_SUBNET:-172.16.0.0/24}"
+# Production default: sandboxes sharing this bridge cannot address each other.
+# Set ALLOW_INTER_GUEST_NETWORK=true only for trusted multi-service setups.
+ALLOW_INTER_GUEST_NETWORK="${ALLOW_INTER_GUEST_NETWORK:-false}"
 
 HOST_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
 if [ -z "$HOST_IFACE" ]; then
@@ -33,11 +36,14 @@ fi
 # route_localnet=1 lets DNATed packets with src=127.0.0.1 route out non-loopback
 # interfaces (needed for host:port → guest:port DNAT to work from `curl localhost`).
 echo "  Enabling IP forwarding + route_localnet..."
+sudo modprobe br_netfilter
 sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sudo sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
+sudo sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null
 sudo tee /etc/sysctl.d/99-firecracker.conf >/dev/null <<EOF
 net.ipv4.ip_forward=1
 net.ipv4.conf.all.route_localnet=1
+net.bridge.bridge-nf-call-iptables=1
 EOF
 
 # --- iptables NAT (masquerade guest traffic to internet) ---
@@ -57,9 +63,22 @@ fi
 if ! sudo iptables -C FORWARD -i "$HOST_IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
   sudo iptables -A FORWARD -i "$HOST_IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT
 fi
-# Allow bridge-to-bridge (so a sandbox could in principle talk to another, if needed)
-if ! sudo iptables -C FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT 2>/dev/null; then
-  sudo iptables -A FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT
+# Remove the opposite legacy policy first: an earlier ACCEPT ahead of a DROP
+# would make the secure rule ineffective.
+if [ "$ALLOW_INTER_GUEST_NETWORK" = "true" ]; then
+  while sudo iptables -C FORWARD -i "$BRIDGE" -o "$BRIDGE" -j DROP 2>/dev/null; do
+    sudo iptables -D FORWARD -i "$BRIDGE" -o "$BRIDGE" -j DROP
+  done
+  if ! sudo iptables -C FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT 2>/dev/null; then
+    sudo iptables -A FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT
+  fi
+else
+  while sudo iptables -C FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT 2>/dev/null; do
+    sudo iptables -D FORWARD -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT
+  done
+  if ! sudo iptables -C FORWARD -i "$BRIDGE" -o "$BRIDGE" -j DROP 2>/dev/null; then
+    sudo iptables -A FORWARD -i "$BRIDGE" -o "$BRIDGE" -j DROP
+  fi
 fi
 
 # Ensure /var/lib/sandbox exists for the registry + rootfs copies

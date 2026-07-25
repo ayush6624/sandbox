@@ -139,10 +139,15 @@ the file.
 | `disable_hot_create` | `false` | `true` = always cold-boot creates |
 | `hibernate_after_sec` | `600` in shipped configs | hibernate after externally idle seconds; `0` disables the host default |
 | `bridge` / `gateway_ip` | `br-fc` / `172.16.0.1` | host bridge and guest default gateway |
+| `allow_inter_guest_network` | `false` | permit direct guest-to-guest traffic on the shared bridge; keep off for untrusted sandboxes |
 | `nameservers` | `8.8.8.8` | guest DNS (comma-separated; match your network's egress rules) |
 | `pools.*` | taps `fc0-63`, IPs `.10-.73`, ports `5200-5263` | VM identity and explicit-forwarding pools |
 | `vcpus` / `mem_mib` | `2` / `1024` | per-VM resources (template-wide) |
 | `firecracker_bin` / `kernel_image` / `kernel_args` | … | VM template |
+| `disable_seccomp` | `false` | development-only escape hatch; production keeps Firecracker's restrictive filters enabled |
+| `firecracker_log_max_bytes` | `16777216` | maximum stdout/stderr bytes persisted per VMM |
+| `firecracker_log_retention_hours` | `24` | retention window for capped logs from unexpected VMM exits; expected lifecycle exits are removed immediately |
+| `firecracker_log_max_files` | `128` | maximum retained unexpected-exit logs; active VMM logs are excluded |
 
 ## Troubleshooting
 

@@ -13,8 +13,9 @@ import (
 
 // Network describes the host-side bridge used by sandboxes.
 type Network struct {
-	Bridge      string // e.g. "br-fc" — tap devices attach here
-	GatewayCIDR string // e.g. "172.16.0.1/24" — bridge address; subnet derived from it
+	Bridge                 string // e.g. "br-fc" — tap devices attach here
+	GatewayCIDR            string // e.g. "172.16.0.1/24" — bridge address; subnet derived from it
+	AllowInterGuestTraffic bool   // false isolates guests that share the bridge
 }
 
 // Provisioner performs host-side setup/teardown for sandboxes:
@@ -51,11 +52,15 @@ func (p *Provisioner) EnsureNetwork() error {
 			return fmt.Errorf("create bridge %s: %w: %s", p.Network.Bridge, err, out)
 		}
 	}
+	if err := ensureBridgeNetfilter(); err != nil {
+		return err
+	}
 	setup := [][]string{
 		{"ip", "addr", "replace", p.Network.GatewayCIDR, "dev", p.Network.Bridge},
 		{"ip", "link", "set", p.Network.Bridge, "up"},
 		{"sysctl", "-w", "net.ipv4.ip_forward=1"},
 		{"sysctl", "-w", "net.ipv4.conf.all.route_localnet=1"},
+		{"sysctl", "-w", "net.bridge.bridge-nf-call-iptables=1"},
 	}
 	for _, args := range setup {
 		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
@@ -72,12 +77,23 @@ func (p *Provisioner) EnsureNetwork() error {
 		{"-t", "nat", "POSTROUTING", "-o", p.Network.Bridge, "-j", "MASQUERADE"},
 		{"FORWARD", "-i", p.Network.Bridge, "-o", hostIface, "-j", "ACCEPT"},
 		{"FORWARD", "-i", hostIface, "-o", p.Network.Bridge, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
-		{"FORWARD", "-i", p.Network.Bridge, "-o", p.Network.Bridge, "-j", "ACCEPT"},
 	}
 	for _, rule := range rules {
 		if err := ensureIptablesRule(rule); err != nil {
 			return err
 		}
+	}
+	// A shared bridge must not become an implicit tenant network. Remove the
+	// legacy opposite rule before installing the configured policy so upgrades
+	// become secure immediately rather than leaving an earlier ACCEPT ahead of
+	// a new DROP.
+	bridgeRule := interGuestRule(p.Network.Bridge, p.Network.AllowInterGuestTraffic)
+	opposite := interGuestRule(p.Network.Bridge, !p.Network.AllowInterGuestTraffic)
+	if err := removeIptablesRule(opposite); err != nil {
+		return err
+	}
+	if err := ensureIptablesRule(bridgeRule); err != nil {
+		return err
 	}
 
 	// Clamp TCP MSS on every forwarded handshake to what the path can actually
@@ -100,6 +116,28 @@ func (p *Provisioner) EnsureNetwork() error {
 	return nil
 }
 
+func ensureBridgeNetfilter() error {
+	const knob = "/proc/sys/net/bridge/bridge-nf-call-iptables"
+	if _, err := os.Stat(knob); err == nil {
+		return nil
+	}
+	if out, err := exec.Command("modprobe", "br_netfilter").CombinedOutput(); err != nil {
+		return fmt.Errorf("load br_netfilter: %w: %s", err, out)
+	}
+	if _, err := os.Stat(knob); err != nil {
+		return fmt.Errorf("br_netfilter loaded but %s is unavailable: %w", knob, err)
+	}
+	return nil
+}
+
+func interGuestRule(bridge string, allow bool) []string {
+	target := "DROP"
+	if allow {
+		target = "ACCEPT"
+	}
+	return []string{"FORWARD", "-i", bridge, "-o", bridge, "-j", target}
+}
+
 // ensureIptablesRule appends rule if an identical one isn't already present.
 // rule is the iptables arg list without the -C/-A verb, e.g.
 // ["-t","nat","POSTROUTING","-s",...] or ["FORWARD","-i",...].
@@ -115,6 +153,24 @@ func ensureIptablesRule(rule []string) error {
 	add := append(append(append([]string{}, rule[:verbAt]...), "-A", rule[verbAt]), rule[verbAt+1:]...)
 	if out, err := exec.Command("iptables", add...).CombinedOutput(); err != nil {
 		return fmt.Errorf("iptables %v: %w: %s", add, err, out)
+	}
+	return nil
+}
+
+// removeIptablesRule removes every exact copy of rule. Older setup scripts
+// could append duplicates, and leaving even one ACCEPT before the DROP would
+// defeat isolation.
+func removeIptablesRule(rule []string) error {
+	verbAt := 0
+	if rule[0] == "-t" {
+		verbAt = 2
+	}
+	check := append(append(append([]string{}, rule[:verbAt]...), "-C", rule[verbAt]), rule[verbAt+1:]...)
+	del := append(append(append([]string{}, rule[:verbAt]...), "-D", rule[verbAt]), rule[verbAt+1:]...)
+	for exec.Command("iptables", check...).Run() == nil {
+		if out, err := exec.Command("iptables", del...).CombinedOutput(); err != nil {
+			return fmt.Errorf("iptables %v: %w: %s", del, err, out)
+		}
 	}
 	return nil
 }

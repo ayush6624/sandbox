@@ -117,9 +117,10 @@ Each sandbox gets a private IP on a host-internal bridge. Three directions:
   `await sbx.exposePort(8000)`. The idempotent operation returns the allocated
   host port.
 
-Sandboxes on the same host can also reach each other over the bridge — handy
-for multi-service setups, but remember they are only as isolated from each
-other as your guests' own listening services.
+Sandboxes on the same host are isolated from each other by default even though
+their tap devices share a bridge. Trusted multi-service deployments can opt in
+to direct guest-to-guest traffic with `allow_inter_guest_network`, but public
+services should use explicit port forwards or a controlled service network.
 
 ## Multi-host (fleet mode)
 

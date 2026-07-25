@@ -81,8 +81,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	prov := &provisioner.Provisioner{
 		Network: provisioner.Network{
-			Bridge:      cfg.Bridge,
-			GatewayCIDR: fmt.Sprintf("%s/%d", cfg.GatewayIP, cfg.GuestSubnetBits),
+			Bridge:                 cfg.Bridge,
+			GatewayCIDR:            fmt.Sprintf("%s/%d", cfg.GatewayIP, cfg.GuestSubnetBits),
+			AllowInterGuestTraffic: cfg.AllowInterGuestNetwork,
 		},
 		RootfsBase:  cfg.RootfsBase,
 		RootfsDir:   cfg.RootfsDir,
@@ -100,6 +101,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		Vcpus:          cfg.Vcpus,
 		MemMIB:         cfg.MemMIB,
 		Nameservers:    cfg.Nameservers,
+		DisableSeccomp: cfg.DisableSeccomp,
+		LogMaxBytes:    cfg.FirecrackerLogMaxBytes,
+		LogRetention:   time.Duration(cfg.FirecrackerLogRetentionHours) * time.Hour,
+		LogMaxFiles:    cfg.FirecrackerLogMaxFiles,
 	}
 
 	srv := server.New(server.Config{

@@ -90,6 +90,25 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		first := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
 		return fmt.Sprintf(" (%s)", first), nil
 	})
+	check("Seccomp policy", func() (string, error) {
+		if cfg.DisableSeccomp {
+			return "", fmt.Errorf("disabled by config — remove disable_seccomp for production")
+		}
+		return " (restrictive Firecracker filters enabled)", nil
+	})
+	check("VMM log bound", func() (string, error) {
+		if cfg.FirecrackerLogMaxBytes <= 0 {
+			return "", fmt.Errorf("firecracker_log_max_bytes must be positive")
+		}
+		return fmt.Sprintf(" (%d bytes per VM)", cfg.FirecrackerLogMaxBytes), nil
+	})
+	check("VMM log retention", func() (string, error) {
+		if cfg.FirecrackerLogRetentionHours <= 0 || cfg.FirecrackerLogMaxFiles <= 0 {
+			return "", fmt.Errorf("log retention hours and max files must be positive")
+		}
+		return fmt.Sprintf(" (%dh, max %d retained failures)",
+			cfg.FirecrackerLogRetentionHours, cfg.FirecrackerLogMaxFiles), nil
+	})
 	fmt.Println()
 
 	fmt.Println("Guest assets")
@@ -129,6 +148,19 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			return "", fmt.Errorf("disabled — run: sysctl -w net.ipv4.ip_forward=1")
 		}
 		return "", nil
+	})
+	check("Bridge firewall", func() (string, error) {
+		b, err := os.ReadFile("/proc/sys/net/bridge/bridge-nf-call-iptables")
+		if err != nil {
+			return "", fmt.Errorf("br_netfilter unavailable: %w", err)
+		}
+		if len(b) == 0 || b[0] != '1' {
+			return "", fmt.Errorf("bridge-nf-call-iptables disabled — guest isolation rules are ineffective")
+		}
+		if cfg.AllowInterGuestNetwork {
+			return "", fmt.Errorf("allow_inter_guest_network is enabled")
+		}
+		return " (guest-to-guest isolation enabled)", nil
 	})
 	fmt.Println()
 

@@ -1,5 +1,7 @@
 package vm
 
+import "time"
+
 // RunOptions configures a microVM run.
 type RunOptions struct {
 	FirecrackerBin string
@@ -10,6 +12,18 @@ type RunOptions struct {
 	Vcpus          int64
 	MemMIB         int64
 	LogDir         string
+	// DisableSeccomp is a development-only escape hatch. The zero value keeps
+	// Firecracker's built-in restrictive seccomp filters enabled.
+	DisableSeccomp bool
+	// LogMaxBytes caps the process stdout/stderr file for one VMM. Zero selects
+	// the package default.
+	LogMaxBytes int64
+	// LogRetention bounds completed/crashed VMM diagnostics by age. Zero
+	// selects the package default.
+	LogRetention time.Duration
+	// LogMaxFiles bounds retained completed/crashed VMM diagnostics by count.
+	// Active VMM logs are never pruned. Zero selects the package default.
+	LogMaxFiles int
 
 	// Networking (optional — if TapDevice is empty, no networking)
 	TapDevice   string
@@ -37,6 +51,23 @@ type RunOptions struct {
 	// supplied chunk source (the server's GCS-backed loader; roadmap Phase B2)
 	// instead of the local mem file. Its Load is called on each chunk fault.
 	UFFDChunks *UFFDChunkSource
+}
+
+const (
+	defaultLogMaxBytes  int64 = 16 << 20
+	defaultLogRetention       = 24 * time.Hour
+	defaultLogMaxFiles        = 128
+)
+
+// processArgs returns the Firecracker arguments shared by SDK-managed cold
+// boots and raw clone/UFFD restore paths. Keeping seccomp policy here prevents
+// a new raw path from accidentally reintroducing --no-seccomp.
+func processArgs(socketPath, vmID string, disableSeccomp bool) []string {
+	args := []string{"--api-sock", socketPath, "--id", vmID}
+	if disableSeccomp {
+		args = append(args, "--no-seccomp")
+	}
+	return args
 }
 
 // UFFDChunkSource describes a chunked UFFD page source whose chunk bytes come
