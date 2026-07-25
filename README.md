@@ -4,7 +4,7 @@ Firecracker-based microVM sandboxes for development. Spin up isolated Ubuntu VMs
 
 Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hosted, on bare metal.
 
-**Docs:** [Quickstart](docs/quickstart.md) · [Concepts](docs/concepts.md) · [HTTP API](docs/http-api.md) · [Self-hosting](docs/self-hosting.md) · [TypeScript SDK](sdk/typescript/README.md)
+**Docs:** [Quickstart](docs/quickstart.md) · [Concepts](docs/concepts.md) · [HTTP API](docs/http-api.md) · [Self-hosting](docs/self-hosting.md) · [Autoscaling latency](docs/autoscaling-latency.md) · [TypeScript SDK](sdk/typescript/README.md)
 
 - **Fast creates** — every `POST /sandboxes` clones a pre-booted golden snapshot (~0.5 s end-to-end; automatic cold-boot fallback).
 - **Snapshots & fan-out** — capture a running sandbox (memory + processes + disk), restore it 1:1, or fan out N copy-on-write clones (32 clones in ~2.7 s).

@@ -20,6 +20,11 @@ Autoscaler resizes a worker MIG to match. Workers run `sandbox serve` as a Nomad
 **system job**, so a newly-booted worker starts serving within seconds of
 joining the cluster.
 
+For the latency model, comparison with Modal's published architecture, and the
+next implementation steps (level-triggered direct scaling, tap recycling,
+staged create concurrency, and prepared microVM pools), see
+[Autoscaling and burst-start latency](../../docs/autoscaling-latency.md).
+
 **Topology** (all in `asia-south1-a`, VPC-internal):
 
 - **`sandbox-control`** — one small non-spot VM: Nomad server + `sandbox gateway`
@@ -95,7 +100,13 @@ scale-in), `STANDBY_SUSPENDED_SIZE`/`STANDBY_STOPPED_SIZE` (pre-created standby
 VMs; the MIG resumes suspended workers before starting stopped workers, then
 falls back to fresh create+boot; apply to a live MIG with `./mig.sh standby`), and
 `QUEUE_WAIT`/`QUEUE_MAX` (the gateway's create queue — wait must cover standby
-start → nomad join → golden-snapshot build, ~2-3 min). The defaults size the
+start → nomad join → golden-snapshot build → fresh-worker placement quarantine,
+up to ~4 min). `deploy-job.sh` generates `placement_delay_sec` as
+`STANDBY_INITIAL_DELAY + PLACEMENT_DELAY_HEADROOM_SEC` (180 + 30 seconds by
+default). Fresh refill workers register and route immediately but advertise
+zero free slots until that Linux boot age, giving the MIG time to suspend them
+before they can receive traffic. Linux uptime includes suspended time, so a
+resumed standby advertises capacity immediately. The defaults size the
 fleet for **1000 concurrent sandboxes**: n2-standard-16 workers × 48 slots ×
 MIG_MAX=22. Scale-up is immediate; scale-down waits out the window.
 
@@ -145,9 +156,11 @@ advertises `slots_free=0` as a placement gate while running zero sandboxes, and
 `total − free` misread that as a full host, inflating desired by ~one host) — so
 the autoscaler scales up
 immediately; the MIG resumes suspended standby workers first, then starts
-stopped workers, and finally creates fresh VMs when both pools run dry. A fresh host
-advertises `slots_free=0` until its golden snapshot is built, so it is never
-boot-stormed with cold creates; each host also bounds concurrent bring-ups
+stopped workers, and finally creates fresh VMs when both pools run dry. A fresh
+host advertises `slots_free=0` until both its golden snapshot is built and its
+boot-age placement quarantine expires, so it is neither boot-stormed with cold
+creates nor selected for traffic while the MIG is about to move it into the
+standby pool; each host also bounds concurrent bring-ups
 (`create_concurrency`; the fleet explicitly uses 24, while the general default
 remains 2×cores capped at 16). When warm-up completes the worker immediately
 heartbeats its real capacity, and that heartbeat broadcasts a retry to all
@@ -199,7 +212,7 @@ Phase order (adjacent gaps are the per-stage costs):
 | `reconcile_done` | serve | stale-state cleanup |
 | `golden_settled` | serve | golden **adopt** (fast) vs **cold build** (slow) |
 | `first_heartbeat_ok` | serve | gateway can route here |
-| `capacity_advertised` | serve | gateway can **place** here ← the real "capacity online" |
+| `capacity_advertised` | serve | golden + placement quarantine passed; gateway can **place** here ← the real "capacity online" |
 
 Because these are absolute timestamps rather than rates, **the normal 10 s scrape
 already yields millisecond-accurate boundaries** — no special scrape interval is
