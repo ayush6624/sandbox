@@ -22,10 +22,12 @@ case "$RELEASE" in
   *[!A-Za-z0-9._-]*|'') echo "error: release must contain only letters, digits, dot, underscore, or dash"; exit 1 ;;
 esac
 CONTROL_NAME="${CONTROL_NAME:-sandbox-control}"
+CONTROL_SSH_HOST="${CONTROL_SSH_HOST:-$CONTROL_NAME}"
 CONTROL_IP="${CONTROL_INTERNAL_IP:?}"
 GW_URL="http://${CONTROL_IP}:${GW_PORT:-9090}"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
 
-sshc() { ssh -o BatchMode=yes "${SSH_USER}@${CONTROL_NAME}" "$@"; }
+sshc() { ssh "${SSH_OPTS[@]}" "${SSH_USER}@${CONTROL_SSH_HOST}" "$@"; }
 
 # --- derive per-host capacity from SLOTS_PER_HOST (the single source of truth) ---
 # The pools in devbox-gcp.json are GENERATED here, not hand-maintained, so the
@@ -117,8 +119,8 @@ CORES="$(echo "${WORKER_MACHINE_TYPE:-n2-standard-16}" | grep -oE '[0-9]+$' || e
 TASK_CPU="$(( (CORES - 1) * 1000 ))"
 
 echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS creates=$CREATE_CONCURRENCY placement-delay=${PLACEMENT_DELAY}s /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
-scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_NAME}:/tmp/serve.nomad.hcl"
-scp -o BatchMode=yes -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_NAME}:/tmp/devbox-gcp.json"
+scp "${SSH_OPTS[@]}" -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_SSH_HOST}:/tmp/serve.nomad.hcl"
+scp "${SSH_OPTS[@]}" -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_SSH_HOST}:/tmp/devbox-gcp.json"
 rm -f "$GEN_CONFIG"
 
 echo ">> nomad job run sandbox-serve (release=$RELEASE)"
@@ -145,4 +147,4 @@ sshc "nomad job run \
         -var=task_cpu='$TASK_CPU' \
         -var=task_memory='$TASK_MEMORY' \
         /tmp/serve.nomad.hcl"
-echo ">> submitted. Watch: ssh ${SSH_USER}@${CONTROL_NAME} 'nomad job status sandbox-serve'"
+echo ">> submitted. Watch: ssh ${SSH_USER}@${CONTROL_SSH_HOST} 'nomad job status sandbox-serve'"

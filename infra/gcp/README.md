@@ -69,6 +69,16 @@ SANDBOX_API_URL=http://<control-tailnet-ip>:9090 SANDBOX_API_KEY=<gateway-token>
 make -C ../.. gcs-release && ./deploy-job.sh   # new sha rolls the system job fleet-wide
 ```
 
+If Tailscale SSH requires an interactive reauthentication check, point only
+the deployment transport at the control VM's normal SSH endpoint:
+
+```bash
+CONTROL_SSH_HOST=<control-ssh-ip-or-name> ./deploy-job.sh <release>
+```
+
+The gateway/worker control URL remains the VPC-internal
+`CONTROL_INTERNAL_IP`; this override changes only `ssh`/`scp`.
+
 That rolls the WORKERS only. If the change touches the gateway — including
 adding fields to `client.CreateOpts` (the gateway re-encodes create bodies
 through it, so an old gateway silently drops new fields) — also run
