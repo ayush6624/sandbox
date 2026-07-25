@@ -190,13 +190,45 @@ else
   # DNS — the Firecracker SDK passes the config's nameservers
   # (IPConfiguration.Nameservers, from configs/*.json) to the guest *only* via
   # the kernel `ip=` boot param, which the guest kernel exposes at
-  # /proc/net/pnp in resolv.conf format. glibc reads /etc/resolv.conf and never
-  # /proc/net/pnp, so symlink the two. This honors whatever nameservers the
-  # config sets instead of hardcoding them. See firecracker-go-sdk network.go
+  # /proc/net/pnp in resolv.conf format. See firecracker-go-sdk network.go
   # (IPConfiguration) and cni/vmconf (IPBootParam) for the contract.
-  sudo chroot "$BUILD_DIR" bash -c 'rm -f /etc/resolv.conf && ln -s /proc/net/pnp /etc/resolv.conf'
+  #
+  # We used to symlink /etc/resolv.conf -> /proc/net/pnp so the guest honored
+  # the host config without hardcoding it. Do NOT go back to that: glibc reads
+  # the symlink fine, but /proc files report st_size=0, and a resolver that
+  # sizes the file before reading it sees an empty config. c-ares — which backs
+  # Node's dns.resolve*/undici, and so Claude Code's "Checking connectivity..."
+  # probe — is one of those: finding no nameservers it falls back to
+  # 127.0.0.1:53, where nothing listens. That yields DNS which works for
+  # curl/git/npm/python (glibc) and fails for anything c-ares based, i.e. an
+  # internet connection that looks intermittently broken depending on the tool.
+  #
+  # So COPY pnp into a real file at boot. This unit runs before anything can
+  # look a name up; sandboxd also does it on startup (materializeResolvConf),
+  # which is what fixes an already-built rootfs when a new agent is baked in.
+  sudo tee "$BUILD_DIR/etc/systemd/system/sandbox-resolvconf.service" > /dev/null <<'UNIT'
+[Unit]
+Description=Materialize /etc/resolv.conf from kernel ip= autoconf (/proc/net/pnp)
+Documentation=https://github.com/ayush6624/sandbox
+DefaultDependencies=no
+Before=sysinit.target network.target sandboxd.service
+ConditionPathExists=/proc/net/pnp
 
-  # systemd-resolved/networkd would clobber that symlink and fight the kernel
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'grep -E "^(nameserver|search|domain|options)" /proc/net/pnp > /etc/resolv.conf.tmp && mv /etc/resolv.conf.tmp /etc/resolv.conf'
+
+[Install]
+WantedBy=sysinit.target
+UNIT
+  sudo chroot "$BUILD_DIR" bash -c '
+    rm -f /etc/resolv.conf
+    printf "# Replaced at boot from /proc/net/pnp by sandbox-resolvconf.service.\n" > /etc/resolv.conf
+    systemctl enable sandbox-resolvconf.service 2>/dev/null || true
+  '
+
+  # systemd-resolved/networkd would clobber that file and fight the kernel
   # ip= config, so keep them masked.
   sudo chroot "$BUILD_DIR" bash -c '
     systemctl disable systemd-networkd.service 2>/dev/null || true
@@ -226,9 +258,22 @@ HOSTS
   # localhost-over-v6 dev servers still work (/etc/hosts maps localhost to ::1).
   # Re-enable by deleting this file and rebuilding if the fleet ever gains v6
   # egress (see docs / the "enable IPv6" plan).
+  #
+  # NB measured on the GCP fleet: keeping ::1 on `lo` means glibc still counts
+  # IPv6 as configured, so AI_ADDRCONFIG does NOT filter AAAA — getaddrinfo and
+  # node's dns.lookup still return v6 addresses. What actually saves us is the
+  # second path: with no v6 route the connect() fails ENETUNREACH in ~0ms, so
+  # happy-eyeballs clients fall straight to IPv4. Don't rely on the AAAA
+  # records being absent.
+  #
+  # tcp_mtu_probing: last-resort recovery if PMTU discovery black-holes (the
+  # host clamps MSS in provisioner.EnsureNetwork, so this should never fire).
+  # Without it a lost ICMP frag-needed stalls a connection through the full RTO
+  # ladder — tens of seconds — instead of probing down to a workable MSS.
   sudo tee "$BUILD_DIR/etc/sysctl.d/99-disable-ipv6.conf" > /dev/null <<'SYSCTL'
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.eth0.disable_ipv6 = 1
+net.ipv4.tcp_mtu_probing = 1
 SYSCTL
 
   # Set root password for serial console debugging

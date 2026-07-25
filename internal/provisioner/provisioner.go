@@ -2,6 +2,7 @@ package provisioner
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -77,6 +78,24 @@ func (p *Provisioner) EnsureNetwork() error {
 		if err := ensureIptablesRule(rule); err != nil {
 			return err
 		}
+	}
+
+	// Clamp TCP MSS on every forwarded handshake to what the path can actually
+	// carry. Firecracker's virtio-net gives the guest a 1500-byte MTU and there
+	// is no way to hand it the host's, so on a fabric with a smaller MTU (GCP's
+	// VPC is 1460) the guest advertises an MSS 40 bytes too large. Connectivity
+	// still "works" — the host drops the oversized frame and returns ICMP
+	// frag-needed, and PMTU discovery recovers — but it costs a drop plus a
+	// retransmit on every new connection to every new destination (measured on
+	// the fleet: ~2.4 retransmits/connection), and it becomes a multi-second
+	// stall wherever that ICMP is lost or rate-limited. Clamping is adaptive,
+	// so this is a no-op on a 1500-MTU host.
+	//
+	// Best-effort on purpose: it needs xt_TCPMSS, and a host without that
+	// module should still serve (slightly lossier) rather than refuse to start.
+	clamp := []string{"-t", "mangle", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"}
+	if err := ensureIptablesRule(clamp); err != nil {
+		log.Printf("provisioner: MSS clamp unavailable, falling back to PMTU discovery: %v", err)
 	}
 	return nil
 }

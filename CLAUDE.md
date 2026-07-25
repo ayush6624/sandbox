@@ -279,6 +279,37 @@ scripts/              Host setup shell scripts
   BYTES (4096), not KiB — `pageSizeBytes()` normalizes it; getting this wrong made 4 MiB
   "pages" and an offset that panicked. The fault loop has a `recover()` so a handler bug
   degrades to a failed wake, never a serve crash. See docs/scale-to-zero.md.
+- **`/etc/resolv.conf` in the guest must be a REAL FILE, never a symlink to
+  `/proc/net/pnp`.** The config's nameservers reach the guest only through the kernel
+  `ip=` boot param, which the kernel re-exposes at `/proc/net/pnp` in resolv.conf
+  format, so symlinking the two looks like the clean way to honor the host config
+  without baking it in. It isn't: `/proc` files report `st_size=0`, and any resolver
+  that sizes a file before reading it sees an EMPTY config. c-ares — which backs
+  Node's `dns.resolve*`/undici, and therefore Claude Code's "Checking
+  connectivity..." probe — is one of those; finding no nameservers it falls back to
+  `127.0.0.1:53`, where nothing listens. The symptom is DNS that works for
+  curl/git/npm/python (glibc reads the symlink fine) and fails for anything
+  c-ares-based: an "unstable internet" that depends on which tool you reach for,
+  and a `claude` that dies with `Failed to connect to api.anthropic.com: ETIMEDOUT`
+  ~30 s in while `curl` to that same host takes 50 ms. So the pnp content is COPIED
+  into a regular file, in two places: `sandbox-resolvconf.service` at boot
+  (build-devbox-rootfs.sh) and `materializeResolvConf` on sandboxd startup
+  (cmd/sandboxd/resolvconf.go) — the latter is what repairs an older rootfs once a
+  new agent is baked in. Snapshot-restored guests (hot create, fan-out, wake) resume
+  a live process and re-run neither, but inherit the file through the rootfs.
+- **Guest MTU is 1500 and the host fabric may be smaller, so the host clamps MSS.**
+  Firecracker's virtio-net hands the guest a fixed 1500-byte MTU with no way to pass
+  the host's through, so on GCP (VPC MTU 1460) every guest advertises an MSS 40 bytes
+  too large. It still works — the host drops the oversized frame and returns ICMP
+  frag-needed, PMTU discovery recovers — but it costs a drop + retransmit per new
+  connection per destination (measured ~2.4 retransmits/connection, and the PMTU
+  cache expires in ~10 min), and it hard-stalls wherever that ICMP is lost or
+  rate-limited. `EnsureNetwork` therefore adds a `-t mangle FORWARD ... TCPMSS
+  --clamp-mss-to-pmtu` rule; it's adaptive (a no-op on a 1500-MTU host like Hetzner)
+  and **best-effort**, since it needs `xt_TCPMSS` and a host missing that module
+  should still serve. The guest also sets `tcp_mtu_probing=1` as a black-hole
+  backstop. Don't "fix" the MTU by setting the tap/bridge instead — virtio-net won't
+  propagate it to the guest.
 - **SSH into a sandbox rides the existing port proxy.** The base rootfs bakes
   `openssh-server` (key-only root login: `PermitRootLogin prohibit-password`,
   `PasswordAuthentication no`, in `sshd_config.d/sandbox.conf`; host keys via

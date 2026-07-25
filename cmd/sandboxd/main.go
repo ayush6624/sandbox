@@ -44,6 +44,13 @@ func main() {
 	mux.HandleFunc("POST /clock", handleClock)
 	mux.HandleFunc("POST /ssh-key", handleSSHKey)
 
+	// A real /etc/resolv.conf, not a symlink into /proc — c-ares-based
+	// resolvers can't read the latter. Non-fatal: a guest with a working
+	// resolv.conf already shouldn't lose its agent over this.
+	if err := materializeResolvConf(); err != nil {
+		log.Printf("resolv.conf: %v (leaving existing config in place)", err)
+	}
+
 	// Reidentify eth0 from MMDS after a fan-out clone resume (no-op otherwise).
 	go runThawAgent()
 
