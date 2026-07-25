@@ -16,7 +16,7 @@
  * Usage:
  *   SANDBOX_API_URL=http://<gw>:9090 SANDBOX_API_KEY=<tok> \
  *     tsx benchmarks/burst-bench.ts [--count 500] [--concurrency 96] [--hold]
- *       [--output file.json]
+ *       [--no-hibernate] [--output file.json]
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -41,16 +41,18 @@ interface Args {
   count: number
   concurrency: number
   hold: boolean
+  noHibernate: boolean
   retryMs: number
   output?: string
 }
 function parseArgs(argv: string[]): Args {
-  const a: Args = { count: 500, concurrency: 96, hold: false, retryMs: 0 }
+  const a: Args = { count: 500, concurrency: 96, hold: false, noHibernate: false, retryMs: 0 }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
     if (k === '--count') a.count = Number(argv[++i])
     else if (k === '--concurrency') a.concurrency = Number(argv[++i])
     else if (k === '--hold') a.hold = true
+    else if (k === '--no-hibernate') a.noHibernate = true
     else if (k === '--retry-ms') a.retryMs = Number(argv[++i])
     else if (k === '--output') a.output = argv[++i]
   }
@@ -62,13 +64,24 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 // createWithRetry rides out capacity/pool pushback with jittered exponential
 // backoff up to retryMs — how a real client absorbs a burst while the
 // autoscaler adds hosts and slots recycle. retryMs=0 disables (raw behavior).
-async function createWithRetry(retryMs: number): Promise<{ sbx: Sandbox; retries: number }> {
+async function createWithRetry(
+  retryMs: number,
+  noHibernate: boolean,
+  name: string
+): Promise<{ sbx: Sandbox; retries: number }> {
   const deadline = Date.now() + retryMs
   let delay = 200
   let retries = 0
   while (true) {
     try {
-      return { sbx: await Sandbox.create({ timeoutMs: 10 * 60_000 }), retries }
+      return {
+        sbx: await Sandbox.create({
+          timeoutMs: 10 * 60_000,
+          name,
+          ...(noHibernate ? { hibernateAfterMs: -1 } : {}),
+        }),
+        retries,
+      }
     } catch (e) {
       const o = classify(e)
       const retriable = o === 'capacity' || o === 'tap_pool'
@@ -133,12 +146,14 @@ async function mapLimit<T>(n: number, limit: number, fn: (i: number) => Promise<
 }
 
 async function runChurn(args: Args, expected: string): Promise<Rec[]> {
-  return mapLimit(args.count, args.concurrency, async () => {
+  return mapLimit(args.count, args.concurrency, async (i) => {
     const rec: Rec = { outcome: 'ok' }
     const t0 = Date.now()
     let sbx: Sandbox | undefined
     try {
-      const c = await createWithRetry(args.retryMs)
+      const runId = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}`)
+        .replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 24)
+      const c = await createWithRetry(args.retryMs, args.noHibernate, `burst-${runId}-${i}`.slice(0, 63))
       sbx = c.sbx
       rec.retries = c.retries
       rec.createMs = Date.now() - t0
@@ -158,7 +173,10 @@ async function runChurn(args: Args, expected: string): Promise<Rec[]> {
         try {
           await sbx.kill()
           rec.killMs = Date.now() - tk
-        } catch { /* best effort */ }
+        } catch (e) {
+          rec.outcome = 'other'
+          rec.err = `${rec.err ? `${rec.err}; ` : ''}kill failed: ${String((e as Error)?.message ?? e)}`.slice(0, 160)
+        }
       }
     }
     return rec
@@ -172,7 +190,9 @@ async function runHold(args: Args, expected: string): Promise<Rec[]> {
     const rec: Rec = { outcome: 'ok' }
     const t0 = Date.now()
     try {
-      const c = await createWithRetry(args.retryMs)
+      const runId = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}`)
+        .replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 24)
+      const c = await createWithRetry(args.retryMs, args.noHibernate, `burst-${runId}-${i}`.slice(0, 63))
       rec.retries = c.retries
       rec.createMs = Date.now() - t0
       live[i] = c.sbx
@@ -207,7 +227,12 @@ async function runHold(args: Args, expected: string): Promise<Rec[]> {
     try {
       await sbx.kill()
       if (rec) rec.killMs = Date.now() - tk
-    } catch { /* best effort */ }
+    } catch (e) {
+      if (rec) {
+        rec.outcome = 'other'
+        rec.err = `${rec.err ? `${rec.err}; ` : ''}kill failed: ${String((e as Error)?.message ?? e)}`.slice(0, 160)
+      }
+    }
     return null
   })
   return recs
@@ -262,6 +287,7 @@ async function main(): Promise<void> {
   const out = args.output ?? join(RESULTS_DIR, `burst_${args.hold ? 'hold' : 'churn'}_${args.count}.json`)
   writeFileSync(out, JSON.stringify({ args, wallMs, counts, createMs, execMs, killMs, peak: (recs as any).peak }, null, 2))
   console.log(`\n  Saved ${out}`)
+  if (counts.ok !== args.count) process.exitCode = 1
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })

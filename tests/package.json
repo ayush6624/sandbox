@@ -11,6 +11,7 @@
     "test": "tsx run.ts",
     "test:quick": "tsx run.ts lifecycle exec files",
     "test:stress": "tsx run.ts concurrency churn load",
+    "test:autoscale": "tsx autoscale-traffic.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

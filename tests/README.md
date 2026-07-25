@@ -73,3 +73,32 @@ Crank them up for a real stress run, e.g.:
 ```bash
 STRESS_BURST=64 STRESS_LOAD_N=48 STRESS_FANOUT_N=32 npm test -- concurrency load snapshots
 ```
+
+## Destructive autoscaling traffic suite
+
+`autoscale-traffic.ts` is a separate live-fleet benchmark. It covers a held
+burst beyond the warm floor, gradual ramp, a second burst while the first
+scale-out is in progress, long-lived sandboxes during worker reconciliation,
+create/exec/kill churn, and repeated scale-out/scale-in sawteeth. Successful
+creates are repeatedly reconnected and executed against; host release,
+capacity, placement, routing, and final cleanup invariants are monitored
+independently.
+
+Run it from the control VM through `autoscale-benchmark.sh` so the existing
+GCE, SSH, Nomad, gateway, and queue timeline is captured on the same clock:
+
+```bash
+export EXPECTED_WORKER_RELEASE=<deployed-release>
+export LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
+export TRAFFIC_SCENARIOS="sawtooth-scale-cycle held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
+
+./tests/autoscale-benchmark.sh
+```
+
+The wrapper retains its existing `PROJECT`, `ZONE`, `MIG_NAME`,
+`GATEWAY_TOKEN`, and `WORKER_SSH_USER` requirements and refuses to start if
+the gateway is not empty or the fleet is not at the expected clean floor.
+Run a subset by changing `TRAFFIC_SCENARIOS`. The sawtooth defaults to three
+bursts and waits up to 22 minutes for scale-in between them (15-minute policy
+window plus late-scale-action and reconciliation headroom); tune only via the
+documented `AUTOSCALE_*` variables in `autoscale-traffic.ts`.

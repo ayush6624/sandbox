@@ -1,0 +1,700 @@
+/**
+ * Destructive, live-fleet autoscaling correctness benchmark.
+ *
+ * This is intentionally separate from the normal test runner. It can occupy
+ * hundreds of real microVM slots and (for the sawtooth scenario) wait through
+ * scale-in. LIVE_AUTOSCALE_BENCHMARK must be set to the exact value below.
+ *
+ * The important property is that a successful create is not counted as a
+ * success by itself. Every held sandbox gets durable in-guest identity state
+ * and is repeatedly connected to and executed against while hosts resume,
+ * Nomad reconciles allocations, and the gateway changes its routing table.
+ */
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Sandbox } from '../sdk/typescript/src/index.js'
+
+const LIVE_ACK = 'I_UNDERSTAND_THIS_CREATES_REAL_VMS'
+const API_URL = required('SANDBOX_API_URL')
+const API_KEY = required('SANDBOX_API_KEY')
+const EXPECTED_RELEASE = required('EXPECTED_WORKER_RELEASE')
+const RUN_ID = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}-${stamp()}`)
+  .replace(/[^a-zA-Z0-9-]/g, '-')
+  .slice(0, 24)
+const MIG_SNAPSHOT = process.env.AUTOSCALE_MIG_SNAPSHOT
+const TTL_MS = integerEnv('AUTOSCALE_TTL_MS', 45 * 60_000, 60_000)
+const REQUEST_TIMEOUT_MS = integerEnv('AUTOSCALE_CREATE_TIMEOUT_MS', 240_000, 10_000)
+const PROBE_INTERVAL_MS = integerEnv('AUTOSCALE_PROBE_INTERVAL_MS', 2_000, 100)
+const PROBE_CONCURRENCY = integerEnv('AUTOSCALE_PROBE_CONCURRENCY', 48, 1)
+const INVARIANT_INTERVAL_MS = integerEnv('AUTOSCALE_INVARIANT_INTERVAL_MS', 500, 100)
+const FLOOR_HOSTS = integerEnv('AUTOSCALE_FLOOR_HOSTS', 2, 1)
+const SLOTS_PER_HOST = integerEnv('AUTOSCALE_SLOTS_PER_HOST', 48, 1)
+const OUTPUT = process.env.AUTOSCALE_OUTPUT ??
+  resolve(dirname(fileURLToPath(import.meta.url)), 'results', `autoscale-traffic-${stamp()}.json`)
+
+interface RawHost {
+  id: string
+  addr: string
+  slots_total: number
+  slots_used: number
+  hibernated: number
+  free: number
+  alive: boolean
+  last_seen_ms_ago: number
+  release?: string
+  release_compatible?: boolean
+}
+
+interface RawSandbox {
+  id: string
+  host_addr?: string
+  status?: string
+}
+
+interface Held {
+  sandbox: Sandbox
+  marker: string
+  scenario: string
+  createdAt: number
+  host: string
+  probes: number
+}
+
+interface Failure {
+  at: string
+  scenario: string
+  operation: string
+  sandboxId?: string
+  message: string
+}
+
+interface ScenarioResult {
+  name: string
+  startedAt: string
+  wallMs: number
+  creates: number
+  createLatencyMs: number[]
+  probes: number
+  failures: Failure[]
+  hostPeak: number
+}
+
+interface Scenario {
+  name: string
+  run(ctx: ScenarioContext): Promise<void>
+}
+
+class ScenarioContext {
+  readonly held = new Map<string, Held>()
+  readonly failures: Failure[] = []
+  readonly createLatencyMs: number[] = []
+  probes = 0
+  creates = 0
+  hostPeak = 0
+  private stopping = false
+  private monitor?: Promise<void>
+  private createsInFlight = 0
+
+  constructor(readonly scenario: string) {}
+
+  startMonitor(): void {
+    this.monitor = this.monitorLoop()
+  }
+
+  async stopMonitor(): Promise<void> {
+    this.stopping = true
+    await this.monitor
+  }
+
+  async create(label: string): Promise<Held> {
+    this.assertHealthy()
+    this.createsInFlight++
+    try {
+      return await this.createTracked(label)
+    } finally {
+      this.createsInFlight--
+    }
+  }
+
+  private async createTracked(label: string): Promise<Held> {
+    const started = Date.now()
+    const sandbox = await Sandbox.create({
+      apiUrl: API_URL,
+      apiKey: API_KEY,
+      timeoutMs: TTL_MS,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      hibernateAfterMs: -1,
+      name: `autoscale-${RUN_ID}-${this.scenario}-${label}`.slice(0, 63),
+    })
+    this.createLatencyMs.push(Date.now() - started)
+    this.creates++
+    const marker = `${this.scenario}:${label}:${sandbox.sandboxId}:${Date.now()}`
+    const held: Held = {
+      sandbox,
+      marker,
+      scenario: this.scenario,
+      createdAt: Date.now(),
+      host: sandbox.info.hostAddr ?? '',
+      probes: 0,
+    }
+    this.held.set(sandbox.sandboxId, held)
+    this.assertHealthy()
+    try {
+      const result = await sandbox.commands.run(
+        `umask 077; printf '%s' '${shellSingle(marker)}' > /tmp/autoscale-marker; echo initialized`
+      )
+      if (result.stdout.trim() !== 'initialized') throw new Error(`unexpected init output: ${result.stdout}`)
+    } catch (error) {
+      this.record('initialize', error, held)
+      throw error
+    }
+    return held
+  }
+
+  async createMany(count: number, prefix: string, concurrency = count): Promise<Held[]> {
+    const settled = await mapLimit(count, concurrency, async (i) => {
+      try {
+        return await this.create(`${prefix}-${i}`)
+      } catch (error) {
+        this.record('create', error)
+        return undefined
+      }
+    })
+    const made = settled.filter((held): held is Held => held !== undefined)
+    if (made.length !== count) {
+      throw new Error(`${this.scenario}: ${count - made.length}/${count} creates failed`)
+    }
+    this.assertHealthy()
+    return made
+  }
+
+  async probe(held: Held): Promise<void> {
+    this.probes++
+    held.probes++
+    try {
+      // Connect exercises GET routing independently from the handle retained
+      // by create; exec then exercises POST routing and the guest identity.
+      const connected = await Sandbox.connect(held.sandbox.sandboxId, {
+        apiUrl: API_URL,
+        apiKey: API_KEY,
+      })
+      const result = await connected.commands.run(
+        `test "$(cat /tmp/autoscale-marker)" = '${shellSingle(held.marker)}' && echo route-ok`,
+        { timeoutMs: 15_000 }
+      )
+      if (result.stdout.trim() !== 'route-ok') {
+        throw new Error(`identity mismatch; stdout=${JSON.stringify(result.stdout)}`)
+      }
+    } catch (error) {
+      this.record('connect+exec', error, held)
+    }
+  }
+
+  async probeAll(): Promise<void> {
+    await mapItems([...this.held.values()], PROBE_CONCURRENCY, (held) => this.probe(held))
+    this.assertHealthy()
+  }
+
+  async holdAndProbe(ms: number): Promise<void> {
+    const deadline = Date.now() + ms
+    do {
+      await this.probeAll()
+      if (Date.now() < deadline) await sleep(Math.min(PROBE_INTERVAL_MS, deadline - Date.now()))
+    } while (Date.now() < deadline)
+  }
+
+  async kill(held: Held): Promise<void> {
+    try {
+      await held.sandbox.kill()
+      this.held.delete(held.sandbox.sandboxId)
+    } catch (error) {
+      this.record('kill', error, held)
+    }
+  }
+
+  async killAll(): Promise<void> {
+    for (let attempt = 0; attempt < 5 && this.held.size; attempt++) {
+      await mapItems([...this.held.values()], 48, (held) => this.kill(held))
+      if (this.held.size) await sleep(500)
+    }
+  }
+
+  async abortAndCleanup(): Promise<void> {
+    this.stopping = true
+    const deadline = Date.now() + REQUEST_TIMEOUT_MS + 5_000
+    while (this.createsInFlight > 0 && Date.now() < deadline) await sleep(100)
+    await this.killAll()
+  }
+
+  record(operation: string, error: unknown, held?: Held): void {
+    const failure: Failure = {
+      at: new Date().toISOString(),
+      scenario: this.scenario,
+      operation,
+      message: String((error as Error)?.message ?? error).slice(0, 500),
+    }
+    if (held) failure.sandboxId = held.sandbox.sandboxId
+    this.failures.push(failure)
+    console.error(`  FAIL ${operation}${held ? ` ${held.sandbox.sandboxId}` : ''}: ${failure.message}`)
+  }
+
+  assertHealthy(): void {
+    if (interrupted) throw new Error(`${this.scenario}: benchmark interrupted`)
+    if (this.failures.length) {
+      throw new Error(
+        `${this.scenario}: stopping after first correctness failure: ` +
+        `${this.failures[0].operation}: ${this.failures[0].message}`
+      )
+    }
+  }
+
+  private async monitorLoop(): Promise<void> {
+    while (!this.stopping) {
+      try {
+        const hosts = await getHosts()
+        this.hostPeak = Math.max(this.hostPeak, hosts.filter((host) => host.alive).length)
+        assertHostInvariants(hosts)
+        const listed = await getSandboxes()
+        const duplicates = duplicateIds(listed.map((sandbox) => sandbox.id))
+        if (duplicates.length) throw new Error(`duplicate sandbox routes: ${duplicates.join(',')}`)
+        for (const held of this.held.values()) {
+          const routed = listed.find((sandbox) => sandbox.id === held.sandbox.sandboxId)
+          if (!routed) throw new Error(`held sandbox ${held.sandbox.sandboxId} disappeared from gateway list`)
+          if (held.host && routed.host_addr && routed.host_addr !== held.host) {
+            throw new Error(
+              `route changed for ${held.sandbox.sandboxId}: ${held.host} -> ${routed.host_addr}`
+            )
+          }
+        }
+      } catch (error) {
+        this.record('invariant-monitor', error)
+        this.stopping = true
+      }
+      await sleep(INVARIANT_INTERVAL_MS)
+    }
+  }
+}
+
+const heldBurst: Scenario = {
+  name: 'held-burst',
+  async run(ctx) {
+    const count = integerEnv('AUTOSCALE_HELD_BURST', FLOOR_HOSTS * SLOTS_PER_HOST + 64, 1)
+    await ctx.createMany(count, 'burst')
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_HELD_HOLD_MS', 45_000, 1_000))
+  },
+}
+
+const gradualRamp: Scenario = {
+  name: 'gradual-ramp',
+  async run(ctx) {
+    const total = integerEnv('AUTOSCALE_RAMP_TOTAL', FLOOR_HOSTS * SLOTS_PER_HOST + 72, 1)
+    const batch = integerEnv('AUTOSCALE_RAMP_BATCH', 12, 1)
+    const interval = integerEnv('AUTOSCALE_RAMP_INTERVAL_MS', 3_000, 100)
+    for (let start = 0; start < total; start += batch) {
+      await ctx.createMany(Math.min(batch, total - start), `ramp-${start}`, batch)
+      await ctx.probeAll()
+      if (start + batch < total) await sleep(interval)
+    }
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_RAMP_HOLD_MS', 30_000, 1_000))
+  },
+}
+
+const secondWave: Scenario = {
+  name: 'second-wave',
+  async run(ctx) {
+    const first = integerEnv('AUTOSCALE_SECOND_WAVE_FIRST', FLOOR_HOSTS * SLOTS_PER_HOST + 16, 1)
+    const second = integerEnv('AUTOSCALE_SECOND_WAVE_SECOND', SLOTS_PER_HOST * 2, 1)
+    const gap = integerEnv('AUTOSCALE_SECOND_WAVE_GAP_MS', 2_000, 100)
+    const firstPromise = ctx.createMany(first, 'wave-1')
+    await sleep(gap)
+    const secondPromise = ctx.createMany(second, 'wave-2')
+    await Promise.all([firstPromise, secondPromise])
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_SECOND_WAVE_HOLD_MS', 45_000, 1_000))
+  },
+}
+
+const longLived: Scenario = {
+  name: 'long-lived-reconcile',
+  async run(ctx) {
+    const anchors = await ctx.createMany(
+      integerEnv('AUTOSCALE_LONG_LIVED_ANCHORS', Math.max(8, Math.floor(SLOTS_PER_HOST / 2)), 1),
+      'anchor'
+    )
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_ANCHOR_SETTLE_MS', 5_000, 1_000))
+    const pressureCount = integerEnv(
+      'AUTOSCALE_LONG_LIVED_PRESSURE',
+      FLOOR_HOSTS * SLOTS_PER_HOST + SLOTS_PER_HOST,
+      1
+    )
+    let pressureDone = false
+    const pressure = ctx.createMany(pressureCount, 'pressure')
+    void pressure.then(
+      () => { pressureDone = true },
+      () => { pressureDone = true }
+    )
+    while (!pressureDone) {
+      await mapItems(anchors, PROBE_CONCURRENCY, (held) => ctx.probe(held))
+      await sleep(PROBE_INTERVAL_MS)
+    }
+    await pressure
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_RECONCILE_HOLD_MS', 45_000, 1_000))
+  },
+}
+
+const churn: Scenario = {
+  name: 'create-exec-kill-churn',
+  async run(ctx) {
+    const count = integerEnv('AUTOSCALE_CHURN_COUNT', 360, 1)
+    const concurrency = integerEnv('AUTOSCALE_CHURN_CONCURRENCY', SLOTS_PER_HOST * 2, 1)
+    await mapLimit(count, concurrency, async (i) => {
+      let held: Held | undefined
+      try {
+        held = await ctx.create(`churn-${i}`)
+        await ctx.probe(held)
+        await ctx.probe(held)
+      } catch (error) {
+        ctx.record('churn-lifecycle', error, held)
+      } finally {
+        if (held) await ctx.kill(held)
+      }
+      return undefined
+    })
+  },
+}
+
+const sawtooth: Scenario = {
+  name: 'sawtooth-scale-cycle',
+  async run(ctx) {
+    const cycles = integerEnv('AUTOSCALE_SAWTOOTH_CYCLES', 3, 2)
+    const burst = integerEnv('AUTOSCALE_SAWTOOTH_BURST', FLOOR_HOSTS * SLOTS_PER_HOST + 64, 1)
+    // SCALE_DOWN_WINDOW is 15m, but its clock can be reset by a late scale-up
+    // action and the ensuing GCE/Nomad/gateway reconciliation needs additional
+    // time after the target changes. The first live run proved 16m from
+    // sandbox cleanup was too short: targetSize had reached 2, but host
+    // liveness had not converged. Keep seven minutes of control-plane headroom.
+    const waitMs = integerEnv('AUTOSCALE_SCALE_IN_WAIT_MS', 22 * 60_000, 1_000)
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      const before = (await getHosts()).filter((host) => host.alive).length
+      await ctx.createMany(burst, `cycle-${cycle}`)
+      await ctx.holdAndProbe(integerEnv('AUTOSCALE_SAWTOOTH_HOLD_MS', 30_000, 1_000))
+      const peak = (await getHosts()).filter((host) => host.alive).length
+      if (peak <= before) throw new Error(`cycle ${cycle}: no scale-out observed (${before} -> ${peak})`)
+      await ctx.killAll()
+      let stableSince = 0
+      await waitFor(
+        async () => {
+          const alive = (await getHosts()).filter((host) => host.alive).length
+          const mig = getMigSnapshot()
+          const atFloor = alive === FLOOR_HOSTS &&
+            mig.target_size === FLOOR_HOSTS &&
+            mig.running === FLOOR_HOSTS &&
+            mig.transitioning === 0 &&
+            Date.now() - mig.ts_ms < 15_000
+          if (!atFloor) {
+            stableSince = 0
+            return false
+          }
+          if (!stableSince) stableSince = Date.now()
+          return Date.now() - stableSince >=
+            integerEnv('AUTOSCALE_SCALE_IN_STABLE_MS', 30_000, 1_000)
+        },
+        waitMs,
+        5_000,
+        `stable physical and gateway scale-in to ${FLOOR_HOSTS} hosts after cycle ${cycle}`,
+        () => ctx.assertHealthy()
+      )
+      await assertCleanGateway()
+    }
+  },
+}
+
+// Sawtooth must start from the preflight floor. Other scenarios intentionally
+// reuse whatever running capacity a prior scenario caused; sawtooth itself
+// proves return-to-floor behavior between its cycles.
+const ALL: Scenario[] = [sawtooth, heldBurst, gradualRamp, secondWave, longLived, churn]
+let interrupted = false
+let activeContext: ScenarioContext | undefined
+
+async function main(): Promise<void> {
+  if (process.env.LIVE_AUTOSCALE_BENCHMARK !== LIVE_ACK) {
+    throw new Error(`refusing live run: set LIVE_AUTOSCALE_BENCHMARK=${LIVE_ACK}`)
+  }
+  await preflight()
+  const wanted = process.argv.slice(2)
+  const unknown = wanted.filter((name) => !ALL.some((scenario) => scenario.name === name))
+  if (unknown.length) throw new Error(`unknown scenario(s): ${unknown.join(', ')}; available: ${ALL.map((s) => s.name).join(', ')}`)
+  const scenarios = wanted.length ? ALL.filter((scenario) => wanted.includes(scenario.name)) : ALL
+  const startedAt = new Date().toISOString()
+  const results: ScenarioResult[] = []
+
+  for (const scenario of scenarios) {
+    if (interrupted) break
+    await assertCleanGateway()
+    console.log(`\n== ${scenario.name} ==`)
+    const ctx = new ScenarioContext(scenario.name)
+    activeContext = ctx
+    ctx.startMonitor()
+    const started = Date.now()
+    try {
+      await scenario.run(ctx)
+    } catch (error) {
+      ctx.record('scenario', error)
+    } finally {
+      await ctx.stopMonitor()
+      await ctx.killAll()
+      try {
+        await assertCleanGateway()
+      } catch (error) {
+        ctx.record('postflight-cleanup', error)
+      }
+    }
+    results.push({
+      name: scenario.name,
+      startedAt: new Date(started).toISOString(),
+      wallMs: Date.now() - started,
+      creates: ctx.creates,
+      createLatencyMs: ctx.createLatencyMs,
+      probes: ctx.probes,
+      failures: ctx.failures,
+      hostPeak: ctx.hostPeak,
+    })
+    activeContext = undefined
+    console.log(
+      `${ctx.failures.length ? 'FAIL' : 'PASS'} ${scenario.name}: ` +
+      `${ctx.creates} creates, ${ctx.probes} survivability probes, peak ${ctx.hostPeak} hosts`
+    )
+    if (ctx.failures.length) break
+  }
+
+  mkdirSync(dirname(OUTPUT), { recursive: true })
+  const report = {
+    target: API_URL,
+    runId: RUN_ID,
+    expectedRelease: EXPECTED_RELEASE,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    config: {
+      floorHosts: FLOOR_HOSTS,
+      slotsPerHost: SLOTS_PER_HOST,
+      ttlMs: TTL_MS,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      probeIntervalMs: PROBE_INTERVAL_MS,
+    },
+    results,
+    summary: {
+      scenarios: results.length,
+      failedScenarios: results.filter((result) => result.failures.length).length,
+      creates: results.reduce((sum, result) => sum + result.creates, 0),
+      probes: results.reduce((sum, result) => sum + result.probes, 0),
+      failures: results.reduce((sum, result) => sum + result.failures.length, 0),
+    },
+  }
+  writeFileSync(OUTPUT, JSON.stringify(report, null, 2))
+  console.log(`\nReport: ${OUTPUT}`)
+  if (report.summary.failures || interrupted) process.exitCode = interrupted ? 130 : 1
+}
+
+async function preflight(): Promise<void> {
+  const sandboxes = await getSandboxes()
+  if (sandboxes.length) throw new Error(`preflight: gateway already owns ${sandboxes.length} sandboxes`)
+  const hosts = await getHosts()
+  assertHostInvariants(hosts)
+  const alive = hosts.filter((host) => host.alive)
+  if (alive.length !== FLOOR_HOSTS) {
+    throw new Error(`preflight: expected exactly ${FLOOR_HOSTS} alive floor hosts, got ${alive.length}`)
+  }
+  for (const host of alive) {
+    if (host.slots_used !== 0 || host.free !== SLOTS_PER_HOST) {
+      throw new Error(
+        `preflight: ${host.id} is not empty ${SLOTS_PER_HOST}-slot floor ` +
+        `(used=${host.slots_used}, free=${host.free})`
+      )
+    }
+  }
+}
+
+function assertHostInvariants(hosts: RawHost[]): void {
+  const ids = duplicateIds(hosts.map((host) => host.id))
+  if (ids.length) throw new Error(`duplicate host ids: ${ids.join(',')}`)
+  for (const host of hosts.filter((candidate) => candidate.alive)) {
+    if (host.release !== EXPECTED_RELEASE || host.release_compatible !== true) {
+      throw new Error(
+        `incompatible host ${host.id}: release=${host.release ?? '<missing>'}, ` +
+        `compatible=${String(host.release_compatible)}, expected=${EXPECTED_RELEASE}`
+      )
+    }
+    if (host.slots_total !== SLOTS_PER_HOST) {
+      throw new Error(`host ${host.id}: slots_total=${host.slots_total}, expected ${SLOTS_PER_HOST}`)
+    }
+    if (host.slots_used < 0 || host.slots_used > host.slots_total) {
+      throw new Error(`host ${host.id}: slots_used=${host.slots_used} outside [0,${host.slots_total}]`)
+    }
+    if (host.free < 0 || host.free > host.slots_total) {
+      throw new Error(`host ${host.id}: free=${host.free} outside [0,${host.slots_total}]`)
+    }
+    if (host.slots_used + host.free > host.slots_total) {
+      throw new Error(
+        `host ${host.id}: used+free=${host.slots_used + host.free} exceeds total=${host.slots_total}`
+      )
+    }
+  }
+}
+
+interface MigSnapshot {
+  ts_ms: number
+  target_size: number
+  running: number
+  transitioning: number
+}
+
+function getMigSnapshot(): MigSnapshot {
+  if (!MIG_SNAPSHOT) {
+    throw new Error('AUTOSCALE_MIG_SNAPSHOT is required for sawtooth physical scale-in proof')
+  }
+  try {
+    const value = JSON.parse(readFileSync(MIG_SNAPSHOT, 'utf8')) as Partial<MigSnapshot>
+    if (
+      !Number.isFinite(value.ts_ms) ||
+      !Number.isInteger(value.target_size) ||
+      !Number.isInteger(value.running) ||
+      !Number.isInteger(value.transitioning)
+    ) {
+      throw new Error('snapshot fields are missing or invalid')
+    }
+    return value as MigSnapshot
+  } catch (error) {
+    throw new Error(`cannot read MIG snapshot ${MIG_SNAPSHOT}: ${String((error as Error).message ?? error)}`)
+  }
+}
+
+async function assertCleanGateway(): Promise<void> {
+  await waitFor(async () => {
+    const [sandboxes, hosts] = await Promise.all([getSandboxes(), getHosts()])
+    return sandboxes.length === 0 && hosts.filter((host) => host.alive).every((host) => host.slots_used === 0)
+  }, 60_000, 500, 'zero residual sandboxes and zero advertised host usage')
+  const hosts = await getHosts()
+  assertHostInvariants(hosts)
+}
+
+async function getHosts(): Promise<RawHost[]> {
+  return apiJson<RawHost[]>('/hosts')
+}
+
+async function getSandboxes(): Promise<RawSandbox[]> {
+  return apiJson<RawSandbox[]>('/sandboxes')
+}
+
+async function apiJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_URL.replace(/\/$/, '')}${path}`, {
+    headers: { Authorization: `Bearer ${API_KEY}` },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!response.ok) throw new Error(`GET ${path}: HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`)
+  return response.json() as Promise<T>
+}
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  timeoutMs: number,
+  intervalMs: number,
+  description: string,
+  failFast?: () => void
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown
+  while (Date.now() < deadline) {
+    failFast?.()
+    try {
+      if (await predicate()) return
+    } catch (error) {
+      lastError = error
+    }
+    await sleep(intervalMs)
+  }
+  throw new Error(
+    `timed out after ${timeoutMs}ms waiting for ${description}` +
+    (lastError ? `: ${String((lastError as Error).message ?? lastError)}` : '')
+  )
+}
+
+async function mapLimit<T>(
+  count: number,
+  concurrency: number,
+  fn: (index: number) => Promise<T>
+): Promise<T[]> {
+  const result = new Array<T>(count)
+  let next = 0
+  await Promise.all(
+    Array.from({ length: Math.min(count, concurrency) }, async () => {
+      while (true) {
+        const index = next++
+        if (index >= count) return
+        result[index] = await fn(index)
+      }
+    })
+  )
+  return result
+}
+
+async function mapItems<T>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  await mapLimit(items.length, concurrency, (index) => fn(items[index], index))
+}
+
+function duplicateIds(ids: string[]): string[] {
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  for (const id of ids) {
+    if (seen.has(id)) duplicates.add(id)
+    seen.add(id)
+  }
+  return [...duplicates]
+}
+
+function required(name: string): string {
+  const value = process.env[name]
+  if (!value) throw new Error(`missing required environment variable ${name}`)
+  return value
+}
+
+function integerEnv(name: string, fallback: number, minimum: number): number {
+  const value = Number(process.env[name] ?? fallback)
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer >= ${minimum}, got ${process.env[name] ?? fallback}`)
+  }
+  return value
+}
+
+function shellSingle(value: string): string {
+  return value.replaceAll("'", "'\"'\"'")
+}
+
+function stamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-')
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    if (interrupted) return
+    interrupted = true
+    console.error(`\n${signal}: cleanup requested`)
+    void (async () => {
+      if (activeContext) await activeContext.abortAndCleanup()
+      process.exit(130)
+    })()
+  })
+}
+
+void main().catch(async (error) => {
+  console.error(error)
+  if (activeContext) await activeContext.killAll()
+  process.exitCode = 1
+})
