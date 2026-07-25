@@ -29,6 +29,21 @@ npm run test:quick             # lifecycle + exec + files
 npm run test:stress            # concurrency + churn + load
 ```
 
+The focused Linux/KVM security gate targets one worker directly so both probe
+sandboxes share its bridge:
+
+```bash
+SANDBOX_HOST_URL=http://<worker-ip>:8080 \
+SANDBOX_HOST_KEY=<host-token> \
+WORKER_SSH=you@<worker-ip> \
+./security-gate.sh
+```
+
+It verifies live Firecracker seccomp state, root-only bounded logs, SDK FIFO
+hygiene, expected-exit log cleanup, bridge firewall state, and direct
+guest-to-guest denial. Its exit trap deletes only the two named probes it
+creates.
+
 Exit code is non-zero on any failure; a JSON report lands in `results/`
 (gitignored).
 
