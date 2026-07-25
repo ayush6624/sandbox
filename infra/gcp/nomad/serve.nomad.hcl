@@ -27,6 +27,20 @@ job "sandbox-serve" {
   }
 
   group "serve" {
+    # MIG standby workers are intentionally disconnected while suspended.
+    # Without a disconnect policy Nomad immediately marks their allocations
+    # lost/stop. The still-running old serve process then resumes first, can
+    # accept creates, and is killed when Nomad installs its replacement.
+    #
+    # Keep the original allocation through the longest practical suspension.
+    # A genuinely replaced MIG instance gets a new Nomad node and therefore its
+    # own system allocation; it does not need this allocation to be replaced.
+    disconnect {
+      lost_after = "8760h"
+      replace    = false
+      reconcile  = "keep_original"
+    }
+
     # System jobs have no reschedule policy (a per-host agent isn't movable).
     # restart handles in-place recovery if serve exits.
     restart {

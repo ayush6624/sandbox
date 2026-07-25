@@ -45,7 +45,11 @@ type host struct {
 	token      string // bearer presented when dialing addr
 	release    string // worker artifact generation reported by the host
 	slotsTotal int
-	slotsUsed  int // running sandboxes, from the last heartbeat
+	// slotsUsed starts with the worker heartbeat count and is optimistically
+	// advanced as create responses land. It is capped at slotsTotal because a
+	// heartbeat can already include a registry-committed create whose response
+	// is still in flight.
+	slotsUsed int
 	// slotsFree is the host's self-reported allocatable capacity — the truth
 	// to place against. It differs from slotsTotal-slotsUsed when memory
 	// admission is binding or the host is still warming up (advertises 0).
@@ -495,9 +499,14 @@ func (g *Gateway) reserveHost(exclude map[string]bool) *host {
 }
 
 // release ends a create's reservation. landed=true means the sandbox came up,
-// so the slot moves from reserved to used (and debits the advertised free
-// count until the host's next heartbeat reports its own numbers);
+// so it debits the advertised free count until the host's next heartbeat;
 // landed=false (create failed) just frees the reservation.
+//
+// A heartbeat can include a registry-committed sandbox while its create
+// response is still in flight. Optimistically increment used for fresh
+// landings, but cap it at physical capacity so that race cannot report an
+// impossible slots_used > slots_total. The next heartbeat supplies the exact
+// count; slotsFree + reserved remain the placement accounting bridge.
 func (g *Gateway) release(hostID string, landed bool) {
 	g.mu.Lock()
 	h := g.hosts[hostID]
@@ -509,7 +518,9 @@ func (g *Gateway) release(hostID string, landed bool) {
 		h.reserved--
 	}
 	if landed {
-		h.slotsUsed++
+		if h.slotsUsed < h.slotsTotal {
+			h.slotsUsed++
+		}
 		if h.slotsFree > 0 {
 			h.slotsFree--
 		}
@@ -549,7 +560,9 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 		if h.reserved > 0 {
 			h.reserved--
 		}
-		h.slotsUsed++
+		if h.slotsUsed < h.slotsTotal {
+			h.slotsUsed++
+		}
 		if h.slotsFree > 0 {
 			h.slotsFree--
 		}

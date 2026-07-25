@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -96,10 +97,53 @@ func TestReserveHostCapsAtCapacity(t *testing.T) {
 	if g.hosts["a"].free() != 1 {
 		t.Fatalf("after failed release, host a free=%d want 1", g.hosts["a"].free())
 	}
-	// A landed create moves reserved->used, free stays 0.
+	// A landed create releases its reservation, optimistically advances used,
+	// and debits advertised free.
 	g.release("b", true)
 	if h := g.hosts["b"]; h.free() != 0 || h.slotsUsed != 1 || h.reserved != 23 {
 		t.Fatalf("after landed release, host b used=%d reserved=%d free=%d", h.slotsUsed, h.reserved, h.free())
+	}
+}
+
+func TestLandedCreatesCapOptimisticUsedAfterHeartbeatRace(t *testing.T) {
+	g := liveGateway(&host{id: "worker", slotsTotal: 48, slotsUsed: 0})
+
+	reservations := make([]*host, 48)
+	for i := range reservations {
+		reservations[i] = g.reserveHost(nil)
+		if reservations[i] == nil {
+			t.Fatalf("reservation %d unexpectedly failed", i)
+		}
+	}
+
+	// Half the creates have committed to the worker registry, but none of their
+	// HTTP responses have returned yet. This is the race seen during the
+	// autoscaling burst: the heartbeat includes those 24 while all 48 gateway
+	// reservations are still outstanding.
+	g.mu.Lock()
+	g.hosts["worker"].slotsUsed = 24
+	g.hosts["worker"].slotsFree = 24
+	g.mu.Unlock()
+
+	for i, reserved := range reservations {
+		g.landReservation(reserved, fmt.Sprintf("sandbox-%d", i))
+	}
+
+	h := g.hosts["worker"]
+	if h.slotsUsed != 48 {
+		t.Fatalf("optimistic occupancy escaped physical capacity: slotsUsed=%d, want 48", h.slotsUsed)
+	}
+	if h.reserved != 0 || h.free() != 0 {
+		t.Fatalf("after landings reserved=%d free=%d, want 0/0", h.reserved, h.free())
+	}
+
+	// The next worker heartbeat supplies the exact occupancy.
+	g.mu.Lock()
+	h.slotsUsed = 48
+	h.slotsFree = 0
+	g.mu.Unlock()
+	if h.slotsUsed != h.slotsTotal {
+		t.Fatalf("settled occupancy used=%d total=%d", h.slotsUsed, h.slotsTotal)
 	}
 }
 
