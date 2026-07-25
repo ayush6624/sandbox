@@ -35,11 +35,11 @@ job "sandbox-serve" {
     # Keep the original allocation through the longest practical suspension.
     # A genuinely replaced MIG instance gets a new Nomad node and therefore its
     # own system allocation; it does not need this allocation to be replaced.
-    disconnect {
-      lost_after = "8760h"
-      replace    = false
-      reconcile  = "keep_original"
-    }
+    # Nomad 1.7 names these settings directly on the group. Nomad 1.8 folds
+    # them into disconnect { lost_after, replace, reconcile }; keep the legacy
+    # form until the fleet upgrades its pinned Nomad version.
+    max_client_disconnect      = "8760h"
+    prevent_reschedule_on_lost = true
 
     # System jobs have no reschedule policy (a per-host agent isn't movable).
     # restart handles in-place recovery if serve exits.
