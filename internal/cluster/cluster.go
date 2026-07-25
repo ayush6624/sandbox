@@ -38,7 +38,9 @@ type Heartbeat struct {
 	// overstate capacity. Pointer so the gateway can tell an old host binary
 	// (absent → fall back to SlotsTotal-SlotsUsed) from a genuine zero. A host
 	// still warming up (golden snapshot build) advertises 0 to avoid attracting
-	// a cold-boot storm.
+	// a cold-boot storm. It must never exceed SlotsTotal-SlotsUsed; current
+	// workers produce both values from one registry snapshot and gateways
+	// defensively clamp heartbeats from older releases.
 	SlotsFree *int `json:"slots_free,omitempty"`
 	// Hibernated is the number of idle sandboxes frozen to disk on this host.
 	// They appear in SandboxIDs (requests must route here to wake them) but

@@ -312,6 +312,28 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if hb.SlotsFree != nil {
 		h.slotsFree = *hb.SlotsFree
 	}
+	// SlotsUsed and SlotsFree are sampled by the worker. Older releases
+	// obtained them with separate registry reads, so concurrent deletes could
+	// pair an older used count with newer free capacity (observed as used=7,
+	// free=46 on a 48-slot host). Never advertise more than total-used. A
+	// temporarily conservative count self-corrects on the next heartbeat;
+	// accepting an impossible optimistic count can over-place.
+	if h.slotsTotal < 0 {
+		h.slotsTotal = 0
+	}
+	if h.slotsUsed < 0 {
+		h.slotsUsed = 0
+	}
+	if h.slotsUsed > h.slotsTotal {
+		h.slotsUsed = h.slotsTotal
+	}
+	maxFree := h.slotsTotal - h.slotsUsed
+	if h.slotsFree < 0 {
+		h.slotsFree = 0
+	}
+	if h.slotsFree > maxFree {
+		h.slotsFree = maxFree
+	}
 	if g.expectedRelease != "" && h.release != g.expectedRelease {
 		h.slotsFree = 0
 	}

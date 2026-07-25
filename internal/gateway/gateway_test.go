@@ -352,6 +352,67 @@ func TestRegisterFallsBackWithoutSlotsFree(t *testing.T) {
 	}
 }
 
+func TestRegisterClampsHeartbeatFreeToTotalMinusUsed(t *testing.T) {
+	g := New("tok", 20*time.Second, 0, 0)
+
+	post := func(body string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/register", strings.NewReader(body))
+		g.handleRegister(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("register: got %d: %s", rr.Code, rr.Body.String())
+		}
+	}
+
+	// Reproduce the live delete storm. The worker's older heartbeat path first
+	// listed 7 running rows, then concurrent deletes reduced occupancy to 2
+	// before its separate FreeSlots query returned 46. The gateway must retain
+	// the route/used snapshot but conservatively clamp its free half to 41.
+	post(`{
+		"host_id":"worker",
+		"addr":"10.160.0.59:8080",
+		"slots_total":48,
+		"slots_used":48,
+		"slots_free":0,
+		"sandbox_ids":["before"]
+	}`)
+	post(`{
+		"host_id":"worker",
+		"addr":"10.160.0.59:8080",
+		"slots_total":48,
+		"slots_used":7,
+		"slots_free":46,
+		"sandbox_ids":["a","b","c","d","e","f","g"]
+	}`)
+
+	h := g.hosts["worker"]
+	if h.slotsUsed != 7 || h.slotsFree != 41 {
+		t.Fatalf("racy heartbeat accounting used/free = %d/%d, want 7/41", h.slotsUsed, h.slotsFree)
+	}
+	if got := h.slotsUsed + h.free(); got != h.slotsTotal {
+		t.Fatalf("used+free = %d, want total %d", got, h.slotsTotal)
+	}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		if got := g.route[id]; got != "worker" {
+			t.Fatalf("route %s = %q, want worker", id, got)
+		}
+	}
+
+	// The following coherent heartbeat restores exact empty capacity.
+	post(`{
+		"host_id":"worker",
+		"addr":"10.160.0.59:8080",
+		"slots_total":48,
+		"slots_used":0,
+		"slots_free":48,
+		"sandbox_ids":[]
+	}`)
+	if h.slotsUsed != 0 || h.slotsFree != 48 {
+		t.Fatalf("settled accounting used/free = %d/%d, want 0/48", h.slotsUsed, h.slotsFree)
+	}
+}
+
 func TestWorkerReleaseGatePersistsAndBlocksStaleCapacity(t *testing.T) {
 	releaseFile := filepath.Join(t.TempDir(), "worker-release")
 	g := New("tok", 20*time.Second, 0, 0)

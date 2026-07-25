@@ -72,9 +72,9 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	// Routed = running + hibernated: the gateway must route requests for a
 	// hibernated sandbox here so this host can wake it. Only running ones
 	// consume slots.
-	routed, err := s.reg.ListRouted(ctx)
+	routed, free, err := s.reg.RoutedCapacity(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "heartbeat: list sandboxes: %v\n", err)
+		fmt.Fprintf(os.Stderr, "heartbeat: snapshot routed capacity: %v\n", err)
 		return
 	}
 	ids := make([]string, len(routed))
@@ -112,18 +112,15 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	// SlotsTotal-SlotsUsed overstate it. Until the golden snapshot is ready,
 	// advertise 0 — a fresh host that
 	// invites a burst before it can hot-create serves nothing but cold-boot
-	// storms and agent timeouts. On FreeSlots error, omit the field (gateway
-	// falls back to SlotsTotal-SlotsUsed).
-	if free, err := s.reg.FreeSlots(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "heartbeat: free slots: %v\n", err)
-	} else {
-		select {
-		case <-s.warmed:
-		default:
-			free = 0
-		}
-		hb.SlotsFree = &free
+	// storms and agent timeouts. RoutedCapacity calculated this value from the
+	// same SQLite snapshot as SandboxIDs/SlotsUsed, so concurrent destroys
+	// cannot combine an older used count with newer free capacity.
+	select {
+	case <-s.warmed:
+	default:
+		free = 0
 	}
+	hb.SlotsFree = &free
 	b, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
 	if err != nil {

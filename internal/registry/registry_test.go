@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -545,6 +546,89 @@ func TestListRoutedAndListSplitStatuses(t *testing.T) {
 	}
 	if len(routed) != 2 {
 		t.Fatalf("ListRouted should include hibernated, got %+v", routed)
+	}
+}
+
+func TestRoutedCapacityUsesSameRowsForUsedAndFree(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	r.SetMemAccounting(MemAccounting{
+		TemplateMemMIB: 1024,
+		OverheadMIB:    156,
+		BudgetMIB:      2 * 1180,
+	})
+
+	if _, err := r.Create(ctx, "run1", "", "/tmp/r1.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create running: %v", err)
+	}
+	if _, err := r.Create(ctx, "hib1", "", "/tmp/h1.ext4", nil, "", 0, 0, 0); err != nil {
+		t.Fatalf("create hibernated: %v", err)
+	}
+	if err := r.Hibernate(ctx, "hib1"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+
+	routed, free, err := r.RoutedCapacity(ctx)
+	if err != nil {
+		t.Fatalf("routed capacity: %v", err)
+	}
+	if len(routed) != 2 {
+		t.Fatalf("routed rows = %d, want running + hibernated = 2", len(routed))
+	}
+	running := 0
+	for _, sb := range routed {
+		if sb.Status == StatusRunning {
+			running++
+		}
+	}
+	if running != 1 || free != 1 {
+		t.Fatalf("coherent used/free = %d/%d, want 1/1 (memory-bound)", running, free)
+	}
+}
+
+func TestRoutedCapacityAvoidsDeleteBetweenHeartbeatReads(t *testing.T) {
+	r := testRegistryWithPools(t, Pools{
+		TapPrefix:  "fc",
+		TapMax:     48,
+		GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.57",
+		PortMin:    5200,
+		PortMax:    5247,
+	})
+	ctx := context.Background()
+	for i := 0; i < 7; i++ {
+		id := fmt.Sprintf("sb-%d", i)
+		if _, err := r.Create(ctx, id, "", "/tmp/"+id+".ext4", nil, "", 0, 0, 0); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	// Deterministically reproduce the old heartbeat's two-query race: list
+	// first, then let five deletes commit before querying free capacity.
+	oldRouted, err := r.ListRouted(ctx)
+	if err != nil {
+		t.Fatalf("old list routed: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := r.Destroy(ctx, fmt.Sprintf("sb-%d", i)); err != nil {
+			t.Fatalf("destroy %d: %v", i, err)
+		}
+	}
+	oldFree, err := r.FreeSlots(ctx)
+	if err != nil {
+		t.Fatalf("old free slots: %v", err)
+	}
+	if len(oldRouted) != 7 || oldFree != 46 || len(oldRouted)+oldFree != 53 {
+		t.Fatalf("failed to reproduce old skew: used=%d free=%d", len(oldRouted), oldFree)
+	}
+
+	// The heartbeat API performs one routed-row read and derives capacity from
+	// those exact rows, so no delete can split its used/free snapshot.
+	routed, free, err := r.RoutedCapacity(ctx)
+	if err != nil {
+		t.Fatalf("routed capacity: %v", err)
+	}
+	if len(routed) != 2 || free != 46 || len(routed)+free != 48 {
+		t.Fatalf("coherent snapshot used/free = %d/%d, want 2/46", len(routed), free)
 	}
 }
 

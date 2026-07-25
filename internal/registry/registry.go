@@ -177,6 +177,10 @@ func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return r.freeSlotsFor(running, committedMem), nil
+}
+
+func (r *Registry) freeSlotsFor(running int, committedMem int64) int {
 	free := r.pools.TapMax - running
 	if f := r.pools.ipPoolSize() - running; f < free {
 		free = f
@@ -189,7 +193,7 @@ func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
 	if free < 0 {
 		free = 0
 	}
-	return free, nil
+	return free
 }
 
 // Stats is a point-in-time snapshot of a host's occupancy, for the /metrics
@@ -228,11 +232,10 @@ func (r *Registry) Stats(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
-	free, err := r.FreeSlots(ctx)
-	if err != nil {
-		return Stats{}, err
-	}
-	s.SlotsFree = free
+	// Derive free capacity from the same aggregate query. Calling FreeSlots
+	// here would take a second SQLite snapshot and can pair an older Running
+	// count with newer capacity while deletes are committing.
+	s.SlotsFree = r.freeSlotsFor(s.Running, s.CommittedMemMIB)
 	s.TapUsed, s.TapTotal = s.Running, r.pools.TapMax
 	s.IPUsed, s.IPTotal = s.Running, r.pools.ipPoolSize()
 	s.PortTotal = r.pools.PortMax - r.pools.PortMin + 1
@@ -729,6 +732,40 @@ func (r *Registry) ListRouted(ctx context.Context) ([]Sandbox, error) {
 	}
 	defer rows.Close()
 	return collectSandboxes(rows)
+}
+
+// RoutedCapacity returns the routed sandboxes and allocatable capacity from
+// one SQLite read snapshot. Heartbeats must not call ListRouted and FreeSlots
+// separately: concurrent destroys can otherwise make the first read report
+// (for example) 7 running sandboxes while the later read reports 46 free
+// slots, an impossible 53/48 accounting state.
+func (r *Registry) RoutedCapacity(ctx context.Context) ([]Sandbox, int, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?) ORDER BY created_at DESC`,
+		StatusRunning, StatusHibernated)
+	if err != nil {
+		return nil, 0, err
+	}
+	routed, err := collectSandboxes(rows)
+	rows.Close()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	running := 0
+	var committedMem int64
+	for _, sb := range routed {
+		if sb.Status != StatusRunning {
+			continue
+		}
+		running++
+		mem := sb.MemMIB
+		if mem == 0 {
+			mem = r.mem.TemplateMemMIB
+		}
+		committedMem += mem + r.mem.OverheadMIB
+	}
+	return routed, r.freeSlotsFor(running, committedMem), nil
 }
 
 // Destroy removes a sandbox row outright, along with its port mappings.
