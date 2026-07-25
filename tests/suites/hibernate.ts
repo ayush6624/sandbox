@@ -50,7 +50,7 @@ suite.test('hibernate is idempotent-ish: second call on a frozen sandbox fails c
   const sbx = await ctx.createTracked()
   await sbx.hibernate()
   // Not running → the API refuses rather than double-freezing.
-  await assertThrows(() => sbx.hibernate(), 'SandboxError', 'hibernate while hibernated')
+  await assertThrows(() => sbx.hibernate(), 'ConflictError', 'hibernate while hibernated')
   // Still wakeable afterwards.
   const res = await sbx.commands.run('echo ok')
   assertEq(res.stdout.trim(), 'ok', 'wake after failed double-hibernate')
