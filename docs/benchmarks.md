@@ -1,9 +1,10 @@
 # Benchmarks
 
-**Updated 2026-07-23.** The instrumented headline/detail numbers were measured
+**Updated 2026-07-24.** The instrumented headline/detail numbers were measured
 2026-07-01 → 2026-07-12 (server release `b801d6d`+); a full end-to-end SDK
 re-run on the current fleet (commit `06f5c16`) is in
-[2026-07-23 fleet re-run](#2026-07-23-fleet-re-run-commit-06f5c16) below.
+[2026-07-23 fleet re-run](#2026-07-23-fleet-re-run-commit-06f5c16), followed by
+the [2026-07-24 stress and autoscaling burst](#2026-07-24-stress-and-autoscaling-burst-commit-1cefc65).
 Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 (published at <https://claude.ai/code/artifact/f14de3c5-96c3-45d1-bc7d-1a4ce4ccf6b3>).
 
@@ -19,6 +20,7 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 | Diff snapshot write | **123 ms** (vs ~1.5 s full); uploads ~24× smaller | pause → snapshot written |
 | Cold boot (baseline) | 3.46 s p50 (GCP), ~2.2 s (Hetzner bare metal) | create request → agent answers |
 | Burst churn | 499/500 creates on 3 hosts (72 slots), 6.9 creates/s sustained | 500 create→exec→kill @ concurrency 96 |
+| Autoscaling held burst | **160/160 created in 50.0 s**, 0 failures; scale decision in 9.8 s | 160 simultaneous creates held until all settled, starting from 2×48 slots |
 
 Environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB, nested KVM), guests
 2 vCPU / 1 GB, Firecracker v1.15.0, XFS reflink storage; client on the same
@@ -73,8 +75,11 @@ connection:
 | Wake on API request, same identity (common case) | **49 ms** server-side |
 | Wake on TCP connect to a forwarded port | **133 ms** incl. guest dial |
 
-Frozen background processes survive; the guest wall clock is re-stepped
-deterministically on every resume path (`/clock` push + MMDS epoch).
+Frozen background processes survive. A 2026-07-24 stress run found an
+intermittent regression in the same-identity wake clock re-step: 3/5 targeted
+reproductions returned the guest clock approximately 11 s stale after a 10 s
+freeze. Hot-create clock sync remained 5/5. Wake latency and state preservation
+still passed, but the clock-correctness claim is not currently deterministic.
 
 ### Burst & fleet
 
@@ -128,6 +133,52 @@ The burst's create p50 rising to 5.2 s at 96-in-flight — with **zero** 503s, p
 exhaustion, or agent timeouts — is the per-host create semaphore working as
 designed: a flood queues instead of boot-storming the hosts into timeouts. Raw
 JSON: `sdk/typescript/benchmarks/results/06f5c16/`.
+
+### 2026-07-24 stress and autoscaling burst (commit `1cefc65`)
+
+Validation after the fast-scale changes (baked golden adoption, 10 s control
+loop, create-rate lead term, and corrected occupancy accounting). The client
+ran on the control VM against the gateway, starting with an empty fleet at its
+**2-worker floor × 48 slots = 96 immediately available slots**.
+
+Held burst: 160 create requests were issued simultaneously with auto-hibernation
+disabled, deliberately leaving 64 requests queued until the fleet added
+capacity.
+
+| Result | Measurement |
+|---|---:|
+| Creates | **160/160 succeeded**, 0 failures |
+| Create latency | min 1.31 s · p50 **8.38 s** · p90 48.32 s · p99 49.82 s · max 49.91 s |
+| Whole burst | **50.02 s** |
+| Queue | peaked at **64**, drained to zero |
+| Placement | 48 + 48 on the original workers; 48 + 16 on two resumed workers |
+| Usability | **24/24** sampled sandboxes executed `echo ok` |
+| Cleanup | **160/160** deleted, 0 kill failures; gateway returned to 0 sandboxes |
+
+Scale-up timeline, relative to the first create:
+
+| Event | Time |
+|---|---:|
+| `sandbox:workers_desired` first changed 1 → 4 | ~6 s |
+| Autoscaler issued MIG resize 2 → 4 | **9.8 s** |
+| Two stopped workers began resuming | ~19 s |
+| All 160 creates completed | **50.0 s** |
+
+The desired metric briefly reached 5, but the first 2→4 action supplied 192
+slots—enough for the 160-request burst—so the cooldown correctly avoided a
+second resize. This is the end-to-end proof of the fast-scale path: the old
+held-overload run took roughly 450 s to ramp 3→8 hosts; this smaller,
+capacity-targeted burst detected demand in one control-loop interval and
+finished without a 503, pool-exhaustion error, or agent timeout.
+
+The broader stress suite completed **30/31 checks in 138.5 s**. Concurrency,
+churn, load, snapshots, fan-out, hibernation state preservation, ports, and
+hot-create clock correctness passed. The sole failure was
+`clock :: hibernate + wake resteps the clock`; it reproduced 3/5 times after
+the suite and is tracked as a wake-only timing regression rather than being
+folded into the successful burst result.
+
+Driver: [`tests/burst.ts`](../tests/burst.ts).
 
 ## Versus hosted sandbox providers
 

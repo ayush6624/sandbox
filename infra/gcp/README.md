@@ -69,6 +69,19 @@ adding fields to `client.CreateOpts` (the gateway re-encodes create bodies
 through it, so an old gateway silently drops new fields) — also run
 `./control.sh deploy` to update the control plane.
 
+**Observe it** in Grafana at the URL printed by `./control.sh status`. The
+provisioned **Sandbox Fleet** dashboard separates live operational telemetry
+from offline benchmark evidence:
+
+- gateway demand, queue, rejection, desired-worker, and direct-scale signals
+  refresh on the 10 s control-loop scrape;
+- per-worker pools, memory, create concurrency, lifecycle, release, and
+  readiness phases arrive through the 30 s federation scrape;
+- rollout panels compare the gateway's persisted expected worker release with
+  releases actually serving, including workers gated from new placement;
+- benchmark p50/p95/p99 values are reference text, not live samples. The
+  service does not yet export request-duration histograms.
+
 **Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` (bounds + cost guardrail),
 `SLOTS_PER_HOST` (the **single source of truth** for per-host capacity —
 `deploy-job.sh` *generates* the pools in `devbox-gcp.json` from it: taps = IPs
@@ -135,10 +148,18 @@ immediately; the MIG resumes suspended standby workers first, then starts
 stopped workers, and finally creates fresh VMs when both pools run dry. A fresh host
 advertises `slots_free=0` until its golden snapshot is built, so it is never
 boot-stormed with cold creates; each host also bounds concurrent bring-ups
-(`create_concurrency`, default 2×cores capped at 16). A create that still hits
-a stale host gets failed over to the next host by the gateway (up to 3
-attempts) before it would ever surface an error. Only a burst that outruns
-queue-wait + MIG_MAX sees 503s (with Retry-After).
+(`create_concurrency`; the fleet explicitly uses 24, while the general default
+remains 2×cores capped at 16). When warm-up completes the worker immediately
+heartbeats its real capacity, and that heartbeat broadcasts a retry to all
+gateway waiters. Worker heartbeats also carry the deployed release. Before
+submitting a new Nomad job, `deploy-job.sh` persists that release in the
+gateway; a resumed worker still running an older allocation keeps its existing
+sandbox routes but is forced to `slots_free=0` until Nomad starts the current
+allocation. This prevents a burst from landing on a serve process that the
+system-job rollout is about to terminate. A create that still hits a stale host
+gets failed over to the next host by the gateway (up to 3 attempts) before it
+would ever surface an error. Only a burst that outruns queue-wait + MIG_MAX
+sees 503s (with Retry-After).
 
 **Teardown:** `./mig.sh down` then `./control.sh down` (the reserved IP, SAs, and
 buckets persist — remove with `gcloud` if you're fully done).
@@ -148,11 +169,15 @@ buckets persist — remove with `gcloud` if you're fully done).
 
 ### Profiling a scale-up (worker readiness)
 
-Autoscale latency splits into a **decision** span (demand → MIG resize, ~10 s:
-scrape 10 s + rule eval 10 s + `evaluation_interval` 10 s) and a **readiness**
+Autoscale latency splits into a **decision** span and a **readiness**
 span (resize → the new host advertises capacity), which dominates. The readiness
 span is instrumented per stage and exported on every host's `/metrics`, federated
 to Prometheus with a `host` label:
+
+The gateway fast path submits a grow-only MIG resize when its create queue
+changes from empty to non-empty. It debounces for 50 ms to collect the burst and
+sizes from used + in-flight reservations + queued creates + headroom. The normal
+Prometheus/Nomad loop still reconciles exact desired capacity and owns scale-in.
 
 ```promql
 sandbox_worker_ready_seconds                  # headline: kernel boot -> capacity advertised

@@ -2,7 +2,7 @@
 # Runs as root ON the control VM (piped in by control.sh deploy). Installs and
 # starts the four control-plane services from the rsync'd assets under
 # $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
-# PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SLOTS_PER_HOST
+# PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
 # HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
 # QUEUE_WAIT QUEUE_MAX REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
 # GRAFANA_ADMIN_PASSWORD
@@ -51,8 +51,14 @@ Description=sandbox multi-host gateway (control plane)
 After=network-online.target
 Wants=network-online.target
 [Service]
+StateDirectory=sandbox-gateway
+Environment=SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
 ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN} \
-  --queue-wait ${QUEUE_WAIT:-180s} --queue-max ${QUEUE_MAX:-4096}
+  --queue-wait ${QUEUE_WAIT:-180s} --queue-max ${QUEUE_MAX:-4096} \
+  --worker-release-file /var/lib/sandbox-gateway/worker-release \
+  --direct-scale-project ${PROJECT} --direct-scale-zone ${ZONE} \
+  --direct-scale-mig ${MIG_NAME} --direct-scale-max ${MIG_MAX} \
+  --direct-scale-slots-per-host ${SLOTS_PER_HOST} --direct-scale-headroom ${HEADROOM_SLOTS}
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

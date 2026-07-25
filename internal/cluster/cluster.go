@@ -22,6 +22,10 @@ type Heartbeat struct {
 	// Token is the bearer token the gateway must present when calling Addr —
 	// i.e. the host's own api_token. Sent over the (Tailscale) control link.
 	Token string `json:"token"`
+	// Release identifies the worker artifact / Nomad job release running this
+	// serve process. The gateway can route existing sandboxes from an older
+	// release, but must not place new creates there during a rolling update.
+	Release string `json:"release,omitempty"`
 	// SlotsTotal is the host's sandbox capacity (min of its tap/IP pools).
 	SlotsTotal int `json:"slots_total"`
 	// SlotsUsed is the number of running sandboxes on the host right now.

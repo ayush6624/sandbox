@@ -85,6 +85,8 @@ printf '%s\t%s\n' serve_task_started "$(date +%s%3N)" >> /run/sandbox/boot-phase
 exec ./bin/sandbox serve --config config.json \
   --listen  "$${NODE_IP}:8080" \
   --advertise "$${NODE_IP}:8080" \
+  --host-id "$${HOST_ID}" \
+  --worker-release "$${WORKER_RELEASE}" \
   --token "$${HOST_TOKEN}" \
   --gateway "$${GATEWAY_URL}" --gateway-token "$${GATEWAY_TOKEN}"
 EOT
@@ -97,8 +99,14 @@ EOT
 
       env {
         # Nomad interpolates node attributes here; the VPC-internal IP is the
-        # client's fingerprinted primary address.
+        # client's fingerprinted primary address. node.unique.id is persisted
+        # in the Nomad client state, so it remains identical when a suspended
+        # worker resumes and when a new serve allocation replaces the old one.
+        # Do not derive the gateway host ID from hostname: GCE can expose the
+        # short name before guest initialization and the FQDN afterward.
         NODE_IP       = "${attr.unique.network.ip-address}"
+        HOST_ID       = "${node.unique.id}"
+        WORKER_RELEASE = "${var.release}"
         HOST_TOKEN    = "${var.host_token}"
         GATEWAY_URL   = "${var.gateway_url}"
         GATEWAY_TOKEN = "${var.gateway_token}"

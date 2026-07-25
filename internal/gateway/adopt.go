@@ -86,11 +86,8 @@ func (g *Gateway) adoptElsewhere(id string, exclude map[string]bool) (string, bo
 		}
 		_, err := client.NewHTTP(h.addr, h.token).Adopt(ctx, id)
 		if err == nil {
-			g.mu.Lock()
-			g.route[id] = h.id
-			g.mu.Unlock()
-			g.release(h.id, true)
-			return h.id, true
+			hostID := g.landReservation(h, id)
+			return hostID, true
 		}
 		g.release(h.id, false)
 

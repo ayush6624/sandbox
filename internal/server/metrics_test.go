@@ -71,6 +71,7 @@ func metricsTestServer(t *testing.T) *Server {
 // (tap/IP free on hibernate, explicit ports stay held) plus lifecycle counters.
 func TestHandleMetrics(t *testing.T) {
 	s := metricsTestServer(t)
+	s.cfg.WorkerRelease = "release/candidate 7"
 	ctx := context.Background()
 
 	if _, err := s.reg.Create(ctx, "sb-a", "", "/tmp/a", nil, "", 0, 0, 0); err != nil {
@@ -107,6 +108,7 @@ func TestHandleMetrics(t *testing.T) {
 
 	m := parseMetrics(t, w.Body.String())
 	want := map[string]int64{
+		"sandbox_build_info{component=\"worker\",release=\"release_candidate_7\"}": 1,
 		"sandbox_running":                   1,
 		"sandbox_hibernated":                1,
 		"sandbox_pool_used{pool=\"tap\"}":   1, // hibernated released its tap

@@ -83,6 +83,7 @@ type Config struct {
 	GatewayToken  string // bearer the host presents to the gateway
 	AdvertiseAddr string // addr the gateway should dial back; defaults to ListenAddr
 	HostID        string // stable host identity; defaults to hostname
+	WorkerRelease string // deployed worker generation reported in heartbeats
 }
 
 // Server holds runtime state for the sandbox API.

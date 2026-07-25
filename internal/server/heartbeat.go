@@ -35,7 +35,22 @@ func (s *Server) heartbeat(ctx context.Context) {
 	url := s.cfg.GatewayURL + "/register"
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	// Send one immediately so the gateway learns about us without waiting a tick.
+	// Golden adoption/build completes asynchronously after the heartbeat loop
+	// starts. That transition changes slots_free from 0 to real capacity, so
+	// send immediately instead of waiting up to heartbeatInterval. Once warmed
+	// is closed it stays closed; nil the local channel after observing it to
+	// avoid a permanently-ready select case and a heartbeat busy loop.
+	warmed := (<-chan struct{})(s.warmed)
+	select {
+	case <-warmed:
+		warmed = nil
+	default:
+	}
+
+	// Send one immediately so the gateway learns about us without waiting a
+	// tick. Check warmed first: if it was already closed this heartbeat carries
+	// capacity and no event heartbeat is needed. If it closes during this send,
+	// the still-live channel case below sends the capacity update afterward.
 	s.sendHeartbeat(ctx, client, url, hostID, advertise)
 
 	ticker := time.NewTicker(heartbeatInterval)
@@ -44,6 +59,9 @@ func (s *Server) heartbeat(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-warmed:
+			warmed = nil
+			s.sendHeartbeat(ctx, client, url, hostID, advertise)
 		case <-ticker.C:
 			s.sendHeartbeat(ctx, client, url, hostID, advertise)
 		}
@@ -83,6 +101,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		HostID:      hostID,
 		Addr:        advertise,
 		Token:       s.cfg.APIToken,
+		Release:     s.cfg.WorkerRelease,
 		SlotsTotal:  s.reg.Pools().Slots(),
 		SlotsUsed:   runningCount,
 		Hibernated:  hibernated,

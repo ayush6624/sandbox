@@ -24,6 +24,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ type host struct {
 	id         string
 	addr       string // TCP API address the gateway dials
 	token      string // bearer presented when dialing addr
+	release    string // worker artifact generation reported by the host
 	slotsTotal int
 	slotsUsed  int // running sandboxes, from the last heartbeat
 	// slotsFree is the host's self-reported allocatable capacity — the truth
@@ -99,10 +101,32 @@ type Gateway struct {
 	// autoscaler's lead term reads create RATE at 10s resolution instead of the
 	// 30s-federated per-host sandbox_creates_ok_total.
 	createsOK atomic.Int64
-	// slotFreed nudges one queued create to retry placement immediately when
-	// capacity may have appeared (failed create, fresh heartbeat). Buffered,
-	// best-effort; the queue's poll ticker is the backstop.
-	slotFreed chan struct{}
+	// slotFreed is replaced and the old channel closed whenever capacity may
+	// have appeared. Closing broadcasts to every queued create: a fresh worker
+	// can expose dozens of slots in one heartbeat, so waking only one waiter
+	// needlessly leaves the rest on the polling backstop.
+	slotFreedMu sync.Mutex
+	slotFreed   chan struct{}
+
+	// directScaler is the fast path for queue pressure. On the first waiter
+	// (queue 0 -> 1), the gateway briefly debounces to collect the burst, then
+	// asks the scaler to grow to fit occupied + reserved + queued demand. The
+	// normal Prometheus/Nomad autoscaler remains the reconciliation loop.
+	directScaler       DirectScaler
+	directSlotsPerHost int
+	directHeadroom     int
+	directScalePending atomic.Bool
+	directScaleStarted atomic.Int64
+	directScaleFailed  atomic.Int64
+
+	// expectedRelease gates placement during worker rollouts. A suspended VM
+	// can resume an old serve process and heartbeat before Nomad replaces its
+	// stale allocation. Keep its routes, but force free capacity to zero until
+	// the expected release reports. The value is persisted across gateway
+	// restarts and updated by deploy-job.sh before it submits the new job.
+	expectedRelease string
+	releaseFile     string
+	releaseUpdateMu sync.Mutex
 
 	mu        sync.RWMutex
 	hosts     map[string]*host  // host id → host
@@ -125,6 +149,12 @@ type Gateway struct {
 	proxies sync.Map // host id → *hostProxyEntry
 }
 
+// DirectScaler is implemented by the queue-triggered infrastructure fast path.
+// Implementations must treat desired as a grow-only request.
+type DirectScaler interface {
+	ScaleOut(context.Context, int) error
+}
+
 // New returns a Gateway. token gates all inbound requests (clients and host
 // registration alike); ttl is the stale-host cutoff. queueWait/queueMax
 // configure the create wait queue (queueWait 0 disables queueing).
@@ -134,12 +164,51 @@ func New(token string, ttl time.Duration, queueWait time.Duration, queueMax int)
 		ttl:       ttl,
 		queueWait: queueWait,
 		queueMax:  queueMax,
-		slotFreed: make(chan struct{}, 1),
+		slotFreed: make(chan struct{}),
 		hosts:     map[string]*host{},
 		route:     map[string]string{},
 		snapRoute: map[string]string{},
 		adopts:    map[string]*adoptInflight{},
 	}
+}
+
+// ConfigureDirectScaleOut enables a queue 0 -> 1 scale-out trigger. The direct
+// path is deliberately optional so non-GCE and local gateways are unchanged.
+func (g *Gateway) ConfigureDirectScaleOut(s DirectScaler, slotsPerHost, headroom int) error {
+	if s == nil {
+		return errors.New("direct scale-out scaler is nil")
+	}
+	if slotsPerHost <= 0 {
+		return errors.New("direct scale-out slots per host must be positive")
+	}
+	if headroom < 0 {
+		return errors.New("direct scale-out headroom cannot be negative")
+	}
+	g.directScaler = s
+	g.directSlotsPerHost = slotsPerHost
+	g.directHeadroom = headroom
+	return nil
+}
+
+// ConfigureWorkerReleaseFile enables the persisted worker-release placement
+// gate. A missing file is valid on first deploy; PUT /worker-release creates it.
+func (g *Gateway) ConfigureWorkerReleaseFile(path string) error {
+	if path == "" {
+		return errors.New("worker release file path is empty")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read worker release file: %w", err)
+	}
+	release := strings.TrimSpace(string(b))
+	if err == nil {
+		if err := validateWorkerRelease(release); err != nil {
+			return fmt.Errorf("worker release file: %w", err)
+		}
+	}
+	g.releaseFile = path
+	g.expectedRelease = release
+	return nil
 }
 
 // Serve listens on addr until ctx is cancelled.
@@ -150,6 +219,8 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /register", g.handleRegister)
 	mux.HandleFunc("GET /info", g.handleInfo)
 	mux.HandleFunc("GET /hosts", g.handleHosts)
+	mux.HandleFunc("GET /worker-release", g.handleWorkerRelease)
+	mux.HandleFunc("PUT /worker-release", g.handleWorkerRelease)
 	mux.HandleFunc("GET /metrics", g.handleMetrics)
 	// Per-host detail, federated: the gateway scrapes each live host's /metrics
 	// (it already holds their addr+token) and re-exports every series with a
@@ -206,6 +277,22 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.mu.Lock()
+	// A host's advertised API address is unique within the fleet. Treat it as
+	// the physical-host identity backstop when HostID changes across a process
+	// restart (for example, a resumed GCE worker first reporting its short
+	// hostname and the replacement Nomad allocation reporting its FQDN).
+	//
+	// Keeping both entries would double-count the same capacity. Worse, creates
+	// routed through the old ID would become unreachable when that entry timed
+	// out, even though the sandboxes still exist at this address. The incoming
+	// heartbeat is authoritative for the address, so discard the superseded
+	// identity before rebuilding its routes below.
+	for id, existing := range g.hosts {
+		if id != hb.HostID && existing.addr == hb.Addr {
+			fmt.Fprintf(os.Stderr, "gateway: host %s replaced by %s at %s\n", id, hb.HostID, hb.Addr)
+			g.dropHostLocked(id)
+		}
+	}
 	h := g.hosts[hb.HostID]
 	if h == nil {
 		h = &host{id: hb.HostID}
@@ -214,11 +301,15 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	h.addr = hb.Addr
 	h.token = hb.Token
+	h.release = hb.Release
 	h.slotsTotal = hb.SlotsTotal
 	h.slotsUsed = hb.SlotsUsed
 	h.slotsFree = hb.SlotsTotal - hb.SlotsUsed // old host binary: best guess
 	if hb.SlotsFree != nil {
 		h.slotsFree = *hb.SlotsFree
+	}
+	if g.expectedRelease != "" && h.release != g.expectedRelease {
+		h.slotsFree = 0
 	}
 	h.hibernated = hb.Hibernated
 	h.lastSeen = time.Now()
@@ -292,10 +383,9 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 			// Landed: convert the reservation into a used slot and record the
 			// route. The next heartbeat overwrites the host's counts (which now
 			// include this sandbox), so the adjustment just bridges the gap.
-			g.mu.Lock()
-			g.route[sb.ID] = h.id
-			g.mu.Unlock()
-			g.release(h.id, true)
+			// landReservation also handles the host changing identity while this
+			// request was in flight.
+			g.landReservation(h, sb.ID)
 			sb.HostAddr = hostOnly(h.addr)
 			writeJSON(w, http.StatusCreated, sb)
 			return
@@ -435,14 +525,56 @@ func (g *Gateway) release(hostID string, landed bool) {
 	}
 }
 
-// notifySlotFreed wakes at most one awaitHost waiter without blocking. The
-// 250ms poll remains the backstop; this just shaves latency when capacity
-// appears (failed create, fresh heartbeat).
-func (g *Gateway) notifySlotFreed() {
-	select {
-	case g.slotFreed <- struct{}{}:
-	default:
+// landReservation records a successful create/adopt and converts its
+// reservation into a used slot. A host can replace its HostID while the
+// request is in flight; in that case handleRegister has removed the reserved
+// ID, so resolve the current identity by the same unique advertised address
+// before writing the route. It returns the identity the route was recorded
+// against.
+func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
+	g.mu.Lock()
+	h := g.hosts[reserved.id]
+	if h == nil || h.addr != reserved.addr {
+		h = nil
+		for _, candidate := range g.hosts {
+			if candidate.addr == reserved.addr {
+				h = candidate
+				break
+			}
+		}
 	}
+	routeID := reserved.id
+	if h != nil {
+		routeID = h.id
+		if h.reserved > 0 {
+			h.reserved--
+		}
+		h.slotsUsed++
+		if h.slotsFree > 0 {
+			h.slotsFree--
+		}
+	}
+	g.route[sandboxID] = routeID
+	g.mu.Unlock()
+	g.createsOK.Add(1)
+	return routeID
+}
+
+// notifySlotFreed broadcasts to every awaitHost waiter without blocking. Each
+// waiter still reserves atomically, so only the newly available slots win; the
+// rest return to waiting. The 250ms poll remains the missed-signal backstop.
+func (g *Gateway) notifySlotFreed() {
+	g.slotFreedMu.Lock()
+	close(g.slotFreed)
+	g.slotFreed = make(chan struct{})
+	g.slotFreedMu.Unlock()
+}
+
+func (g *Gateway) slotFreedSignal() <-chan struct{} {
+	g.slotFreedMu.Lock()
+	ch := g.slotFreed
+	g.slotFreedMu.Unlock()
+	return ch
 }
 
 // queuePollInterval is how often a queued create re-tries placement. Capacity
@@ -463,9 +595,13 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 	if wait <= 0 {
 		return nil
 	}
-	if g.queued.Add(1) > int64(g.queueMax) {
+	depth := g.queued.Add(1)
+	if depth > int64(g.queueMax) {
 		g.queued.Add(-1)
 		return nil
+	}
+	if depth == 1 {
+		g.triggerDirectScaleOut()
 	}
 	defer g.queued.Add(-1)
 
@@ -474,12 +610,13 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 	tick := time.NewTicker(queuePollInterval)
 	defer tick.Stop()
 	for {
+		slotFreed := g.slotFreedSignal()
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-timeout.C:
 			return nil
-		case <-g.slotFreed:
+		case <-slotFreed:
 			if h := g.reserveHost(exclude); h != nil {
 				return h
 			}
@@ -489,6 +626,65 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 			}
 		}
 	}
+}
+
+const directScaleDebounce = 50 * time.Millisecond
+
+// triggerDirectScaleOut coalesces the queue's empty -> non-empty edge. The
+// short debounce lets concurrent requests enter the queue and lets in-flight
+// reservations become visible, without paying a scrape/evaluation interval.
+func (g *Gateway) triggerDirectScaleOut() {
+	if g.directScaler == nil || !g.directScalePending.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer g.directScalePending.Store(false)
+		timer := time.NewTimer(directScaleDebounce)
+		defer timer.Stop()
+		<-timer.C
+
+		queued := int(g.queued.Load())
+		if queued == 0 {
+			return
+		}
+
+		now := time.Now()
+		live, occupied := 0, 0
+		g.mu.RLock()
+		for _, h := range g.hosts {
+			if now.Sub(h.lastSeen) > g.ttl {
+				continue
+			}
+			live++
+			// A heartbeat can land after the host has committed a create but
+			// before its HTTP response releases our reservation. Clamp that
+			// brief double-count to the host's physical running capacity.
+			running := h.slotsUsed + h.reserved
+			if running > h.slotsTotal {
+				running = h.slotsTotal
+			}
+			occupied += running + h.hibernated
+		}
+		g.mu.RUnlock()
+
+		desired := (occupied + queued + g.directHeadroom + g.directSlotsPerHost - 1) / g.directSlotsPerHost
+		if desired <= live {
+			// A non-empty queue proves the currently registered fleet cannot
+			// place the request, even if stale accounting says it should fit.
+			desired = live + 1
+		}
+
+		g.directScaleStarted.Add(1)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if err := g.directScaler.ScaleOut(ctx, desired); err != nil {
+			g.directScaleFailed.Add(1)
+			fmt.Fprintf(os.Stderr, "gateway: direct scale-out to %d workers failed: %v\n", desired, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "gateway: direct scale-out requested %d workers (live=%d occupied=%d queued=%d)\n",
+			desired, live, occupied, queued)
+	}()
 }
 
 // hostOnly strips the port from an addr, so clients can pair it with a
@@ -778,10 +974,84 @@ func (g *Gateway) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 // --- debug ---
 
+func (g *Gateway) handleWorkerRelease(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		g.mu.RLock()
+		release := g.expectedRelease
+		g.mu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]string{"release": release})
+		return
+	}
+
+	var body struct {
+		Release string `json:"release"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("decode worker release: %w", err))
+		return
+	}
+	body.Release = strings.TrimSpace(body.Release)
+	if err := validateWorkerRelease(body.Release); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if g.releaseFile == "" {
+		httpError(w, http.StatusServiceUnavailable, errors.New("worker release persistence is not configured"))
+		return
+	}
+
+	g.releaseUpdateMu.Lock()
+	defer g.releaseUpdateMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(g.releaseFile), 0o755); err != nil {
+		httpError(w, http.StatusInternalServerError, fmt.Errorf("create worker release directory: %w", err))
+		return
+	}
+	tmp := g.releaseFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(body.Release+"\n"), 0o644); err != nil {
+		httpError(w, http.StatusInternalServerError, fmt.Errorf("write worker release: %w", err))
+		return
+	}
+	if err := os.Rename(tmp, g.releaseFile); err != nil {
+		_ = os.Remove(tmp)
+		httpError(w, http.StatusInternalServerError, fmt.Errorf("persist worker release: %w", err))
+		return
+	}
+
+	g.mu.Lock()
+	g.expectedRelease = body.Release
+	for _, h := range g.hosts {
+		if h.release != body.Release {
+			h.slotsFree = 0
+		}
+	}
+	g.mu.Unlock()
+	fmt.Fprintf(os.Stderr, "gateway: worker release set to %s; stale workers gated from placement\n", body.Release)
+	writeJSON(w, http.StatusOK, map[string]string{"release": body.Release})
+}
+
+func validateWorkerRelease(release string) error {
+	if release == "" {
+		return errors.New("worker release cannot be empty")
+	}
+	if len(release) > 128 {
+		return errors.New("worker release is longer than 128 bytes")
+	}
+	for _, r := range release {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return fmt.Errorf("worker release contains invalid character %q", r)
+	}
+	return nil
+}
+
 func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 	type hostView struct {
 		ID         string `json:"id"`
 		Addr       string `json:"addr"`
+		Release    string `json:"release,omitempty"`
+		Compatible bool   `json:"release_compatible"`
 		SlotsTotal int    `json:"slots_total"`
 		SlotsUsed  int    `json:"slots_used"`
 		Hibernated int    `json:"hibernated"`
@@ -792,8 +1062,10 @@ func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 	g.mu.RLock()
 	views := []hostView{}
 	for _, h := range g.hosts {
+		compatible := g.expectedRelease == "" || h.release == g.expectedRelease
 		views = append(views, hostView{
-			ID: h.id, Addr: h.addr, SlotsTotal: h.slotsTotal, SlotsUsed: h.slotsUsed,
+			ID: h.id, Addr: h.addr, Release: h.release, Compatible: compatible,
+			SlotsTotal: h.slotsTotal, SlotsUsed: h.slotsUsed,
 			Hibernated: h.hibernated, Free: h.free(), Alive: time.Since(h.lastSeen) <= g.ttl,
 			LastSeenMS: time.Since(h.lastSeen).Milliseconds(),
 		})
@@ -817,21 +1089,27 @@ func (g *Gateway) pruneLoop(ctx context.Context) {
 			for id, h := range g.hosts {
 				if time.Since(h.lastSeen) > g.ttl {
 					fmt.Fprintf(os.Stderr, "gateway: host %s timed out, dropping\n", id)
-					delete(g.hosts, id)
-					g.proxies.Delete(id)
-					for sid, hid := range g.route {
-						if hid == id {
-							delete(g.route, sid)
-						}
-					}
-					for sid, hid := range g.snapRoute {
-						if hid == id {
-							delete(g.snapRoute, sid)
-						}
-					}
+					g.dropHostLocked(id)
 				}
 			}
 			g.mu.Unlock()
+		}
+	}
+}
+
+// dropHostLocked removes a host and every derived cache entry that names it.
+// g.mu must be held for writing.
+func (g *Gateway) dropHostLocked(id string) {
+	delete(g.hosts, id)
+	g.proxies.Delete(id)
+	for sid, hid := range g.route {
+		if hid == id {
+			delete(g.route, sid)
+		}
+	}
+	for sid, hid := range g.snapRoute {
+		if hid == id {
+			delete(g.snapRoute, sid)
 		}
 	}
 }

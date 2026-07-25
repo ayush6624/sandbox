@@ -23,6 +23,7 @@ var (
 	gatewayToken  string
 	advertiseAddr string
 	hostID        string
+	workerRelease string
 )
 
 func serveCmd() *cobra.Command {
@@ -38,6 +39,7 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&gatewayToken, "gateway-token", "", "bearer token presented to the gateway; overrides config gateway_token")
 	cmd.Flags().StringVar(&advertiseAddr, "advertise", "", "address the gateway should dial back; defaults to --listen")
 	cmd.Flags().StringVar(&hostID, "host-id", "", "stable host identity reported to the gateway; defaults to hostname")
+	cmd.Flags().StringVar(&workerRelease, "worker-release", "", "deployed worker generation reported to the gateway")
 	return cmd
 }
 
@@ -63,6 +65,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	if hostID != "" {
 		cfg.HostID = hostID
+	}
+	if workerRelease != "" {
+		cfg.WorkerRelease = workerRelease
 	}
 	if cfg.GatewayURL != "" && cfg.ListenAddr == "" {
 		return fmt.Errorf("--gateway requires --listen (the gateway dials back over TCP)")
@@ -118,6 +123,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		GatewayToken:      cfg.GatewayToken,
 		AdvertiseAddr:     cfg.AdvertiseAddr,
 		HostID:            cfg.HostID,
+		WorkerRelease:     cfg.WorkerRelease,
 	}, reg)
 
 	// Every running sandbox costs a handful of fds (firecracker socket, log,

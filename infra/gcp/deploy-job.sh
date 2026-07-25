@@ -18,6 +18,9 @@ source "$DIR/config.env"
 : "${HOST_TOKEN:?run control.sh deploy first}"
 
 RELEASE="${1:-$(git -C "$REPO" rev-parse --short HEAD)}"
+case "$RELEASE" in
+  *[!A-Za-z0-9._-]*|'') echo "error: release must contain only letters, digits, dot, underscore, or dash"; exit 1 ;;
+esac
 CONTROL_NAME="${CONTROL_NAME:-sandbox-control}"
 CONTROL_IP="${CONTROL_INTERNAL_IP:?}"
 GW_URL="http://${CONTROL_IP}:${GW_PORT:-9090}"
@@ -81,14 +84,20 @@ fi
 # hold. Must be set explicitly on Nomad hosts — serve's /proc/meminfo fallback
 # sees the machine total, not the cgroup limit.
 MEM_PER_SLOT="${MEM_PER_SLOT_MIB:-1180}"
+CREATE_CONCURRENCY="${CREATE_CONCURRENCY:-24}"
+if [ "$CREATE_CONCURRENCY" -lt 1 ]; then
+  echo "error: CREATE_CONCURRENCY=$CREATE_CONCURRENCY must be >= 1"
+  exit 1
+fi
 GEN_CONFIG="$(mktemp)"
-jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" \
+jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" --argjson cc "$CREATE_CONCURRENCY" \
    --arg gipmax "$GIP_MAX" --argjson mps "$MEM_PER_SLOT" '
   .guest_subnet_bits = $bits |
   .pools.TapMax      = $n |
   .pools.GuestIPMax  = $gipmax |
   .pools.PortMax     = (.pools.PortMin + $p - 1) |
-  .mem_budget_mib    = ($n * $mps)
+  .mem_budget_mib    = ($n * $mps) |
+  .create_concurrency = $cc
 ' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
 
 # Size the Nomad task cgroup to the host: MEM_PER_SLOT_MIB per slot + 2 GiB for
@@ -98,12 +107,22 @@ TASK_MEMORY="$(( SLOTS * MEM_PER_SLOT + 2000 ))"
 CORES="$(echo "${WORKER_MACHINE_TYPE:-n2-standard-16}" | grep -oE '[0-9]+$' || echo 16)"
 TASK_CPU="$(( (CORES - 1) * 1000 ))"
 
-echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
+echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS creates=$CREATE_CONCURRENCY /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
 scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_NAME}:/tmp/serve.nomad.hcl"
 scp -o BatchMode=yes -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_NAME}:/tmp/devbox-gcp.json"
 rm -f "$GEN_CONFIG"
 
 echo ">> nomad job run sandbox-serve (release=$RELEASE)"
+# Gate placement BEFORE updating the system job. Suspended workers can resume
+# an old serve process before Nomad notices the new job version; their routes
+# remain usable, but the gateway must expose zero free slots until the
+# allocation carrying this release starts.
+echo ">> set gateway expected worker release=$RELEASE"
+sshc "curl -fsS -X PUT \
+        -H 'Authorization: Bearer $GATEWAY_TOKEN' \
+        -H 'Content-Type: application/json' \
+        --data '{\"release\":\"$RELEASE\"}' \
+        http://127.0.0.1:${GW_PORT:-9090}/worker-release >/dev/null"
 # Values are expanded locally into single-quoted -var args (tokens are hex, the
 # URL/paths have no quotes) — NOT passed via a remote env prefix, which wouldn't
 # be visible to the remote shell's own $VAR expansion on the same command line.

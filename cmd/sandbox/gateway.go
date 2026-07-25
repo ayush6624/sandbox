@@ -10,14 +10,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ayush6624/sandbox/internal/gateway"
+	"github.com/ayush6624/sandbox/internal/gcemig"
 )
 
 var (
-	gwListen    string
-	gwToken     string
-	gwTTL       time.Duration
-	gwQueueWait time.Duration
-	gwQueueMax  int
+	gwListen        string
+	gwToken         string
+	gwTTL           time.Duration
+	gwQueueWait     time.Duration
+	gwQueueMax      int
+	gwScaleProject  string
+	gwScaleZone     string
+	gwScaleMIG      string
+	gwScaleMax      int
+	gwScaleSlots    int
+	gwScaleHeadroom int
+	gwReleaseFile   string
 )
 
 func gatewayCmd() *cobra.Command {
@@ -44,6 +52,13 @@ The gateway exposes the same API as a single server; point the CLI at it with
 	// it starves the autoscaler signal (a 1000-burst against a 512 queue read
 	// as half its real demand).
 	cmd.Flags().IntVar(&gwQueueMax, "queue-max", 4096, "max creates waiting at once; beyond this creates 503 immediately")
+	cmd.Flags().StringVar(&gwScaleProject, "direct-scale-project", "", "GCE project for queue-triggered direct MIG scale-out (empty disables)")
+	cmd.Flags().StringVar(&gwScaleZone, "direct-scale-zone", "", "GCE zone for queue-triggered direct MIG scale-out")
+	cmd.Flags().StringVar(&gwScaleMIG, "direct-scale-mig", "", "GCE managed instance group for queue-triggered direct scale-out")
+	cmd.Flags().IntVar(&gwScaleMax, "direct-scale-max", 0, "maximum MIG size for direct scale-out")
+	cmd.Flags().IntVar(&gwScaleSlots, "direct-scale-slots-per-host", 0, "sandbox slots supplied by each worker")
+	cmd.Flags().IntVar(&gwScaleHeadroom, "direct-scale-headroom", 0, "extra slots included in direct scale-out demand")
+	cmd.Flags().StringVar(&gwReleaseFile, "worker-release-file", "", "persisted expected worker release used to gate stale allocations")
 	return cmd
 }
 
@@ -63,5 +78,19 @@ func runGateway(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	g := gateway.New(gwToken, gwTTL, gwQueueWait, gwQueueMax)
+	if gwReleaseFile != "" {
+		if err := g.ConfigureWorkerReleaseFile(gwReleaseFile); err != nil {
+			return err
+		}
+	}
+	if gwScaleProject != "" || gwScaleZone != "" || gwScaleMIG != "" {
+		scaler, err := gcemig.New(gwScaleProject, gwScaleZone, gwScaleMIG, gwScaleMax)
+		if err != nil {
+			return err
+		}
+		if err := g.ConfigureDirectScaleOut(scaler, gwScaleSlots, gwScaleHeadroom); err != nil {
+			return err
+		}
+	}
 	return g.Serve(ctx, gwListen)
 }

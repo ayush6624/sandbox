@@ -102,8 +102,11 @@ cmd_deploy() {
     "${SSH_USER}@${NAME}:${REMOTE_DIR}/"
 
   echo ">> install Nomad server + Prometheus + autoscaler + gateway on $NAME"
+  local control_release
+  control_release="$(git -C "$REPO" rev-parse --short HEAD)"
   sshx "$NAME" \
     "sudo GW_TOKEN='$GATEWAY_TOKEN' HOST_TOKEN='$HOST_TOKEN' \
+       SANDBOX_RELEASE='$control_release' \
        CONTROL_IP='$IP' GW_PORT='$GW_PORT' PROM_PORT='$PROM_PORT' \
        PROM_VERSION='$PROM_VERSION' NOMAD_VERSION='$NOMAD_VERSION' \
        AUTOSCALER_VERSION='$AUTOSCALER_VERSION' \

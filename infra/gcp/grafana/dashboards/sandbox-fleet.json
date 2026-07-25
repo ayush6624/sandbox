@@ -1,174 +1,362 @@
 {
   "uid": "sandbox-fleet",
   "title": "Sandbox Fleet",
-  "tags": ["sandbox"],
+  "description": "Live fleet demand, capacity, autoscaling, rollout safety, and worker-readiness telemetry. Benchmark results are explicitly marked as offline reference data.",
+  "tags": ["sandbox", "fleet", "autoscaling"],
   "timezone": "",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "10s",
-  "time": { "from": "now-1h", "to": "now" },
-  "templating": { "list": [] },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"],
+    "time_options": ["15m", "1h", "3h", "6h", "12h", "24h", "2d", "7d"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Worker",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+        "query": { "query": "label_values(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}, host)", "refId": "VariableQuery" },
+        "definition": "label_values(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}, host)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
   "annotations": { "list": [] },
   "panels": [
-    { "type": "row", "title": "Fleet overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100, "collapsed": false },
-
     {
-      "type": "stat", "title": "Running sandboxes", "id": 1,
-      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(sandbox_running{job=\"sandbox-hosts\"})" } ]
+      "type": "row", "title": "Operational overview", "id": 100,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false
     },
     {
-      "type": "stat", "title": "Hibernated", "id": 2,
+      "type": "stat", "title": "Running", "id": 1,
+      "description": "Fleet-aggregate running count from the gateway's 10s scrape. Scoped to the gateway to avoid double-counting federated host series.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(sandbox_hibernated{job=\"sandbox-hosts\"})" } ]
+      "targets": [{ "refId": "A", "expr": "sum(sandbox_slots_used{job=\"sandbox-gateway\"})" }]
     },
     {
-      "type": "stat", "title": "Slots free (fleet)", "id": 3,
+      "type": "stat", "title": "Allocatable slots", "id": 2,
+      "description": "Capacity the gateway can place against now. Warming workers intentionally contribute zero until golden readiness.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 1 }, { "color": "green", "value": 10 } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 1 }, { "color": "green", "value": 24 }] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(sandbox_slots_free{job=\"sandbox-hosts\"})" } ]
+      "targets": [{ "refId": "A", "expr": "sum(sandbox_slots_free{job=\"sandbox-gateway\"})" }]
     },
     {
-      "type": "stat", "title": "Hosts live", "id": 4,
+      "type": "stat", "title": "Create queue", "id": 3,
+      "description": "Waiting creates are unmet demand. A 0→1 transition now triggers the direct grow-only MIG scale-out path.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 48 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "sum(sandbox_create_queue_depth{job=\"sandbox-gateway\"})" }]
+    },
+    {
+      "type": "stat", "title": "Live workers", "id": 4,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sandbox_hosts_live" } ]
+      "targets": [{ "refId": "A", "expr": "sandbox_hosts_live{job=\"sandbox-gateway\"}" }]
     },
-
     {
-      "type": "stat", "title": "Create queue depth", "id": 5,
+      "type": "stat", "title": "Workers desired", "id": 5,
+      "description": "Prometheus reconciliation target: occupied + queued + rejected-demand estimate + rate-based/static headroom.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 5 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 50 } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 4 }, { "color": "red", "value": 8 }] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sandbox_create_queue_depth" } ]
+      "targets": [{ "refId": "A", "expr": "sandbox:workers_desired" }]
     },
     {
-      "type": "stat", "title": "Hosts reachable (scrape)", "id": 6,
+      "type": "stat", "title": "Rejected creates (5m)", "id": 6,
+      "description": "Capacity rejections after the queue is full or queue-wait expires. Retrying clients can increment this more than once.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 5 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(sandbox_host_scrape_ok)" } ]
-    },
-    {
-      "type": "stat", "title": "Golden-ready hosts", "id": 7,
-      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 5 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "orange", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(sandbox_golden_ready)" } ]
-    },
-    {
-      "type": "stat", "title": "Create errors (5m)", "id": 8,
-      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 5 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sum(increase(sandbox_creates_error_total{job=\"sandbox-hosts\"}[5m]))" } ]
+      "targets": [{ "refId": "A", "expr": "sum(increase(sandbox_create_rejected_total{job=\"sandbox-gateway\"}[5m]))" }]
     },
 
-    { "type": "row", "title": "Capacity & pools", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "id": 101, "collapsed": false },
-
     {
-      "type": "timeseries", "title": "Fleet slots: used vs free vs total", "id": 9,
+      "type": "row", "title": "Demand & autoscaling", "id": 101,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "collapsed": false
+    },
+    {
+      "type": "timeseries", "title": "Workers: live vs desired", "id": 7,
+      "description": "Desired is the fast 10s recording rule; live is workers within the gateway heartbeat TTL. The gap is capacity requested but not yet registered.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "none" } } }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "min": 0, "decimals": 0, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 12 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "expr": "sandbox_slots_used", "legendFormat": "used" },
-        { "refId": "B", "expr": "sandbox_slots_free", "legendFormat": "free" },
-        { "refId": "C", "expr": "sandbox_slots_total", "legendFormat": "total" }
+        { "refId": "A", "expr": "sandbox_hosts_live{job=\"sandbox-gateway\"}", "legendFormat": "live" },
+        { "refId": "B", "expr": "sandbox:workers_desired", "legendFormat": "desired" }
       ]
     },
     {
-      "type": "bargauge", "title": "Pool utilization by host (used / total)", "id": 10,
+      "type": "timeseries", "title": "Queue and overflow demand", "id": 8,
+      "description": "Overflow estimate mirrors the autoscaling rule: rejected retry rate × 5 seconds. It approximates demand beyond the bounded queue.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
-      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.95 } ] } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "fieldConfig": { "defaults": { "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(sandbox_create_queue_depth{job=\"sandbox-gateway\"})", "legendFormat": "queued" },
+        { "refId": "B", "expr": "sum(rate(sandbox_create_rejected_total{job=\"sandbox-gateway\"}[1m])) * 5", "legendFormat": "overflow estimate" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Create demand and failures (events/min)", "id": 9,
+      "description": "Gateway creates are the freshest fleet demand signal (10s). Worker errors arrive through 30s federation.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "fieldConfig": { "defaults": { "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(sandbox_creates_total{job=\"sandbox-gateway\"}[2m])) * 60", "legendFormat": "creates ok" },
+        { "refId": "B", "expr": "sum(rate(sandbox_creates_error_total{job=\"sandbox-hosts\"}[2m])) * 60", "legendFormat": "worker create errors" },
+        { "refId": "C", "expr": "sum(rate(sandbox_create_rejected_total{job=\"sandbox-gateway\"}[2m])) * 60", "legendFormat": "capacity rejections" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Fleet slots and queued demand", "id": 10,
+      "description": "All slot series are explicitly gateway-scoped. Earlier unscoped queries counted gateway aggregates and federated workers together.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_slots_total{job=\"sandbox-gateway\"}", "legendFormat": "registered total" },
+        { "refId": "B", "expr": "sandbox_slots_used{job=\"sandbox-gateway\"}", "legendFormat": "running" },
+        { "refId": "C", "expr": "sandbox_slots_free{job=\"sandbox-gateway\"}", "legendFormat": "allocatable" },
+        { "refId": "D", "expr": "sandbox_create_queue_depth{job=\"sandbox-gateway\"}", "legendFormat": "queued demand" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Direct scale-out fast path", "id": 11,
+      "description": "The gateway submits a grow-only resize on queue 0→1. Failures do not disable Prometheus/Nomad reconciliation, but any non-zero failure rate needs investigation.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "ops", "custom": { "drawStyle": "bars", "fillOpacity": 30 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(sandbox_direct_scale_out_total{job=\"sandbox-gateway\"}[$__rate_interval]))", "legendFormat": "requests" },
+        { "refId": "B", "expr": "sum(increase(sandbox_direct_scale_out_failed_total{job=\"sandbox-gateway\"}[$__rate_interval]))", "legendFormat": "failed" }
+      ]
+    },
+
+    {
+      "type": "row", "title": "Host capacity & lifecycle", "id": 102,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }, "collapsed": false
+    },
+    {
+      "type": "bargauge", "title": "Slot utilization by worker", "id": 12,
+      "description": "Gateway heartbeat data at 10s cadence, including reservations in allocatable capacity.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.95 }] } }, "overrides": [] },
       "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sandbox_pool_used{job=\"sandbox-hosts\"} / sandbox_pool_total{job=\"sandbox-hosts\"}", "legendFormat": "{{host}} {{pool}}" } ]
+      "targets": [{ "refId": "A", "expr": "sandbox_host_slots_used{job=\"sandbox-gateway\",host=~\"$host\"} / sandbox_host_slots_total{job=\"sandbox-gateway\",host=~\"$host\"}", "legendFormat": "{{host}}" }]
     },
-
     {
-      "type": "timeseries", "title": "Committed memory vs budget (MiB, by host)", "id": 11,
+      "type": "bargauge", "title": "Binding pools by worker", "id": 13,
+      "description": "Tap/IP track running VMs; port tracks running + hibernated mappings. This identifies the resource preventing placement.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
-      "fieldConfig": { "defaults": { "unit": "mbytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.95 }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "sandbox_pool_used{job=\"sandbox-hosts\",host=~\"$host\"} / sandbox_pool_total{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}} / {{pool}}" }]
+    },
+    {
+      "type": "bargauge", "title": "Committed memory / budget", "id": 14,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.8 }, { "color": "red", "value": 0.95 }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "sandbox_committed_mem_mib{job=\"sandbox-hosts\",host=~\"$host\"} / sandbox_mem_budget_mib{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Create concurrency saturation", "id": 15,
+      "description": "Fleet deploys now default to 24 bring-ups per worker. Sustained saturation explains rising create latency even before capacity is exhausted.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "sandbox_create_inflight{job=\"sandbox-hosts\",host=~\"$host\"} / sandbox_create_concurrency{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Lifecycle events (events/min)", "id": 16,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "fieldConfig": { "defaults": { "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "expr": "sandbox_committed_mem_mib{job=\"sandbox-hosts\"} * 1024 * 1024", "legendFormat": "{{host}} committed" },
-        { "refId": "B", "expr": "sandbox_mem_budget_mib{job=\"sandbox-hosts\"} * 1024 * 1024", "legendFormat": "{{host}} budget" }
+        { "refId": "A", "expr": "sum(rate(sandbox_hibernations_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60", "legendFormat": "hibernations" },
+        { "refId": "B", "expr": "sum(rate(sandbox_wakes_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60", "legendFormat": "wakes" },
+        { "refId": "C", "expr": "sum(rate(sandbox_wake_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60", "legendFormat": "wake failures" }
       ]
     },
-    {
-      "type": "timeseries", "title": "Lifecycle rate (fleet, events/min)", "id": 12,
-      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-      "targets": [
-        { "refId": "A", "expr": "sum(rate(sandbox_creates_ok_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "creates ok" },
-        { "refId": "B", "expr": "sum(rate(sandbox_creates_error_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "creates error" },
-        { "refId": "C", "expr": "sum(rate(sandbox_hibernations_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "hibernations" },
-        { "refId": "D", "expr": "sum(rate(sandbox_wakes_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "wakes" },
-        { "refId": "E", "expr": "sum(rate(sandbox_wake_failures_total{job=\"sandbox-hosts\"}[5m])) * 60", "legendFormat": "wake failures" }
-      ]
-    },
-
-    { "type": "row", "title": "Health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }, "id": 102, "collapsed": false },
 
     {
-      "type": "timeseries", "title": "Create-slot saturation by host (inflight vs capacity)", "id": 13,
-      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-      "targets": [
-        { "refId": "A", "expr": "sandbox_create_inflight{job=\"sandbox-hosts\"}", "legendFormat": "{{host}} inflight" },
-        { "refId": "B", "expr": "sandbox_create_concurrency{job=\"sandbox-hosts\"}", "legendFormat": "{{host}} capacity" }
-      ]
+      "type": "row", "title": "Production rollout safety", "id": 103,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 }, "collapsed": false
     },
     {
-      "type": "timeseries", "title": "Per-host scrape health (1=ok)", "id": 14,
+      "type": "stat", "title": "Worker releases present", "id": 17,
+      "description": "One is healthy after a completed rollout; more than one is expected only while a Nomad system-job rollout is in progress.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
-      "fieldConfig": { "defaults": { "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20 } }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-      "targets": [ { "refId": "A", "expr": "sandbox_host_scrape_ok", "legendFormat": "{{host}}" } ]
-    },
-
-    { "type": "row", "title": "Autoscale: worker readiness", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }, "id": 103, "collapsed": false },
-
-    {
-      "type": "stat", "title": "Worker ready: boot -> capacity (slowest host)", "id": 15,
-      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 36 },
-      "description": "Seconds from kernel boot until the host first advertised free slots to the gateway — the span autoscale latency work targets. Absent for a host that has not warmed yet (never a misleading 0).",
-      "fieldConfig": { "defaults": { "unit": "s", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 60 }, { "color": "red", "value": 120 } ] } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 40 },
+      "fieldConfig": { "defaults": { "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }, { "color": "orange", "value": 2 }] } }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "max(sandbox_worker_ready_seconds)" } ]
+      "targets": [{ "refId": "A", "expr": "count(count by (release) (sandbox_build_info{job=\"sandbox-hosts\",component=\"worker\"}))" }]
     },
     {
-      "type": "bargauge", "title": "Boot phase offsets by host (s from kernel boot)", "id": 16,
+      "type": "stat", "title": "Release-incompatible workers", "id": 18,
+      "description": "Workers whose heartbeat release differs from the gateway's persisted rollout target. They keep existing routes but are gated from new placement.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
-      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 36 },
-      "description": "Each phase's completion time relative to the boot anchor; the gap between adjacent phases is that stage's cost. Order: startup_script_entered, data_disk_ready, rootfs_staged, nomad_started, serve_task_started (Nomad schedule + GCS artifact pull), serve_process_start, reconcile_done, golden_settled (adopt vs cold build), first_heartbeat_ok, capacity_advertised. Absolute timestamps underneath, so the 10s scrape does not blur the boundaries.",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 40 },
+      "fieldConfig": { "defaults": { "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "sandbox_worker_release_mismatch{job=\"sandbox-gateway\"}" }]
+    },
+    {
+      "type": "stat", "title": "Workers not golden-ready", "id": 19,
+      "description": "During rollout or scale-out, workers advertise zero allocatable slots until their golden snapshot settles.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 40 },
+      "fieldConfig": { "defaults": { "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 3 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_min(sandbox_hosts_live{job=\"sandbox-gateway\"} - sum(sandbox_golden_ready{job=\"sandbox-hosts\"}), 0)" }]
+    },
+    {
+      "type": "stat", "title": "Worker scrape failures", "id": 20,
+      "description": "Gateway federation failures. A newly registered worker can briefly appear here before its metrics endpoint is reachable.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 40 },
+      "fieldConfig": { "defaults": { "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "clamp_min(sandbox_hosts_live{job=\"sandbox-gateway\"} - sum(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}), 0)" }]
+    },
+    {
+      "type": "stat", "title": "Gateway / expected worker release", "id": 21,
+      "description": "The control-plane binary and the persisted worker generation accepted for new placement. These may intentionally differ.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 40 },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "name", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_build_info{job=\"sandbox-gateway\",component=\"gateway\"}", "legendFormat": "gateway {{release}}" },
+        { "refId": "B", "expr": "sandbox_worker_release_info{job=\"sandbox-gateway\"}", "legendFormat": "workers {{release}}" }
+      ]
+    },
+    {
+      "type": "state-timeline", "title": "Worker release presence", "id": 22,
+      "description": "Each band is a host/release pair. A release change closes the old series and opens the new one; use this beside error, queue, and readiness panels during rollout.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "mappings": [{ "type": "value", "options": { "1": { "text": "present", "color": "green" } } }] }, "overrides": [] },
+      "options": { "alignValue": "left", "legend": { "displayMode": "list", "placement": "bottom" }, "mergeValues": true, "rowHeight": 0.8, "showValue": "never", "tooltip": { "mode": "single" } },
+      "targets": [{ "refId": "A", "expr": "sandbox_build_info{job=\"sandbox-hosts\",component=\"worker\",host=~\"$host\"}", "legendFormat": "{{host}} · {{release}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Worker process uptime", "id": 23,
+      "description": "Drops identify process replacement during a rollout or crash. A suspended worker retains process uptime across resume.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 5 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "sandbox_uptime_seconds{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}}" }]
+    },
+
+    {
+      "type": "row", "title": "Autoscale readiness critical path", "id": 104,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 }, "collapsed": false
+    },
+    {
+      "type": "stat", "title": "Slowest worker: boot → capacity", "id": 24,
+      "description": "Current workers only. The July stopped-standby path measured about 26s; 60s and 120s are operational warning/critical boundaries, not an SLO.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 5, "x": 0, "y": 53 },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 60 }, { "color": "red", "value": 120 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "max(sandbox_worker_ready_seconds{job=\"sandbox-hosts\",host=~\"$host\"})" }]
+    },
+    {
+      "type": "bargauge", "title": "Worker readiness by host", "id": 25,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 7, "x": 5, "y": 53 },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "s", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 60 }, { "color": "red", "value": 120 }] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [{ "refId": "A", "expr": "sandbox_worker_ready_seconds{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}}" }]
+    },
+    {
+      "type": "bargauge", "title": "Boot phase offsets", "id": 26,
+      "description": "Absolute phase timestamps are exported underneath, so offsets retain millisecond boundary accuracy despite the 30s host-federation scrape.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
       "fieldConfig": { "defaults": { "min": 0, "unit": "s", "decimals": 1, "color": { "mode": "continuous-GrYlRd" } }, "overrides": [] },
       "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [ { "refId": "A", "expr": "sandbox_boot_phase_seconds", "legendFormat": "{{host}} / {{phase}}" } ]
+      "targets": [{ "refId": "A", "expr": "sandbox_boot_phase_seconds{job=\"sandbox-hosts\",host=~\"$host\",phase!=\"kernel_boot\"}", "legendFormat": "{{host}} / {{phase}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Readiness over time", "id": 27,
+      "description": "Use a longer time range to compare new worker cohorts. Mid-life serve restarts deliberately omit worker_ready_seconds rather than reporting host uptime as readiness.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "s", "custom": { "drawStyle": "points", "pointSize": 6, "showPoints": "always", "fillOpacity": 0 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "sandbox_worker_ready_seconds{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}}" }]
+    },
+    {
+      "type": "state-timeline", "title": "Worker health gates", "id": 28,
+      "description": "Scrape, golden readiness, and genuine-boot classification. A rollout is safe to continue when workers are reachable and golden-ready without rising errors or queue pressure.",
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "mappings": [{ "type": "value", "options": { "0": { "text": "no", "color": "red" }, "1": { "text": "yes", "color": "green" } } }] }, "overrides": [] },
+      "options": { "alignValue": "left", "legend": { "displayMode": "list", "placement": "bottom" }, "mergeValues": true, "rowHeight": 0.8, "showValue": "never", "tooltip": { "mode": "single" } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_host_scrape_ok{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}} / scrape" },
+        { "refId": "B", "expr": "sandbox_golden_ready{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}} / golden" },
+        { "refId": "C", "expr": "sandbox_boot_timeline_is_boot{job=\"sandbox-hosts\",host=~\"$host\"}", "legendFormat": "{{host}} / boot timeline" }
+      ]
+    },
+
+    {
+      "type": "row", "title": "Benchmark context & telemetry coverage", "id": 105,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 69 }, "collapsed": false
+    },
+    {
+      "type": "text", "title": "Measured baselines (offline reference, not live Prometheus)", "id": 29,
+      "description": "Source: docs/benchmarks.md, updated 2026-07-24.",
+      "datasource": { "type": "datasource", "uid": "grafana" },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 70 },
+      "options": {
+        "mode": "markdown",
+        "content": "These are **test-run baselines**, not dashboard samples or SLOs. Compare live queue, throughput, saturation, errors, and readiness against the workload shape.\n\n| Scenario | Measured result |\n|---|---:|\n| Hot create, fleet E2E (commit `06f5c16`) | 478 ms p50 / 509 ms p90 |\n| 64 concurrent creates + workload | 1.28 s p50 / 2.0 s p95; 0 failures |\n| Churn 200 @ concurrency 96 | 7.9 creates/s; create p50 5.2 s |\n| Held autoscale burst 160 from 2×48 | 8.38 s p50 / 49.82 s p99; 160/160 |\n| Held burst scale decision | 9.8 s |\n| Held burst complete | 50.02 s |\n| Snapshot restore | 84 ms p50 (current fleet rerun) |\n\nSee `docs/benchmarks.md` for clocks, environment, caveats, and the known hibernate/wake clock regression."
+      }
+    },
+    {
+      "type": "text", "title": "What is live now—and what is still missing", "id": 30,
+      "datasource": { "type": "datasource", "uid": "grafana" },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 70 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Live now:** 10s gateway occupancy, allocatable slots, queue depth, rejected demand, create rate, desired workers, direct scale-out attempts/failures, and release-gate mismatches; 30s per-worker pools, memory admission, create concurrency, lifecycle counters, readiness phases, process uptime, golden state, scrape health, and release identity.\n\n**Not currently emitted:** request-duration histograms (create/wake/restore p50/p95/p99), Nomad autoscaler action/confirmation timestamps, GCE MIG target/current state, host CPU/disk/network pressure, or deploy annotations.\n\nThat distinction is intentional: latency numbers above remain benchmark evidence until the HTTP paths expose histograms. For a production rollout, watch expected/observed release presence together with queue, rejection/error rates, golden readiness, direct-scaler failures, and worker readiness; do not infer live latency from the static benchmark table."
+      }
     }
   ]
 }

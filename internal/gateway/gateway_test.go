@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -133,6 +134,42 @@ func TestAwaitHostReturnsWhenCapacityFrees(t *testing.T) {
 	}
 }
 
+func TestCapacityNotificationWakesAllQueuedCreates(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 3, slotsUsed: 3})
+	g.queueWait, g.queueMax = 5*time.Second, 8
+
+	got := make(chan *host, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < 3; i++ {
+		go func() { got <- g.awaitHost(ctx, g.queueDeadline(), nil) }()
+	}
+	deadline := time.Now().Add(time.Second)
+	for g.queued.Load() != 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if depth := g.queued.Load(); depth != 3 {
+		t.Fatalf("queued depth = %d, want 3", depth)
+	}
+
+	g.mu.Lock()
+	g.hosts["a"].slotsUsed = 0
+	g.hosts["a"].slotsFree = 3
+	g.mu.Unlock()
+	g.notifySlotFreed()
+
+	for i := 0; i < 3; i++ {
+		select {
+		case h := <-got:
+			if h == nil || h.id != "a" {
+				t.Fatalf("waiter %d got host %v, want a", i, h)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("waiter %d was not woken by capacity broadcast", i)
+		}
+	}
+}
+
 func TestAwaitHostTimesOutAndRespectsCancel(t *testing.T) {
 	g := liveGateway(&host{id: "a", slotsTotal: 1, slotsUsed: 1})
 	g.queueWait, g.queueMax = 300*time.Millisecond, 8
@@ -181,6 +218,48 @@ func TestAwaitHostQueueBounds(t *testing.T) {
 	}
 }
 
+type fakeDirectScaler struct {
+	desired chan int
+}
+
+func (s *fakeDirectScaler) ScaleOut(_ context.Context, desired int) error {
+	s.desired <- desired
+	return nil
+}
+
+func TestQueueTransitionTriggersOneDirectScaleOutForBurst(t *testing.T) {
+	g := liveGateway(
+		&host{id: "a", slotsTotal: 2, slotsUsed: 0, slotsFree: 2, reserved: 2},
+		&host{id: "b", slotsTotal: 2, slotsUsed: 0, slotsFree: 2, reserved: 2},
+	)
+	g.queueWait, g.queueMax = time.Minute, 8
+	scaler := &fakeDirectScaler{desired: make(chan int, 2)}
+	if err := g.ConfigureDirectScaleOut(scaler, 2, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < 3; i++ {
+		go g.awaitHost(ctx, g.queueDeadline(), nil)
+	}
+
+	select {
+	case desired := <-scaler.desired:
+		// 4 reservations + 3 queued + 2 headroom = 9 slots => 5 workers.
+		if desired != 5 {
+			t.Fatalf("direct desired workers = %d, want 5", desired)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queue transition did not trigger direct scale-out")
+	}
+	select {
+	case desired := <-scaler.desired:
+		t.Fatalf("one burst triggered a second direct scale-out to %d", desired)
+	case <-time.After(2 * directScaleDebounce):
+	}
+}
+
 // TestFreeUsesSlotsFreeNotTotalMinusUsed is the "hibernation port black hole"
 // regression: a host whose hibernated sandboxes hold every spare port reports
 // slots_free=0 even though total-used looks roomy. Placement must never pick
@@ -226,6 +305,142 @@ func TestRegisterFallsBackWithoutSlotsFree(t *testing.T) {
 	post(`{"host_id":"new","addr":"1.2.3.5:8080","slots_total":24,"slots_used":10,"slots_free":0,"sandbox_ids":[]}`)
 	if f := g.hosts["new"].slotsFree; f != 0 {
 		t.Fatalf("explicit slotsFree = %d, want 0", f)
+	}
+}
+
+func TestWorkerReleaseGatePersistsAndBlocksStaleCapacity(t *testing.T) {
+	releaseFile := filepath.Join(t.TempDir(), "worker-release")
+	g := New("tok", 20*time.Second, 0, 0)
+	if err := g.ConfigureWorkerReleaseFile(releaseFile); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/worker-release", strings.NewReader(`{"release":"release-2"}`))
+	g.handleWorkerRelease(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("set release: got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	post := func(body string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		g.handleRegister(rr, httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body)))
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("register: got %d: %s", rr.Code, rr.Body.String())
+		}
+	}
+	post(`{"host_id":"worker","addr":"10.0.0.1:8080","release":"release-1","slots_total":3,"slots_used":0,"slots_free":3,"sandbox_ids":["existing"]}`)
+	if free := g.hosts["worker"].free(); free != 0 {
+		t.Fatalf("stale worker free = %d, want 0", free)
+	}
+	if got := g.route["existing"]; got != "worker" {
+		t.Fatalf("stale worker route = %q, want worker", got)
+	}
+
+	post(`{"host_id":"worker","addr":"10.0.0.1:8080","release":"release-2","slots_total":3,"slots_used":0,"slots_free":3,"sandbox_ids":["existing"]}`)
+	if free := g.hosts["worker"].free(); free != 3 {
+		t.Fatalf("current worker free = %d, want 3", free)
+	}
+
+	restarted := New("tok", 20*time.Second, 0, 0)
+	if err := restarted.ConfigureWorkerReleaseFile(releaseFile); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.expectedRelease != "release-2" {
+		t.Fatalf("persisted release = %q, want release-2", restarted.expectedRelease)
+	}
+}
+
+func TestRegisterReplacesHostWithSameAddress(t *testing.T) {
+	g := New("tok", 20*time.Second, 0, 0)
+
+	post := func(body string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/register", strings.NewReader(body))
+		g.handleRegister(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("register: got %d: %s", rr.Code, rr.Body.String())
+		}
+	}
+
+	// A suspended worker can resume an old serve process that captured the
+	// short hostname, then roll to a new allocation that sees the FQDN. Both
+	// advertise the same physical API address.
+	post(`{
+		"host_id":"worker-short",
+		"addr":"10.160.0.59:8080",
+		"slots_total":48,
+		"slots_used":2,
+		"slots_free":46,
+		"sandbox_ids":["kept","stale"],
+		"snapshot_ids":["old-snapshot"]
+	}`)
+	post(`{
+		"host_id":"other-worker",
+		"addr":"10.160.0.60:8080",
+		"slots_total":48,
+		"slots_used":0,
+		"slots_free":48,
+		"sandbox_ids":[]
+	}`)
+	// Exercise cleanup of the old reverse-proxy cache too.
+	g.proxies.Store("worker-short", &hostProxyEntry{})
+	g.hosts["worker-short"].reserved = 1
+	inflight := *g.hosts["worker-short"]
+
+	post(`{
+		"host_id":"worker.example.internal",
+		"addr":"10.160.0.59:8080",
+		"slots_total":48,
+		"slots_used":2,
+		"slots_free":46,
+		"sandbox_ids":["kept","new"],
+		"snapshot_ids":["new-snapshot"]
+	}`)
+
+	if _, ok := g.hosts["worker-short"]; ok {
+		t.Fatal("superseded host identity was not removed")
+	}
+	if len(g.hosts) != 2 {
+		t.Fatalf("hosts = %d, want 2 physical addresses", len(g.hosts))
+	}
+	if _, ok := g.hosts["other-worker"]; !ok {
+		t.Fatal("host at a different address was removed")
+	}
+	if h := g.hosts["worker.example.internal"]; h == nil || h.addr != "10.160.0.59:8080" {
+		t.Fatalf("replacement host = %#v", h)
+	}
+	if got := g.route["kept"]; got != "worker.example.internal" {
+		t.Fatalf("kept route = %q, want replacement host", got)
+	}
+	if got := g.route["new"]; got != "worker.example.internal" {
+		t.Fatalf("new route = %q, want replacement host", got)
+	}
+	if _, ok := g.route["stale"]; ok {
+		t.Fatal("route omitted by authoritative replacement heartbeat survived")
+	}
+	if _, ok := g.snapRoute["old-snapshot"]; ok {
+		t.Fatal("superseded snapshot route survived")
+	}
+	if got := g.snapRoute["new-snapshot"]; got != "worker.example.internal" {
+		t.Fatalf("new snapshot route = %q, want replacement host", got)
+	}
+	if _, ok := g.proxies.Load("worker-short"); ok {
+		t.Fatal("superseded reverse proxy cache survived")
+	}
+
+	// A create reserved through the old identity may complete after the
+	// replacement heartbeat. It must land on the current route, not resurrect
+	// the deleted host ID.
+	g.landReservation(&inflight, "completed-after-replacement")
+	if got := g.route["completed-after-replacement"]; got != "worker.example.internal" {
+		t.Fatalf("in-flight create route = %q, want replacement host", got)
+	}
+	if h := g.hosts["worker.example.internal"]; h.slotsUsed != 3 || h.slotsFree != 45 {
+		t.Fatalf("replacement accounting after in-flight create: used=%d free=%d, want 3/45",
+			h.slotsUsed, h.slotsFree)
 	}
 }
 
@@ -447,6 +662,7 @@ func TestPenaltyExpires(t *testing.T) {
 }
 
 func TestMetricsExposition(t *testing.T) {
+	t.Setenv("SANDBOX_RELEASE", "abc123")
 	g := liveGateway(
 		&host{id: "h1", slotsTotal: 24, slotsUsed: 10},
 		&host{id: "h2", slotsTotal: 24, slotsUsed: 5},
@@ -464,12 +680,17 @@ func TestMetricsExposition(t *testing.T) {
 	body := rr.Body.String()
 
 	want := []string{
+		`sandbox_build_info{component="gateway",release="abc123"} 1`,
 		"sandbox_hosts_live 2",
 		"sandbox_slots_total 48",
 		"sandbox_slots_used 15",
 		"sandbox_slots_free 33",
 		"sandbox_routes 2",
 		"sandbox_create_queue_depth 3",
+		"sandbox_direct_scale_out_total 0",
+		"sandbox_direct_scale_out_failed_total 0",
+		"sandbox_worker_release_mismatch 0",
+		`sandbox_worker_release_info{release=""} 1`,
 		`sandbox_host_slots_used{host="h1"} 10`,
 		`sandbox_host_slots_total{host="h2"} 24`,
 	}

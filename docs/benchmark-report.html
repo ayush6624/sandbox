@@ -145,14 +145,14 @@
   <p class="dek">Create, wake, restore, and fork latencies for our e2b-style microVM
   sandbox — with an honest comparison against e2b, Modal, Daytona, Vercel, Fly,
   Morph, CodeSandbox/Together, and Cloudflare.</p>
-  <p class="stamp">updated 2026-07-23 · headline measurements 2026-07-01 → 07-12 (release b801d6d+) · latest end-to-end re-run 2026-07-23 (commit 06f5c16, 2×48-slot fleet) · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
+  <p class="stamp">updated 2026-07-24 · headline measurements 2026-07-01 → 07-12 (release b801d6d+) · latest fleet validation 2026-07-24 (commit 1cefc65, 160-create autoscaling burst) · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
 
   <div class="tiles">
     <div class="tile ours" data-tip="<b>Hot create</b>199–271 ms server-side (golden-snapshot clone + GARP readiness). ~0.55 s end-to-end via gateway from a tailnet client. Clock: create request → in-guest agent answers.">
       <div class="v">~250 <small>ms</small></div>
       <div class="k">hot create, server-side</div>
     </div>
-    <div class="tile ours" data-tip="<b>Hibernation wake</b>49 ms server-side, same-identity restore (the common case). Frozen processes survive; guest clock re-stepped on resume.">
+    <div class="tile ours" data-tip="<b>Hibernation wake</b>49 ms server-side, same-identity restore (the common case). Frozen processes survive. Caveat: a 2026-07-24 stress run found an intermittent post-wake clock re-step regression; see fleet validation below.">
       <div class="v">49 <small>ms</small></div>
       <div class="k">wake from hibernation</div>
     </div>
@@ -242,6 +242,37 @@
   semaphore queueing the flood instead of boot-storming — and kill p50 is
   186 ms. A single-sandbox SQLite + filesystem workload: create 0.52 s, full
   suite 4.10 s.</p>
+
+  <h2>Fast-scale validation <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-24 · commit 1cefc65</small></h2>
+  <p>A held burst issued <strong>160 simultaneous creates</strong> against an
+  empty fleet at its 2-worker floor (96 immediately available slots). The extra
+  64 requests queued while the create-rate lead signal resumed two stopped
+  workers. All 160 creates completed successfully in <strong>50.02 s</strong>;
+  24/24 sampled sandboxes executed a real command, and all 160 were deleted
+  without a cleanup failure.</p>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Measurement</th><th>Result</th></tr>
+      </thead>
+      <tbody>
+        <tr class="us"><td>Creates</td><td class="num">160/160 · 0 failures</td></tr>
+        <tr><td>Create latency</td><td class="num">p50 8.38 s · p90 48.32 s · p99 49.82 s</td></tr>
+        <tr><td>Queue</td><td class="num">peak 64 · drained to 0</td></tr>
+        <tr><td>Scale signal</td><td class="num">desired changed at ~6 s · resize at 9.8 s</td></tr>
+        <tr><td>Worker resume</td><td class="num">began at ~19 s</td></tr>
+        <tr><td>Placement</td><td class="num">48 + 48 existing · 48 + 16 resumed</td></tr>
+        <tr><td>Usability / cleanup</td><td class="num">24/24 sampled · 160/160 deleted</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note"><strong>Stress-suite caveat.</strong> The accompanying suite
+  passed 30/31 checks in 138.5 s. Ports, concurrency, churn, load, snapshots,
+  fan-out, hibernation state preservation, and hot-create clock correctness
+  passed. The sole failure was the hibernation-wake clock re-step: the guest
+  remained approximately 11 s stale after a 10 s freeze, reproducing 3/5 times
+  afterward on the same worker. This wake-only timing regression is reported
+  separately and is not hidden inside the successful create/exec burst.</p>
 
   <h2>Create → command running, across providers</h2>
   <p>The only independent cross-provider dataset is the
@@ -419,6 +450,13 @@
   </div>
 
   <h2>Burst behavior</h2>
+  <p><strong>Latest (2026-07-24):</strong> a 160-create held burst starting at
+  the 2×48-slot floor completed <strong>160/160 with zero failures in 50.02
+  s</strong>. Demand was detected in ~6 s, the autoscaler issued its 2→4 resize
+  at 9.8 s, two stopped workers began resuming at ~19 s, and the 64-request
+  queue drained completely. Create latency was p50 8.38 s / p90 48.32 s / p99
+  49.82 s; placement was 48 + 48 + 48 + 16, 24/24 sampled sandboxes were
+  usable, and cleanup deleted all 160.</p>
   <p>500-sandbox churn (create → exec → kill, concurrency 96) against 3 workers
   × 24 slots: <strong>499/500 succeeded</strong> in 72 s — 6.9 creates/s sustained —
   with client retry+backoff; zero pool-exhaustion errors after the gateway's

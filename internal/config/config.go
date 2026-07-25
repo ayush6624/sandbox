@@ -21,6 +21,7 @@ type Config struct {
 	GatewayToken  string `json:"gateway_token"`  // bearer presented to the gateway
 	AdvertiseAddr string `json:"advertise_addr"` // addr the gateway dials back; defaults to listen_addr
 	HostID        string `json:"host_id"`        // stable host identity; defaults to hostname
+	WorkerRelease string `json:"worker_release"` // deployed worker generation reported in heartbeats
 
 	// --- Storage ---
 	DBPath      string `json:"db_path"`      // SQLite registry

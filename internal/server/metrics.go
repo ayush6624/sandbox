@@ -34,6 +34,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", name, help, name, name, val)
 	}
 
+	release := metricRelease(s.cfg.WorkerRelease)
+	fmt.Fprintf(&b, "# HELP sandbox_build_info Release identity for rollout tracking.\n# TYPE sandbox_build_info gauge\nsandbox_build_info{component=\"worker\",release=%q} 1\n", release)
 	gauge("sandbox_uptime_seconds", "Seconds since this server process started.", int64(time.Since(s.startedAt).Seconds()))
 
 	gauge("sandbox_running", "Sandboxes running on this host (hold a tap, IP, port, and guest memory).", int64(st.Running))
@@ -73,4 +75,23 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
+}
+
+// metricRelease keeps the rollout label within Prometheus's deliberately small
+// label-value escape surface. Fleet releases are git SHAs, but accepting a
+// human tag here is useful for non-Nomad deployments too.
+func metricRelease(v string) string {
+	if v == "" {
+		return "unknown"
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, v)
 }
