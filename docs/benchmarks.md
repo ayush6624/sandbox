@@ -1,10 +1,12 @@
 # Benchmarks
 
-**Updated 2026-07-24.** The instrumented headline/detail numbers were measured
+**Updated 2026-07-25.** The instrumented headline/detail numbers were measured
 2026-07-01 → 2026-07-12 (server release `b801d6d`+); a full end-to-end SDK
 re-run on the current fleet (commit `06f5c16`) is in
 [2026-07-23 fleet re-run](#2026-07-23-fleet-re-run-commit-06f5c16), followed by
-the [2026-07-24 stress and autoscaling burst](#2026-07-24-stress-and-autoscaling-burst-commit-1cefc65).
+the historical [2026-07-24 stopped-worker burst](#2026-07-24-stress-and-autoscaling-burst-commit-1cefc65)
+and the latest
+[2026-07-25 release-gated suspended-standby burst](#2026-07-25-suspended-standby-and-event-driven-scale-out-release-releasegate-20260725-1-commit-0b049db).
 Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 (published at <https://claude.ai/code/artifact/f14de3c5-96c3-45d1-bc7d-1a4ce4ccf6b3>).
 
@@ -20,7 +22,7 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 | Diff snapshot write | **123 ms** (vs ~1.5 s full); uploads ~24× smaller | pause → snapshot written |
 | Cold boot (baseline) | 3.46 s p50 (GCP), ~2.2 s (Hetzner bare metal) | create request → agent answers |
 | Burst churn | 499/500 creates on 3 hosts (72 slots), 6.9 creates/s sustained | 500 create→exec→kill @ concurrency 96 |
-| Autoscaling held burst | **160/160 created in 50.0 s**, 0 failures; scale decision in 9.8 s | 160 simultaneous creates held until all settled, starting from 2×48 slots |
+| Autoscaling held burst | **160/160 created in 18.653 s**, 0 failures; demand → resize ≤1.095 s | 160 simultaneous creates held until all settled, starting from 2×48 slots plus suspended standby |
 
 Environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB, nested KVM), guests
 2 vCPU / 1 GB, Firecracker v1.15.0, XFS reflink storage; client on the same
@@ -133,6 +135,67 @@ The burst's create p50 rising to 5.2 s at 96-in-flight — with **zero** 503s, p
 exhaustion, or agent timeouts — is the per-host create semaphore working as
 designed: a flood queues instead of boot-storming the hosts into timeouts. Raw
 JSON: `sdk/typescript/benchmarks/results/06f5c16/`.
+
+### 2026-07-25 suspended standby and event-driven scale-out (release `releasegate-20260725-1`, commit `0b049db`)
+
+Independent post-deploy validation of direct scale-out, immediate warm
+heartbeats, higher create concurrency, and worker-release gating. The gateway
+started at its **2-worker floor × 48 slots = 96 available slots**, with
+suspended standby behind it. The driver issued **160 simultaneous creates** and
+held them until the full burst had settled.
+
+| Result | Measurement |
+|---|---:|
+| Creates | **160/160 succeeded**, 0 capacity, pool, agent-timeout, or other failures |
+| Create latency | min 1.463 s · mean 9.069 s · p50 **8.159 s** · p90 17.419 s · p95 17.936 s · p99 18.569 s · max **18.653 s** |
+| Create phase | **18.653 s** from first request until the last create returned |
+| Full harness | 29.697 s including the in-guest workload and deletion |
+| Demand → resize request | **≤1.095 s**; this upper bound includes benchmark-client startup |
+| Resumed worker → registered capacity | **8.037–9.161 s** |
+| Gateway registration → ready | **27–28 ms** |
+| Queued creates | 64 → 16 on the first new host; drained after the second, observed within the trace's **≤0.73 s** effective sampling interval |
+| Cleanup | 0 used slots, 0 routes, 0 queued creates, 0 release mismatches |
+
+The effective scale-up timeline was:
+
+| Event | UTC |
+|---|---:|
+| Demand marker | 11:14:24.741 |
+| MIG resize requested | 11:14:25.836 |
+| MIG resize completed | 11:14:26.308 |
+| Suspended workers began resuming | 11:14:27.208 / 11:14:27.425 |
+| Current-release capacity registered | 11:14:35.245 / 11:14:36.586 |
+| Last create returned | within **18.653 s** of the first request |
+
+The trace loop was configured for 100 ms, but its SSH-backed samples took about
+310 ms per endpoint; the observed queue-drain bound is therefore 0.73 s, not
+100 ms. The capacity-registration clock is based on worker lifecycle and
+gateway logs and is not limited by that sampling cadence.
+
+Release gating also prevented resumed allocations from the previous worker
+release (`v49`) from serving creates while Nomad replaced them with the current
+release (`v50`): every create landed on `v50`. A separate controlled stale
+heartbeat against the production gateway advertised 48 slots but was exposed
+as `release_compatible: false` with `free: 0`; it expired normally after the
+20-second heartbeat TTL, returning the gateway to zero routes, queued creates,
+used slots, and release mismatches.
+
+Progress across the three comparable held-burst runs:
+
+| Capacity strategy | Create phase | p50 | p90 | p99 |
+|---|---:|---:|---:|---:|
+| Stopped workers, control-loop scale-out (2026-07-24) | 50.020 s | 8.380 s | 48.320 s | 49.820 s |
+| Suspended standby, control-loop scale-out | 31.106 s | 6.919 s | 28.906 s | 30.803 s |
+| Suspended standby, event-driven scale-out + release gate | **18.653 s** | 8.159 s | **17.419 s** | **18.569 s** |
+
+The latest create phase is **12.453 s (40.0%) faster** than the clean
+suspended-standby run, with p90 down **39.7%**. The p50 is slightly higher
+because the existing workers still admit creates in bounded waves; the large
+win is removing control-loop delay and promptly making resumed capacity
+eligible.
+
+Driver:
+[`sdk/typescript/benchmarks/burst-bench.ts`](../sdk/typescript/benchmarks/burst-bench.ts).
 
 ### 2026-07-24 stress and autoscaling burst (commit `1cefc65`)
 

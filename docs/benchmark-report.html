@@ -145,7 +145,7 @@
   <p class="dek">Create, wake, restore, and fork latencies for our e2b-style microVM
   sandbox — with an honest comparison against e2b, Modal, Daytona, Vercel, Fly,
   Morph, CodeSandbox/Together, and Cloudflare.</p>
-  <p class="stamp">updated 2026-07-24 · headline measurements 2026-07-01 → 07-12 (release b801d6d+) · latest fleet validation 2026-07-24 (commit 1cefc65, 160-create autoscaling burst) · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
+  <p class="stamp">updated 2026-07-25 · headline measurements 2026-07-01 → 07-12 (release b801d6d+) · latest fleet validation 2026-07-25 (releasegate-20260725-1, commit 0b049db, 160-create autoscaling burst) · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
 
   <div class="tiles">
     <div class="tile ours" data-tip="<b>Hot create</b>199–271 ms server-side (golden-snapshot clone + GARP readiness). ~0.55 s end-to-end via gateway from a tailnet client. Clock: create request → in-guest agent answers.">
@@ -243,13 +243,13 @@
   186 ms. A single-sandbox SQLite + filesystem workload: create 0.52 s, full
   suite 4.10 s.</p>
 
-  <h2>Fast-scale validation <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-24 · commit 1cefc65</small></h2>
-  <p>A held burst issued <strong>160 simultaneous creates</strong> against an
-  empty fleet at its 2-worker floor (96 immediately available slots). The extra
-  64 requests queued while the create-rate lead signal resumed two stopped
-  workers. All 160 creates completed successfully in <strong>50.02 s</strong>;
-  24/24 sampled sandboxes executed a real command, and all 160 were deleted
-  without a cleanup failure.</p>
+  <h2>Fast-scale validation <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-25 · releasegate-20260725-1 · commit 0b049db</small></h2>
+  <p>An independent post-deploy run issued <strong>160 simultaneous
+  creates</strong> against the 2-worker floor (96 immediately available slots)
+  with suspended standby behind it. Direct queue-triggered scale-out, immediate
+  warm heartbeats, higher create concurrency, and worker-release gating
+  completed all creates successfully in <strong>18.653 s</strong>. The full
+  harness took 29.697 s including its in-guest workload and deletion.</p>
   <div class="tablewrap">
     <table>
       <thead>
@@ -257,16 +257,28 @@
       </thead>
       <tbody>
         <tr class="us"><td>Creates</td><td class="num">160/160 · 0 failures</td></tr>
-        <tr><td>Create latency</td><td class="num">p50 8.38 s · p90 48.32 s · p99 49.82 s</td></tr>
-        <tr><td>Queue</td><td class="num">peak 64 · drained to 0</td></tr>
-        <tr><td>Scale signal</td><td class="num">desired changed at ~6 s · resize at 9.8 s</td></tr>
-        <tr><td>Worker resume</td><td class="num">began at ~19 s</td></tr>
-        <tr><td>Placement</td><td class="num">48 + 48 existing · 48 + 16 resumed</td></tr>
-        <tr><td>Usability / cleanup</td><td class="num">24/24 sampled · 160/160 deleted</td></tr>
+        <tr><td>Create latency</td><td class="num">p50 8.159 s · p90 17.419 s · p99 18.569 s · max 18.653 s</td></tr>
+        <tr><td>Demand → resize request</td><td class="num">≤1.095 s, including client startup</td></tr>
+        <tr><td>Resumed worker → capacity</td><td class="num">8.037–9.161 s</td></tr>
+        <tr><td>Registration → ready</td><td class="num">27–28 ms</td></tr>
+        <tr><td>Queue</td><td class="num">64 → 16 on first host · zero after second (observed ≤0.73 s)</td></tr>
+        <tr><td>Release gate</td><td class="num">previous-release allocations served 0 creates</td></tr>
+        <tr><td>Cleanup</td><td class="num">0 used slots · 0 routes · 0 queued · 0 mismatches</td></tr>
       </tbody>
     </table>
   </div>
-  <p class="note"><strong>Stress-suite caveat.</strong> The accompanying suite
+  <p class="note"><strong>Improvement.</strong> The comparable stopped-worker
+  run took 50.020 s; suspended standby reduced that to 31.106 s; the latest
+  event-driven path reduced it again to 18.653 s — <strong>40.0% faster</strong>
+  than suspended standby alone. Its p90 fell from 28.906 s to 17.419 s
+  (39.7%). The trace loop was configured for 100 ms, but SSH-backed sampling
+  made its effective cadence about 0.73 s.</p>
+  <p class="note"><strong>Release-gate verification.</strong> Resumed
+  previous-release allocations were replaced before serving creates. A
+  controlled stale heartbeat then verified that production exposed the host as
+  <code>release_compatible: false</code> with <code>free: 0</code>; it expired
+  normally after the 20-second heartbeat TTL.</p>
+  <p class="note"><strong>Earlier stress-suite caveat (2026-07-24).</strong> The suite
   passed 30/31 checks in 138.5 s. Ports, concurrency, churn, load, snapshots,
   fan-out, hibernation state preservation, and hot-create clock correctness
   passed. The sole failure was the hibernation-wake clock re-step: the guest
@@ -450,13 +462,15 @@
   </div>
 
   <h2>Burst behavior</h2>
-  <p><strong>Latest (2026-07-24):</strong> a 160-create held burst starting at
-  the 2×48-slot floor completed <strong>160/160 with zero failures in 50.02
-  s</strong>. Demand was detected in ~6 s, the autoscaler issued its 2→4 resize
-  at 9.8 s, two stopped workers began resuming at ~19 s, and the 64-request
-  queue drained completely. Create latency was p50 8.38 s / p90 48.32 s / p99
-  49.82 s; placement was 48 + 48 + 48 + 16, 24/24 sampled sandboxes were
-  usable, and cleanup deleted all 160.</p>
+  <p><strong>Latest (2026-07-25):</strong> a 160-create held burst starting at
+  the 2×48-slot floor plus suspended standby completed <strong>160/160 with
+  zero failures in 18.653 s</strong>. Demand reached the MIG resize request
+  within 1.095 s, resumed workers registered current-release capacity in
+  8.037–9.161 s, and the 64-request queue drained completely. Create latency
+  was p50 8.159 s / p90 17.419 s / p99 18.569 s; cleanup returned the gateway
+  to zero used slots, routes, queued creates, and release mismatches. The
+  historical stopped-worker run took 50.020 s, and suspended standby without
+  event-driven scale-out took 31.106 s.</p>
   <p>500-sandbox churn (create → exec → kill, concurrency 96) against 3 workers
   × 24 slots: <strong>499/500 succeeded</strong> in 72 s — 6.9 creates/s sustained —
   with client retry+backoff; zero pool-exhaustion errors after the gateway's
