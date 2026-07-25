@@ -93,7 +93,7 @@ GCE, SSH, Nomad, gateway, and queue timeline is captured on the same clock:
 ```bash
 export EXPECTED_WORKER_RELEASE=<deployed-release>
 export LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
-export TRAFFIC_SCENARIOS="sawtooth-scale-cycle held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
+export TRAFFIC_SCENARIOS="sawtooth-scale-cycle standby-refill-boundary held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
 
 ./tests/autoscale-benchmark.sh
 ```

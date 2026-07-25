@@ -5,8 +5,10 @@
 re-run on the current fleet (commit `06f5c16`) is in
 [2026-07-23 fleet re-run](#2026-07-23-fleet-re-run-commit-06f5c16), followed by
 the historical [2026-07-24 stopped-worker burst](#2026-07-24-stress-and-autoscaling-burst-commit-1cefc65)
-and the latest
-[2026-07-25 release-gated suspended-standby burst](#2026-07-25-suspended-standby-and-event-driven-scale-out-release-releasegate-20260725-1-commit-0b049db).
+and the release-gated
+[2026-07-25 suspended-standby burst](#2026-07-25-suspended-standby-and-event-driven-scale-out-release-releasegate-20260725-1-commit-0b049db).
+The latest correctness and traffic-pattern validation is
+[the 2026-07-25 autoscaling traffic suite](#2026-07-25-autoscaling-traffic-suite-gateway-52a94cc-workers-820c3e4).
 Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 (published at <https://claude.ai/code/artifact/f14de3c5-96c3-45d1-bc7d-1a4ce4ccf6b3>).
 
@@ -23,6 +25,7 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 | Cold boot (baseline) | 3.46 s p50 (GCP), ~2.2 s (Hetzner bare metal) | create request → agent answers |
 | Burst churn | 499/500 creates on 3 hosts (72 slots), 6.9 creates/s sustained | 500 create→exec→kill @ concurrency 96 |
 | Autoscaling held burst | **160/160 created in 18.653 s**, 0 failures; demand → resize ≤1.095 s | 160 simultaneous creates held until all settled, starting from 2×48 slots plus suspended standby |
+| Autoscaling traffic validation | **896/896 creates**, **31,256/31,256 connect+identity-exec probes**, 0 failures | standby-boundary, second-wave, long-lived reconciliation, and churn traffic |
 
 Environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB, nested KVM), guests
 2 vCPU / 1 GB, Firecracker v1.15.0, XFS reflink storage; client on the same
@@ -135,6 +138,85 @@ The burst's create p50 rising to 5.2 s at 96-in-flight — with **zero** 503s, p
 exhaustion, or agent timeouts — is the per-host create semaphore working as
 designed: a flood queues instead of boot-storming the hosts into timeouts. Raw
 JSON: `sdk/typescript/benchmarks/results/06f5c16/`.
+
+### 2026-07-25 autoscaling traffic suite (gateway `52a94cc`, workers `820c3e4`)
+
+Final post-fix validation of physical-host autoscaling under four traffic
+shapes. Every successful create was held and repeatedly reconnected to; each
+probe also executed an identity check inside the guest, so this tests continued
+route and VM usability rather than only HTTP create status.
+
+| Scenario | Creates | Survivability probes | Create p95 / max | Peak hosts | Result |
+|---|---:|---:|---:|---:|---|
+| Standby-refill boundary | 160 | 24,160 | 19.439 s / 20.360 s | 9 | pass |
+| Second wave during scale-out | 208 | 3,328 | 8.433 s / 8.975 s | 8 | pass |
+| Long-lived during reconciliation | 168 | 3,048 | 7.984 s / 8.556 s | 9 | pass |
+| Create → exec → kill churn | 360 | 720 | 6.593 s / 8.006 s | 9 | pass |
+| **Total** | **896** | **31,256** | — | — | **4/4 scenarios, 0 failures** |
+
+The final gateway state was zero sandboxes and zero used slots, with no worker
+release mismatches. The gateway ran `52a94cc`; all serving and standby workers
+ran release `820c3e4`.
+
+The boundary scenario deliberately kept live sandboxes running while the
+autoscaler replenished its standby pool. All five newly created refill workers
+reached GCE `SUSPENDED` state. Suspension occurred 176.9–198.1 seconds after
+the first MIG observation. Two workers were later resumed and became eligible
+at 216.140 and 222.962 seconds, both after the configured 210-second placement
+quarantine; the other three never advertised eligible capacity. No live
+sandbox disappeared across this transition.
+
+This suite closed three correctness gaps found by progressively stronger
+traffic tests:
+
+1. An initial 160-create resume test returned 59 `404`s. On Nomad 1.7 a
+   suspended allocation was treated as lost, so its resumed process briefly
+   accepted traffic before a replacement allocation reconciled those routes
+   away. The legacy disconnect policy now preserves the allocation, and every
+   standby worker was refreshed onto the current release.
+2. Concurrent deletion could combine routed and free-slot counts from two
+   different SQLite snapshots, briefly reporting impossible capacity. Worker
+   heartbeats now derive all capacity fields atomically, and the gateway clamps
+   malformed or old reports.
+3. The broad pre-fix suite passed sawtooth, held-burst, and gradual-ramp traffic,
+   then caught a fresh standby-refill worker accepting sandboxes before GCE
+   suspended it. Fresh workers now advertise zero placeable slots for the
+   initial-delay boundary. The final second-wave scenario passed 208 creates
+   and 3,328 continued-usability probes after this fix.
+
+Latency did not improve uniformly, because the fixes intentionally trade a
+small amount of placement availability for correctness. The physical
+suspended-host resume remains the approximately 8–9 second lower bound; the
+standby-boundary p95 is 19.439 seconds versus 17.936 seconds in the earlier
+simple held burst. The improvement is that capacity is never exposed during an
+unsafe lifecycle transition, and the varied final workload completed without
+404s, route loss, or partial-success listings.
+
+Scale-in is deliberately slower than scale-out. With
+`SCALE_DOWN_WINDOW=15m`, observed cleanup-to-floor time was approximately
+17–20 minutes: the 15-minute max-over-time window is followed by the
+one-host-per-minute action cooldown and asynchronous GCE suspend /
+reconciliation. A three-cycle sawtooth precursor run completed 480 creates and
+5,120 continued-usability probes with zero failures, peaked at 10 hosts, and
+returned to the stable 2-running + 6-suspended floor after every cycle.
+
+The remaining improvement areas are:
+
+- keep more running headroom when the SLO cannot absorb the 8–9 second GCE
+  resume floor;
+- reduce sandbox queue-drain and worker-local create contention, which account
+  for the rest of the 19–20 second overflow tail;
+- improve autoscaler action confirmation: Nomad Autoscaler can exhaust its
+  20–30 second retry budget even though the asynchronous GCE operation later
+  succeeds;
+- shorten scale-in only if the extra host cost is worth changing the 15-minute
+  stability window and per-action cooldown.
+
+Driver:
+[`tests/autoscale-traffic.ts`](../tests/autoscale-traffic.ts), wrapped by
+[`tests/autoscale-benchmark.sh`](../tests/autoscale-benchmark.sh). Raw results
+are intentionally gitignored; the canonical run directory is
+`tests/results/autoscale-targeted-proof-820c3e4-20260725T182047Z/`.
 
 ### 2026-07-25 suspended standby and event-driven scale-out (release `releasegate-20260725-1`, commit `0b049db`)
 
@@ -333,3 +415,12 @@ bash ../../scripts/bench-extensive.sh   # full single-host + fleet sweep
 E2e latency checks (hibernate wake, wake-on-connect, clock): `cd tests && npm run e2e`.
 Raw run JSON lands in `sdk/typescript/benchmarks/results/` and `tests/results/`
 (gitignored; each folder's README describes the files).
+
+Full destructive autoscaling traffic validation:
+
+```bash
+export EXPECTED_WORKER_RELEASE=<deployed-release>
+export LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
+export TRAFFIC_SCENARIOS="sawtooth-scale-cycle standby-refill-boundary held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
+./tests/autoscale-benchmark.sh
+```
