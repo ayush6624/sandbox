@@ -10,6 +10,7 @@ Self-hosted Firecracker microVM sandboxes with an e2b-style API. Start here:
 | [Self-hosting](self-hosting.md) | Run it on your own hardware: single host or a multi-host fleet |
 | [Autoscaling latency](autoscaling-latency.md) | Current burst critical path, Modal comparison, and implementation roadmap |
 | [Ona-style devboxes](devboxes-roadmap.md) | Design roadmap for repository-aware, editor-accessible development environments |
+| [Production readiness plan](production-readiness-plan.md) | Runtime hardening plus the versioned HTTP API and TypeScript SDK migration |
 
 Also:
 
