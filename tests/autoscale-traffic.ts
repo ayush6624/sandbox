@@ -23,6 +23,7 @@ const RUN_ID = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}-${stamp()
   .replace(/[^a-zA-Z0-9-]/g, '-')
   .slice(0, 24)
 const MIG_SNAPSHOT = process.env.AUTOSCALE_MIG_SNAPSHOT
+const TIMELINE_FILE = process.env.AUTOSCALE_TIMELINE
 const TTL_MS = integerEnv('AUTOSCALE_TTL_MS', 45 * 60_000, 60_000)
 const REQUEST_TIMEOUT_MS = integerEnv('AUTOSCALE_CREATE_TIMEOUT_MS', 300_000, 10_000)
 const PROBE_INTERVAL_MS = integerEnv('AUTOSCALE_PROBE_INTERVAL_MS', 2_000, 100)
@@ -83,6 +84,12 @@ interface ScenarioResult {
 interface Scenario {
   name: string
   run(ctx: ScenarioContext): Promise<void>
+}
+
+interface TimelineEvent {
+  ts_ms: number
+  event: string
+  data: Record<string, unknown>
 }
 
 class ScenarioContext {
@@ -285,6 +292,29 @@ const heldBurst: Scenario = {
   },
 }
 
+const standbyRefillBoundary: Scenario = {
+  name: 'standby-refill-boundary',
+  async run(ctx) {
+    if (!TIMELINE_FILE) {
+      throw new Error('AUTOSCALE_TIMELINE is required for standby refill lifecycle proof')
+    }
+    const started = Date.now()
+    const count = integerEnv(
+      'AUTOSCALE_REFILL_PRESSURE',
+      FLOOR_HOSTS * SLOTS_PER_HOST + 64,
+      1
+    )
+    await ctx.createMany(count, 'refill')
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_REFILL_HOLD_MS', 240_000, 181_000))
+    ctx.assertHealthy()
+    assertStandbyRefillTimeline(
+      readTimeline(TIMELINE_FILE),
+      started,
+      integerEnv('AUTOSCALE_PLACEMENT_DELAY_MS', 210_000, 1_000)
+    )
+  },
+}
+
 const gradualRamp: Scenario = {
   name: 'gradual-ramp',
   async run(ctx) {
@@ -412,7 +442,15 @@ const sawtooth: Scenario = {
 // Sawtooth must start from the preflight floor. Other scenarios intentionally
 // reuse whatever running capacity a prior scenario caused; sawtooth itself
 // proves return-to-floor behavior between its cycles.
-const ALL: Scenario[] = [sawtooth, heldBurst, gradualRamp, secondWave, longLived, churn]
+const ALL: Scenario[] = [
+  sawtooth,
+  standbyRefillBoundary,
+  heldBurst,
+  gradualRamp,
+  secondWave,
+  longLived,
+  churn,
+]
 let interrupted = false
 let activeContext: ScenarioContext | undefined
 
@@ -565,6 +603,103 @@ function getMigSnapshot(): MigSnapshot {
     return value as MigSnapshot
   } catch (error) {
     throw new Error(`cannot read MIG snapshot ${MIG_SNAPSHOT}: ${String((error as Error).message ?? error)}`)
+  }
+}
+
+function readTimeline(path: string): TimelineEvent[] {
+  try {
+    return readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as TimelineEvent)
+  } catch (error) {
+    throw new Error(`cannot read timeline ${path}: ${String((error as Error).message ?? error)}`)
+  }
+}
+
+/**
+ * Proves that newly created standby-refill instances never become placement
+ * eligible during GCE's 180s initial-delay boundary. Instance names present
+ * before the scenario are resumed standbys and are intentionally eligible
+ * immediately; only names first observed after scenario start are refill VMs.
+ *
+ * For every refill VM, correlate MIG instance name -> Nomad node id -> task
+ * StartedAt -> gateway host id. It must reach SUSPENDED, and any capacity
+ * heartbeat must be at least placementDelayMs after the serve task started.
+ */
+function assertStandbyRefillTimeline(
+  events: TimelineEvent[],
+  scenarioStartedMs: number,
+  placementDelayMs: number
+): void {
+  const migEvents = events.filter((event) => event.event === 'mig_instance_state')
+  const baseline = new Set(
+    migEvents
+      .filter((event) => event.ts_ms < scenarioStartedMs)
+      .map((event) => String(event.data.instance ?? ''))
+      .filter(Boolean)
+  )
+  const fresh = new Set(
+    migEvents
+      .filter((event) => event.ts_ms >= scenarioStartedMs)
+      .map((event) => String(event.data.instance ?? ''))
+      .filter((name) => name && !baseline.has(name))
+  )
+  if (!fresh.size) {
+    throw new Error('standby refill proof observed no newly created MIG instance')
+  }
+
+  for (const instance of fresh) {
+    const suspended = migEvents.some(
+      (event) =>
+        event.ts_ms >= scenarioStartedMs &&
+        event.data.instance === instance &&
+        event.data.status === 'SUSPENDED'
+    )
+    if (!suspended) throw new Error(`fresh refill ${instance} did not reach SUSPENDED during hold`)
+
+    const nodeEvent = events.find(
+      (event) =>
+        event.event === 'nomad_node_state' &&
+        String(event.data.name ?? '').split('.')[0] === instance
+    )
+    if (!nodeEvent) throw new Error(`fresh refill ${instance} never registered a Nomad node`)
+    const nodeID = String(nodeEvent.data.node_id ?? '')
+
+    const allocationEvents = events.filter(
+      (event) =>
+        event.event === 'nomad_allocation_state' &&
+        event.data.node_id === nodeID &&
+        event.ts_ms >= scenarioStartedMs
+    )
+    const startedAt = allocationEvents
+      .flatMap((event) => {
+        const tasks = Array.isArray(event.data.tasks) ? event.data.tasks : []
+        return tasks.map((task) => String((task as Record<string, unknown>).started_at ?? ''))
+      })
+      .filter(Boolean)
+      .map((value) => Date.parse(value))
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b)[0]
+    if (!Number.isFinite(startedAt)) {
+      throw new Error(`fresh refill ${instance} has no serve task StartedAt`)
+    }
+
+    const eligible = events
+      .filter(
+        (event) =>
+          event.event === 'gateway_host_eligible_observed' &&
+          event.data.host_id === nodeID &&
+          event.ts_ms >= scenarioStartedMs
+      )
+      .map((event) => event.ts_ms)
+      .sort((a, b) => a - b)[0]
+    if (eligible !== undefined && eligible - startedAt < placementDelayMs) {
+      throw new Error(
+        `fresh refill ${instance} advertised capacity after ${eligible - startedAt}ms; ` +
+        `placement delay requires >=${placementDelayMs}ms`
+      )
+    }
   }
 }
 

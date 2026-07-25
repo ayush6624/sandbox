@@ -79,7 +79,10 @@ STRESS_BURST=64 STRESS_LOAD_N=48 STRESS_FANOUT_N=32 npm test -- concurrency load
 `autoscale-traffic.ts` is a separate live-fleet benchmark. It covers a held
 burst beyond the warm floor, gradual ramp, a second burst while the first
 scale-out is in progress, long-lived sandboxes during worker reconciliation,
-create/exec/kill churn, and repeated scale-out/scale-in sawteeth. Successful
+create/exec/kill churn, repeated scale-out/scale-in sawteeth, and a
+`standby-refill-boundary` regression that holds live sandboxes across the
+standby pool's initial-delay boundary while proving newly created refill
+workers remain placement-quarantined until safely suspended. Successful
 creates are repeatedly reconnected and executed against; host release,
 capacity, placement, routing, and final cleanup invariants are monitored
 independently.
