@@ -438,6 +438,85 @@ func TestListFailsClosedInsteadOfReturningPartialFleet(t *testing.T) {
 	}
 }
 
+func TestListSkipsUnreachableEmptyQuarantinedHost(t *testing.T) {
+	owner, _ := fakeHost(t, http.StatusOK, `[{"id":"held"}]`)
+	quarantined, quarantinedHits := fakeHost(t, http.StatusInternalServerError,
+		`{"error":"suspending"}`)
+
+	g := New("tok", 20*time.Second, 0, 0)
+	addTestHost(g, "owner", strings.TrimPrefix(owner.URL, "http://"), 1, 23)
+	// Fresh placement quarantine: no routes, occupancy, hibernation, or
+	// reservations. It is safe and important not to query this host while MIG
+	// moves it into SUSPENDED.
+	addTestHost(g, "empty-refill", strings.TrimPrefix(quarantined.URL, "http://"), 0, 0)
+
+	rr := httptest.NewRecorder()
+	g.handleList(rr, httptest.NewRequest(http.MethodGet, "/sandboxes", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list with empty quarantined host = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if quarantinedHits.Load() != 0 {
+		t.Fatalf("empty quarantined host received %d list calls, want 0", quarantinedHits.Load())
+	}
+	var got []registry.Sandbox
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "held" {
+		t.Fatalf("list = %+v, want held sandbox", got)
+	}
+}
+
+func TestListStillFailsForUnreachableOwnershipSignals(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Gateway, *host)
+	}{
+		{
+			name: "route",
+			setup: func(g *Gateway, _ *host) {
+				g.route["held"] = "unreachable"
+			},
+		},
+		{
+			name: "occupancy",
+			setup: func(_ *Gateway, h *host) {
+				h.slotsUsed = 1
+			},
+		},
+		{
+			name: "hibernated",
+			setup: func(_ *Gateway, h *host) {
+				h.hibernated = 1
+			},
+		},
+		{
+			name: "reservation",
+			setup: func(_ *Gateway, h *host) {
+				h.reserved = 1
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unreachable, hits := fakeHost(t, http.StatusInternalServerError,
+				`{"error":"unreachable"}`)
+			g := New("tok", 20*time.Second, 0, 0)
+			h := addTestHost(g, "unreachable", strings.TrimPrefix(unreachable.URL, "http://"), 0, 0)
+			tt.setup(g, h)
+
+			rr := httptest.NewRecorder()
+			g.handleList(rr, httptest.NewRequest(http.MethodGet, "/sandboxes", nil))
+			if rr.Code != http.StatusBadGateway {
+				t.Fatalf("list status = %d, want 502; body=%s", rr.Code, rr.Body.String())
+			}
+			if hits.Load() != 1 {
+				t.Fatalf("ownership host received %d list calls, want 1", hits.Load())
+			}
+		})
+	}
+}
+
 func TestListAggregatesAllLiveHostsWhenComplete(t *testing.T) {
 	first, _ := fakeHost(t, http.StatusOK, `[{"id":"one"}]`)
 	second, _ := fakeHost(t, http.StatusOK, `[{"id":"two"}]`)

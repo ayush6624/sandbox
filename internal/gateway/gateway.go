@@ -766,11 +766,22 @@ func (g *Gateway) pickHost() *host {
 
 func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 	g.mu.RLock()
-	var live []host
+	routeOwners := make(map[string]bool)
+	for _, hostID := range g.route {
+		routeOwners[hostID] = true
+	}
+	var candidates []host
 	for _, h := range g.hosts {
-		if time.Since(h.lastSeen) <= g.ttl {
-			live = append(live, *h)
+		// Listing an empty placement-quarantined refill worker adds no data and
+		// can turn the whole fleet list into a 502 while the MIG suspends it.
+		// Skip only when every ownership signal agrees it is empty. Routes
+		// cover hibernated and heartbeat-known identities; occupancy is a
+		// conservative backstop for route/accounting skew; reservations cover
+		// creates that can commit after this snapshot.
+		if !routeOwners[h.id] && h.slotsUsed == 0 && h.hibernated == 0 && h.reserved == 0 {
+			continue
 		}
+		candidates = append(candidates, *h)
 	}
 	g.mu.RUnlock()
 
@@ -783,7 +794,7 @@ func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 		out      = []registry.Sandbox{}
 		failures = map[string]error{}
 	)
-	for _, h := range live {
+	for _, h := range candidates {
 		wg.Add(1)
 		go func(h host) {
 			defer wg.Done()
@@ -823,8 +834,8 @@ func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 			details = append(details, fmt.Sprintf("%s: %v", hostID, failures[hostID]))
 		}
 		httpError(w, http.StatusBadGateway,
-			fmt.Errorf("sandbox list incomplete; %d/%d live hosts failed: %s",
-				len(hostIDs), len(live), strings.Join(details, "; ")))
+			fmt.Errorf("sandbox list incomplete; %d/%d candidate hosts failed: %s",
+				len(hostIDs), len(candidates), strings.Join(details, "; ")))
 		return
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
