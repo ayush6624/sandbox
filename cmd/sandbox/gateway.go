@@ -43,9 +43,9 @@ The gateway exposes the same API as a single server; point the CLI at it with
 	cmd.Flags().StringVar(&gwToken, "token", "", "bearer token required on all inbound requests (required)")
 	cmd.Flags().DurationVar(&gwTTL, "heartbeat-ttl", 20*time.Second, "drop a host not seen within this window")
 	// queue-wait must cover the autoscaler's worst common path: MIG resize →
-	// standby VM start → nomad join → serve up + golden build → first warm
-	// heartbeat (~2-3 min). 90s was right at the edge and 503'd real bursts.
-	cmd.Flags().DurationVar(&gwQueueWait, "queue-wait", 180*time.Second, "how long a create may wait for a free slot before 503 (0 disables queueing)")
+	// standby VM start → nomad join → serve up + golden build → fresh-worker
+	// placement quarantine → first eligible heartbeat (~4 min worst case).
+	cmd.Flags().DurationVar(&gwQueueWait, "queue-wait", 240*time.Second, "how long a create may wait for a free slot before 503 (0 disables queueing)")
 	// queue-max also bounds what the queue-depth metric can express: overflow
 	// beyond it only shows up as the rejected-creates rate. A queued create is
 	// one goroutine + one connection, so a large bound is cheap — undersizing

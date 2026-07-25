@@ -66,6 +66,13 @@ type Config struct {
 	// boot-storm the host into agent timeouts. 0 = server default
 	// (min(2×NumCPU, 16)).
 	CreateConcurrency int `json:"create_concurrency"`
+	// PlacementDelaySec keeps a freshly booted worker routable but advertises
+	// zero create capacity until Linux boot age reaches this threshold. Fleet
+	// deployments set it beyond the MIG standby initial delay so refill VMs
+	// are suspended before they can receive sandboxes. /proc/uptime includes
+	// suspended time, so a resumed suspended standby is immediately eligible.
+	// 0 disables the gate.
+	PlacementDelaySec int `json:"placement_delay_sec"`
 	// UFFDRestore makes same-identity hibernation wakes restore the guest with
 	// Firecracker's userfaultfd memory backend: the guest resumes before its
 	// RAM is paged in and faults its working set from the mem file on demand,
@@ -194,5 +201,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	c.Defaults()
+	if c.PlacementDelaySec < 0 {
+		return nil, fmt.Errorf("decode %s: placement_delay_sec must be >= 0", path)
+	}
 	return &c, nil
 }

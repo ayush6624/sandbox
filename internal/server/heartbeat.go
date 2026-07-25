@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/cluster"
@@ -115,12 +117,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	// storms and agent timeouts. RoutedCapacity calculated this value from the
 	// same SQLite snapshot as SandboxIDs/SlotsUsed, so concurrent destroys
 	// cannot combine an older used count with newer free capacity.
-	select {
-	case <-s.warmed:
-	default:
-		free = 0
-	}
-	hb.SlotsFree = &free
+	hb.SlotsFree = intPtr(s.advertisedFreeSlots(free))
 	b, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
 	if err != nil {
@@ -144,12 +141,50 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 
 	// Boot-phase stamps (see bootphase.go). first_heartbeat_ok is when the
 	// gateway can ROUTE to this host; capacity_advertised is when it can PLACE
-	// on it — the two differ by the golden warm-up, because an unwarmed host
-	// deliberately advertises slots_free=0. capacity_advertised is the real
-	// "new capacity is online" moment the autoscale timeline should be measured
-	// to. Both are first-write-wins, so the 5s ticker can't overwrite them.
+	// on it — the two differ by golden warm-up and placement quarantine.
 	s.phases.mark(phaseFirstHeartbeat)
 	if hb.SlotsFree != nil && *hb.SlotsFree > 0 {
 		s.phases.mark(phaseCapacityAdv)
 	}
 }
+
+func (s *Server) advertisedFreeSlots(free int) int {
+	select {
+	case <-s.warmed:
+	default:
+		return 0
+	}
+	if s.cfg.PlacementDelay <= 0 {
+		return free
+	}
+	age, err := s.bootAge()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "heartbeat: read boot age for placement gate: %v\n", err)
+		return 0
+	}
+	if age < s.cfg.PlacementDelay {
+		return 0
+	}
+	return free
+}
+
+func linuxBootAge() (time.Duration, error) {
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0, err
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("/proc/uptime is empty")
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse /proc/uptime %q: %w", fields[0], err)
+	}
+	if seconds < 0 {
+		return 0, fmt.Errorf("parse /proc/uptime %q: negative boot age", fields[0])
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+func intPtr(v int) *int { return &v }

@@ -176,7 +176,7 @@ scripts/              Host setup shell scripts
   capacity-class error (503/429, e.g. pool exhaustion) or a connection failure **fails over**
   to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
   host errors return 502 without retry. When no slot is free the create
-  waits in a bounded queue (`--queue-wait`/`--queue-max`, defaults 180s/512; depth exported as
+  waits in a bounded queue (`--queue-wait`/`--queue-max`, defaults 240s/4096; depth exported as
   `sandbox_create_queue_depth` and fed into the autoscaler signal) before 503ing with
   Retry-After. Id-scoped requests (incl. `/exec/stream` + `/shell`) are
   reverse-proxied to the owning host (one cached proxy per host over a shared tuned

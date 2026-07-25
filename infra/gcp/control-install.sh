@@ -54,7 +54,7 @@ Wants=network-online.target
 StateDirectory=sandbox-gateway
 Environment=SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
 ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN} \
-  --queue-wait ${QUEUE_WAIT:-180s} --queue-max ${QUEUE_MAX:-4096} \
+  --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
   --worker-release-file /var/lib/sandbox-gateway/worker-release \
   --direct-scale-project ${PROJECT} --direct-scale-zone ${ZONE} \
   --direct-scale-mig ${MIG_NAME} --direct-scale-max ${MIG_MAX} \

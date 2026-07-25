@@ -89,15 +89,24 @@ if [ "$CREATE_CONCURRENCY" -lt 1 ]; then
   echo "error: CREATE_CONCURRENCY=$CREATE_CONCURRENCY must be >= 1"
   exit 1
 fi
+STANDBY_DELAY="${STANDBY_INITIAL_DELAY:-180}"
+PLACEMENT_HEADROOM="${PLACEMENT_DELAY_HEADROOM_SEC:-30}"
+if ! [[ "$STANDBY_DELAY" =~ ^[0-9]+$ ]] || ! [[ "$PLACEMENT_HEADROOM" =~ ^[0-9]+$ ]]; then
+  echo "error: STANDBY_INITIAL_DELAY and PLACEMENT_DELAY_HEADROOM_SEC must be non-negative integer seconds"
+  exit 1
+fi
+PLACEMENT_DELAY="$((STANDBY_DELAY + PLACEMENT_HEADROOM))"
 GEN_CONFIG="$(mktemp)"
 jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" --argjson cc "$CREATE_CONCURRENCY" \
+   --argjson placement "$PLACEMENT_DELAY" \
    --arg gipmax "$GIP_MAX" --argjson mps "$MEM_PER_SLOT" '
   .guest_subnet_bits = $bits |
   .pools.TapMax      = $n |
   .pools.GuestIPMax  = $gipmax |
   .pools.PortMax     = (.pools.PortMin + $p - 1) |
   .mem_budget_mib    = ($n * $mps) |
-  .create_concurrency = $cc
+  .create_concurrency = $cc |
+  .placement_delay_sec = $placement
 ' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
 
 # Size the Nomad task cgroup to the host: MEM_PER_SLOT_MIB per slot + 2 GiB for
@@ -107,7 +116,7 @@ TASK_MEMORY="$(( SLOTS * MEM_PER_SLOT + 2000 ))"
 CORES="$(echo "${WORKER_MACHINE_TYPE:-n2-standard-16}" | grep -oE '[0-9]+$' || echo 16)"
 TASK_CPU="$(( (CORES - 1) * 1000 ))"
 
-echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS creates=$CREATE_CONCURRENCY /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
+echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS creates=$CREATE_CONCURRENCY placement-delay=${PLACEMENT_DELAY}s /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
 scp -o BatchMode=yes -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_NAME}:/tmp/serve.nomad.hcl"
 scp -o BatchMode=yes -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_NAME}:/tmp/devbox-gcp.json"
 rm -f "$GEN_CONFIG"

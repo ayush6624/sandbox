@@ -62,3 +62,44 @@ func TestWarmCompletionSendsImmediateHeartbeat(t *testing.T) {
 		t.Fatal("warm completion did not send an immediate heartbeat")
 	}
 }
+
+func TestPlacementDelayUsesLinuxBootAgeAfterWarmGate(t *testing.T) {
+	s, _ := capacityTestServer(t)
+	s.cfg.PlacementDelay = 210 * time.Second
+
+	// A genuinely fresh refill worker is fully initialized but remains
+	// unplaceable until after the MIG's 180s standby initial delay plus 30s
+	// safety headroom.
+	s.bootAge = func() (time.Duration, error) { return 90 * time.Second, nil }
+	if got := s.advertisedFreeSlots(3); got != 0 {
+		t.Fatalf("fresh boot advertised %d free slots, want 0", got)
+	}
+
+	// Linux /proc/uptime uses boottime, which includes time spent suspended.
+	// A resumed suspended standby therefore clears the gate immediately.
+	s.bootAge = func() (time.Duration, error) { return 20 * time.Minute, nil }
+	if got := s.advertisedFreeSlots(3); got != 3 {
+		t.Fatalf("resumed old boot advertised %d free slots, want 3", got)
+	}
+
+	// Placement age never bypasses golden warm-up: both gates must be open.
+	s.warmed = make(chan struct{})
+	if got := s.advertisedFreeSlots(3); got != 0 {
+		t.Fatalf("old but unwarmed boot advertised %d free slots, want 0", got)
+	}
+	close(s.warmed)
+	if got := s.advertisedFreeSlots(3); got != 3 {
+		t.Fatalf("old warm boot advertised %d free slots, want 3", got)
+	}
+}
+
+func TestPlacementDelayFailsClosedWhenBootAgeUnavailable(t *testing.T) {
+	s, _ := capacityTestServer(t)
+	s.cfg.PlacementDelay = time.Second
+	s.bootAge = func() (time.Duration, error) {
+		return 0, context.DeadlineExceeded
+	}
+	if got := s.advertisedFreeSlots(3); got != 0 {
+		t.Fatalf("boot-age error advertised %d free slots, want 0", got)
+	}
+}

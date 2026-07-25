@@ -46,6 +46,10 @@ type Config struct {
 	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
 	// golden clones); excess creates queue. <=0 = default: min(2×NumCPU, 16).
 	CreateConcurrency int
+	// PlacementDelay suppresses advertised create capacity until Linux boot
+	// age reaches this duration. Routing and heartbeat registration are not
+	// delayed. See config.PlacementDelaySec.
+	PlacementDelay time.Duration
 	// MemBudgetMIB caps committed guest memory (mem_mib + per-VM overhead)
 	// across running sandboxes. 0 = derive from host total − 2 GiB;
 	// <0 = disabled. See config.MemBudgetMIB.
@@ -157,6 +161,9 @@ type Server struct {
 
 	// startedAt stamps process start so /metrics can export uptime.
 	startedAt time.Time
+	// bootAge reads Linux boot age (/proc/uptime, CLOCK_BOOTTIME semantics).
+	// Kept injectable for deterministic placement-quarantine tests.
+	bootAge func() (time.Duration, error)
 
 	// phases records the worker boot/readiness timeline (see bootphase.go) so
 	// the autoscale "host becomes usable" span is attributable per stage
@@ -183,7 +190,7 @@ const fcOverheadMIB = 156
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
 		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
-		startedAt: time.Now(), phases: newPhaseRecorder()}
+		startedAt: time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder()}
 	sem := cfg.CreateConcurrency
 	if sem <= 0 {
 		sem = 2 * runtime.NumCPU()

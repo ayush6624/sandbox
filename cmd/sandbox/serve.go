@@ -112,6 +112,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		VMTemplate:        tmpl,
 		HotCreate:         !cfg.DisableHotCreate,
 		CreateConcurrency: cfg.CreateConcurrency,
+		PlacementDelay:    time.Duration(cfg.PlacementDelaySec) * time.Second,
 		MemBudgetMIB:      cfg.MemBudgetMIB,
 		HibernateAfter:    time.Duration(cfg.HibernateAfterSec) * time.Second,
 		UFFDRestore:       cfg.UFFDRestore,

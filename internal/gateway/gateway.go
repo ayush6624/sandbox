@@ -778,9 +778,10 @@ func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 	// with fleet size. A per-host timeout keeps one wedged host from stalling
 	// the whole response.
 	var (
-		mu  sync.Mutex
-		wg  sync.WaitGroup
-		out = []registry.Sandbox{}
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		out      = []registry.Sandbox{}
+		failures = map[string]error{}
 	)
 	for _, h := range live {
 		wg.Add(1)
@@ -791,6 +792,9 @@ func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 			sandboxes, err := client.NewHTTP(h.addr, h.token).List(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "gateway: list from host %s: %v\n", h.id, err)
+				mu.Lock()
+				failures[h.id] = err
+				mu.Unlock()
 				return
 			}
 			for i := range sandboxes {
@@ -802,6 +806,27 @@ func (g *Gateway) handleList(w http.ResponseWriter, r *http.Request) {
 		}(h)
 	}
 	wg.Wait()
+	if len(failures) > 0 {
+		// A partial list is indistinguishable from sandbox loss to callers and
+		// has caused real clients to conclude that held sandboxes disappeared
+		// while an owning worker was merely unreachable. Fail closed instead of
+		// returning a plausible-looking 200 response assembled from the other
+		// hosts. The caller can retry; the error also preserves the underlying
+		// fleet availability signal.
+		hostIDs := make([]string, 0, len(failures))
+		for hostID := range failures {
+			hostIDs = append(hostIDs, hostID)
+		}
+		sort.Strings(hostIDs)
+		details := make([]string, 0, len(hostIDs))
+		for _, hostID := range hostIDs {
+			details = append(details, fmt.Sprintf("%s: %v", hostID, failures[hostID]))
+		}
+		httpError(w, http.StatusBadGateway,
+			fmt.Errorf("sandbox list incomplete; %d/%d live hosts failed: %s",
+				len(hostIDs), len(live), strings.Join(details, "; ")))
+		return
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	writeJSON(w, 200, out)
 }

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // liveGateway builds a gateway with the given hosts, all marked seen just now.
@@ -410,6 +413,54 @@ func TestRegisterClampsHeartbeatFreeToTotalMinusUsed(t *testing.T) {
 	}`)
 	if h.slotsUsed != 0 || h.slotsFree != 48 {
 		t.Fatalf("settled accounting used/free = %d/%d, want 0/48", h.slotsUsed, h.slotsFree)
+	}
+}
+
+func TestListFailsClosedInsteadOfReturningPartialFleet(t *testing.T) {
+	good, _ := fakeHost(t, http.StatusOK, `[{"id":"held-on-good"}]`)
+	bad, _ := fakeHost(t, http.StatusInternalServerError, `{"error":"temporarily unavailable"}`)
+
+	g := New("tok", 20*time.Second, 0, 0)
+	addTestHost(g, "good-worker", strings.TrimPrefix(good.URL, "http://"), 1, 23)
+	addTestHost(g, "bad-worker", strings.TrimPrefix(bad.URL, "http://"), 1, 23)
+
+	rr := httptest.NewRecorder()
+	g.handleList(rr, httptest.NewRequest(http.MethodGet, "/sandboxes", nil))
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("partial list status = %d, want 502; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "sandbox list incomplete") ||
+		!strings.Contains(rr.Body.String(), "bad-worker") {
+		t.Fatalf("partial list error lacks failed host context: %s", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "held-on-good") {
+		t.Fatalf("partial sandbox data leaked in error response: %s", rr.Body.String())
+	}
+}
+
+func TestListAggregatesAllLiveHostsWhenComplete(t *testing.T) {
+	first, _ := fakeHost(t, http.StatusOK, `[{"id":"one"}]`)
+	second, _ := fakeHost(t, http.StatusOK, `[{"id":"two"}]`)
+
+	g := New("tok", 20*time.Second, 0, 0)
+	addTestHost(g, "first", strings.TrimPrefix(first.URL, "http://"), 1, 23)
+	addTestHost(g, "second", strings.TrimPrefix(second.URL, "http://"), 1, 23)
+
+	rr := httptest.NewRecorder()
+	g.handleList(rr, httptest.NewRequest(http.MethodGet, "/sandboxes", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("complete list status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var got []registry.Sandbox
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode complete list: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, sb := range got {
+		ids[sb.ID] = true
+	}
+	if len(got) != 2 || !ids["one"] || !ids["two"] {
+		t.Fatalf("complete list = %+v, want one and two", got)
 	}
 }
 

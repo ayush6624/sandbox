@@ -12,7 +12,7 @@ import type { SandboxOpts } from './types.js'
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 /**
  * Timeout for `POST /sandboxes` — creation blocks until the VM is ready.
- * Must exceed the gateway's create queue-wait (180 s default): during a burst
+ * Must exceed the gateway's create queue-wait (240 s default): during a burst
  * a create may sit queued that long while the autoscaler adds a host, then
  * still pay the bring-up + 60 s agent gate. 90 s abandoned creates the queue
  * would have served.

@@ -205,7 +205,7 @@ golden snapshot when available (~0.3–0.5 s), cold boot otherwise (~2–3.5 s).
 **A `vcpus`/`mem_mib` override always cold-boots** — Firecracker bakes
 resources into the golden snapshot, so an override can't be served from it.
 Give the request a generous client timeout — the SDK uses 300 s, which has to
-exceed the gateway's create queue-wait (180 s default) plus bring-up, or a
+exceed the gateway's create queue-wait (240 s default) plus bring-up, or a
 burst abandons creates the queue would have served.
 
 #### Idle-hibernation activity contract
