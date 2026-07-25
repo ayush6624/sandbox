@@ -623,9 +623,11 @@ function readTimeline(path: string): TimelineEvent[] {
  * before the scenario are resumed standbys and are intentionally eligible
  * immediately; only names first observed after scenario start are refill VMs.
  *
- * For every refill VM, correlate MIG instance name -> Nomad node id -> task
- * StartedAt -> gateway host id. It must reach SUSPENDED, and any capacity
- * heartbeat must be at least placementDelayMs after the serve task started.
+ * For every refill VM, correlate MIG instance name -> Nomad node id -> gateway
+ * host id. It must reach SUSPENDED, and any capacity heartbeat must be at
+ * least placementDelayMs after the MIG first reports the instance being
+ * created. The production gate uses Linux boot age, so Nomad task StartedAt is
+ * deliberately not the delay anchor: startup work consumes part of the gate.
  */
 function assertStandbyRefillTimeline(
   events: TimelineEvent[],
@@ -650,6 +652,18 @@ function assertStandbyRefillTimeline(
   }
 
   for (const instance of fresh) {
+    const firstMigObserved = migEvents
+      .filter(
+        (event) =>
+          event.ts_ms >= scenarioStartedMs &&
+          event.data.instance === instance
+      )
+      .map((event) => event.ts_ms)
+      .sort((a, b) => a - b)[0]
+    if (!Number.isFinite(firstMigObserved)) {
+      throw new Error(`fresh refill ${instance} has no MIG creation observation`)
+    }
+
     const suspended = migEvents.some(
       (event) =>
         event.ts_ms >= scenarioStartedMs &&
@@ -666,25 +680,6 @@ function assertStandbyRefillTimeline(
     if (!nodeEvent) throw new Error(`fresh refill ${instance} never registered a Nomad node`)
     const nodeID = String(nodeEvent.data.node_id ?? '')
 
-    const allocationEvents = events.filter(
-      (event) =>
-        event.event === 'nomad_allocation_state' &&
-        event.data.node_id === nodeID &&
-        event.ts_ms >= scenarioStartedMs
-    )
-    const startedAt = allocationEvents
-      .flatMap((event) => {
-        const tasks = Array.isArray(event.data.tasks) ? event.data.tasks : []
-        return tasks.map((task) => String((task as Record<string, unknown>).started_at ?? ''))
-      })
-      .filter(Boolean)
-      .map((value) => Date.parse(value))
-      .filter(Number.isFinite)
-      .sort((a, b) => a - b)[0]
-    if (!Number.isFinite(startedAt)) {
-      throw new Error(`fresh refill ${instance} has no serve task StartedAt`)
-    }
-
     const eligible = events
       .filter(
         (event) =>
@@ -694,10 +689,10 @@ function assertStandbyRefillTimeline(
       )
       .map((event) => event.ts_ms)
       .sort((a, b) => a - b)[0]
-    if (eligible !== undefined && eligible - startedAt < placementDelayMs) {
+    if (eligible !== undefined && eligible - firstMigObserved < placementDelayMs) {
       throw new Error(
-        `fresh refill ${instance} advertised capacity after ${eligible - startedAt}ms; ` +
-        `placement delay requires >=${placementDelayMs}ms`
+        `fresh refill ${instance} advertised capacity ${eligible - firstMigObserved}ms after ` +
+        `first MIG creation observation; placement delay requires >=${placementDelayMs}ms`
       )
     }
   }
