@@ -98,7 +98,9 @@ Fleet evidence (2026-07-25, release `p0-secure-20260725-1`):
 
 ### P0.2 Jailer, privileges, and cgroups
 
-Status: **next implementation slice**.
+Status: **started — shared mode-aware launcher seam implemented**.
+
+Detailed design: [P0.2 shared jailer and cgroup design](p0-jailer-design.md).
 
 Use Firecracker's jailer (or a stricter equivalent) for every VM process:
 
@@ -113,6 +115,12 @@ Use Firecracker's jailer (or a stricter equivalent) for every VM process:
 The pinned SDK's naive jailer strategy does not cover this repo's raw clone and
 UFFD paths. Implement one shared launcher abstraction first; do not jail only
 cold boots.
+
+The first seam now routes process preparation for cold boot, snapshot restore,
+hot clone, and UFFD restore through one `ProcessLauncher`, with explicit mode,
+host-visible API socket, and idempotent post-exit cleanup contracts. Direct
+execution remains the only implementation; the production jailer is not yet
+enabled.
 
 Acceptance:
 

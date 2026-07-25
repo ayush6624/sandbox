@@ -24,6 +24,9 @@ type RunOptions struct {
 	// LogMaxFiles bounds retained completed/crashed VMM diagnostics by count.
 	// Active VMM logs are never pruned. Zero selects the package default.
 	LogMaxFiles int
+	// Launcher is the single process-preparation boundary used by every VMM
+	// lifecycle mode. Nil selects direct execution for development.
+	Launcher ProcessLauncher
 
 	// Networking (optional — if TapDevice is empty, no networking)
 	TapDevice   string

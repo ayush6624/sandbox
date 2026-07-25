@@ -34,8 +34,10 @@ import (
 // is set; the lifecycle functions branch on which.
 type Machine struct {
 	*fcsdk.Machine
-	raw *rawMachine
-	log *vmmLog
+	raw           *rawMachine
+	log           *vmmLog
+	launchCleanup func()
+	cleanupOnce   sync.Once
 	// SDK-backed machines get one process waiter shared by every Wait caller.
 	// It also finalizes the log even when startup fails after the VMM launched
 	// and the caller never reaches its normal lifecycle goroutine.
@@ -85,8 +87,21 @@ type rawMachine struct {
 	// uffd is the page-fault handler backing a UFFD-restored VM's memory; nil
 	// for cold boots and clones. It must outlive the VM (the guest faults
 	// throughout its run) and be torn down when the VM exits.
-	uffd *uffdHandler
-	log  *vmmLog
+	uffd          *uffdHandler
+	log           *vmmLog
+	launchCleanup func()
+	cleanupOnce   sync.Once
+}
+
+func (m *rawMachine) cleanupLaunch() {
+	if m == nil {
+		return
+	}
+	m.cleanupOnce.Do(func() {
+		if m.launchCleanup != nil {
+			m.launchCleanup()
+		}
+	})
 }
 
 func (o *RunOptions) applyDefaults() error {
@@ -203,17 +218,20 @@ func buildNetworkInterface(o RunOptions) (fcsdk.NetworkInterface, error) {
 	}, nil
 }
 
-func buildCommand(ctx context.Context, fcCfg fcsdk.Config, fcBin, logDir string, logMaxBytes int64, retention time.Duration, maxFiles int) (*exec.Cmd, *vmmLog) {
-	cmd := exec.CommandContext(ctx, fcBin, processArgs(fcCfg.SocketPath, fcCfg.VMID, !fcCfg.Seccomp.Enabled)...)
+func buildCommand(ctx context.Context, fcCfg fcsdk.Config, opts RunOptions, mode LaunchMode) (PreparedLaunch, *vmmLog, error) {
+	prepared, err := prepareLaunch(ctx, opts, mode, fcCfg.VMID, fcCfg.SocketPath)
+	if err != nil {
+		return PreparedLaunch{}, nil, err
+	}
 	// Capture firecracker's stdout/stderr so we can debug early-exit crashes.
-	logPath := filepath.Join(logDir, fmt.Sprintf("firecracker-%s.log", fcCfg.VMID))
+	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", fcCfg.VMID))
 	var closer *vmmLog
-	if f, err := openVMMLog(logPath, logMaxBytes, retention, maxFiles); err == nil {
-		cmd.Stdout = f
-		cmd.Stderr = f
+	if f, err := openVMMLog(logPath, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles); err == nil {
+		prepared.Command.Stdout = f
+		prepared.Command.Stderr = f
 		closer = f
 	}
-	return cmd, closer
+	return prepared, closer, nil
 }
 
 func silentLog() *logrus.Entry {
@@ -225,26 +243,39 @@ func silentLog() *logrus.Entry {
 // NewMachine builds a Machine from RunOptions.
 // Pass disableValidation=true to skip SDK path validation (e.g. for dry runs).
 func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*Machine, RuntimeConfig, error) {
+	if err := opts.applyDefaults(); err != nil {
+		return nil, RuntimeConfig{}, err
+	}
 	fcCfg, err := opts.fcConfig()
 	if err != nil {
 		return nil, RuntimeConfig{}, err
 	}
 	fcCfg.DisableValidation = disableValidation
 
-	cmd, logCloser := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles)
+	prepared, logCloser, err := buildCommand(ctx, fcCfg, opts, LaunchColdBoot)
+	if err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	fcCfg.SocketPath = prepared.HostAPIPath
 	// The SDK configures Firecracker's internal warning log through a FIFO.
 	// Feed it into the same bounded sink as stdout/stderr so the FIFO always has
 	// an active consumer and cannot become an unbounded or blocking side path.
 	fcCfg.FifoLogWriter = logCloser
-	m, err := fcsdk.NewMachine(ctx, fcCfg, fcsdk.WithProcessRunner(cmd), fcsdk.WithLogger(silentLog()))
+	m, err := fcsdk.NewMachine(ctx, fcCfg, fcsdk.WithProcessRunner(prepared.Command), fcsdk.WithLogger(silentLog()))
 	if err != nil {
 		if logCloser != nil {
 			_ = logCloser.Close()
 		}
+		prepared.cleanup()
 		return nil, RuntimeConfig{}, err
 	}
 	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
-	return &Machine{Machine: m, log: logCloser, waitDone: make(chan struct{})}, rt, nil
+	return &Machine{
+		Machine:       m,
+		log:           logCloser,
+		launchCleanup: prepared.Cleanup,
+		waitDone:      make(chan struct{}),
+	}, rt, nil
 }
 
 // NewMachineFromSnapshot builds a Machine that loads memPath/statePath and
@@ -255,6 +286,9 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 // kept only so the SDK's load-snapshot validation can stat it — its contents
 // must already match the snapshot's view of the disk.
 func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, statePath string, disableValidation bool) (*Machine, RuntimeConfig, error) {
+	if err := opts.applyDefaults(); err != nil {
+		return nil, RuntimeConfig{}, err
+	}
 	opts.TapDevice = "" // device comes from the snapshot; don't add a fresh iface
 	fcCfg, err := opts.fcConfig()
 	if err != nil {
@@ -262,10 +296,14 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 	}
 	fcCfg.DisableValidation = disableValidation
 
-	cmd, logCloser := buildCommand(ctx, fcCfg, opts.FirecrackerBin, opts.LogDir, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles)
+	prepared, logCloser, err := buildCommand(ctx, fcCfg, opts, LaunchSnapshotRestore)
+	if err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	fcCfg.SocketPath = prepared.HostAPIPath
 	fcCfg.FifoLogWriter = logCloser
 	m, err := fcsdk.NewMachine(ctx, fcCfg,
-		fcsdk.WithProcessRunner(cmd),
+		fcsdk.WithProcessRunner(prepared.Command),
 		fcsdk.WithLogger(silentLog()),
 		fcsdk.WithSnapshot(memPath, statePath, func(c *fcsdk.SnapshotConfig) {
 			c.ResumeVM = true
@@ -275,10 +313,16 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		if logCloser != nil {
 			_ = logCloser.Close()
 		}
+		prepared.cleanup()
 		return nil, RuntimeConfig{}, err
 	}
 	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
-	return &Machine{Machine: m, log: logCloser, waitDone: make(chan struct{})}, rt, nil
+	return &Machine{
+		Machine:       m,
+		log:           logCloser,
+		launchCleanup: prepared.Cleanup,
+		waitDone:      make(chan struct{}),
+	}, rt, nil
 }
 
 // Start boots the VMM and sends InstanceStart — or, for a snapshot-backed
@@ -289,6 +333,7 @@ func Start(ctx context.Context, m *Machine) error {
 	}
 	if err := m.Machine.Start(ctx); err != nil {
 		_ = m.log.Close()
+		m.cleanupLaunch()
 		return err
 	}
 	m.startSDKWait()
@@ -306,8 +351,20 @@ func (m *Machine) startSDKWait() {
 		go func() {
 			m.waitErr = m.Machine.Wait(context.Background())
 			m.log.finishExit(m.waitErr)
+			m.cleanupLaunch()
 			close(m.waitDone)
 		}()
+	})
+}
+
+func (m *Machine) cleanupLaunch() {
+	if m == nil {
+		return
+	}
+	m.cleanupOnce.Do(func() {
+		if m.launchCleanup != nil {
+			m.launchCleanup()
+		}
 	})
 }
 
@@ -473,7 +530,12 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	}
 	vmID := uuid.NewString()
 
-	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, processArgs(opts.SocketPath, vmID, opts.DisableSeccomp)...)
+	prepared, err := prepareLaunch(ctx, opts, LaunchHotClone, vmID, opts.SocketPath)
+	if err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	cmd := prepared.Command
+	opts.SocketPath = prepared.HostAPIPath
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
 	var logCloser *vmmLog
 	if f, ferr := openVMMLog(logPath, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles); ferr == nil {
@@ -485,12 +547,20 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		if logCloser != nil {
 			_ = logCloser.Close()
 		}
+		prepared.cleanup()
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
-	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), log: logCloser}
+	rm := &rawMachine{
+		cmd:           cmd,
+		sock:          opts.SocketPath,
+		doneCh:        make(chan struct{}),
+		log:           logCloser,
+		launchCleanup: prepared.Cleanup,
+	}
 	go func() {
 		rm.waitErr = cmd.Wait()
 		rm.log.finishExit(rm.waitErr)
+		rm.cleanupLaunch()
 		close(rm.doneCh)
 	}()
 	// Kill the process on any error below so we don't leak a firecracker.
@@ -580,7 +650,12 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, opts.FirecrackerBin, processArgs(opts.SocketPath, vmID, opts.DisableSeccomp)...)
+	prepared, err := prepareLaunch(ctx, opts, LaunchUFFDRestore, vmID, opts.SocketPath)
+	if err != nil {
+		return nil, RuntimeConfig{}, err
+	}
+	cmd := prepared.Command
+	opts.SocketPath = prepared.HostAPIPath
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
 	var logCloser *vmmLog
 	if f, ferr := openVMMLog(logPath, opts.LogMaxBytes, opts.LogRetention, opts.LogMaxFiles); ferr == nil {
@@ -592,9 +667,17 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		if logCloser != nil {
 			_ = logCloser.Close()
 		}
+		prepared.cleanup()
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
-	rm := &rawMachine{cmd: cmd, sock: opts.SocketPath, doneCh: make(chan struct{}), uffd: h, log: logCloser}
+	rm := &rawMachine{
+		cmd:           cmd,
+		sock:          opts.SocketPath,
+		doneCh:        make(chan struct{}),
+		uffd:          h,
+		log:           logCloser,
+		launchCleanup: prepared.Cleanup,
+	}
 	// If the page source can't serve a fault (e.g. a GCS chunk fetch fails after
 	// retries), Firecracker would hang forever on the unserved page. Kill it
 	// instead: the wake fails cleanly and the sandbox stays hibernated for a
@@ -608,6 +691,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		rm.waitErr = cmd.Wait()
 		h.close()
 		rm.log.finishExit(rm.waitErr)
+		rm.cleanupLaunch()
 		close(rm.doneCh)
 	}()
 	defer func() {
