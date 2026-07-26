@@ -29,7 +29,8 @@ import (
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	// The body is optional (older clients send none); tolerate EOF.
 	var body struct {
-		Name string `json:"name"`
+		Name             string `json:"name"`
+		RetentionSeconds int    `json:"retention_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -39,7 +40,16 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
-	snap, status, err := s.snapshotSandbox(r.Context(), r.PathValue("id"), false, body.Name)
+	if body.RetentionSeconds < 0 {
+		httpError(w, 400, errors.New("retention_seconds must be non-negative"))
+		return
+	}
+	var expiresAt *time.Time
+	if body.RetentionSeconds > 0 {
+		value := time.Now().Add(time.Duration(body.RetentionSeconds) * time.Second)
+		expiresAt = &value
+	}
+	snap, status, err := s.snapshotSandbox(r.Context(), r.PathValue("id"), false, body.Name, expiresAt)
 	if err != nil {
 		httpError(w, status, err)
 		return
@@ -57,7 +67,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 // sends only rootfs extents that diverged from the base. Everything else
 // (cold boots, restores, user fan-out clones, the golden build itself) is a
 // self-contained FULL snapshot.
-func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, name string) (registry.Snapshot, int, error) {
+func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, name string, expiresAt *time.Time) (registry.Snapshot, int, error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return registry.Snapshot{}, 404, err
@@ -145,6 +155,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		RootfsPath:       rootfsPath,
 		SourceRootfsPath: sb.RootfsPath,
 		CreatedAt:        time.Now(),
+		ExpiresAt:        expiresAt,
 		Golden:           golden,
 		BaseMtime:        baseMtime,
 		BaseSize:         baseSize,
@@ -660,8 +671,9 @@ func (s *Server) deleteSnapshot(ctx context.Context, id string) error {
 // immutable snapshot has been captured.
 func (s *Server) handleSnapshotPublicFields(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name             string `json:"name"`
-		RetentionSeconds int    `json:"retention_seconds"`
+		Name             string     `json:"name"`
+		RetentionSeconds int        `json:"retention_seconds"`
+		ExpiresAt        *time.Time `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
@@ -671,8 +683,8 @@ func (s *Server) handleSnapshotPublicFields(w http.ResponseWriter, r *http.Reque
 		httpError(w, 400, errors.New("retention_seconds must be non-negative"))
 		return
 	}
-	var expiresAt *time.Time
-	if body.RetentionSeconds > 0 {
+	expiresAt := body.ExpiresAt
+	if expiresAt == nil && body.RetentionSeconds > 0 {
 		value := time.Now().Add(time.Duration(body.RetentionSeconds) * time.Second)
 		expiresAt = &value
 	}

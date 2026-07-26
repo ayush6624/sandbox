@@ -71,7 +71,15 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(item)
 	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/snapshot"):
 		id := strings.Split(r.URL.Path, "/")[2]
+		var body struct {
+			RetentionSeconds int `json:"retention_seconds"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		snap := registry.Snapshot{ID: "snap_1", SourceID: id, CreatedAt: time.Now(), Durability: "local"}
+		if body.RetentionSeconds > 0 {
+			value := time.Now().Add(time.Duration(body.RetentionSeconds) * time.Second)
+			snap.ExpiresAt = &value
+		}
 		f.snaps[snap.ID] = snap
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(snap)
@@ -79,15 +87,12 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := strings.Split(r.URL.Path, "/")[2]
 		snap := f.snaps[id]
 		var body struct {
-			Name             string `json:"name"`
-			RetentionSeconds int    `json:"retention_seconds"`
+			Name      string     `json:"name"`
+			ExpiresAt *time.Time `json:"expires_at"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		snap.Name = body.Name
-		if body.RetentionSeconds > 0 {
-			value := time.Now().Add(time.Duration(body.RetentionSeconds) * time.Second)
-			snap.ExpiresAt = &value
-		}
+		snap.ExpiresAt = body.ExpiresAt
 		f.snaps[id] = snap
 		_ = json.NewEncoder(w).Encode(snap)
 	case r.Method == "GET" && r.URL.Path == "/snapshots":

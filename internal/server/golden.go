@@ -92,7 +92,7 @@ func (s *Server) buildGolden(ctx context.Context) {
 		fmt.Fprintf(os.Stderr, "golden snapshot: cold boot failed, creates stay cold: %v\n", err)
 		return
 	}
-	snap, _, snapErr := s.snapshotSandbox(ctx, sb.ID, true, "")
+	snap, _, snapErr := s.snapshotSandbox(ctx, sb.ID, true, "", nil)
 	// The source exists only to be snapshotted — destroy it either way.
 	if err := s.destroy(context.Background(), sb.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "golden snapshot: destroy source %s: %v\n", sb.ID, err)

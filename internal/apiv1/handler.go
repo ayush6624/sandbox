@@ -355,7 +355,8 @@ func (h *Handler) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteProblem(w, r, 400, "invalid_request", "retention_seconds must be non-negative")
 		return
 	}
-	rec := h.call(r, http.MethodPost, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/snapshot", map[string]any{"name": body.Name})
+	rec := h.call(r, http.MethodPost, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/snapshot",
+		map[string]any{"name": body.Name, "retention_seconds": body.RetentionSeconds})
 	if !translateError(w, r, rec) {
 		return
 	}
@@ -365,7 +366,7 @@ func (h *Handler) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	annotated := h.call(r, http.MethodPatch, "/snapshots/"+url.PathEscape(raw.ID)+"/public-fields",
-		map[string]any{"name": body.Name, "retention_seconds": body.RetentionSeconds})
+		map[string]any{"name": body.Name, "expires_at": raw.ExpiresAt})
 	if !translateError(w, r, annotated) {
 		return
 	}
