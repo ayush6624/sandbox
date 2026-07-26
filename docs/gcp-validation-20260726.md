@@ -21,6 +21,8 @@ two-worker security gate is `a97b68f`.
 | SDK typecheck and build | Pass |
 | Deterministic OpenAPI generation | Pass |
 | Shell syntax validation | **27 scripts passed** |
+| Bounded resource exhaustion | Pass on disposable worker |
+| Live client-token rotation | Pass with exact restoration |
 
 The security gate covered live jailer UID/GID allocation, per-VM chroot and
 namespaces, cgroup controls, seccomp, VMM output bounds, non-root guest/SSH
@@ -34,8 +36,9 @@ reconciliation.
 A live `/v1` contract rerun against the hardened fleet exposed a transient
 restored-guest failure: `ssh.service` could remain inactive after identity
 rotation. Commit `a223889` adds bounded retries and unit coverage for restored
-SSH startup. The worker image is currently being rebuilt, after which the
-contract, SDK/e2e, security, and recovery gates must run again.
+SSH startup. Worker image `sandbox-worker-20260727-000120` and golden data image
+`sandbox-golden-data-20260727-001237` are ready. The MIG rollout is pending,
+after which the contract, SDK/e2e, security, and recovery gates must run again.
 
 This document must **not** treat `a223889` or the new image as GCP-validated
 until that sequence completes. In particular, the earlier API/SDK passes below
@@ -45,15 +48,10 @@ combined release gate.
 
 ### Remaining P0 and release evidence
 
-1. Controlled memory, PID, and descriptor exhaustion, and an
-   ENOSPC/log-disk-full case, with bounded failure, worker health, and cleanup
-   assertions.
-2. Live management-token rotation proving the overlap/new key works and the
-   retired key is rejected without stopping the fleet.
-3. Complete `/v1` contract and TypeScript SDK/e2e reruns on the rebuilt image.
-4. Repeat security and recovery gates and record the final image, host kernel,
+1. Complete `/v1` contract and TypeScript SDK/e2e reruns on the rebuilt image.
+2. Repeat security and recovery gates and record the final image, host kernel,
    guest kernel, Firecracker, rootfs, and release identifiers.
-5. Only after those correctness gates pass, run the final rigorous benchmark
+3. Only after those correctness gates pass, run the final rigorous benchmark
    matrix and retain deterministic cleanup evidence.
 
 ## Remediation validation

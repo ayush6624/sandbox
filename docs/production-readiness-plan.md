@@ -24,9 +24,10 @@ The runtime already has a substantial foundation:
   host when local test sockets are available.
 
 The enabled host-isolation paths and public API contract now have substantial
-GCP evidence. The remaining release risks are destructive resource-boundary
-behavior, live credential rotation, combined rebuilt-image regression proof,
-and broader operational failure handling.
+GCP evidence. Destructive resource-boundary behavior and live credential
+rotation have dedicated passing gates. The remaining release risks are the
+combined rebuilt-image regression proof and broader operational failure
+handling.
 
 ## Public terminology
 
@@ -73,9 +74,9 @@ snapshot restore, hibernation wake, and UFFD restore—provide the same security
 properties. A partial mode must not be labelled production-secure.
 
 Overall status: **open**. The enabled production paths have passed the
-two-worker isolation and recovery gates, but resource-exhaustion/ENOSPC, live
-credential rotation, and the final rebuilt-image contract/e2e rerun remain
-release blockers.
+two-worker isolation and recovery gates. Resource-exhaustion/isolated-ENOSPC
+and live credential rotation gates also pass. The final rebuilt-image
+contract/e2e/security/recovery rerun remains the P0 release blocker.
 
 ### P0.1 Firecracker seccomp
 
@@ -244,12 +245,14 @@ Evidence:
   non-root SSH behavior on `a97b68f`.
 - The subsequent live `/v1` contract rerun exposed a transient
   `ssh.service` startup failure after restore. Commit `a223889` adds bounded
-  startup retry and unit coverage. The worker image containing that fix is
-  being rebuilt and **has not yet passed the GCP contract rerun**.
+  startup retry and unit coverage. Worker image
+  `sandbox-worker-20260727-000120` and matching golden data image
+  `sandbox-golden-data-20260727-001237` are built, but the MIG rollout and GCP
+  contract rerun are incomplete.
 
 ### P0.6 Encrypted management transport
 
-Status: **implemented; final live rotation proof pending**.
+Status: **implemented and live-rotation verified**.
 
 - Support TLS on host and gateway TCP listeners, or require and verify a
   private authenticated reverse proxy.
@@ -276,14 +279,16 @@ Evidence and remaining proof:
   preserves the worker credential.
 - Bearer-token query strings are rejected and request logging scrubs sensitive
   query data.
-- Local transport and credential-domain tests pass. A live GCP rotation must
-  still prove that the new key is accepted and the retired key is rejected
-  without stopping the fleet.
+- Local transport and credential-domain tests pass.
+- `tests/security-token-rotation-gate.sh` passed against the live GCP gateway:
+  both keys worked during overlap, only the replacement worked after
+  retirement, and the original root-owned `0600` file was restored
+  byte-for-byte without restarting the gateway.
 
 ### P0.8 Security verification
 
-Status: **substantially implemented and fleet-verified; resource-exhaustion
-proofs remain**.
+Status: **implemented and fleet-verified for enabled production paths; final
+rebuilt-image rerun pending**.
 
 Build host-level tests that execute on Linux/KVM and assert:
 
@@ -305,12 +310,14 @@ cleanup, and expected lifecycle cleanup. `tests/security-recovery-gate.sh`
 covers server-crash and host-reboot reconciliation.
 
 Both active GCP workers passed the complete security gate on release
-`a97b68f`. The server-crash and host-reboot recovery gates also passed. The
-remaining P0.8 work is destructive resource-exhaustion evidence: memory/PID/FD
-pressure and a controlled ENOSPC/log-disk-full scenario must fail within the
-documented boundary, preserve the host/service, and clean up deterministically.
-Release metadata must record the final tested worker image and kernel/rootfs
-versions after the current image rerun completes.
+`a97b68f`. The server-crash and host-reboot recovery gates also passed.
+`tests/security-exhaustion-gate.sh` then passed on the disposable second
+worker: guest address-space, process, and file-descriptor limits failed within
+their bounded rlimits; an isolated 32 MiB loop filesystem reached deterministic
+ENOSPC without consuming production storage; the real VMM cgroup/log, control
+sandbox, API, and host free-space boundaries remained healthy; and exact
+cleanup succeeded. Release metadata must record the final tested worker image
+and kernel/rootfs versions after the current image rerun completes.
 
 ### P0 fleet validation record — 2026-07-25
 
@@ -383,19 +390,15 @@ Confirmed:
 In progress:
 
 - A live `/v1` contract run found restored guests could transiently leave
-  `ssh.service` inactive. Commit `a223889` adds bounded retry. A new worker
-  image is being rebuilt and the contract/security rerun is still in progress;
-  this fix is **not yet GCP-verified**.
+  `ssh.service` inactive. Commit `a223889` adds bounded retry. The matching
+  worker and golden images are built; the MIG rollout and contract/security
+  rerun are still in progress, so this fix is **not yet GCP-verified**.
 
 Remaining P0 exit evidence:
 
-1. Controlled memory, PID, and descriptor exhaustion, plus ENOSPC/log-disk-full
-   tests, must prove bounded failure, host availability, and cleanup.
-2. Live management-token rotation must prove overlap/new-key acceptance and
-   retired-key rejection without stopping the fleet.
-3. The rebuilt image must pass the complete `/v1` contract, SDK/e2e, security,
+1. The rebuilt image must pass the complete `/v1` contract, SDK/e2e, security,
    and recovery gates with final version metadata.
-4. UFFD requires its own KVM security gate before it can be enabled; it remains
+2. UFFD requires its own KVM security gate before it can be enabled; it remains
    outside the current production profile.
 
 ## P1: freeze a versioned API contract
@@ -615,16 +618,13 @@ SDK evidence (2026-07-26, `sandbox@1.0.0`):
 
 ## Recommended delivery order
 
-1. Finish the `a223889` worker-image rebuild and rerun the `/v1`, SDK/e2e,
+1. Finish the `a223889` worker-image rollout and rerun the `/v1`, SDK/e2e,
    security, and recovery gates.
-2. Prove live management-token rotation, including retired-key rejection.
-3. Run controlled memory/PID/FD pressure and ENOSPC/log-disk-full tests; retain
-   cleanup and host-health evidence.
-4. Publish immutable version metadata for the worker image, host and guest
+2. Publish immutable version metadata for the worker image, host and guest
    kernels, Firecracker, jailer layout, and rootfs.
-5. Run the final contract/e2e correctness gate and only then execute the
+3. Run the final contract/e2e correctness gate and only then execute the
    rigorous benchmark matrix with deterministic cleanup.
-6. Complete P3 operational failure testing, SLO release gates, and artifact
+4. Complete P3 operational failure testing, SLO release gates, and artifact
    publication.
 
 The service should not be described as safe for arbitrary multi-tenant code
