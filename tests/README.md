@@ -93,8 +93,9 @@ wake. Both modes reject stale jails/cgroups and recheck the bridge firewall
 after recovery.
 
 The resource-exhaustion gate is also restricted to an empty disposable worker.
-Guest memory, process, and descriptor pressure is bounded inside a 128 MiB
-probe, while ENOSPC is induced only on a 16–64 MiB run-owned loop filesystem:
+Guest memory, process, and descriptor pressure is bounded with process rlimits
+inside 512 MiB probes, while ENOSPC is induced only on a 16–64 MiB run-owned
+loop filesystem:
 
 ```bash
 DISPOSABLE_WORKER_EXHAUSTION=I_UNDERSTAND_THIS_EXHAUSTS_RESOURCES_ON_A_DISPOSABLE_EMPTY_WORKER \

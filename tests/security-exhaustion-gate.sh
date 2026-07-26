@@ -125,7 +125,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 create() {
-  local suffix="$1" mem_mib="${2:-128}" body response id
+  local suffix="$1" mem_mib="${2:-512}" body response id
   body="$(jq -cn --arg name "$RUN_ID-$suffix" --argjson mem "$mem_mib" \
     '{name:$name,mem_mib:$mem,timeout_sec:900,hibernate_after_sec:-1}')"
   response="$(api -X POST -H 'Content-Type: application/json' --data "$body" \
@@ -202,9 +202,12 @@ test "$(findmnt -n -o SOURCE "$run_dir/mnt")" = "$loop_dev"
 REMOTE
 
 echo "security exhaustion gate: create control and pressure sandboxes"
-create control 128
+# The Ubuntu devbox image is not reliable at 128 MiB during cold boot. Guest
+# pressure is bounded independently with rlimits, so use a stable 512 MiB VM
+# size while still staying well below the disposable worker's admission limit.
+create control 512
 CONTROL_ID="$CREATED_ID"
-create pressure 128
+create pressure 512
 PRESSURE_ID="$CREATED_ID"
 assert_control_healthy "$CONTROL_ID"
 
@@ -337,12 +340,11 @@ status=$?
 set -e
 test "$status" -ne 0
 grep -qi 'No space left on device' "$run_dir/dd.stderr"
-set +e
-printf x >>"$mountpoint/firecracker-probe.log" 2>"$run_dir/append.stderr"
-status=$?
-set -e
-test "$status" -ne 0
-grep -qi 'No space left on device' "$run_dir/append.stderr"
+# ext4 delayed allocation may accept a one-byte buffered append even with
+# zero free blocks and report the error only at fsync/close. The deterministic
+# boundary is the synchronous filler above; the modeled bounded log must not
+# have grown past its configured cap.
+test "$(stat -c '%s' "$mountpoint/firecracker-probe.log")" -le "$log_max"
 test "$(df -PB1 / | awk 'NR==2{print $4}')" -ge 2147483648
 test "$(df -PB1 /mnt/sandbox-data | awk 'NR==2{print $4}')" -ge 2147483648
 REMOTE
