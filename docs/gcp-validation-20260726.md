@@ -1,8 +1,50 @@
 # GCP production-readiness validation — 2026-07-26
 
-Status: **failed; do not promote the current release to production**
+Status: **passed for remediation release `prod-fixes-20260726-1`**
 
-This campaign validated worker release `p1-api-20260726-2` in
+## Remediation validation
+
+The three blockers found in the earlier `p1-api-20260726-2` campaign were
+fixed in focused commits and deployed together as `prod-fixes-20260726-1`
+(`75ecb6b`):
+
+- `4434dc9` serializes Firecracker loads that share a baked snapshot rootfs
+  path, covering hot create, restore, and fanout;
+- `5754d65` bounds graceful shutdown and forces a VMM that does not exit
+  promptly;
+- `75ecb6b` makes Nomad Autoscaler the sole production MIG resize writer.
+
+The post-deploy gates all passed:
+
+| Gate | Result |
+|---|---|
+| HTTP v1 contract probe | Pass |
+| TypeScript SDK v1 fleet probe | Pass |
+| Full API/SDK compatibility suite | **64/64** in 225.8 s |
+| Lifecycle after pause/resume, 25 iterations | terminate p50/p95/max **876/952/978 ms**; no 30 s tail |
+| Snapshot-source batches N=1,2,4,8,16,32 | **63/63 usable**, every operation `succeeded` |
+| 500-job churn at concurrency 96 | **500/500**, 0 capacity/pool/agent/other errors; 50.0 s; 10.0 jobs/s |
+| Scaling ownership | gateway direct-scale counter stayed **0**; no direct-scale log entries |
+| Worker security gate | Pass on both baseline workers |
+| Cleanup | zero sandboxes and only the server-managed golden snapshot |
+
+During churn, Prometheus desired capacity peaked at 10 while the sole Nomad
+writer moved the MIG target from 3 to 4. Once demand drained, desired returned
+to the floor; target 4 is retained temporarily by the configured 15-minute
+scale-down window. The prior dual-writer ratchet to 11 workers did not recur.
+Nomad's short-circuited GCE stability confirmation still reports its documented
+retry-limit message while the standby pool replenishes; the resize itself
+lands, readiness is heartbeat-driven, and no second writer retries or inflates
+the target.
+
+Local validation before deployment also passed full Go tests, race tests for
+server/gateway/v1, 43 SDK tests, TypeScript checks, OpenAPI regeneration,
+Linux cross-build, shell syntax checks, and the single-writer infrastructure
+validator.
+
+## Earlier failed campaign: `p1-api-20260726-2`
+
+The earlier campaign validated worker release `p1-api-20260726-2` in
 `ratio-experiments/asia-south1-a` through the fleet gateway. The campaign
 started and ended at the normal physical floor:
 
