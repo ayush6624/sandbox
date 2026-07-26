@@ -5,6 +5,12 @@ implementation compares with systems such as Modal, and which changes are most
 likely to improve it. It is a design and prioritization document: sections
 labelled **proposed** are not implemented yet.
 
+> Production ownership update (2026-07-26): the GCP fleet now uses Nomad
+> Autoscaler as its only MIG resize writer. Direct-scale measurements below are
+> retained as historical evidence, but the gateway fast path is intentionally
+> disabled in `control-install.sh` after dual writers caused post-churn
+> overshoot.
+
 The important distinction is between three different clocks:
 
 1. **Placement decision** — decide that more workers are needed and request
@@ -64,7 +70,7 @@ client
 
 The relevant implementation is:
 
-- gateway reservation, bounded queue, and direct scale trigger:
+- gateway reservation and bounded queue:
   [`internal/gateway/gateway.go`](../internal/gateway/gateway.go);
 - grow-only GCE MIG client:
   [`internal/gcemig/scaler.go`](../internal/gcemig/scaler.go);
@@ -88,8 +94,8 @@ When every registered slot is reserved:
 
 ```text
 create enters gateway queue
-  → queue 0→1 edge triggers direct scale-out (50 ms debounce)
-  → gateway reads MIG target and submits a grow-only resize
+  → Prometheus scrapes queued demand
+  → Nomad Autoscaler computes the target and submits the resize
   → GCE resumes suspended standby, starts stopped standby, or creates a VM
   → Nomad allocation/serve process becomes current-release compatible
   → worker adopts or builds its golden snapshot
@@ -98,9 +104,9 @@ create enters gateway queue
   → normal per-worker create path
 ```
 
-Prometheus and the Nomad Autoscaler remain the reconciliation and scale-in
-path. The gateway fast path deliberately avoids waiting for their scrape and
-evaluation intervals.
+Nomad Autoscaler owns both directions of the production MIG target. The
+gateway's optional direct scaler is not enabled on GCP, maintaining a
+single-writer invariant.
 
 ## What Modal's result means
 

@@ -88,7 +88,7 @@ through it, so an old gateway silently drops new fields) — also run
 provisioned **Sandbox Fleet** dashboard separates live operational telemetry
 from offline benchmark evidence:
 
-- gateway demand, queue, rejection, desired-worker, and direct-scale signals
+- gateway demand, queue, rejection, desired-worker, and scaling-owner signals
   refresh on the 10 s control-loop scrape;
 - per-worker pools, memory, create concurrency, lifecycle, release, and
   readiness phases arrive through the 30 s federation scrape;
@@ -157,6 +157,12 @@ stop/start does exactly this); on a *deleted* instance the frozen state goes
 with the disk, and only saved snapshots survive via GCS durability. Bin-pack
 placement + the window minimize how often scale-in hits an in-use host.
 
+**Scaling ownership:** Nomad Autoscaler is the sole writer of the production
+MIG target. The gateway has an optional direct GCE scale-out capability for
+non-Nomad deployments, but `control-install.sh` deliberately does not enable
+it. Enabling both writers caused target-size overshoot after churn because each
+acted on a different view of in-flight capacity.
+
 **Burst behavior** end to end: a burst first lands on `HEADROOM_SLOTS` of free
 capacity; overflow creates wait in the gateway's bounded queue
 (`QUEUE_WAIT`/`QUEUE_MAX`) instead of 503ing, and the queue depth itself feeds
@@ -197,10 +203,10 @@ span (resize → the new host advertises capacity), which dominates. The readine
 span is instrumented per stage and exported on every host's `/metrics`, federated
 to Prometheus with a `host` label:
 
-The gateway fast path submits a grow-only MIG resize when its create queue
-changes from empty to non-empty. It debounces for 50 ms to collect the burst and
-sizes from used + in-flight reservations + queued creates + headroom. The normal
-Prometheus/Nomad loop still reconciles exact desired capacity and owns scale-in.
+Prometheus scrapes gateway demand every 10 seconds and Nomad Autoscaler submits
+both scale-out and scale-in actions. Gateway direct-scale counters must remain
+zero on this fleet; a non-zero value means a second MIG writer was accidentally
+enabled.
 
 ```promql
 sandbox_worker_ready_seconds                  # headline: kernel boot -> capacity advertised

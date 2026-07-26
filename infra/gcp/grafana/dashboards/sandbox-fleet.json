@@ -147,8 +147,8 @@
       ]
     },
     {
-      "type": "timeseries", "title": "Direct scale-out fast path", "id": 11,
-      "description": "The gateway submits a grow-only resize on queue 0→1. Failures do not disable Prometheus/Nomad reconciliation, but any non-zero failure rate needs investigation.",
+      "type": "timeseries", "title": "Scaling ownership guard", "id": 11,
+      "description": "Nomad Autoscaler is the sole production MIG writer. These gateway direct-scale counters must remain zero; any activity means a competing writer was accidentally enabled.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "fieldConfig": { "defaults": { "min": 0, "unit": "ops", "custom": { "drawStyle": "bars", "fillOpacity": 30 } }, "overrides": [] },

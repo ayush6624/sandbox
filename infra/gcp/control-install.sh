@@ -55,10 +55,10 @@ StateDirectory=sandbox-gateway
 Environment=SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
 ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN} \
   --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
-  --worker-release-file /var/lib/sandbox-gateway/worker-release \
-  --direct-scale-project ${PROJECT} --direct-scale-zone ${ZONE} \
-  --direct-scale-mig ${MIG_NAME} --direct-scale-max ${MIG_MAX} \
-  --direct-scale-slots-per-host ${SLOTS_PER_HOST} --direct-scale-headroom ${HEADROOM_SLOTS}
+  --worker-release-file /var/lib/sandbox-gateway/worker-release
+# Single-writer invariant: Nomad Autoscaler is the sole process allowed to
+# resize the production MIG. Do not enable the gateway's optional direct-scale
+# flags here; two independent writers can ratchet the target far above demand.
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

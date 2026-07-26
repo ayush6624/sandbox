@@ -10,7 +10,7 @@ REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)
 REMOTE_BASE := ssh -o BatchMode=yes $(REMOTE)
 REMOTE_CD   := cd /home/$(REMOTE_USER)/$(REMOTE_DIR)
 
-.PHONY: build build-linux sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status gcs-release
+.PHONY: build build-linux validate-infra sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status gcs-release
 
 build:
 	go build ./...
@@ -19,6 +19,9 @@ build-linux:
 	mkdir -p bin
 	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandbox ./cmd/sandbox
 	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandboxd ./cmd/sandboxd
+
+validate-infra:
+	bash infra/gcp/validate-scaling-owner.sh
 
 check-remote:
 	@test -n "$(REMOTE_HOST)" || (echo "set REMOTE_HOST"; exit 1)
