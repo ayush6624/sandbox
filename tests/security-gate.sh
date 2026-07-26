@@ -15,6 +15,7 @@
 #   LOG_MAX_BYTES     Expected per-VMM log limit (default 16777216)
 #   POLL_TIMEOUT_SEC  Lifecycle/reconciliation timeout (default 120)
 #   CURL_CA_BUNDLE    CA bundle used by curl for a private worker certificate
+#   GUEST_SSH_PROXY_JUMP  SSH jump host used to reach private worker port forwards
 set -euo pipefail
 
 : "${SANDBOX_HOST_URL:?set a direct worker API URL}"
@@ -326,6 +327,9 @@ SSH_OPTIONS=(
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
 )
+if [ -n "${GUEST_SSH_PROXY_JUMP:-}" ]; then
+  SSH_OPTIONS+=(-J "$GUEST_SSH_PROXY_JUMP")
+fi
 SSH_UID="$(ssh "${SSH_OPTIONS[@]}" "sandbox@$WORKER_API_HOST" id -u)"
 test "$SSH_UID" = "1000"
 if ssh "${SSH_OPTIONS[@]}" "root@$WORKER_API_HOST" id -u >/dev/null 2>&1; then
