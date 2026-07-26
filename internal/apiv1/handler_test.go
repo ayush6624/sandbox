@@ -2,6 +2,7 @@ package apiv1
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,30 @@ import (
 	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
+
+func TestInternalDispatchPreservesNonNilEmptyBody(t *testing.T) {
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/snapshots/snap" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			t.Fatalf("read empty body: %v", err)
+		}
+		if len(body) != 0 {
+			t.Fatalf("body=%q, want empty", body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/v1/snapshots/snap", nil)
+	req.Header.Set("Idempotency-Key", "delete-snapshot")
+	w := httptest.NewRecorder()
+	testHandler(t, legacy).ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
 
 type fakeLegacy struct {
 	mu      sync.Mutex

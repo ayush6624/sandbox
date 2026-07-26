@@ -633,6 +633,12 @@ func (h *Handler) call(parent *http.Request, method, path string, body any) *res
 		reader = bytes.NewReader(data)
 	}
 	req, _ := http.NewRequestWithContext(parent.Context(), method, path, reader)
+	// Requests received by net/http always expose a non-nil Body, including
+	// requests with no payload. Preserve that invariant when dispatching to the
+	// legacy mux in-process; several proxy handlers safely read an empty body.
+	if req.Body == nil {
+		req.Body = http.NoBody
+	}
 	req.Header = parent.Header.Clone()
 	req.Header.Del("Idempotency-Key")
 	rec := newRecorder()

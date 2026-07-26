@@ -98,7 +98,11 @@ func (g *Gateway) handleSnapshotOp(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "gateway: snapshot %s has no live owner; forwarding %s to %s\n", id, r.URL.Path, target.id)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	requestBody := io.Reader(http.NoBody)
+	if r.Body != nil {
+		requestBody = r.Body
+	}
+	body, err := io.ReadAll(io.LimitReader(requestBody, 1<<20))
 	if err != nil {
 		httpError(w, 400, fmt.Errorf("read body: %w", err))
 		return
