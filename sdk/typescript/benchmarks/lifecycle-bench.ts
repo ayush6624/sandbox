@@ -17,6 +17,7 @@ const RESULTS_DIR = join(HERE, 'results')
 
 interface Args {
   iterations: number
+  requestTimeoutMs: number
   output?: string
 }
 
@@ -31,18 +32,25 @@ interface Stats {
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { iterations: 10 }
+  const args: Args = { iterations: 10, requestTimeoutMs: 120_000 }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--iterations') args.iterations = Number(argv[++i])
+    else if (arg === '--request-timeout-ms') args.requestTimeoutMs = Number(argv[++i])
     else if (arg === '--output') args.output = argv[++i]
     else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: tsx benchmarks/lifecycle-bench.ts [--iterations N] [--output file.json]')
+      console.log(
+        'Usage: tsx benchmarks/lifecycle-bench.ts [--iterations N] ' +
+        '[--request-timeout-ms N] [--output file.json]',
+      )
       process.exit(0)
     } else throw new Error(`unknown argument: ${arg}`)
   }
   if (!Number.isInteger(args.iterations) || args.iterations < 1) {
     throw new Error('--iterations must be a positive integer')
+  }
+  if (!Number.isInteger(args.requestTimeoutMs) || args.requestTimeoutMs < 1) {
+    throw new Error('--request-timeout-ms must be a positive integer')
   }
   return args
 }
@@ -74,9 +82,10 @@ const format = (value: number): string => `${Math.round(value)}ms`
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
-  const client = new SandboxClient()
+  const client = new SandboxClient({ requestTimeoutMs: args.requestTimeoutMs })
   const metadata = benchmarkMetadata('sandbox-lifecycle', {
     iterations: args.iterations,
+    request_timeout_ms: args.requestTimeoutMs,
     operations: ['create', 'pause', 'resume', 'terminate'],
     resume_readiness_probe: 'echo ready',
   })
