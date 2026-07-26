@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,8 +58,8 @@ func withGuestFilesystem(fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("setfsgid %d: %w", acct.gid, err)
 	}
-	defer func() { _ = unix.Setfsgid(oldGID) }()
 	if current, _ := unix.SetfsgidRetGid(-1); current != int(acct.gid) {
+		_ = unix.Setfsgid(oldGID)
 		return fmt.Errorf("setfsgid %d did not take effect (still %d)", acct.gid, current)
 	}
 
@@ -67,10 +68,23 @@ func withGuestFilesystem(fn func() error) error {
 		_ = unix.Setfsgid(oldGID)
 		return fmt.Errorf("setfsuid %d: %w", acct.uid, err)
 	}
-	defer func() { _ = unix.Setfsuid(oldUID) }()
 	if current, _ := unix.SetfsuidRetUid(-1); current != int(acct.uid) {
+		_ = unix.Setfsuid(oldUID)
+		_ = unix.Setfsgid(oldGID)
 		return fmt.Errorf("setfsuid %d did not take effect (still %d)", acct.uid, current)
 	}
 
-	return fn()
+	opErr := fn()
+	var restoreErr error
+	if err := unix.Setfsuid(oldUID); err != nil {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("restore fsuid %d: %w", oldUID, err))
+	} else if current, _ := unix.SetfsuidRetUid(-1); current != oldUID {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("restore fsuid %d did not take effect (still %d)", oldUID, current))
+	}
+	if err := unix.Setfsgid(oldGID); err != nil {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("restore fsgid %d: %w", oldGID, err))
+	} else if current, _ := unix.SetfsgidRetGid(-1); current != oldGID {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("restore fsgid %d did not take effect (still %d)", oldGID, current))
+	}
+	return errors.Join(opErr, restoreErr)
 }

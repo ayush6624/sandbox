@@ -487,29 +487,31 @@ func handleListDir(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = defaultCwd
 	}
-	var entries []os.DirEntry
+	var out []agentapi.DirEntry
 	err := withGuestFilesystem(func() error {
-		var err error
-		entries, err = os.ReadDir(path)
-		return err
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		out = make([]agentapi.DirEntry, 0, len(entries))
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			out = append(out, agentapi.DirEntry{
+				Name:  e.Name(),
+				Size:  info.Size(),
+				Mode:  info.Mode().String(),
+				IsDir: e.IsDir(),
+				MTime: info.ModTime(),
+			})
+		}
+		return nil
 	})
 	if err != nil {
 		httpError(w, statusForFSError(err), err)
 		return
-	}
-	out := make([]agentapi.DirEntry, 0, len(entries))
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		out = append(out, agentapi.DirEntry{
-			Name:  e.Name(),
-			Size:  info.Size(),
-			Mode:  info.Mode().String(),
-			IsDir: e.IsDir(),
-			MTime: info.ModTime(),
-		})
 	}
 	writeJSON(w, 200, out)
 }
