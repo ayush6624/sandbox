@@ -134,7 +134,7 @@ sshc "curl -fsS -X PUT \
         -H 'Authorization: Bearer $GATEWAY_TOKEN' \
         -H 'Content-Type: application/json' \
         --data '{\"release\":\"$RELEASE\"}' \
-        http://127.0.0.1:${GW_PORT:-9090}/worker-release >/dev/null"
+        http://${CONTROL_IP}:${GW_PORT:-9090}/worker-release >/dev/null"
 # Values are expanded locally into single-quoted -var args (tokens are hex, the
 # URL/paths have no quotes) — NOT passed via a remote env prefix, which wouldn't
 # be visible to the remote shell's own $VAR expansion on the same command line.

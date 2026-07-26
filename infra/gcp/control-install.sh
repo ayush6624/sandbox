@@ -82,7 +82,7 @@ if [ ! -x /usr/local/bin/prometheus ]; then
   rm -rf "$tmp"
 fi
 mkdir -p /etc/prometheus /var/lib/prometheus
-GATEWAY_TOKEN="$GW_TOKEN" GW_PORT="$GW_PORT" \
+GATEWAY_TOKEN="$GW_TOKEN" CONTROL_IP="$CONTROL_IP" GW_PORT="$GW_PORT" \
   envsubst < "${REMOTE_DIR}/prometheus/prometheus.yml.tpl" > /etc/prometheus/prometheus.yml
 SLOTS_PER_HOST="$SLOTS_PER_HOST" HEADROOM_SLOTS="$HEADROOM_SLOTS" \
   envsubst < "${REMOTE_DIR}/prometheus/rules.yml.tpl" > /etc/prometheus/rules.yml

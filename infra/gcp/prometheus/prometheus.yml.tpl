@@ -1,6 +1,7 @@
-# Rendered by control-install.sh (envsubst): ${GATEWAY_TOKEN}, ${GW_PORT}.
-# Prometheus scrapes the gateway's /metrics (behind bearer auth) on localhost —
-# both run on the control VM.
+# Rendered by control-install.sh (envsubst):
+# ${GATEWAY_TOKEN}, ${CONTROL_IP}, ${GW_PORT}.
+# The gateway deliberately listens only on the private VPC address, so local
+# control-plane consumers must use that address rather than loopback.
 global:
   scrape_interval: 10s
   # 10s (was 15s) so the sandbox:workers_desired recording rule refreshes on the
@@ -17,12 +18,12 @@ scrape_configs:
       type: Bearer
       credentials: ${GATEWAY_TOKEN}
     static_configs:
-      - targets: ["127.0.0.1:${GW_PORT}"]
+      - targets: ["${CONTROL_IP}:${GW_PORT}"]
 
   # Per-host detail, federated through the gateway: it scrapes each live
   # worker's /metrics (it holds their addr+token) and re-exports every series
   # with a host="<id>" label. This means Prometheus still scrapes only the
-  # gateway on localhost — the dynamic Nomad worker fleet needs no service
+  # gateway on its private address — the dynamic Nomad worker fleet needs no service
   # discovery — while we get per-host pool/memory/lifecycle series. A
   # sandbox_host_scrape_ok{host} gauge flags any worker the gateway couldn't
   # reach. Slower interval than the gateway's own aggregate: this fans out to
@@ -34,4 +35,4 @@ scrape_configs:
       type: Bearer
       credentials: ${GATEWAY_TOKEN}
     static_configs:
-      - targets: ["127.0.0.1:${GW_PORT}"]
+      - targets: ["${CONTROL_IP}:${GW_PORT}"]
