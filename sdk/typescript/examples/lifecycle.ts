@@ -33,7 +33,7 @@ async function main(): Promise<void> {
     console.log(who.stdout.trim().split('\n').map((l) => `  ${l}`).join('\n'))
   } finally {
     step(`Killing sandbox ${sbx.sandboxId}...`)
-    await sbx.kill()
+  await sbx.terminate()
   }
 }
 

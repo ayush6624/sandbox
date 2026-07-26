@@ -17,11 +17,16 @@ export interface SandboxOpts {
  * ({@link Sandbox.create}, {@link Sandbox.restore}, {@link Sandbox.fanout}).
  */
 export interface SandboxBringUpOpts extends SandboxOpts {
+  /** Auto-delete lifetime. Preferred over the legacy {@link timeoutMs} name. */
+  ttlMs?: number
+  /** Idle duration before automatic pause. Preferred over {@link hibernateAfterMs}. */
+  idleTimeoutMs?: number
   /**
    * Auto-destroy the sandbox after this many milliseconds (rounded up to
    * whole seconds). Omit for no expiry. Can be changed later with
    * `sandbox.setTimeout(ms)`.
    */
+  /** @deprecated Use ttlMs. */
   timeoutMs?: number
   /**
    * Override the host's idle-hibernation window for this sandbox, in
@@ -30,6 +35,7 @@ export interface SandboxBringUpOpts extends SandboxOpts {
    * next request (`status` reads `"hibernated"` while frozen). Pass `-1`
    * to never hibernate. Omit to inherit the host's default.
    */
+  /** @deprecated Use idleTimeoutMs. */
   hibernateAfterMs?: number
 }
 

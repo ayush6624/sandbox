@@ -3,7 +3,7 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { after, before, test } from 'node:test'
 
-import { NotFoundError, SandboxClient } from '../src/index.js'
+import { NotFoundError, Sandbox, SandboxClient } from '../src/index.js'
 
 const API_KEY = 'v1-test-key'
 const sandboxes = new Map<string, Record<string, unknown>>()
@@ -227,6 +227,22 @@ test('batch operations poll and retain indexed per-item errors', async () => {
   assert.equal(completed.status, 'partially_succeeded')
   assert.equal(completed.results[0]?.value?.id, 'batch-1')
   assert.equal(completed.results[1]?.error?.code, 'capacity_unavailable')
+})
+
+test('static facade supports source creation and createMany migration', async () => {
+  sandboxes.clear()
+  const created = await Sandbox.createFromSource(
+    { snapshotId: 'snapshot-1' },
+    { apiUrl: baseUrl, apiKey: API_KEY, ttlMs: 2_000 },
+  )
+  assert.equal(created.source.type, 'snapshot')
+  const operation = await Sandbox.createMany({
+    apiUrl: baseUrl,
+    apiKey: API_KEY,
+    count: 2,
+    source: { snapshotId: 'snapshot-1' },
+  })
+  assert.equal((await operation.wait({ pollIntervalMs: 1 })).requested, 2)
 })
 
 test('problem details expose stable code and request id', async () => {

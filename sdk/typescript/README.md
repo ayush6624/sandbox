@@ -1,8 +1,7 @@
 # sandbox (TypeScript SDK)
 
-TypeScript client for the sandbox API — self-hosted Firecracker microVM
-sandboxes for frontend development. The API surface mirrors the
-[e2b](https://e2b.dev) JavaScript SDK so it works as a near drop-in replacement.
+TypeScript client for the versioned sandbox API — self-hosted Firecracker
+microVM development environments with resource-oriented lifecycle methods.
 
 - Zero runtime dependencies (uses global `fetch`)
 - ESM, strict TypeScript, Node 18+
@@ -39,7 +38,69 @@ export SANDBOX_API_URL=http://100.99.183.74:8080
 export SANDBOX_API_KEY=<your-key>
 ```
 
-## Usage
+## Resource client
+
+`SandboxClient` is the primary API. It uses the versioned `/v1` contract,
+generates idempotency keys for mutations, safely retries retryable requests,
+and exposes paginated collections as `AsyncIterable`.
+
+```ts
+import { SandboxClient } from 'sandbox'
+
+const client = new SandboxClient({
+  baseUrl: process.env.SANDBOX_API_URL,
+  apiKey: process.env.SANDBOX_API_KEY,
+})
+
+const sandbox = await client.sandboxes.create({
+  source: { templateId: 'default' },
+  ttlMs: 10 * 60_000,
+  idleTimeoutMs: 5 * 60_000,
+  metadata: { project: 'docs' },
+})
+
+await sandbox.commands.run('node --version')
+await sandbox.pause()
+await sandbox.resume()
+await sandbox.terminate()
+```
+
+Create several independent sandboxes from one reusable snapshot with a typed
+operation. Every requested index has either a sandbox or structured problem
+details; partial success is never represented by a mysteriously short array.
+
+```ts
+const prepared = await client.sandboxes.create()
+await prepared.commands.run('pnpm install')
+const snapshot = await prepared.createSnapshot({ name: 'dependencies-ready' })
+
+const operation = await client.sandboxes.createMany({
+  count: 32,
+  source: { snapshotId: snapshot.id },
+  maxParallelism: 8,
+})
+const abortController = new AbortController()
+const result = await operation.wait({ signal: abortController.signal })
+for (const item of result.results) {
+  if (item.value) console.log(item.index, item.value.id)
+  else console.error(item.index, item.error?.code)
+}
+```
+
+Collections can be streamed without manually handling page tokens:
+
+```ts
+for await (const sandbox of client.sandboxes.list({ status: 'running' })) {
+  console.log(sandbox.id, sandbox.metadata)
+}
+```
+
+## Compatibility facade
+
+The original static `Sandbox` surface remains available during the migration
+window. New code should use `pause`, `resume`, and `terminate`; `hibernate` and
+`kill` remain deprecated aliases. `restore` and `fanout` are also deprecated in
+favor of source creation and `createMany`.
 
 ```ts
 import { Sandbox } from 'sandbox'
@@ -84,10 +145,12 @@ const api = await sbx.exposePort(8000)          // e.g. "100.99.183.74:5201"
 const ports = await sbx.listPorts()             // only explicitly exposed mappings
 sbx.getHost(8000)                               // works now; throws for unexposed ports
 
-// Lifecycle
+// Lifecycle (standard names)
 const all = await Sandbox.list()
 const again = await Sandbox.connect(sbx.sandboxId)
-await sbx.kill()                                // or: await Sandbox.kill(id)
+await sbx.pause()
+await sbx.resume()
+await sbx.terminate()                           // or: await Sandbox.terminate(id)
 ```
 
 ### Auto-destroy (TTL)
@@ -96,16 +159,17 @@ Sandboxes live until killed unless you give them a timeout. The server reaps
 expired sandboxes within ~10 seconds of their deadline.
 
 ```ts
-const sbx = await Sandbox.create({ timeoutMs: 300_000 })  // auto-destroy in 5 min
+const sbx = await Sandbox.create({ ttlMs: 300_000 })      // auto-destroy in 5 min
 console.log(sbx.info.expiresAt)                           // Date | undefined
 
 await sbx.setTimeout(600_000)   // replace the timeout: now 10 min from now
 await sbx.setTimeout(0)         // remove the timeout entirely
 ```
 
-`timeoutMs` is rounded up to whole seconds (the API speaks `timeout_sec`).
+`ttlMs` is rounded up to whole seconds. `timeoutMs` remains a deprecated alias;
+command `timeoutMs` and HTTP `requestTimeoutMs` are separate budgets.
 
-### Hibernation
+### Pause and resume
 
 Idle sandboxes are frozen to disk automatically — **the shipped hosts do this
 after 10 minutes** — and woken transparently by the next command, file
@@ -114,19 +178,16 @@ processes come back exactly as they were (~50 ms typical), so this is a cost
 optimization, not a lifecycle event you have to handle:
 
 ```ts
-const sbx = await Sandbox.create({ hibernateAfterMs: 30 * 60_000 }) // 30 min
-const never = await Sandbox.create({ hibernateAfterMs: -1 })        // never freeze
-await sbx.hibernate()                                               // freeze now
-console.log(sbx.info.status)                                        // 'hibernated'
-await sbx.commands.run('echo back')                                 // wakes it
+const sbx = await Sandbox.create({ idleTimeoutMs: 30 * 60_000 })
+await sbx.pause()
+await sbx.resume()
 ```
 
 What counts as activity is **external** traffic: API calls, an open shell or
 exec stream, and connections through exposed ports. Work happening only inside
 the guest does not — a detached `tmux` job can be hibernated mid-run. It
 resumes on the next request, but external TCP sessions it held may have timed
-out, so pass `hibernateAfterMs: -1` for unattended workloads that must stay
-continuously live.
+out. `hibernateAfterMs` and `hibernate()` remain compatibility aliases.
 
 Hibernation is independent of `timeoutMs`: freezing is recoverable, while the
 TTL destroys the sandbox whether it is running or hibernated.
@@ -198,7 +259,7 @@ delivers them as WebSocket close codes (`4401` bad key →
 `AuthenticationError`, `4404` unknown sandbox → `NotFoundError`) instead of
 an opaque `1006`. Connecting to a hibernated sandbox wakes it transparently.
 
-### Snapshots, restore, and fan-out
+### Snapshots and batch creation
 
 A snapshot captures a running sandbox completely — memory, running processes,
 and disk. Restoring one brings all of that back in a new sandbox in a few
@@ -212,12 +273,12 @@ await base.commands.run('git clone https://github.com/you/app && cd app && pnpm 
 const snap = await base.snapshot()      // pauses briefly, then keeps running
 await base.kill()                       // source must be gone before restoring
 
-// ...restore it whenever you need it back (1:1, at most one at a time)
-const sbx = await Sandbox.restore(snap.snapshotId)
-
-// ...or fan out N independent clones of it, concurrently
-const clones = await Sandbox.fanout(snap.snapshotId, 32, { timeoutMs: 600_000 })
-// each clone: own IP/ports, copy-on-write disk — writes are isolated
+const operation = await Sandbox.createMany({
+  count: 32,
+  source: { snapshotId: snap.snapshotId },
+  ttlMs: 600_000,
+})
+const clones = await operation.wait()
 
 // Housekeeping
 const snaps = await Sandbox.listSnapshots()
@@ -225,11 +286,9 @@ await Sandbox.renameSnapshot(snap.snapshotId, 'deps-installed')
 await Sandbox.deleteSnapshot(snap.snapshotId)
 ```
 
-`fanout` is **partially successful by design**: the returned array holds every
-clone that came up and can be shorter than `count`, so check `.length` rather
-than assuming N. Both `restore` and `fanout` accept `timeoutMs` and
-`hibernateAfterMs`, but not `vcpus`/`memMib` — resources are baked into the
-snapshot (`snap.vcpus` / `snap.memMib` report them).
+Batch creation records one indexed result for every requested sandbox, with
+structured errors for failures. The old `restore` and `fanout` methods remain
+deprecated compatibility calls for one migration window.
 
 `listSnapshots()` also returns the server's **golden** snapshot, flagged
 `golden: true` — the pristine image plain `create` clones from. Hide or badge

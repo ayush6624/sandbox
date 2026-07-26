@@ -3,6 +3,8 @@ import { Commands } from './commands.js'
 import { SandboxError } from './errors.js'
 import { Files } from './files.js'
 import { Pty } from './pty.js'
+import { ClientSandbox, Operation, SandboxClient } from './v1.js'
+import type { CreateManyOptions, CreateSandboxOptions, SandboxSource } from './v1.js'
 import { toFleetHostInfo, toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
 import type {
   ApiFleetHost,
@@ -28,17 +30,21 @@ import type {
  * hibernation default).
  */
 function bringUpBody(opts: {
+  ttlMs?: number
+  idleTimeoutMs?: number
   timeoutMs?: number
   hibernateAfterMs?: number
 }): Record<string, number | string> {
   const body: Record<string, number | string> = {}
-  if (opts.timeoutMs !== undefined) {
-    body.timeout_sec = Math.ceil(opts.timeoutMs / 1000)
+  const ttlMs = opts.ttlMs ?? opts.timeoutMs
+  const idleTimeoutMs = opts.idleTimeoutMs ?? opts.hibernateAfterMs
+  if (ttlMs !== undefined) {
+    body.timeout_sec = Math.ceil(ttlMs / 1000)
   }
-  if (opts.hibernateAfterMs !== undefined) {
+  if (idleTimeoutMs !== undefined) {
     // -1 is the "never hibernate" sentinel, passed through unscaled.
     body.hibernate_after_sec =
-      opts.hibernateAfterMs < 0 ? -1 : Math.ceil(opts.hibernateAfterMs / 1000)
+      idleTimeoutMs < 0 ? -1 : Math.ceil(idleTimeoutMs / 1000)
   }
   return body
 }
@@ -124,6 +130,32 @@ export class Sandbox {
   }
 
   /**
+   * Creates a sandbox through the resource-oriented v1 API. This facade keeps
+   * the familiar static entry point while making the source explicit.
+   */
+  static async createFromSource(
+    source: SandboxSource,
+    opts: CreateSandboxOptions & SandboxOpts = {},
+  ): Promise<ClientSandbox> {
+    const client = new SandboxClient({
+      baseUrl: opts.apiUrl,
+      apiKey: opts.apiKey,
+      requestTimeoutMs: opts.requestTimeoutMs,
+    })
+    return client.sandboxes.create({ ...opts, source })
+  }
+
+  /** Starts a typed batch-create operation through the v1 API. */
+  static async createMany(opts: CreateManyOptions & SandboxOpts): Promise<Operation<ClientSandbox>> {
+    const client = new SandboxClient({
+      baseUrl: opts.apiUrl,
+      apiKey: opts.apiKey,
+      requestTimeoutMs: opts.requestTimeoutMs,
+    })
+    return client.sandboxes.createMany(opts)
+  }
+
+  /**
    * Connects to an existing running sandbox by id.
    *
    * @throws {NotFoundError} when no sandbox with that id exists.
@@ -178,9 +210,14 @@ export class Sandbox {
   /**
    * Destroys a sandbox by id without needing a `Sandbox` instance.
    */
-  static async kill(sandboxId: string, opts: SandboxOpts = {}): Promise<void> {
+  static async terminate(sandboxId: string, opts: SandboxOpts = {}): Promise<void> {
     const client = new ApiClient(opts)
     await client.request('DELETE', `/sandboxes/${sandboxId}`)
+  }
+
+  /** @deprecated Use Sandbox.terminate(). */
+  static async kill(sandboxId: string, opts: SandboxOpts = {}): Promise<void> {
+    return this.terminate(sandboxId, opts)
   }
 
   /**
@@ -204,6 +241,7 @@ export class Sandbox {
    * @throws {ConflictError} when the snapshot's baked identity is still in use
    *                         by its source sandbox or an earlier restore.
    */
+  /** @deprecated Use Sandbox.createFromSource({ snapshotId }, opts). */
   static async restore(snapshotId: string, opts: SandboxRestoreOpts = {}): Promise<Sandbox> {
     const client = new ApiClient(opts)
     const body = bringUpBody(opts)
@@ -238,6 +276,7 @@ export class Sandbox {
    *             `hibernateAfterMs` idle-hibernation override, applied to every clone.
    * @returns One {@link Sandbox} per clone that came up successfully.
    */
+  /** @deprecated Use Sandbox.createMany({ count, source: { snapshotId }, ...opts }). */
   static async fanout(snapshotId: string, count: number, opts: SandboxFanoutOpts = {}): Promise<Sandbox[]> {
     if (!Number.isInteger(count) || count < 1) throw new Error('count must be a positive integer')
     const client = new ApiClient(opts)
@@ -418,7 +457,8 @@ export class Sandbox {
    * `"hibernated"`; the next command/file/shell request wakes it
    * transparently, with all processes resuming where they stopped.
    */
-  async hibernate(): Promise<void> {
+  /** Pauses this sandbox while preserving its identity and runtime state. */
+  async pause(): Promise<void> {
     const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/hibernate`, {
       timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
     })
@@ -426,10 +466,25 @@ export class Sandbox {
     this.info.status = raw.status
   }
 
+  /** Explicitly resumes a paused sandbox without changing its identity. */
+  async resume(): Promise<void> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/resume`, {
+      timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+    })
+    const raw = (await res.json()) as ApiSandbox
+    this.info.status = raw.status
+  }
+
+  /** @deprecated Use pause(). */
+  async hibernate(): Promise<void> { return this.pause() }
+
   /**
    * Destroys this sandbox and releases its resources on the host.
    */
-  async kill(): Promise<void> {
+  async terminate(): Promise<void> {
     await this.client.request('DELETE', `/sandboxes/${this.sandboxId}`)
   }
+
+  /** @deprecated Use terminate(). */
+  async kill(): Promise<void> { return this.terminate() }
 }

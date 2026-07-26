@@ -319,6 +319,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
 
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/resume`) {
+    sendJson(res, 200, { ...currentSandboxRecord(), status: 'running' })
+    return
+  }
+
   if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
     const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
     const guestPort = body.guest_port
@@ -691,6 +696,16 @@ test('hibernate() posts to the hibernate endpoint and updates status', async () 
   await sbx.hibernate()
   assert.equal(sbx.info.status, 'hibernated')
   await sbx.kill()
+})
+
+test('pause/resume/terminate are standard lifecycle names', async () => {
+  const sbx = await Sandbox.create(opts())
+  await sbx.pause()
+  assert.equal(sbx.info.status, 'hibernated')
+  await sbx.resume()
+  assert.equal(sbx.info.status, 'running')
+  await sbx.terminate()
+  assert.equal(sandboxAlive, false)
 })
 
 test('setTimeout posts ceil(ms/1000) and updates expiresAt', async () => {
