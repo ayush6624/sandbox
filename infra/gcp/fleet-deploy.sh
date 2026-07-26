@@ -76,6 +76,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${REMOTE_DIR}
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /mnt/sandbox-data/jailer
 ExecStartPre=/bin/sh -c 'umask 077; printf "%s\\n" "${HOST_TOKEN}" > /run/sandbox-worker.tokens; printf "%s\\n" "${GATEWAY_CONTROL_TOKEN}" > /run/sandbox-gateway-control.tokens'
 ExecStart=${REMOTE_DIR}/sandbox serve --config ${CONFIG} \\
   --listen ${ip}:${HOST_PORT} --management-transport private_proxy \\

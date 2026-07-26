@@ -79,6 +79,7 @@ job "sandbox-serve" {
 set -euo pipefail
 cd "$${NOMAD_TASK_DIR}"
 chmod +x bin/sandbox bin/sandboxd
+install -d -o root -g root -m 0755 /mnt/sandbox-data/jailer
 umask 077
 printf '%s\n' "$${HOST_TOKEN}" > worker.tokens
 printf '%s\n' "$${GATEWAY_CONTROL_TOKEN}" > gateway-control.tokens

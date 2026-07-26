@@ -1,6 +1,6 @@
 # P0.2 shared jailer and cgroup design
 
-Status: **implementation started**. This document defines the host isolation
+Status: **implemented; fleet rollout validation pending**. This document defines the host isolation
 work required by P0.2 of the
 [production readiness plan](production-readiness-plan.md).
 
@@ -157,3 +157,33 @@ bounded stdout/stderr.
 
 The fleet must never run a mixed placement pool where some launch modes are
 jailed and others are direct.
+
+## Snapshot migration boundary
+
+Firecracker snapshot state embeds host-visible device paths. A snapshot created
+by the direct launcher therefore cannot be restored by the jailed launcher,
+whose stable paths are `/disks/rootfs.ext4`, `/snapshots/memory`, and
+`/snapshots/state`.
+
+The golden manifest records an isolation signature (`direct-v1` or
+`jailer-v1`). A missing or mismatched signature is rejected and the golden is
+cold-rebuilt, so an older baked data disk cannot poison the production hot
+path.
+
+User snapshots created before the jailed rollout are intentionally
+incompatible: preserve their data externally if needed, then drain or delete
+them before enabling `vm_isolation: "jailer"`. The rollout must bake a new
+jailed golden and must not roll back to direct mode while jailed snapshots
+remain in use.
+
+The Firecracker 1.15 cgroup v2 leaf layout with an explicit
+`--parent-cgroup` is:
+
+```text
+/sys/fs/cgroup/<nomad-task>/<vm-id>
+```
+
+There is no additional `firecracker/` component. `serve` moves itself into
+`<nomad-task>/sandbox-control` before enabling the delegated controllers, so
+the task's finite `memory.max` remains the aggregate bound for the controller
+and every sibling VMM leaf.
