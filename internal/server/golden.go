@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/registry"
+	"github.com/ayush6624/sandbox/internal/vm"
 )
 
 // The golden snapshot makes POST /sandboxes hot by default: a snapshot of a
@@ -76,7 +77,8 @@ func (s *Server) goldenUsable(snap registry.Snapshot) bool {
 	if err != nil {
 		return false
 	}
-	return fi.ModTime().Unix() == snap.BaseMtime && fi.Size() == snap.BaseSize
+	return fi.ModTime().Unix() == snap.BaseMtime && fi.Size() == snap.BaseSize &&
+		s.goldenManifestMatches(snap)
 }
 
 // buildGolden cold-boots a throwaway sandbox, snapshots it as golden, and
@@ -119,9 +121,10 @@ func (s *Server) buildGolden(ctx context.Context) {
 // because registry.Snapshot marks them json:"-" — yet goldenUsable keys the
 // staleness check on exactly those two, so the manifest must persist them.
 type goldenManifest struct {
-	Snapshot  registry.Snapshot `json:"snapshot"`
-	BaseMtime int64             `json:"base_mtime"`
-	BaseSize  int64             `json:"base_size"`
+	Snapshot           registry.Snapshot `json:"snapshot"`
+	BaseMtime          int64             `json:"base_mtime"`
+	BaseSize           int64             `json:"base_size"`
+	IsolationSignature string            `json:"isolation_signature"`
 }
 
 // goldenManifestPath is the fixed on-disk location of the manifest — a stable
@@ -135,7 +138,10 @@ func (s *Server) goldenManifestPath() string {
 // future fresh host can import it. Best-effort (written atomically via a temp +
 // rename): a failure only costs the cross-host adopt fast path, never the run.
 func (s *Server) writeGoldenManifest(snap registry.Snapshot) {
-	m := goldenManifest{Snapshot: snap, BaseMtime: snap.BaseMtime, BaseSize: snap.BaseSize}
+	m := goldenManifest{
+		Snapshot: snap, BaseMtime: snap.BaseMtime, BaseSize: snap.BaseSize,
+		IsolationSignature: vm.IsolationSignature(s.cfg.VMTemplate),
+	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "golden manifest: marshal: %v\n", err)
@@ -170,6 +176,11 @@ func (s *Server) importGoldenManifest(ctx context.Context) (registry.Snapshot, b
 		return registry.Snapshot{}, false
 	}
 	snap := m.Snapshot
+	if m.IsolationSignature != vm.IsolationSignature(s.cfg.VMTemplate) {
+		fmt.Fprintf(os.Stderr, "golden manifest isolation %q is incompatible with runtime %q; cold-building instead\n",
+			m.IsolationSignature, vm.IsolationSignature(s.cfg.VMTemplate))
+		return registry.Snapshot{}, false
+	}
 	snap.BaseMtime = m.BaseMtime
 	snap.BaseSize = m.BaseSize
 	snap.Golden = true
@@ -183,6 +194,19 @@ func (s *Server) importGoldenManifest(ctx context.Context) (registry.Snapshot, b
 	}
 	fmt.Fprintf(os.Stderr, "golden snapshot %s imported from data-disk manifest\n", snap.ID)
 	return snap, true
+}
+
+func (s *Server) goldenManifestMatches(snap registry.Snapshot) bool {
+	b, err := os.ReadFile(s.goldenManifestPath())
+	if err != nil {
+		return false
+	}
+	var manifest goldenManifest
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		return false
+	}
+	return manifest.Snapshot.ID == snap.ID &&
+		manifest.IsolationSignature == vm.IsolationSignature(s.cfg.VMTemplate)
 }
 
 // uploadGoldenBase eagerly pushes the golden's base template to GCS (once).

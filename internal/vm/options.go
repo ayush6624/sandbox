@@ -2,6 +2,11 @@ package vm
 
 import "time"
 
+const (
+	directLayoutVersion = "direct-v1"
+	jailLayoutVersion   = "jailer-v1"
+)
+
 // RunOptions configures a microVM run.
 type RunOptions struct {
 	FirecrackerBin string
@@ -57,6 +62,15 @@ type RunOptions struct {
 	// supplied chunk source (the server's GCS-backed loader; roadmap Phase B2)
 	// instead of the local mem file. Its Load is called on each chunk fault.
 	UFFDChunks *UFFDChunkSource
+}
+
+// IsolationSignature identifies the host paths embedded in Firecracker
+// snapshot state. Snapshots from a different signature must not be adopted.
+func IsolationSignature(opts RunOptions) string {
+	if opts.Jailer != nil {
+		return jailLayoutVersion
+	}
+	return directLayoutVersion
 }
 
 const (
