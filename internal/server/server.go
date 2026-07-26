@@ -925,22 +925,12 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		fmt.Fprintf(os.Stderr, "[%s] list ports: %v\n", id, err)
 	}
 
-	if v, ok := s.machines.LoadAndDelete(id); ok {
+	if v, ok := s.machines.Load(id); ok {
 		m := v.(*vm.Machine)
-		shCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = vm.ShutdownGuest(shCtx, m)
-		cancel()
-		waitDone := make(chan struct{})
-		go func() {
-			_ = vm.Wait(context.Background(), m)
-			close(waitDone)
-		}()
-		select {
-		case <-waitDone:
-		case <-time.After(2 * time.Minute):
-			_ = vm.StopForce(m)
-			<-waitDone
+		if err := stopMachineBounded(m); err != nil {
+			return fmt.Errorf("stop VM: %w", err)
 		}
+		s.machines.Delete(id)
 	}
 
 	s.pf.CloseSandbox(id)
