@@ -16,7 +16,7 @@ import (
 const (
 	defaultJailerUIDStart       = 200000
 	defaultJailerIdentityCount  = 4096
-	defaultJailerMemoryOverhead = int64(256)
+	defaultJailerMemoryOverhead = int64(512)
 	defaultJailerPIDsMax        = int64(64)
 	defaultJailerIOBPS          = int64(256 << 20)
 	defaultJailerNoFile         = uint64(256)

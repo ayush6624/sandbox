@@ -239,7 +239,7 @@ func (c *Config) Defaults() {
 			c.JailerIdentityCount = 4096
 		}
 		if c.JailerMemoryOverheadMIB == 0 {
-			c.JailerMemoryOverheadMIB = 256
+			c.JailerMemoryOverheadMIB = 512
 		}
 		if c.JailerPIDsMax == 0 {
 			c.JailerPIDsMax = 64

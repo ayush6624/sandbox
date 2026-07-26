@@ -122,7 +122,7 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	}
 	leaf := jailerCgroupLeaf(cfg, req.VMID)
 	for file, want := range map[string]string{
-		"memory.max":      "1342177280",
+		"memory.max":      "1610612736",
 		"memory.swap.max": "0",
 		"pids.max":        "64",
 		"cpu.max":         "200000 100000",

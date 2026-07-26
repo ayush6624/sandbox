@@ -16,7 +16,7 @@
   "jailer_uid_start": 200000,
   "jailer_gid_start": 200000,
   "jailer_identity_count": 4096,
-  "jailer_memory_overhead_mib": 256,
+  "jailer_memory_overhead_mib": 512,
   "jailer_pids_max": 64,
   "jailer_cpu_weight": 100,
   "jailer_cpu_period_us": 100000,
