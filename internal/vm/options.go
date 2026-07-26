@@ -27,6 +27,9 @@ type RunOptions struct {
 	// Launcher is the single process-preparation boundary used by every VMM
 	// lifecycle mode. Nil selects direct execution for development.
 	Launcher ProcessLauncher
+	// Jailer enables the production Firecracker jailer backend. It is mutually
+	// exclusive with Launcher, which remains an injection seam for tests.
+	Jailer *JailerConfig
 
 	// Networking (optional — if TapDevice is empty, no networking)
 	TapDevice   string

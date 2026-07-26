@@ -27,15 +27,47 @@ type LaunchRequest struct {
 	VMID           string
 	HostAPIPath    string
 	DisableSeccomp bool
+	KernelImage    string
+	RootfsPath     string
+	SnapshotMem    string
+	SnapshotState  string
+	UFFDHostPath   string
+	Vcpus          int64
+	MemMIB         int64
+}
+
+// LaunchPaths are the paths visible to Firecracker after preparation. HostAPI
+// is deliberately separate: the controller dials it outside the jail.
+type LaunchPaths struct {
+	API           string
+	Kernel        string
+	Rootfs        string
+	SnapshotMem   string
+	SnapshotState string
+	UFFD          string
 }
 
 // PreparedLaunch is a process ready to start plus the host-visible API socket
 // the controller must dial. Cleanup must be idempotent and is called only
 // after the process has exited, or when preparation/startup fails.
 type PreparedLaunch struct {
-	Command     *exec.Cmd
-	HostAPIPath string
-	Cleanup     func()
+	Command      *exec.Cmd
+	HostAPIPath  string
+	HostUFFDPath string
+	Paths        LaunchPaths
+	// PrepareOutput creates a jail-visible file for Firecracker to write and
+	// returns a finalize callback that publishes it at the requested host path.
+	// Direct launches leave this nil and write to the host path directly.
+	PrepareOutput func(hostPath string) (guestPath string, finalize func() error, err error)
+	// ConfigureSocket applies the jailed VMM identity to a controller-created
+	// Unix socket (currently UFFD) after it has been bound.
+	ConfigureSocket func(hostPath string) error
+	// OwnsValidation means preparation validated and staged every filesystem
+	// input; SDK host-path validation must be skipped for jail-visible paths.
+	OwnsValidation bool
+	// ProcessPID returns the Firecracker child PID (not the jailer parent).
+	ProcessPID func() (int, error)
+	Cleanup    func()
 }
 
 // ProcessLauncher prepares the Firecracker process for every lifecycle mode.
@@ -62,15 +94,37 @@ func (directProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) (Pr
 	}
 	cmd := exec.CommandContext(ctx, req.FirecrackerBin,
 		processArgs(req.HostAPIPath, req.VMID, req.DisableSeccomp)...)
-	return PreparedLaunch{
-		Command:     cmd,
-		HostAPIPath: req.HostAPIPath,
-		Cleanup:     func() {},
-	}, nil
+	prepared := PreparedLaunch{
+		Command:      cmd,
+		HostAPIPath:  req.HostAPIPath,
+		HostUFFDPath: req.UFFDHostPath,
+		Paths: LaunchPaths{
+			API:           req.HostAPIPath,
+			Kernel:        req.KernelImage,
+			Rootfs:        req.RootfsPath,
+			SnapshotMem:   req.SnapshotMem,
+			SnapshotState: req.SnapshotState,
+			UFFD:          req.UFFDHostPath,
+		},
+		Cleanup: func() {},
+	}
+	prepared.ProcessPID = func() (int, error) {
+		if cmd.Process == nil {
+			return 0, fmt.Errorf("firecracker process not started")
+		}
+		return cmd.Process.Pid, nil
+	}
+	return prepared, nil
 }
 
 func prepareLaunch(ctx context.Context, opts RunOptions, mode LaunchMode, vmID, socketPath string) (PreparedLaunch, error) {
 	launcher := opts.Launcher
+	if launcher != nil && opts.Jailer != nil {
+		return PreparedLaunch{}, fmt.Errorf("Launcher and Jailer are mutually exclusive")
+	}
+	if launcher == nil && opts.Jailer != nil {
+		launcher = newJailerProcessLauncher(*opts.Jailer)
+	}
 	if launcher == nil {
 		launcher = directProcessLauncher{}
 	}
@@ -80,6 +134,13 @@ func prepareLaunch(ctx context.Context, opts RunOptions, mode LaunchMode, vmID, 
 		VMID:           vmID,
 		HostAPIPath:    socketPath,
 		DisableSeccomp: opts.DisableSeccomp,
+		KernelImage:    opts.KernelImage,
+		RootfsPath:     opts.RootfsPath,
+		SnapshotMem:    opts.SnapshotMemPath,
+		SnapshotState:  opts.SnapshotStatePath,
+		UFFDHostPath:   socketPath + ".uffd",
+		Vcpus:          opts.Vcpus,
+		MemMIB:         opts.MemMIB,
 	})
 	if err != nil {
 		return PreparedLaunch{}, fmt.Errorf("prepare %s launch: %w", mode, err)
@@ -91,6 +152,9 @@ func prepareLaunch(ctx context.Context, opts RunOptions, mode LaunchMode, vmID, 
 	if prepared.HostAPIPath == "" {
 		prepared.cleanup()
 		return PreparedLaunch{}, fmt.Errorf("prepare %s launch: launcher returned empty API path", mode)
+	}
+	if prepared.Paths.API == "" {
+		prepared.Paths.API = prepared.HostAPIPath
 	}
 	if prepared.Cleanup == nil {
 		prepared.Cleanup = func() {}

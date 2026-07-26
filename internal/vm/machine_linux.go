@@ -37,6 +37,8 @@ type Machine struct {
 	raw           *rawMachine
 	log           *vmmLog
 	launchCleanup func()
+	processPID    func() (int, error)
+	prepareOutput func(string) (string, func() error, error)
 	cleanupOnce   sync.Once
 	// SDK-backed machines get one process waiter shared by every Wait caller.
 	// It also finalizes the log even when startup fails after the VMM launched
@@ -90,6 +92,8 @@ type rawMachine struct {
 	uffd          *uffdHandler
 	log           *vmmLog
 	launchCleanup func()
+	processPID    func() (int, error)
+	prepareOutput func(string) (string, func() error, error)
 	cleanupOnce   sync.Once
 }
 
@@ -218,10 +222,28 @@ func buildNetworkInterface(o RunOptions) (fcsdk.NetworkInterface, error) {
 	}, nil
 }
 
-func buildCommand(ctx context.Context, fcCfg fcsdk.Config, opts RunOptions, mode LaunchMode) (PreparedLaunch, *vmmLog, error) {
+func buildCommand(ctx context.Context, fcCfg *fcsdk.Config, opts RunOptions, mode LaunchMode) (PreparedLaunch, *vmmLog, error) {
 	prepared, err := prepareLaunch(ctx, opts, mode, fcCfg.VMID, fcCfg.SocketPath)
 	if err != nil {
 		return PreparedLaunch{}, nil, err
+	}
+	fcCfg.SocketPath = prepared.HostAPIPath
+	fcCfg.KernelImagePath = prepared.Paths.Kernel
+	for i := range fcCfg.Drives {
+		if fcsdk.StringValue(fcCfg.Drives[i].DriveID) == "rootfs" {
+			fcCfg.Drives[i].PathOnHost = fcsdk.String(prepared.Paths.Rootfs)
+		}
+	}
+	// The SDK creates and opens LogFifo in the controller's mount namespace,
+	// while the API path is interpreted in Firecracker's jail. Jailed launches
+	// therefore use the already-bounded stdout/stderr sink exclusively.
+	if prepared.PrepareOutput != nil {
+		fcCfg.LogFifo = ""
+	}
+	if prepared.OwnsValidation {
+		// Jail-visible absolute paths intentionally do not exist in the host
+		// mount namespace. The launcher already lstat'd and staged every input.
+		fcCfg.DisableValidation = true
 	}
 	// Capture firecracker's stdout/stderr so we can debug early-exit crashes.
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", fcCfg.VMID))
@@ -252,7 +274,7 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 	}
 	fcCfg.DisableValidation = disableValidation
 
-	prepared, logCloser, err := buildCommand(ctx, fcCfg, opts, LaunchColdBoot)
+	prepared, logCloser, err := buildCommand(ctx, &fcCfg, opts, LaunchColdBoot)
 	if err != nil {
 		return nil, RuntimeConfig{}, err
 	}
@@ -274,6 +296,8 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 		Machine:       m,
 		log:           logCloser,
 		launchCleanup: prepared.Cleanup,
+		processPID:    prepared.ProcessPID,
+		prepareOutput: prepared.PrepareOutput,
 		waitDone:      make(chan struct{}),
 	}, rt, nil
 }
@@ -295,8 +319,10 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		return nil, RuntimeConfig{}, err
 	}
 	fcCfg.DisableValidation = disableValidation
+	opts.SnapshotMemPath = memPath
+	opts.SnapshotStatePath = statePath
 
-	prepared, logCloser, err := buildCommand(ctx, fcCfg, opts, LaunchSnapshotRestore)
+	prepared, logCloser, err := buildCommand(ctx, &fcCfg, opts, LaunchSnapshotRestore)
 	if err != nil {
 		return nil, RuntimeConfig{}, err
 	}
@@ -305,7 +331,7 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 	m, err := fcsdk.NewMachine(ctx, fcCfg,
 		fcsdk.WithProcessRunner(prepared.Command),
 		fcsdk.WithLogger(silentLog()),
-		fcsdk.WithSnapshot(memPath, statePath, func(c *fcsdk.SnapshotConfig) {
+		fcsdk.WithSnapshot(prepared.Paths.SnapshotMem, prepared.Paths.SnapshotState, func(c *fcsdk.SnapshotConfig) {
 			c.ResumeVM = true
 		}),
 	)
@@ -321,6 +347,8 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		Machine:       m,
 		log:           logCloser,
 		launchCleanup: prepared.Cleanup,
+		processPID:    prepared.ProcessPID,
+		prepareOutput: prepared.PrepareOutput,
 		waitDone:      make(chan struct{}),
 	}, rt, nil
 }
@@ -332,6 +360,11 @@ func Start(ctx context.Context, m *Machine) error {
 		return fmt.Errorf("nil machine")
 	}
 	if err := m.Machine.Start(ctx); err != nil {
+		if m.processPID != nil {
+			if pid, pidErr := m.processPID(); pidErr == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
 		_ = m.log.Close()
 		m.cleanupLaunch()
 		return err
@@ -375,6 +408,13 @@ func StopForce(m *Machine) error {
 	}
 	if m.raw != nil {
 		m.raw.log.markExpectedExit()
+		if m.raw.processPID != nil {
+			if pid, err := m.raw.processPID(); err == nil {
+				err = syscall.Kill(pid, syscall.SIGTERM)
+				m.raw.uffd.close()
+				return err
+			}
+		}
 		if m.raw.cmd.Process != nil {
 			err := m.raw.cmd.Process.Signal(syscall.SIGTERM)
 			// Close the UFFD handler's socket (if any); its mem mapping is
@@ -389,6 +429,11 @@ func StopForce(m *Machine) error {
 		return nil
 	}
 	m.log.markExpectedExit()
+	if m.processPID != nil {
+		if pid, err := m.processPID(); err == nil {
+			return syscall.Kill(pid, syscall.SIGTERM)
+		}
+	}
 	return m.Machine.StopVMM()
 }
 
@@ -440,6 +485,9 @@ func PID(m *Machine) (int, error) {
 		return 0, fmt.Errorf("nil machine")
 	}
 	if m.raw != nil {
+		if m.raw.processPID != nil {
+			return m.raw.processPID()
+		}
 		if m.raw.cmd.Process == nil {
 			return 0, fmt.Errorf("clone process not started")
 		}
@@ -447,6 +495,9 @@ func PID(m *Machine) (int, error) {
 	}
 	if m.Machine == nil {
 		return 0, fmt.Errorf("nil machine")
+	}
+	if m.processPID != nil {
+		return m.processPID()
 	}
 	return m.Machine.PID()
 }
@@ -495,19 +546,53 @@ func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType stri
 	if snapType == SnapshotDiff && !m.diffCapable {
 		return fmt.Errorf("diff snapshot requested but VM was not loaded with dirty-page tracking")
 	}
+	prepareOutput := m.prepareOutput
 	if m.raw != nil {
-		return fcAPI(ctx, unixClient(m.raw.sock), "PUT", "/snapshot/create", map[string]any{
+		prepareOutput = m.raw.prepareOutput
+	}
+	guestMem, guestState := memPath, statePath
+	var finalizeMem, finalizeState func() error
+	if prepareOutput != nil {
+		var err error
+		guestMem, finalizeMem, err = prepareOutput(memPath)
+		if err != nil {
+			return fmt.Errorf("prepare snapshot memory output: %w", err)
+		}
+		guestState, finalizeState, err = prepareOutput(statePath)
+		if err != nil {
+			return fmt.Errorf("prepare snapshot state output: %w", err)
+		}
+	}
+	if m.raw != nil {
+		if err := fcAPI(ctx, unixClient(m.raw.sock), "PUT", "/snapshot/create", map[string]any{
 			"snapshot_type": snapType,
-			"snapshot_path": statePath,
-			"mem_file_path": memPath,
-		})
+			"snapshot_path": guestState,
+			"mem_file_path": guestMem,
+		}); err != nil {
+			return err
+		}
+		return finalizeSnapshotOutputs(finalizeMem, finalizeState)
 	}
 	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
 	// SDK machines (cold boots, 1:1 restores) are never diffCapable, so this
 	// is always a Full snapshot — CreateSnapshot's default.
-	return m.Machine.CreateSnapshot(ctx, memPath, statePath)
+	if err := m.Machine.CreateSnapshot(ctx, guestMem, guestState); err != nil {
+		return err
+	}
+	return finalizeSnapshotOutputs(finalizeMem, finalizeState)
+}
+
+func finalizeSnapshotOutputs(finalizers ...func() error) error {
+	for _, finalize := range finalizers {
+		if finalize != nil {
+			if err := finalize(); err != nil {
+				return fmt.Errorf("publish jailed snapshot output: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // StartClone launches an identity-neutral clone from a snapshot. Because the
@@ -529,6 +614,9 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, err
 	}
 	vmID := uuid.NewString()
+	opts.SnapshotMemPath = c.MemPath
+	opts.SnapshotStatePath = c.StatePath
+	opts.RootfsPath = c.CloneRootfsPath
 
 	prepared, err := prepareLaunch(ctx, opts, LaunchHotClone, vmID, opts.SocketPath)
 	if err != nil {
@@ -556,6 +644,8 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		doneCh:        make(chan struct{}),
 		log:           logCloser,
 		launchCleanup: prepared.Cleanup,
+		processPID:    prepared.ProcessPID,
+		prepareOutput: prepared.PrepareOutput,
 	}
 	go func() {
 		rm.waitErr = cmd.Wait()
@@ -566,7 +656,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	// Kill the process on any error below so we don't leak a firecracker.
 	defer func() {
 		if err != nil {
-			_ = cmd.Process.Kill()
+			killLaunchProcess(cmd)
 		}
 	}()
 
@@ -583,8 +673,8 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	// load, so a later PUT /snapshot/create with snapshot_type=Diff captures
 	// exactly this sandbox's delta over the snapshot it was cloned from.
 	load := map[string]any{
-		"snapshot_path":         c.StatePath,
-		"mem_backend":           map[string]any{"backend_type": "File", "backend_path": c.MemPath},
+		"snapshot_path":         prepared.Paths.SnapshotState,
+		"mem_backend":           map[string]any{"backend_type": "File", "backend_path": prepared.Paths.SnapshotMem},
 		"enable_diff_snapshots": true,
 		"resume_vm":             false,
 		"network_overrides":     []map[string]any{{"iface_id": "1", "host_dev_name": c.TapDevice}},
@@ -593,7 +683,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, fmt.Errorf("load snapshot: %w", err)
 	}
 	// 2. Relocate the rootfs to this clone's CoW copy.
-	if err = fcAPI(ctx, client, "PATCH", "/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": c.CloneRootfsPath}); err != nil {
+	if err = fcAPI(ctx, client, "PATCH", "/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": prepared.Paths.Rootfs}); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("relocate rootfs: %w", err)
 	}
 	// 3. Push the clone's fresh identity into MMDS for the guest thaw agent.
@@ -630,7 +720,8 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		return nil, RuntimeConfig{}, err
 	}
 	vmID := uuid.NewString()
-	uffdSock := opts.SocketPath + ".uffd"
+	opts.SnapshotMemPath = memPath
+	opts.SnapshotStatePath = statePath
 
 	// Build the page source (local mmap, local chunks, or an injected GCS chunk
 	// source), then start the handler listening before the load call — Firecracker
@@ -639,10 +730,24 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	if err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("build uffd source: %w", err)
 	}
+	prepared, err := prepareLaunch(ctx, opts, LaunchUFFDRestore, vmID, opts.SocketPath)
+	if err != nil {
+		_ = src.close()
+		return nil, RuntimeConfig{}, err
+	}
+	uffdSock := prepared.HostUFFDPath
 	h, err := startUffdHandler(uffdSock, src)
 	if err != nil {
 		_ = src.close()
+		prepared.cleanup()
 		return nil, RuntimeConfig{}, fmt.Errorf("start uffd handler: %w", err)
+	}
+	if prepared.ConfigureSocket != nil {
+		if err := prepared.ConfigureSocket(uffdSock); err != nil {
+			h.close()
+			prepared.cleanup()
+			return nil, RuntimeConfig{}, fmt.Errorf("configure uffd socket permissions: %w", err)
+		}
 	}
 	defer func() {
 		if err != nil {
@@ -650,10 +755,6 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		}
 	}()
 
-	prepared, err := prepareLaunch(ctx, opts, LaunchUFFDRestore, vmID, opts.SocketPath)
-	if err != nil {
-		return nil, RuntimeConfig{}, err
-	}
 	cmd := prepared.Command
 	opts.SocketPath = prepared.HostAPIPath
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
@@ -677,6 +778,8 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		uffd:          h,
 		log:           logCloser,
 		launchCleanup: prepared.Cleanup,
+		processPID:    prepared.ProcessPID,
+		prepareOutput: prepared.PrepareOutput,
 	}
 	// If the page source can't serve a fault (e.g. a GCS chunk fetch fails after
 	// retries), Firecracker would hang forever on the unserved page. Kill it
@@ -696,7 +799,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	}()
 	defer func() {
 		if err != nil {
-			_ = cmd.Process.Kill()
+			killLaunchProcess(cmd)
 		}
 	}()
 
@@ -709,8 +812,8 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	// here (unlike the clone path) because there's no drive/identity fixup to do
 	// between load and resume. Firecracker connects to uffdSock during this call.
 	load := map[string]any{
-		"snapshot_path": statePath,
-		"mem_backend":   map[string]any{"backend_type": "Uffd", "backend_path": uffdSock},
+		"snapshot_path": prepared.Paths.SnapshotState,
+		"mem_backend":   map[string]any{"backend_type": "Uffd", "backend_path": prepared.Paths.UFFD},
 		"resume_vm":     true,
 	}
 	if err = fcAPI(ctx, client, "PUT", "/snapshot/load", load); err != nil {
@@ -723,6 +826,17 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	// faults, exactly like fault-ahead prefetch (which is safe at high concurrency).
 	h.startPrewarm()
 	return &Machine{raw: rm, diffCapable: false}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+}
+
+func killLaunchProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return
+	}
+	_ = cmd.Process.Kill()
 }
 
 // PushEpoch writes the host's current wall clock into a VM's MMDS store so
