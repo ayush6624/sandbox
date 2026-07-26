@@ -71,17 +71,19 @@ export interface SandboxCreateOpts extends SandboxRestoreOpts {
   memMib?: number
   /**
    * A single OpenSSH public key line (e.g. `ssh-ed25519 AAAA… me@laptop`)
-   * installed as `/root/.ssh/authorized_keys` in the guest, enabling
-   * key-only root SSH. Reach it by exposing guest port 22:
+   * installed as `/home/sandbox/.ssh/authorized_keys` in the guest, enabling
+   * key-only SSH as the unprivileged `sandbox` user. Reach it by exposing
+   * guest port 22:
    *
    * ```ts
    * const sbx = await Sandbox.create({ sshPubkey: await readFile('~/.ssh/id_ed25519.pub', 'utf8') })
    * const addr = await sbx.exposePort(22)   // → "100.75.186.35:5200"
-   * // ssh -p 5200 root@100.75.186.35
+   * // ssh -p 5200 sandbox@100.75.186.35
    * ```
    *
-   * The key lives in the rootfs, so it survives hibernation and wake. Unlike
-   * most create-time extras this is **not** best-effort: if the key can't be
+   * Independent creates rotate SSH host keys and clear inherited login keys;
+   * pause/resume preserves them. Unlike most create-time extras this is
+   * **not** best-effort: if the key can't be
    * installed the sandbox is destroyed and the create fails, so a sandbox
    * handed back with SSH requested is always reachable.
    */

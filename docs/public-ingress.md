@@ -217,7 +217,8 @@ the client speaks. Two options:
   interface.
 
 Recommendation: the port range. Note that the base rootfs already bakes
-`openssh-server` with key-only root login and `ssh.service` enabled, and
+`openssh-server` with key-only login as the unprivileged `sandbox` user and
+`ssh.service` enabled, and
 `POST /sandboxes` takes `ssh_pubkey` — so the guest side is done; this is purely
 the missing public path.
 

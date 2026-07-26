@@ -41,8 +41,9 @@ func main() {
 	mux.HandleFunc("PUT /files", handleWriteFile)
 	mux.HandleFunc("GET /dir", handleListDir)
 	mux.HandleFunc("GET /shell", handleShell)
-	mux.HandleFunc("POST /clock", handleClock)
-	mux.HandleFunc("POST /ssh-key", handleSSHKey)
+	mux.HandleFunc("POST /clock", hostOnly(handleClock))
+	mux.HandleFunc("POST /identity", hostOnly(handleGuestIdentity))
+	mux.HandleFunc("POST /ssh-key", hostOnly(handleSSHKey))
 
 	// A real /etc/resolv.conf, not a symlink into /proc — c-ares-based
 	// resolvers can't read the latter. Non-fatal: a guest with a working
@@ -85,12 +86,10 @@ func handleClock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-// handleSSHKey writes the supplied public key to root's authorized_keys so the
-// sandbox is reachable over SSH (login as root, key-only — sshd is configured
-// PermitRootLogin prohibit-password). The host posts this right after the
-// readiness gate on create. Overwrite, not append: one create carries one key,
-// and rewriting keeps the call idempotent across retries. The file lives in the
-// rootfs and thus survives hibernation/wake untouched.
+// handleSSHKey writes the supplied public key to the normal sandbox user's
+// authorized_keys. The host posts this after /identity on independent create.
+// Overwrite, not append: one create carries one key, and rewriting keeps the
+// call idempotent across retries.
 func handleSSHKey(w http.ResponseWriter, r *http.Request) {
 	var req agentapi.SSHKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -108,11 +107,12 @@ func handleSSHKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("public_key must be a single line"))
 		return
 	}
-	if err := os.MkdirAll(sshDir, 0o700); err != nil {
-		httpError(w, 500, fmt.Errorf("mkdir %s: %w", sshDir, err))
-		return
-	}
-	if err := os.WriteFile(authorizedKeysPath, []byte(key+"\n"), 0o600); err != nil {
+	if err := withGuestFilesystem(func() error {
+		if err := os.MkdirAll(sshDir, 0o700); err != nil {
+			return fmt.Errorf("mkdir %s: %w", sshDir, err)
+		}
+		return os.WriteFile(authorizedKeysPath, []byte(key+"\n"), 0o600)
+	}); err != nil {
 		httpError(w, 500, fmt.Errorf("write authorized_keys: %w", err))
 		return
 	}
@@ -120,9 +120,9 @@ func handleSSHKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-const (
-	sshDir             = "/root/.ssh"
-	authorizedKeysPath = "/root/.ssh/authorized_keys"
+var (
+	sshDir             = "/home/sandbox/.ssh"
+	authorizedKeysPath = "/home/sandbox/.ssh/authorized_keys"
 )
 
 func handleExec(w http.ResponseWriter, r *http.Request) {
@@ -138,14 +138,18 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), execTimeout(req))
 	defer cancel()
-	cmd := buildCmd(ctx, req)
+	cmd, err := buildCmd(ctx, req)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
 
 	var stdout, stderr cappedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	start := time.Now()
-	err := cmd.Run()
+	err = cmd.Run()
 	res := agentapi.ExecResult{
 		Stdout:     stdout.String(),
 		Stderr:     stderr.String(),
@@ -185,7 +189,11 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), execTimeout(req))
 	defer cancel()
-	cmd := buildCmd(ctx, req)
+	cmd, err := buildCmd(ctx, req)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -272,14 +280,17 @@ func execTimeout(req agentapi.ExecRequest) time.Duration {
 // buildCmd constructs the bash invocation shared by /exec and /exec/stream.
 // The command runs in its own process group and the whole group is killed on
 // timeout, so children spawned by the shell don't outlive the request.
-func buildCmd(ctx context.Context, req agentapi.ExecRequest) *exec.Cmd {
+func buildCmd(ctx context.Context, req agentapi.ExecRequest) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, "/bin/bash", "-lc", req.Cmd)
 	cmd.Dir = workingDir(req.Cwd)
-	cmd.Env = os.Environ()
+	cmd.Env = guestEnvironment(os.Environ())
 	for k, v := range req.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := configureGuestCommandProcess(cmd); err != nil {
+		return nil, fmt.Errorf("configure sandbox process: %w", err)
+	}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
@@ -289,7 +300,7 @@ func buildCmd(ctx context.Context, req agentapi.ExecRequest) *exec.Cmd {
 	// shortly after the shell itself exits: exec returns when the shell
 	// returns, and surviving children keep running.
 	cmd.WaitDelay = 500 * time.Millisecond
-	return cmd
+	return cmd, nil
 }
 
 // handleShell upgrades the connection to a WebSocket and attaches it to an
@@ -314,7 +325,11 @@ func handleShell(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cmd := exec.Command("/bin/bash", "-l")
 	cmd.Dir = workingDir(q.Get("cwd"))
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	cmd.Env = append(guestEnvironment(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")
+	if err := configureGuestCommandProcess(cmd); err != nil {
+		conn.Close(websocket.StatusInternalError, "configure sandbox process")
+		return
+	}
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: parseDim(q.Get("cols"), 80),
@@ -412,7 +427,12 @@ func handleReadFile(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("path query param is required"))
 		return
 	}
-	f, err := os.Open(path)
+	var f *os.File
+	err := withGuestFilesystem(func() error {
+		var err error
+		f, err = os.Open(path)
+		return err
+	})
 	if err != nil {
 		httpError(w, statusForFSError(err), err)
 		return
@@ -438,11 +458,15 @@ func handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("path query param is required"))
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		httpError(w, 500, err)
-		return
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	var f *os.File
+	err := withGuestFilesystem(func() error {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		var err error
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		return err
+	})
 	if err != nil {
 		httpError(w, statusForFSError(err), err)
 		return
@@ -463,7 +487,12 @@ func handleListDir(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = defaultCwd
 	}
-	entries, err := os.ReadDir(path)
+	var entries []os.DirEntry
+	err := withGuestFilesystem(func() error {
+		var err error
+		entries, err = os.ReadDir(path)
+		return err
+	})
 	if err != nil {
 		httpError(w, statusForFSError(err), err)
 		return

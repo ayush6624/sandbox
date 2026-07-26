@@ -323,12 +323,14 @@ const sbx = await Sandbox.create({
 })
 const addr = await sbx.exposePort(22)     // e.g. "100.75.186.35:5200"
 const [host, port] = addr.split(':')
-console.log(`ssh -p ${port} root@${host}`)
+console.log(`ssh -p ${port} sandbox@${host}`)
 ```
 
-Key-only root login; the key lands in `/root/.ssh/authorized_keys` inside the
-guest, so it survives hibernation and wake. If the key can't be installed the
-create fails outright rather than handing back an unreachable sandbox.
+Key-only login as the unprivileged `sandbox` user; the key lands in
+`/home/sandbox/.ssh/authorized_keys` and survives hibernation and wake.
+Independent creates rotate SSH host keys and clear inherited login keys. If
+the key can't be installed the create fails outright rather than handing back
+an unreachable sandbox.
 
 Because the forwarded port carries wake-on-connect, an incoming SSH connection
 wakes a hibernated sandbox and pins it for the session. In fleet mode the
@@ -416,7 +418,7 @@ try {
 | — | `Sandbox.fanout(snapshotId, n)` — N live clones of one snapshot |
 | `sbx.pty.create({ onData, cols, rows })` | `sbx.pty.create({ onData, cols, rows, cwd })` — `sendInput` / `resize` / `kill` / `await pty.exited` |
 | `sbx.getInfo()` | `sbx.info` (a live object) + `await sbx.refresh()` to re-read it; `sbx.info.vcpus` / `memMib` are always the effective values, and `Sandbox.hostInfo()` gives defaults/limits |
-| — | `Sandbox.create({ sshPubkey })` + `exposePort(22)` — key-only root SSH |
+| — | `Sandbox.create({ sshPubkey })` + `exposePort(22)` — key-only SSH as `sandbox` |
 | — | `Sandbox.hosts()` — fleet capacity behind a gateway |
 | rate-limit errors | `CapacityError` (429/503) with `retryAfterMs` — distinguishes "fleet full" from "broken" |
 

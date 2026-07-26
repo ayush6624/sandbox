@@ -194,7 +194,7 @@ Body (optional — empty body is fine):
   template's defaults. Bounds-checked (400 on negative, more vcpus than host
   cores, mem below 128 MiB or above host RAM).
 - `ssh_pubkey` — a single OpenSSH public key line, installed as
-  `/root/.ssh/authorized_keys` in the guest for key-only root SSH
+  `/home/sandbox/.ssh/authorized_keys` for key-only SSH as `sandbox`
   (`400` on multi-line input or an unknown key type). Unlike other
   create-time extras this is **not** best-effort: if the key can't be
   installed the sandbox is destroyed and the create fails, so a sandbox
@@ -205,6 +205,10 @@ Body (optional — empty body is fine):
   to a hibernated sandbox wakes it. **Fleet caveat:** the gateway proxies
   HTTP only, so fleet SSH needs a `ProxyJump` through the owning worker
   (`host_addr`).
+
+Every independent create rotates the guest's SSH host keys and clears login
+keys inherited from its image or snapshot before installing `ssh_pubkey`.
+Pause/resume preserves both identities.
 
 Returns `201 Sandbox`. Blocks until the sandbox's in-guest agent is healthy,
 so the sandbox is usable the moment this returns. Served from a pre-booted

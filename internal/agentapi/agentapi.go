@@ -88,13 +88,17 @@ type ClockSyncRequest struct {
 	UnixNano int64 `json:"unix_nano"` // host CLOCK_REALTIME, Unix nanoseconds
 }
 
-// SSHKeyRequest installs an SSH public key into the guest so a user can `ssh`
-// straight into the sandbox (POST /ssh-key). The host calls this right after
-// the create readiness gate, on both the cold and hot (golden-clone) paths, so
-// a sandbox created with a key is immediately reachable over SSH. The key is
-// written to root's authorized_keys (sandboxd runs as root; login is as root).
-// Idempotent: the file is overwritten, not appended. The key lives in the
-// rootfs, so it survives hibernation/wake with no re-push.
+// GuestIdentityRequest initializes security-sensitive identity for one
+// independently created sandbox. Repeating the same SandboxID is a no-op;
+// changing it rotates SSH host keys and clears inherited authorized keys.
+type GuestIdentityRequest struct {
+	SandboxID string `json:"sandbox_id"`
+}
+
+// SSHKeyRequest installs an SSH public key for the normal sandbox user. The
+// host calls this only after guest identity initialization has cleared any key
+// inherited from the source image or snapshot. Idempotent: the file is
+// overwritten, not appended. The key survives pause/resume unchanged.
 type SSHKeyRequest struct {
 	PublicKey string `json:"public_key"` // one authorized_keys line, e.g. "ssh-ed25519 AAAA... user@host"
 }

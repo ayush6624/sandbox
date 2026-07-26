@@ -1,0 +1,153 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/ayush6624/sandbox/internal/agentapi"
+)
+
+var (
+	guestIdentityMu sync.Mutex
+
+	guestIdentityMarker = "/var/lib/sandboxd/identity"
+	sshHostKeyPattern   = "/etc/ssh/ssh_host_*"
+	runIdentityCommand  = func(name string, args ...string) error {
+		if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+)
+
+func handleGuestIdentity(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.GuestIdentityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if err := initializeGuestIdentity(strings.TrimSpace(req.SandboxID)); err != nil {
+		code := http.StatusInternalServerError
+		if errors.Is(err, errInvalidSandboxIdentity) {
+			code = http.StatusBadRequest
+		}
+		httpError(w, code, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+var errInvalidSandboxIdentity = errors.New("invalid sandbox identity")
+
+// initializeGuestIdentity rotates state that must be unique to every
+// independently created sandbox. Its durable marker makes retries for the same
+// sandbox idempotent, while a rootfs copied from an image or snapshot always
+// carries a different marker and therefore rotates before create returns.
+func initializeGuestIdentity(sandboxID string) error {
+	if !validSandboxIdentity(sandboxID) {
+		return fmt.Errorf("%w: sandbox_id must be 1-128 letters, digits, dots, underscores, or hyphens", errInvalidSandboxIdentity)
+	}
+
+	guestIdentityMu.Lock()
+	defer guestIdentityMu.Unlock()
+
+	if marker, err := os.ReadFile(guestIdentityMarker); err == nil &&
+		strings.TrimSpace(string(marker)) == sandboxID && sshHostKeysPresent() {
+		return nil
+	}
+
+	paths, err := filepath.Glob(sshHostKeyPattern)
+	if err != nil {
+		return fmt.Errorf("list ssh host keys: %w", err)
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove inherited ssh host key %s: %w", path, err)
+		}
+	}
+	// Never carry a source sandbox's login key into an independent clone.
+	if err := os.Remove(authorizedKeysPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove inherited authorized_keys: %w", err)
+	}
+	if err := runIdentityCommand("ssh-keygen", "-A"); err != nil {
+		return fmt.Errorf("generate ssh host keys: %w", err)
+	}
+	if !sshHostKeysPresent() {
+		return errors.New("generate ssh host keys: ssh-keygen produced no private host keys")
+	}
+	if err := runIdentityCommand("systemctl", "restart", "ssh.service"); err != nil {
+		return fmt.Errorf("restart ssh service: %w", err)
+	}
+	if err := writeIdentityMarker(sandboxID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sshHostKeysPresent() bool {
+	paths, err := filepath.Glob(sshHostKeyPattern)
+	if err != nil {
+		return false
+	}
+	for _, path := range paths {
+		if !strings.HasSuffix(path, ".pub") {
+			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func writeIdentityMarker(sandboxID string) error {
+	dir := filepath.Dir(guestIdentityMarker)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create identity state dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".identity-*")
+	if err != nil {
+		return fmt.Errorf("create identity marker: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod identity marker: %w", err)
+	}
+	if _, err := tmp.WriteString(sandboxID + "\n"); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write identity marker: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync identity marker: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close identity marker: %w", err)
+	}
+	if err := os.Rename(tmpPath, guestIdentityMarker); err != nil {
+		return fmt.Errorf("install identity marker: %w", err)
+	}
+	return nil
+}
+
+func validSandboxIdentity(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
