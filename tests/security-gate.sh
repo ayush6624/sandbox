@@ -240,7 +240,10 @@ while [ "$#" -gt 0 ]; do
   jail_root="$jail/root"
   test -d "$jail_root"
   test "$(stat -c '%u' "$jail")" = "0"
-  test "$(stat -c '%u' "$jail_root")" = "0"
+  # Firecracker's jailer deliberately transfers the chroot root itself to the
+  # unprivileged VMM identity after pivot_root; the parent jail remains
+  # root-owned, and the process has neither uid 0 nor CAP_SYS_CHROOT.
+  test "$(stat -c '%u:%g' "$jail_root")" = "$uid:$gid"
   test -S "$jail_root/run/firecracker.socket"
   test -s "$jail_root/firecracker.pid"
   test "$(cat "$jail_root/firecracker.pid")" = "$pid"
@@ -271,7 +274,8 @@ first_jail="$1"
 second_jail="$2"
 test -n "$second_jail"
 test "$second_jail" != "$first_jail"
-test "$(readlink -f "/proc/$first_pid/root")" = "$first_jail/root"
+test "$(stat -Lc '%d:%i' "/proc/$first_pid/root")" = \
+  "$(stat -Lc '%d:%i' "$first_jail/root")"
 if setpriv --reuid "$first_uid" --regid "$first_gid" --clear-groups \
   test -r "$second_jail/root/disks/rootfs.ext4"; then
     echo "error: VMM identity $first_uid:$first_gid can read another jail's rootfs" >&2
