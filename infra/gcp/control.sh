@@ -18,6 +18,7 @@ REPO="$(cd "$DIR/../.." && pwd)"
 source "$DIR/config.env"
 
 NAME="${CONTROL_NAME:-sandbox-control}"
+SSH_HOST="${CONTROL_SSH_HOST:-$NAME}"
 MACHINE="${CONTROL_MACHINE_TYPE:-e2-medium}"
 IP="${CONTROL_INTERNAL_IP:?set CONTROL_INTERNAL_IP in config.env}"
 REGION="${ZONE%-*}"
@@ -38,7 +39,12 @@ REMOTE_DIR="/home/${SSH_USER}/sandbox"
 SECRETS="$DIR/fleet-secrets.env"
 
 GC=(gcloud --project="$PROJECT")
-sshx() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_USER}@$1" "${@:2}"; }
+sshx() {
+  local host="$1"
+  shift
+  [ "$host" = "$NAME" ] && host="$SSH_HOST"
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_USER}@$host" "$@"
+}
 
 load_tokens() {
   [ -f "$SECRETS" ] && source "$SECRETS" || true
@@ -99,7 +105,7 @@ cmd_deploy() {
   ( cd "$REPO" && make build-linux )
   rsync -az -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
     "$REPO/bin/sandbox" "$REPO/configs" "$DIR/nomad" "$DIR/prometheus" "$DIR/grafana" \
-    "${SSH_USER}@${NAME}:${REMOTE_DIR}/"
+    "${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/"
 
   echo ">> install Nomad server + Prometheus + autoscaler + gateway on $NAME"
   local control_release
