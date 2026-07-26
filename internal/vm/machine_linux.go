@@ -401,7 +401,10 @@ func (m *Machine) cleanupLaunch() {
 	})
 }
 
-// StopForce sends SIGTERM to the Firecracker process (fast teardown).
+// StopForce sends SIGKILL to the Firecracker process. A jailed Firecracker is
+// PID 1 in its private PID namespace, where an unhandled SIGTERM can be
+// ignored; the graceful shutdown path is attempted separately before this
+// bounded fallback.
 func StopForce(m *Machine) error {
 	if m == nil {
 		return nil
@@ -410,13 +413,13 @@ func StopForce(m *Machine) error {
 		m.raw.log.markExpectedExit()
 		if m.raw.processPID != nil {
 			if pid, err := m.raw.processPID(); err == nil {
-				err = syscall.Kill(pid, syscall.SIGTERM)
+				err = syscall.Kill(pid, syscall.SIGKILL)
 				m.raw.uffd.close()
 				return err
 			}
 		}
 		if m.raw.cmd.Process != nil {
-			err := m.raw.cmd.Process.Signal(syscall.SIGTERM)
+			err := m.raw.cmd.Process.Kill()
 			// Close the UFFD handler's socket (if any); its mem mapping is
 			// released by the fault goroutine once Firecracker actually exits.
 			m.raw.uffd.close()
@@ -431,7 +434,7 @@ func StopForce(m *Machine) error {
 	m.log.markExpectedExit()
 	if m.processPID != nil {
 		if pid, err := m.processPID(); err == nil {
-			return syscall.Kill(pid, syscall.SIGTERM)
+			return syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
 	return m.Machine.StopVMM()
