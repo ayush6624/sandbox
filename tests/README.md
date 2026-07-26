@@ -120,3 +120,26 @@ Run a subset by changing `TRAFFIC_SCENARIOS`. The sawtooth defaults to three
 bursts and waits up to 22 minutes for scale-in between them (15-minute policy
 window plus late-scale-action and reconciliation headroom); tune only via the
 documented `AUTOSCALE_*` variables in `autoscale-traffic.ts`.
+
+The acknowledgement and `EXPECTED_WORKER_RELEASE` are required for both the
+traffic suite and the legacy held-burst mode. Safety defaults bound a driver to
+three hours, cap a legacy burst at 512 creates, cap traffic scenarios at 512
+simultaneously live sandboxes and 22 alive hosts, and fail acceptance when
+create p95 exceeds 30 seconds or any create exceeds 60 seconds. Override these
+only after checking the live `MIG_MAX`, queue wait, slot count, and budget:
+
+| Guard | Default |
+| --- | ---: |
+| `BENCHMARK_TIMEOUT_SEC` | 10800 |
+| `MAX_BURST_COUNT` | 512 |
+| `CLEANUP_TIMEOUT_SEC` | 120 |
+| `AUTOSCALE_MAX_LIVE_SANDBOXES` | 512 |
+| `AUTOSCALE_MAX_HOSTS` | 22 |
+| `AUTOSCALE_MAX_CREATE_P95_MS` | 30000 |
+| `AUTOSCALE_MAX_CREATE_MS` | 60000 |
+
+Every invocation gets a directory under `tests/results/autoscale-<UTC>/` with
+the driver result, combined observer timeline, benchmark log, final fleet
+snapshot, run metadata, and SHA-256 checksums. Exit 70 means the driver itself
+passed but the wrapper could not prove cleanup. The cleanup trap deletes only
+names bearing that invocation's run ID; it never sweeps unrelated sandboxes.

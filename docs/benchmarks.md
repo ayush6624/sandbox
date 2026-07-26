@@ -424,3 +424,54 @@ export LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
 export TRAFFIC_SCENARIOS="sawtooth-scale-cycle standby-refill-boundary held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
 ./tests/autoscale-benchmark.sh
 ```
+
+### Safe GCP campaign order
+
+Run from the control VM so API traffic, Nomad, GCE observations, and timestamps
+share the same VPC and clock. The committed production shape assumes a clean
+floor of 2 running workers × 48 slots, at least 2 suspended standbys, standard
+`n2-standard-16` workers, and a hard `MIG_MAX=22`. A full autoscaling campaign
+can therefore keep multiple large workers and their disks allocated for the
+test plus the 15-minute scale-down window. The three-cycle sawtooth alone can
+take roughly 70 minutes; the wrapper's three-hour timeout is a failure
+backstop, not a target duration.
+
+Use this sequence, never overlapping two campaigns:
+
+1. Run `/v1`, SDK, quick lifecycle, then full correctness/stress suites. Stop
+   before autoscaling if any correctness test fails or cleanup does not return
+   the gateway to zero sandboxes.
+2. Run the 160-create legacy held burst to establish the comparable latency
+   baseline. Wait for a stable 2-running floor and replenished suspended pool.
+3. Run the targeted traffic group:
+   `standby-refill-boundary held-burst gradual-ramp second-wave
+   long-lived-reconcile create-exec-kill-churn`.
+4. Wait again for the clean physical floor, then run
+   `sawtooth-scale-cycle` alone. This isolates its three 15-minute scale-in
+   windows and makes abort/cost decisions straightforward.
+
+Before every invocation verify:
+
+- the gateway owns zero sandboxes and reports queue depth zero;
+- exactly two compatible, empty, current-release hosts expose 48 free slots;
+- the MIG has exactly two `RUNNING` instances and the expected suspended
+  standby pool;
+- `EXPECTED_WORKER_RELEASE` matches the deployed artifact and no rollout is in
+  progress;
+- `MIG_MAX`, machine type, slot count, benchmark demand cap, and the GCP budget
+  are intentional.
+
+The live wrapper now enforces the acknowledgement for every mode, bounds
+runtime and demand, verifies exact worker release, and fails on uncertain
+cleanup. Traffic acceptance is zero correctness failures, no duplicate or
+disappearing routes, no release/capacity invariant violation, no more than 22
+alive hosts, create p95 ≤30 seconds, create max ≤60 seconds, and proven final
+cleanup. Treat any of these as a stop condition; do not continue to the next
+stage to “get more data.”
+
+Results land under `tests/results/autoscale-<UTC>/`. Preserve the entire
+directory. `run.json` must show exit code 0 and `cleanup_ok: true`; verify
+`SHA256SUMS` before copying or publishing measurements. After each stage also
+confirm zero gateway sandboxes, zero queue depth, zero release mismatches, and
+no fresh gateway/worker panic logs. A nonzero result, timeout (124), signal
+(130/143), or cleanup-proof failure (70) ends the campaign.

@@ -4,6 +4,20 @@ Output of the fleet e2e suite (`npm run e2e`, see [`../README.md`](../README.md)
 One `run_<ISO timestamp>.json` per invocation; everything here except this README
 is **gitignored**.
 
+Live autoscaling runs use a directory named `autoscale-<UTC>/`:
+
+- `traffic.json` or `burst.json`: driver measurements and acceptance result;
+- `timeline.jsonl`: MIG, Nomad, gateway, queue, and demand events on one clock;
+- `benchmark.log`: complete driver output;
+- `mig-latest.json`: latest compact physical-fleet observation;
+- `run.json`: immutable run identity, commit/release, bounds, exit code,
+  cleanup verdict, and final sandbox/host/MIG state;
+- `SHA256SUMS`: checksums for the captured files.
+
+Archive the whole directory. A driver result without `run.json` and a
+`cleanup_ok: true` verdict is incomplete evidence, even when its measurements
+look successful.
+
 ## Shape
 
 ```json
