@@ -117,6 +117,14 @@ operation/readiness errors. Override with `--readiness-timeout-ms` and
 `--readiness-poll-ms`. Any unusable sandbox, partial operation, or unproven
 cleanup makes the process exit nonzero after it writes the diagnostic result.
 
+The fleet suite validates all workload and concurrency arguments before it
+allocates capacity. It uses an explicit cleanup request timeout, retries each
+termination, and verifies each created resource returns `404` before declaring
+cleanup complete. Partial create/workload results, transient cleanup errors,
+host observations, and the final cleanup verdict are persisted even when the
+command exits nonzero. Tune the per-request bound with
+`--cleanup-timeout-ms` (10 s default).
+
 ## Implementation notes
 
 - `benchmark.ts` is **erasable-syntax-only** TypeScript (no enums, namespaces, or

@@ -51,7 +51,7 @@
     "bench:lifecycle": "tsx benchmarks/lifecycle-bench.ts",
     "bench:restore": "tsx benchmarks/restore-bench.ts",
     "bench:fanout": "tsx benchmarks/fanout-bench.ts",
-    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts"
+    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts benchmarks/fleet-bench.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

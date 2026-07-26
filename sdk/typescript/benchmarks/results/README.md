@@ -12,7 +12,7 @@ regenerated rather than versioned. The curated, human-readable numbers live in
 | `snapshot_source_<ts>.json` | `npm run bench:snapshot-source` | default-source vs snapshot-source create latency; retains deprecated `cold_boot` and `restore` keys |
 | `snapshot_batch_<ts>.json` | `npm run bench:snapshot-batch` | snapshot-source batch operation/readiness scaling with per-item diagnostics and cleanup errors; retains deprecated `perCloneMs` and `fanout` aliases |
 | `lifecycle_<ts>.json` | `npm run bench:lifecycle` | create/pause/resume-to-usable/terminate latency; retains deprecated lifecycle aliases |
-| `fleet_<mode>_<n>_<ts>.json` | `benchmarks/fleet-bench.ts` | N sandboxes via the gateway: create/workload latency percentiles per config |
+| `fleet_<mode>_<n>_<ts>.json` | `benchmarks/fleet-bench.ts` | N sandboxes via the gateway: compatible create/workload percentiles plus per-resource cleanup proof and failure diagnostics |
 | `burst_*.json` | `npm run bench:burst -- --output ...` | create/exec/terminate churn or held-burst results; retains deprecated `killMs` |
 | `<mode>_<ts>.json` | `npm run bench` (`run-bench.ts`) | in-guest SQLite+fs workload (upstream `sandbox-sqlite-bench` shape) |
 | `extensive/` | `scripts/bench-extensive.sh` | one full sweep: `latency.json`, `fanout.json`, `fleet_*.json`, `mem.json` (PSS/RSS density) |
