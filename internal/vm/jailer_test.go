@@ -106,10 +106,7 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 
 	args := strings.Join(prepared.Command.Args[1:], "\x00")
 	for _, want := range []string{
-		"--new-pid-ns", "--cgroup-version\x002", "--parent-cgroup\x00nomad/task",
-		"memory.max=1342177280", "memory.swap.max=0", "pids.max=64",
-		"cpu.max=200000 100000", "cpu.weight=100",
-		"io.max=8:16 rbps=10485760 wbps=5242880",
+		"--new-pid-ns", "--cgroup-version\x002", "--parent-cgroup\x00nomad/task/vm-123",
 		"no-file=256", "fsize=68719476736",
 		"--\x00--api-sock\x00/run/firecracker.socket",
 	} {
@@ -119,6 +116,26 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	}
 	if strings.Count(args, "--id") != 1 {
 		t.Fatalf("jailer must own the sole --id argument: %q", prepared.Command.Args)
+	}
+	if strings.Contains("\x00"+args+"\x00", "\x00--cgroup\x00") {
+		t.Fatalf("jailer must use the preconfigured cgroup leaf: %q", prepared.Command.Args)
+	}
+	leaf := jailerCgroupLeaf(cfg, req.VMID)
+	for file, want := range map[string]string{
+		"memory.max":      "1342177280",
+		"memory.swap.max": "0",
+		"pids.max":        "64",
+		"cpu.max":         "200000 100000",
+		"cpu.weight":      "100",
+		"io.max":          "8:16 rbps=10485760 wbps=5242880",
+	} {
+		got, err := os.ReadFile(filepath.Join(leaf, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", file, got, want)
+		}
 	}
 
 	hostOutput := filepath.Join(base, "published", "snapshot.mem")

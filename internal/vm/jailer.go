@@ -262,6 +262,15 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		}
 		cfg.IODevice = device
 	}
+	if err := prepareVMMCgroup(cfg, req); err != nil {
+		return PreparedLaunch{}, err
+	}
+	cleanupCgroup := true
+	defer func() {
+		if retErr != nil && cleanupCgroup {
+			_ = os.Remove(jailerCgroupLeaf(cfg, req.VMID))
+		}
+	}()
 
 	uid, gid, releaseIdentity, err := reserveJailerIdentity(cfg, req.VMID)
 	if err != nil {
@@ -292,6 +301,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		_ = os.Remove(jailerCgroupLeaf(cfg, req.VMID))
 		releaseIdentity()
 	}
+	cleanupCgroup = false
 	cleanupIdentity = false
 	if err := os.Chown(filepath.Join(rootDir, "run"), uid, gid); err != nil {
 		cleanupJail()
@@ -735,8 +745,6 @@ func stableSlot(id string, n int) int {
 }
 
 func jailerArgs(cfg JailerConfig, req LaunchRequest, uid, gid int, apiPath string) []string {
-	memoryMax := (req.MemMIB + cfg.MemoryOverheadMIB) << 20
-	cpuMax := req.Vcpus * cfg.CPUPeriodUS
 	args := []string{
 		"--id", req.VMID,
 		"--exec-file", req.FirecrackerBin,
@@ -745,22 +753,11 @@ func jailerArgs(cfg JailerConfig, req LaunchRequest, uid, gid int, apiPath strin
 		"--chroot-base-dir", cfg.ChrootBaseDir,
 		"--new-pid-ns",
 		"--cgroup-version", "2",
-		"--parent-cgroup", cfg.CgroupParent,
-		"--cgroup", fmt.Sprintf("memory.max=%d", memoryMax),
-		"--cgroup", "memory.swap.max=0",
-		"--cgroup", fmt.Sprintf("pids.max=%d", cfg.PIDsMax),
-		"--cgroup", fmt.Sprintf("cpu.max=%d %d", cpuMax, cfg.CPUPeriodUS),
-		"--cgroup", fmt.Sprintf("cpu.weight=%d", cfg.CPUWeight),
-	}
-	if cfg.IODevice != "" && (cfg.IOReadBPS > 0 || cfg.IOWriteBPS > 0) {
-		value := cfg.IODevice
-		if cfg.IOReadBPS > 0 {
-			value += fmt.Sprintf(" rbps=%d", cfg.IOReadBPS)
-		}
-		if cfg.IOWriteBPS > 0 {
-			value += fmt.Sprintf(" wbps=%d", cfg.IOWriteBPS)
-		}
-		args = append(args, "--cgroup", "io.max="+value)
+		// With no --cgroup arguments, Firecracker 1.15 moves the process into
+		// this existing cgroup-v2 leaf. The controller prepares the leaf first
+		// because jailer's key=value parser cannot represent io.max values
+		// containing the required rbps=/wbps= tokens.
+		"--parent-cgroup", filepath.Join(cfg.CgroupParent, req.VMID),
 	}
 	args = append(args,
 		"--resource-limit", fmt.Sprintf("no-file=%d", cfg.NoFile),
@@ -772,4 +769,51 @@ func jailerArgs(cfg JailerConfig, req LaunchRequest, uid, gid int, apiPath strin
 		args = append(args, "--no-seccomp")
 	}
 	return args
+}
+
+func prepareVMMCgroup(cfg JailerConfig, req LaunchRequest) (retErr error) {
+	leaf := jailerCgroupLeaf(cfg, req.VMID)
+	if err := os.Mkdir(leaf, 0755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("refusing to reuse pre-existing VM cgroup %s", leaf)
+		}
+		return fmt.Errorf("create VM cgroup: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(leaf)
+		}
+	}()
+
+	memoryMax := (req.MemMIB + cfg.MemoryOverheadMIB) << 20
+	cpuMax := req.Vcpus * cfg.CPUPeriodUS
+	settings := []struct {
+		file  string
+		value string
+	}{
+		{"memory.max", strconv.FormatInt(memoryMax, 10)},
+		{"memory.swap.max", "0"},
+		{"pids.max", strconv.FormatInt(cfg.PIDsMax, 10)},
+		{"cpu.max", fmt.Sprintf("%d %d", cpuMax, cfg.CPUPeriodUS)},
+		{"cpu.weight", strconv.FormatInt(cfg.CPUWeight, 10)},
+	}
+	if cfg.IODevice != "" && (cfg.IOReadBPS > 0 || cfg.IOWriteBPS > 0) {
+		value := cfg.IODevice
+		if cfg.IOReadBPS > 0 {
+			value += fmt.Sprintf(" rbps=%d", cfg.IOReadBPS)
+		}
+		if cfg.IOWriteBPS > 0 {
+			value += fmt.Sprintf(" wbps=%d", cfg.IOWriteBPS)
+		}
+		settings = append(settings, struct {
+			file  string
+			value string
+		}{"io.max", value})
+	}
+	for _, setting := range settings {
+		if err := os.WriteFile(filepath.Join(leaf, setting.file), []byte(setting.value), 0600); err != nil {
+			return fmt.Errorf("configure VM cgroup %s: %w", setting.file, err)
+		}
+	}
+	return nil
 }
