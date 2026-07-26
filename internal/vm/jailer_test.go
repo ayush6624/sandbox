@@ -12,6 +12,31 @@ import (
 	"testing"
 )
 
+func TestProcessFamilyContainsOnlyAncestorChain(t *testing.T) {
+	parents := map[int]int{42: 21, 21: 7, 7: 1, 1: 0}
+	got := processFamily(42, func(pid int) int { return parents[pid] })
+	for _, pid := range []int{42, 21, 7, 1} {
+		if !got[pid] {
+			t.Fatalf("ancestor %d missing from process family: %v", pid, got)
+		}
+	}
+	if got[99] {
+		t.Fatalf("unrelated process admitted to family: %v", got)
+	}
+}
+
+func TestProcessFamilyStopsAtCycle(t *testing.T) {
+	got := processFamily(42, func(pid int) int {
+		if pid == 42 {
+			return 21
+		}
+		return 42
+	})
+	if len(got) != 2 || !got[42] || !got[21] {
+		t.Fatalf("cyclic process family = %v, want only 42 and 21", got)
+	}
+}
+
 func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	base, err := os.MkdirTemp("/tmp", "jailer-test-")
 	if err != nil {

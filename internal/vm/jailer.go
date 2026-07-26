@@ -642,10 +642,14 @@ func prepareCurrentCgroupDelegation(cfg JailerConfig) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read task cgroup.procs: %w", err)
 	}
+	allowed := currentProcessFamily()
+	var taskPIDs []int
 	for _, field := range strings.Fields(string(procs)) {
-		if field != strconv.Itoa(os.Getpid()) {
+		pid, parseErr := strconv.Atoi(field)
+		if parseErr != nil || !allowed[pid] {
 			return "", fmt.Errorf("task cgroup %s contains foreign process %s; refusing delegation", rel, field)
 		}
+		taskPIDs = append(taskPIDs, pid)
 	}
 	controllers, err := os.ReadFile(filepath.Join(parent, "cgroup.controllers"))
 	if err != nil {
@@ -665,7 +669,20 @@ func prepareCurrentCgroupDelegation(cfg JailerConfig) (string, error) {
 	if err := os.Mkdir(control, 0755); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", fmt.Errorf("create serve control cgroup: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(control, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+	// The production Nomad task may contain a tiny shell supervisor in the
+	// serve process's direct ancestor chain. Move that trusted process family
+	// together so the aggregate task cgroup is empty before enabling
+	// controllers. Any peer or unrelated process still fails closed above.
+	self := os.Getpid()
+	for _, pid := range taskPIDs {
+		if pid == self {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(control, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0600); err != nil {
+			return "", fmt.Errorf("move serve supervisor %d into control cgroup: %w", pid, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(control, "cgroup.procs"), []byte(strconv.Itoa(self)), 0600); err != nil {
 		return "", fmt.Errorf("move serve into control cgroup: %w", err)
 	}
 	var enable strings.Builder
@@ -676,6 +693,23 @@ func prepareCurrentCgroupDelegation(cfg JailerConfig) (string, error) {
 		return "", fmt.Errorf("enable per-VM cgroup controllers: %w", err)
 	}
 	return rel, nil
+}
+
+func currentProcessFamily() map[int]bool {
+	return processFamily(os.Getpid(), processParentPID)
+}
+
+func processFamily(pid int, parent func(int) int) map[int]bool {
+	const maxAncestors = 64
+	family := make(map[int]bool)
+	for range maxAncestors {
+		if pid <= 0 || family[pid] {
+			break
+		}
+		family[pid] = true
+		pid = parent(pid)
+	}
+	return family
 }
 
 func currentUnifiedCgroup() (string, error) {
