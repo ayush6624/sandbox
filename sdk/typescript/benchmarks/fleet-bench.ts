@@ -15,7 +15,8 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { Sandbox } from '../src/index.js'
+import { SandboxClient, type ClientSandbox } from '../src/index.js'
+import { benchmarkMetadata, benchmarkResourceMetadata } from './metadata.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const WORKLOAD_SCRIPT = join(HERE, 'benchmark.ts')
@@ -95,7 +96,7 @@ const stats = (xs: number[]) => {
 const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : 'n/a')
 
 async function gatewayHosts(): Promise<unknown> {
-  const url = (process.env.SANDBOX_API_URL ?? '').replace(/\/+$/, '') + '/hosts'
+  const url = (process.env.SANDBOX_API_URL ?? '').replace(/\/+$/, '') + '/internal/v1/hosts'
   const res = await fetch(url, { headers: { Authorization: `Bearer ${process.env.SANDBOX_API_KEY ?? ''}` } })
   return res.json()
 }
@@ -107,11 +108,19 @@ interface Run {
   runMs?: number
   totalTime?: number
   error?: string
-  sbx?: Sandbox
+  sbx?: ClientSandbox
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
+  const client = new SandboxClient()
+  const metadata = benchmarkMetadata('fleet-sqlite-filesystem', {
+    count: args.count,
+    mode: args.mode,
+    iterations: args.iterations,
+    create_concurrency: args.createConcurrency,
+    run_concurrency: args.runConcurrency,
+  })
   console.log(`\nFleet benchmark: count=${args.count} mode=${args.mode} iters=${args.iterations} ` +
     `create-concurrency=${args.createConcurrency} run-concurrency=${args.runConcurrency}`)
   console.log(`Gateway: ${process.env.SANDBOX_API_URL}`)
@@ -125,7 +134,10 @@ async function main(): Promise<void> {
   await mapLimit(runs, args.createConcurrency, async (r) => {
     const t = Date.now()
     try {
-      const sbx = await Sandbox.create({ timeoutMs: 30 * 60_000 })
+      const sbx = await client.sandboxes.create({
+        requestTimeoutMs: 30 * 60_000,
+        metadata: benchmarkResourceMetadata(metadata),
+      })
       r.sbx = sbx
       r.id = sbx.sandboxId
       r.createMs = Date.now() - t
@@ -185,7 +197,7 @@ async function main(): Promise<void> {
   // --- Phase 4: teardown ---
   console.log(`\n[3/4] (results above)\n[4/4] Tearing down ${live.length} sandboxes...`)
   await mapLimit(live, 16, async (r) => {
-    try { await r.sbx!.kill() } catch { /* best effort */ }
+    try { await r.sbx!.terminate() } catch { /* best effort */ }
   })
   console.log('  done; host state after teardown:')
   console.log('   ', JSON.stringify(await gatewayHosts()))
@@ -194,6 +206,7 @@ async function main(): Promise<void> {
   const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_')
   const outPath = args.output ?? join(RESULTS_DIR, `fleet_${args.mode}_${args.count}_${ts}.json`)
   writeFileSync(outPath, JSON.stringify({
+    metadata,
     args, fleetWall, created: live.length, workloadOk: ok.length,
     createStats: createS, runWallStats: runWallS, benchStats: benchS,
     runs: runs.map((r) => ({ idx: r.idx, id: r.id, createMs: r.createMs, runMs: r.runMs, totalTime: r.totalTime, error: r.error })),

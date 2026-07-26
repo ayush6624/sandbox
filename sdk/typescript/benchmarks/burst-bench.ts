@@ -1,10 +1,10 @@
 /**
  * Burst benchmark — how the fleet handles a flood of short-lived sandboxes.
  *
- * Each task: create a sandbox → run a small math workload → kill it. Two modes:
+ * Each task: create a sandbox → run a small math workload → terminate it.
  *
  *   churn (default): keep at most --concurrency tasks in flight; as each
- *     finishes its create→math→kill it frees a slot for the next. Measures
+ *     finishes its create→math→terminate it frees a slot for the next. Measures
  *     sustained throughput for processing N short jobs on a bounded fleet.
  *
  *   --hold: fire all N creates (up to --concurrency at once), keep every
@@ -16,12 +16,17 @@
  * Usage:
  *   SANDBOX_API_URL=http://<gw>:9090 SANDBOX_API_KEY=<tok> \
  *     tsx benchmarks/burst-bench.ts [--count 500] [--concurrency 96] [--hold]
- *       [--no-hibernate] [--output file.json]
+ *       [--disable-idle-pause] [--output file.json]
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { Sandbox } from '../src/index.js'
+import { SandboxClient, type ClientSandbox } from '../src/index.js'
+import {
+  benchmarkMetadata,
+  benchmarkResourceMetadata,
+  type BenchmarkMetadata,
+} from './metadata.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const RESULTS_DIR = join(HERE, 'results')
@@ -41,18 +46,22 @@ interface Args {
   count: number
   concurrency: number
   hold: boolean
-  noHibernate: boolean
+  disableIdlePause: boolean
   retryMs: number
   output?: string
 }
 function parseArgs(argv: string[]): Args {
-  const a: Args = { count: 500, concurrency: 96, hold: false, noHibernate: false, retryMs: 0 }
+  const a: Args = { count: 500, concurrency: 96, hold: false, disableIdlePause: false, retryMs: 0 }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
     if (k === '--count') a.count = Number(argv[++i])
     else if (k === '--concurrency') a.concurrency = Number(argv[++i])
     else if (k === '--hold') a.hold = true
-    else if (k === '--no-hibernate') a.noHibernate = true
+    else if (k === '--disable-idle-pause') a.disableIdlePause = true
+    else if (k === '--no-hibernate') {
+      console.warn('--no-hibernate is deprecated; use --disable-idle-pause')
+      a.disableIdlePause = true
+    }
     else if (k === '--retry-ms') a.retryMs = Number(argv[++i])
     else if (k === '--output') a.output = argv[++i]
   }
@@ -65,20 +74,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 // backoff up to retryMs — how a real client absorbs a burst while the
 // autoscaler adds hosts and slots recycle. retryMs=0 disables (raw behavior).
 async function createWithRetry(
+  client: SandboxClient,
+  metadata: BenchmarkMetadata,
   retryMs: number,
-  noHibernate: boolean,
+  disableIdlePause: boolean,
   name: string
-): Promise<{ sbx: Sandbox; retries: number }> {
+): Promise<{ sbx: ClientSandbox; retries: number }> {
   const deadline = Date.now() + retryMs
   let delay = 200
   let retries = 0
   while (true) {
     try {
       return {
-        sbx: await Sandbox.create({
-          timeoutMs: 10 * 60_000,
+        sbx: await client.sandboxes.create({
+          requestTimeoutMs: 10 * 60_000,
           name,
-          ...(noHibernate ? { hibernateAfterMs: -1 } : {}),
+          metadata: benchmarkResourceMetadata(metadata),
+          ...(disableIdlePause ? { idleTimeoutMs: 0 } : {}),
         }),
         retries,
       }
@@ -105,7 +117,7 @@ function classify(err: unknown): Outcome {
 interface Rec {
   createMs?: number
   execMs?: number
-  killMs?: number
+  terminateMs?: number
   retries?: number
   outcome: Outcome
   err?: string
@@ -145,15 +157,20 @@ async function mapLimit<T>(n: number, limit: number, fn: (i: number) => Promise<
   return out
 }
 
-async function runChurn(args: Args, expected: string): Promise<Rec[]> {
+async function runChurn(
+  client: SandboxClient,
+  metadata: BenchmarkMetadata,
+  args: Args,
+  expected: string,
+): Promise<Rec[]> {
   return mapLimit(args.count, args.concurrency, async (i) => {
     const rec: Rec = { outcome: 'ok' }
     const t0 = Date.now()
-    let sbx: Sandbox | undefined
+    let sbx: ClientSandbox | undefined
     try {
       const runId = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}`)
         .replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 24)
-      const c = await createWithRetry(args.retryMs, args.noHibernate, `burst-${runId}-${i}`.slice(0, 63))
+      const c = await createWithRetry(client, metadata, args.retryMs, args.disableIdlePause, `burst-${runId}-${i}`.slice(0, 63))
       sbx = c.sbx
       rec.retries = c.retries
       rec.createMs = Date.now() - t0
@@ -171,11 +188,11 @@ async function runChurn(args: Args, expected: string): Promise<Rec[]> {
       if (sbx) {
         const tk = Date.now()
         try {
-          await sbx.kill()
-          rec.killMs = Date.now() - tk
+          await sbx.terminate()
+          rec.terminateMs = Date.now() - tk
         } catch (e) {
           rec.outcome = 'other'
-          rec.err = `${rec.err ? `${rec.err}; ` : ''}kill failed: ${String((e as Error)?.message ?? e)}`.slice(0, 160)
+          rec.err = `${rec.err ? `${rec.err}; ` : ''}terminate failed: ${String((e as Error)?.message ?? e)}`.slice(0, 160)
         }
       }
     }
@@ -183,16 +200,21 @@ async function runChurn(args: Args, expected: string): Promise<Rec[]> {
   })
 }
 
-async function runHold(args: Args, expected: string): Promise<Rec[]> {
+async function runHold(
+  client: SandboxClient,
+  metadata: BenchmarkMetadata,
+  args: Args,
+  expected: string,
+): Promise<Rec[]> {
   // Phase 1: fire all creates (bounded), keep survivors alive.
-  const live: (Sandbox | undefined)[] = new Array(args.count)
+  const live: (ClientSandbox | undefined)[] = new Array(args.count)
   const recs = await mapLimit(args.count, args.concurrency, async (i) => {
     const rec: Rec = { outcome: 'ok' }
     const t0 = Date.now()
     try {
       const runId = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}`)
         .replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 24)
-      const c = await createWithRetry(args.retryMs, args.noHibernate, `burst-${runId}-${i}`.slice(0, 63))
+      const c = await createWithRetry(client, metadata, args.retryMs, args.disableIdlePause, `burst-${runId}-${i}`.slice(0, 63))
       rec.retries = c.retries
       rec.createMs = Date.now() - t0
       live[i] = c.sbx
@@ -225,12 +247,12 @@ async function runHold(args: Args, expected: string): Promise<Rec[]> {
     if (!sbx) return null
     const tk = Date.now()
     try {
-      await sbx.kill()
-      if (rec) rec.killMs = Date.now() - tk
+      await sbx.terminate()
+      if (rec) rec.terminateMs = Date.now() - tk
     } catch (e) {
       if (rec) {
         rec.outcome = 'other'
-        rec.err = `${rec.err ? `${rec.err}; ` : ''}kill failed: ${String((e as Error)?.message ?? e)}`.slice(0, 160)
+        rec.err = `${rec.err ? `${rec.err}; ` : ''}terminate failed: ${String((e as Error)?.message ?? e)}`.slice(0, 160)
       }
     }
     return null
@@ -240,6 +262,16 @@ async function runHold(args: Args, expected: string): Promise<Rec[]> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
+  const client = new SandboxClient()
+  const metadata = benchmarkMetadata('burst-create-exec-terminate', {
+    count: args.count,
+    concurrency: args.concurrency,
+    mode: args.hold ? 'hold' : 'churn',
+    retry_ms: args.retryMs,
+    disable_idle_pause: args.disableIdlePause,
+    math_terms: N_TERMS,
+    modulus: MOD,
+  })
   if (!process.env.SANDBOX_API_URL || !process.env.SANDBOX_API_KEY) {
     console.error('set SANDBOX_API_URL and SANDBOX_API_KEY')
     process.exit(1)
@@ -249,7 +281,9 @@ async function main(): Promise<void> {
   console.log(`Target: ${process.env.SANDBOX_API_URL}  workload: sum(i^2 mod p, i=1..${N_TERMS})=${expected}`)
 
   const started = Date.now()
-  const recs = args.hold ? await runHold(args, expected) : await runChurn(args, expected)
+  const recs = args.hold
+    ? await runHold(client, metadata, args, expected)
+    : await runChurn(client, metadata, args, expected)
   const wallMs = Date.now() - started
 
   const by = (o: Outcome) => recs.filter((r) => r.outcome === o)
@@ -263,7 +297,7 @@ async function main(): Promise<void> {
   }
   const createMs = recs.map((r) => r.createMs).filter((x): x is number => x != null)
   const execMs = ok.map((r) => r.execMs).filter((x): x is number => x != null)
-  const killMs = recs.map((r) => r.killMs).filter((x): x is number => x != null)
+  const terminateMs = recs.map((r) => r.terminateMs).filter((x): x is number => x != null)
 
   console.log(`\n${'='.repeat(64)}\n  BURST RESULTS (${args.hold ? 'hold' : 'churn'})\n${'='.repeat(64)}`)
   console.log(`  requested:        ${args.count}`)
@@ -279,13 +313,24 @@ async function main(): Promise<void> {
   if (args.retryMs > 0) console.log(`  create retries:   ${totalRetries} (retry budget ${args.retryMs}ms)`)
   console.log(`  ${stat('create', createMs)}`)
   console.log(`  ${stat('math exec', execMs)}`)
-  console.log(`  ${stat('kill', killMs)}`)
+  console.log(`  ${stat('terminate', terminateMs)}`)
   const errs = recs.filter((r) => r.outcome !== 'ok' && r.err).slice(0, 4)
   if (errs.length) { console.log('  sample errors:'); errs.forEach((r, i) => console.log(`   #${i} [${r.outcome}] ${r.err}`)) }
 
   mkdirSync(RESULTS_DIR, { recursive: true })
   const out = args.output ?? join(RESULTS_DIR, `burst_${args.hold ? 'hold' : 'churn'}_${args.count}.json`)
-  writeFileSync(out, JSON.stringify({ args, wallMs, counts, createMs, execMs, killMs, peak: (recs as any).peak }, null, 2))
+  writeFileSync(out, JSON.stringify({
+    metadata,
+    args,
+    wallMs,
+    counts,
+    createMs,
+    execMs,
+    terminateMs,
+    // Deprecated compatibility key for historic result consumers.
+    killMs: terminateMs,
+    peak: (recs as any).peak,
+  }, null, 2))
   console.log(`\n  Saved ${out}`)
   if (counts.ok !== args.count) process.exitCode = 1
 }

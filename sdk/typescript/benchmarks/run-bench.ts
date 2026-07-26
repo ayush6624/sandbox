@@ -19,7 +19,12 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { Sandbox } from '../src/index.js'
+import { SandboxClient, type ClientSandbox } from '../src/index.js'
+import {
+  benchmarkMetadata,
+  benchmarkResourceMetadata,
+  type BenchmarkMetadata,
+} from './metadata.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const WORKLOAD_SCRIPT = join(HERE, 'benchmark.ts')
@@ -36,6 +41,7 @@ interface Args {
 
 /** Per-run record, shaped like one entry of the upstream `results/*.json`. */
 interface ProviderResult {
+  metadata: BenchmarkMetadata
   provider: string
   sandbox_id: string
   specs: Record<string, unknown>
@@ -79,7 +85,7 @@ function parseArgs(argv: string[]): Args {
  * `detect_specs()` does — nproc, cgroup cpu.max, MemTotal — but reports the Node
  * version (this workload runs on Node, not Python).
  */
-async function detectSpecs(sbx: Sandbox): Promise<Record<string, unknown>> {
+async function detectSpecs(sbx: ClientSandbox): Promise<Record<string, unknown>> {
   const specs: Record<string, unknown> = {}
 
   const tryRun = async (cmd: string): Promise<string | undefined> => {
@@ -125,6 +131,12 @@ function parseBenchmarkJson(output: string): Record<string, unknown> {
 }
 
 async function runBenchmark(args: Args): Promise<ProviderResult> {
+  const client = new SandboxClient()
+  const metadata = benchmarkMetadata('sqlite-filesystem', {
+    mode: args.mode,
+    iterations: args.iterations,
+    workload_script: 'benchmark.ts',
+  })
   console.log(`\n${'='.repeat(60)}`)
   console.log('  SANDBOX')
   console.log('='.repeat(60))
@@ -133,7 +145,10 @@ async function runBenchmark(args: Args): Promise<ProviderResult> {
   console.log('  Creating sandbox microVM...')
   // Generous TTL so a long --mode large run can't be reaped mid-benchmark;
   // killed explicitly in the finally block regardless.
-  const sbx = await Sandbox.create({ timeoutMs: 30 * 60_000 })
+  const sbx = await client.sandboxes.create({
+    requestTimeoutMs: 30 * 60_000,
+    metadata: benchmarkResourceMetadata(metadata),
+  })
   const createTime = Math.round((Date.now() - createStart) / 10) / 100
   console.log(`  Sandbox ID: ${sbx.sandboxId}`)
   console.log(`  Creation time: ${createTime}s`)
@@ -160,6 +175,7 @@ async function runBenchmark(args: Args): Promise<ProviderResult> {
     const benchResults = parseBenchmarkJson(res.stdout)
 
     return {
+      metadata,
       provider: 'sandbox',
       sandbox_id: sbx.sandboxId,
       specs,
@@ -170,9 +186,9 @@ async function runBenchmark(args: Args): Promise<ProviderResult> {
       wall_time: wallTime,
     }
   } finally {
-    console.log('  Cleaning up sandbox sandbox...')
+    console.log('  Terminating benchmark sandbox...')
     try {
-      await sbx.kill()
+      await sbx.terminate()
     } catch {
       // best-effort cleanup
     }
