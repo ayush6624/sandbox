@@ -8,6 +8,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "v1-contract": "tsx v1-contract.ts",
     "test": "tsx run.ts",
     "test:quick": "tsx run.ts lifecycle exec files",
     "test:stress": "tsx run.ts concurrency churn load",
