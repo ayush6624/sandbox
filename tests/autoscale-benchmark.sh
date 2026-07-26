@@ -103,7 +103,7 @@ fi
 mkdir -p "$TRACE_DIR"
 : >"$TRACE"
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-GIT_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf unknown)"
+GIT_COMMIT="${BENCH_GIT_COMMIT:-$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf unknown)}"
 
 now_ms() { date +%s%3N; }
 
