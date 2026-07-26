@@ -310,7 +310,7 @@ broader crash/reboot/resource cases in P0.8, and opt-in UFFD verification.
 
 ## P1: freeze a versioned API contract
 
-Status: **implemented locally; GCP fleet validation pending**.
+Status: **implemented and GCP fleet-verified**.
 
 The OpenAPI 3.1 contract lives at `api/openapi.yaml`. Both worker and gateway
 serve `/v1` through a compatibility adapter, with sanitized resources,
@@ -324,6 +324,22 @@ Idempotency records and operation resources are process-local for at most 24
 hours. Persisting them across gateway restarts is deliberately coupled to the
 transactional storage and migration work in P3; clients should still retry
 with the same key because a live process provides exactly-once replay.
+
+Fleet evidence (2026-07-26, release `p1-api-20260726-2`):
+
+- Both Nomad worker allocations ran the release with zero release mismatches
+  and 96 allocatable slots after rollout.
+- The self-cleaning `/v1` contract probe passed creation, RFC 9457 errors,
+  request IDs, idempotent replay, filtering/pagination, PATCH, port forwards,
+  pause/resume, reusable snapshots, indexed batch operations, dependency
+  conflicts, deletion, and cleanup.
+- The legacy lifecycle/snapshot/clone/hibernation suites remained compatible:
+  **17 passed, 0 failed**.
+- Both workers passed the direct security gate for seccomp, bounded VMM logs,
+  FIFO cleanup, guest isolation, and lifecycle cleanup.
+- GCP exposed an empty-body in-process proxy panic during the first probe. The
+  regression was fixed in `dc2d2f3`, covered by normal and race tests, and the
+  complete gate passed on the corrected immutable release.
 
 ### Contract foundations
 
@@ -421,6 +437,8 @@ deprecated compatibility operation, not a v1 concept.
 
 ## P2: TypeScript SDK v1
 
+Status: **implemented and GCP fleet-verified; npm registry publication pending**.
+
 Introduce a configured client:
 
 ```ts
@@ -465,6 +483,22 @@ Compatibility:
 - Keep `hibernate()` and `kill()` temporarily as aliases for `pause()` and
   `terminate()`.
 - Maintain old HTTP routes for at least one documented migration window.
+
+SDK evidence (2026-07-26, `sandbox@1.0.0`):
+
+- OpenAPI-generated transport declarations sit below a handwritten configured
+  client with `sandboxes`, `snapshots`, `templates`, `operations`, and
+  `portForwards` collections.
+- The SDK gate passed **35/35** tests, strict typecheck, build, deterministic
+  OpenAPI regeneration, and `npm pack --dry-run`.
+- The publishable package has zero runtime dependencies and `npm audit
+  --omit=dev` reported zero vulnerabilities. Provenance, changelog, semver, and
+  supported `/v1` metadata are configured; publishing is intentionally not
+  performed without an explicitly selected npm registry/package authority.
+- The self-cleaning GCP SDK probe passed configured creation, commands, port
+  forwards, pause/resume, snapshot-source `createMany`, operation polling,
+  async pagination, stable problem errors, and full cleanup against
+  `p1-api-20260726-2`.
 
 ## P3: operational readiness
 
