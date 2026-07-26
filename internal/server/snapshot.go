@@ -338,6 +338,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Deterministic clock step before the sandbox is handed out (the MMDS
 	// push above is polled and can lag the readiness gate by a tick).
 	syncGuestClock(ctx, sb.GuestIP)
+	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
+		_ = s.destroy(context.Background(), id)
+		httpError(w, 500, fmt.Errorf("restored but identity initialization failed: %w", err))
+		return
+	}
 	agentMS := time.Since(tAgent).Milliseconds()
 	fmt.Fprintf(os.Stderr, "[%s] restored from %s: rootfs_cp=%dms load+resume=%dms agent_ready=%dms\n",
 		id, snapID, rootfsMS, loadMS, agentMS)
@@ -359,7 +364,10 @@ type clone struct {
 	// finishClone). Empty for machines whose load source is not a snapshot
 	// row (hibernation wakes load from hib artifacts).
 	baseSnap string
-	err      error
+	// independent is true for a newly created sandbox and false for a
+	// same-sandbox hibernation wake that must preserve its SSH identity.
+	independent bool
+	err         error
 }
 
 // reidentifyMargin bounds how long finishClone waits for the guest's
@@ -571,7 +579,10 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", err)}
 	}
-	return &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp, baseSnap: snap.ID}
+	return &clone{
+		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
+		baseSnap: snap.ID, independent: true,
+	}
 }
 
 // finishClone waits for the guest's reidentify announce, then bridges the
@@ -628,6 +639,11 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	// creates, fan-out, and clone-path wakes (StartClone's MMDS epoch_ms is
 	// polled and can lag the readiness gate by a tick).
 	syncGuestClock(ctx, sb.GuestIP)
+	if c.independent {
+		if err := initializeGuestIdentity(ctx, sb.GuestIP, sb.ID); err != nil {
+			return fmt.Errorf("initialize guest identity: %w", err)
+		}
+	}
 	return nil
 }
 

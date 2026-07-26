@@ -58,6 +58,9 @@ func withGuestFilesystem(fn func() error) error {
 		return fmt.Errorf("setfsgid %d: %w", acct.gid, err)
 	}
 	defer func() { _ = unix.Setfsgid(oldGID) }()
+	if current, _ := unix.SetfsgidRetGid(-1); current != int(acct.gid) {
+		return fmt.Errorf("setfsgid %d did not take effect (still %d)", acct.gid, current)
+	}
 
 	oldUID, err := unix.SetfsuidRetUid(int(acct.uid))
 	if err != nil {
@@ -65,6 +68,9 @@ func withGuestFilesystem(fn func() error) error {
 		return fmt.Errorf("setfsuid %d: %w", acct.uid, err)
 	}
 	defer func() { _ = unix.Setfsuid(oldUID) }()
+	if current, _ := unix.SetfsuidRetUid(-1); current != int(acct.uid) {
+		return fmt.Errorf("setfsuid %d did not take effect (still %d)", acct.uid, current)
+	}
 
 	return fn()
 }

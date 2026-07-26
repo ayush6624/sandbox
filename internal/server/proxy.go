@@ -174,6 +174,34 @@ func syncGuestClock(ctx context.Context, guestIP string) {
 	}
 }
 
+// initializeGuestIdentity asks sandboxd to rotate identity inherited from the
+// base image or snapshot. It is mandatory for every independent create and
+// idempotent for retries with the same sandbox ID. Pause/resume deliberately
+// does not call it because that lifecycle preserves sandbox identity.
+func initializeGuestIdentity(ctx context.Context, guestIP, sandboxID string) error {
+	body, _ := json.Marshal(agentapi.GuestIdentityRequest{SandboxID: sandboxID})
+	url := fmt.Sprintf("http://%s:%d/identity", guestIP, agentapi.Port)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("initialize guest identity on %s: %w", guestIP, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("agent on %s has no /identity (old sandboxd — re-run install-agent)", guestIP)
+	}
+	if resp.StatusCode >= 400 {
+		msg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("initialize guest identity on %s: HTTP %d: %s", guestIP, resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
 // installSSHKey pushes an SSH public key to the guest agent's POST /ssh-key so
 // the sandbox is reachable over SSH the moment create returns. Called after the
 // readiness gate on both the cold and hot (golden-clone) create paths. Unlike

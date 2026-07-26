@@ -103,7 +103,7 @@ export class Sandbox {
    *             `timeoutMs` after which the sandbox is auto-destroyed, an
    *             optional `hibernateAfterMs` idle-hibernation override,
    *             optional `vcpus`/`memMib` resource overrides, and an optional
-   *             `sshPubkey` to authorize for root SSH.
+   *             `sshPubkey` to authorize SSH as the sandbox user.
    * @throws {CapacityError} when the fleet has no free slot (retryable).
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {

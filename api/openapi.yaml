@@ -245,7 +245,9 @@ components:
         lifecycle: {$ref: '#/components/schemas/Lifecycle'}
         resources: {$ref: '#/components/schemas/Resources'}
         metadata: {type: object, additionalProperties: {type: string}, maxProperties: 64}
-        ssh_public_key: {type: string}
+        ssh_public_key:
+          type: string
+          description: OpenSSH public key installed for the unprivileged sandbox user after rotating independent guest host identity.
       additionalProperties: false
     UpdateSandboxRequest:
       type: object

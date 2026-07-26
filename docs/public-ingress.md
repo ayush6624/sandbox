@@ -15,7 +15,7 @@ gateway is an HTTP reverse proxy for the *API*; it does not forward raw TCP,
 which is why fleet SSH is still an open item in CLAUDE.md.
 
 So: a sandbox running a dev server on :3000 can't be opened in a browser by
-anyone outside the tailnet, and `ssh -p <host_port> root@<worker>` only works
+anyone outside the tailnet, and `ssh -p <host_port> sandbox@<worker>` only works
 from a machine that can route to the worker.
 
 **Goal:** `https://3000-<id>.sb.example.com` reachable from the public internet,

@@ -246,6 +246,7 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+            /** @description OpenSSH public key installed for the unprivileged sandbox user after rotating independent guest host identity. */
             ssh_public_key?: string;
         };
         UpdateSandboxRequest: {
