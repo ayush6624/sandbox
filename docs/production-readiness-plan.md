@@ -310,6 +310,21 @@ broader crash/reboot/resource cases in P0.8, and opt-in UFFD verification.
 
 ## P1: freeze a versioned API contract
 
+Status: **implemented locally; GCP fleet validation pending**.
+
+The OpenAPI 3.1 contract lives at `api/openapi.yaml`. Both worker and gateway
+serve `/v1` through a compatibility adapter, with sanitized resources,
+request IDs, RFC 9457 problems, idempotent mutations, cursor pagination,
+filters, source-based creation, explicit pause/resume/delete/PATCH lifecycle,
+port-forward resources, snapshot retention/durability state, dependency-aware
+snapshot deletion, templates, and indexed asynchronous batch operations.
+Fleet coordination aliases now also live below `/internal/v1`.
+
+Idempotency records and operation resources are process-local for at most 24
+hours. Persisting them across gateway restarts is deliberately coupled to the
+transactional storage and migration work in P3; clients should still retry
+with the same key because a live process provides exactly-once replay.
+
 ### Contract foundations
 
 - Add an OpenAPI 3.1 document as the HTTP source of truth.

@@ -7,6 +7,7 @@ Self-hosted Firecracker microVM sandboxes with an e2b-style API. Start here:
 | [Quickstart](quickstart.md) | Create your first sandbox in 5 minutes (SDK, CLI, or curl) |
 | [Concepts](concepts.md) | How it works: hot creates, snapshots & fan-out, ports, TTLs, multi-host |
 | [HTTP API reference](http-api.md) | Every endpoint, request/response shapes, errors, limits |
+| [HTTP API v1](api-v1.md) | Versioned resource contract, standard vocabulary, idempotency, and migration routes |
 | [Self-hosting](self-hosting.md) | Run it on your own hardware: single host or a multi-host fleet |
 | [Autoscaling latency](autoscaling-latency.md) | Current burst critical path, Modal comparison, and implementation roadmap |
 | [Ona-style devboxes](devboxes-roadmap.md) | Design roadmap for repository-aware, editor-accessible development environments |

@@ -1,4 +1,9 @@
-# HTTP API reference
+# Legacy HTTP API reference
+
+This document describes the unversioned compatibility routes used by the
+original SDK. New integrations should use the resource-oriented
+[HTTP API v1](api-v1.md), whose source of truth is
+[`api/openapi.yaml`](../api/openapi.yaml).
 
 Everything the server (and gateway) speaks, verified against the code. The
 [TypeScript SDK](../sdk/typescript/README.md) wraps all of this; use the raw
@@ -12,8 +17,10 @@ API from other languages or shells.
 | TCP `--listen <ip>:8080` | `Authorization: Bearer <token>` | per-host API |
 | Gateway `--listen <ip>:9090` | `Authorization: Bearer <token>` | fleet front door; same API |
 
-All request/response bodies are JSON unless noted. Errors are always
-`{"error": "message"}` with a 4xx/5xx status. There is no versioning yet.
+All compatibility-route request/response bodies are JSON unless noted. Legacy
+errors remain `{"error": "message"}` with a 4xx/5xx status so existing clients
+do not break. `/v1` uses `application/problem+json`, resource envelopes, and
+idempotent mutations.
 
 Notes for browser frontends:
 

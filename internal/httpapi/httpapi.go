@@ -250,9 +250,10 @@ type statusWriter struct {
 }
 
 func (w *statusWriter) WriteHeader(status int) {
-	if w.status == 0 {
-		w.status = status
+	if w.status != 0 {
+		return
 	}
+	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
 func (w *statusWriter) Write(p []byte) (int, error) {
@@ -267,6 +268,11 @@ func (w *statusWriter) statusCode() int {
 	}
 	return w.status
 }
+
+// Unwrap lets http.ResponseController reach optional interfaces such as
+// Flusher and Hijacker on the real writer. This keeps streaming exec and
+// WebSocket shell upgrades working through request instrumentation.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 type captureWriter struct {
 	header http.Header
