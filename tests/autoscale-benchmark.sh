@@ -2,7 +2,9 @@
 # Trace a held autoscaling burst from the control VM on one wall clock.
 #
 # Required environment:
-#   PROJECT, ZONE, MIG_NAME, GATEWAY_TOKEN, WORKER_SSH_USER
+#   PROJECT, ZONE, MIG_NAME, GATEWAY_TOKEN, WORKER_SSH_USER,
+#   EXPECTED_WORKER_RELEASE,
+#   LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
 #
 # Optional:
 #   GATEWAY_URL       gateway URL reachable from this VM (default localhost:9090)
@@ -12,10 +14,13 @@
 #   EXPECTED_RUNNING  required initial RUNNING instance count (default 2)
 #   EXPECTED_SUSPENDED_MIN required initial SUSPENDED count (default 2)
 #   EXPECTED_FREE_PER_HOST required free slots on each ready host (default 48)
-#   TRACE_DIR         output directory (default timestamped directory under /tmp)
+#   TRACE_DIR         output directory (default timestamped under tests/results)
+#   MAX_BURST_COUNT   hard cap for BURST_COUNT (default 512)
+#   BENCHMARK_TIMEOUT_SEC wall-clock driver budget (default 10800)
+#   CLEANUP_TIMEOUT_SEC bounded run-owned cleanup budget (default 120)
 #   TRAFFIC_SCENARIOS space-separated autoscale-traffic.ts scenarios. When set,
 #                     run that correctness suite instead of the legacy one-shot
-#                     burst. Requires EXPECTED_WORKER_RELEASE and the live ack.
+#                     burst.
 #
 # The trace contains no bearer tokens or SSH material. The harness refuses to
 # start if the gateway already owns sandboxes, and its EXIT trap deletes only
@@ -32,19 +37,31 @@ SDK_DIR="$REPO/sdk/typescript"
 : "${MIG_NAME:?set MIG_NAME}"
 : "${GATEWAY_TOKEN:?set GATEWAY_TOKEN}"
 : "${WORKER_SSH_USER:?set WORKER_SSH_USER for the worker SSH readiness probe}"
+: "${EXPECTED_WORKER_RELEASE:?set EXPECTED_WORKER_RELEASE to the deployed release}"
+
+LIVE_ACK="I_UNDERSTAND_THIS_CREATES_REAL_VMS"
+if [ "${LIVE_AUTOSCALE_BENCHMARK:-}" != "$LIVE_ACK" ]; then
+  echo "error: set LIVE_AUTOSCALE_BENCHMARK=$LIVE_ACK" >&2
+  exit 1
+fi
 
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:9090}"
 BURST_COUNT="${BURST_COUNT:-160}"
+MAX_BURST_COUNT="${MAX_BURST_COUNT:-512}"
+BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-10800}"
+CLEANUP_TIMEOUT_SEC="${CLEANUP_TIMEOUT_SEC:-120}"
 POLL_MS="${POLL_MS:-250}"
 EXPECTED_RUNNING="${EXPECTED_RUNNING:-2}"
 EXPECTED_SUSPENDED_MIN="${EXPECTED_SUSPENDED_MIN:-2}"
 EXPECTED_FREE_PER_HOST="${EXPECTED_FREE_PER_HOST:-48}"
-TRACE_DIR="${TRACE_DIR:-/tmp/sandbox-autoscale-$(date -u +%Y%m%dT%H%M%SZ)}"
+TRACE_DIR="${TRACE_DIR:-$REPO/tests/results/autoscale-$(date -u +%Y%m%dT%H%M%SZ)}"
 TRACE="$TRACE_DIR/timeline.jsonl"
 TRAFFIC_SCENARIOS="${TRAFFIC_SCENARIOS:-}"
 RESULT="$TRACE_DIR/$([ -n "$TRAFFIC_SCENARIOS" ] && printf traffic.json || printf burst.json)"
 BENCH_LOG="$TRACE_DIR/benchmark.log"
 MIG_SNAPSHOT="$TRACE_DIR/mig-latest.json"
+RUN_MANIFEST="$TRACE_DIR/run.json"
+CHECKSUMS="$TRACE_DIR/SHA256SUMS"
 BENCH_RUN_ID="${BENCH_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 BENCH_RUN_ID="${BENCH_RUN_ID//[^a-zA-Z0-9-]/-}"
 BENCH_RUN_ID="${BENCH_RUN_ID:0:24}"
@@ -58,7 +75,7 @@ need() {
     exit 1
   }
 }
-for tool in curl gcloud jq nomad ssh flock; do need "$tool"; done
+for tool in curl gcloud jq nomad ssh flock sha256sum timeout; do need "$tool"; done
 if test -x "$SDK_DIR/node_modules/.bin/tsx"; then
   TSX="$SDK_DIR/node_modules/.bin/tsx"
 elif command -v tsx >/dev/null 2>&1; then
@@ -67,12 +84,17 @@ else
   echo "error: install tsx globally or run npm install in $SDK_DIR before this benchmark" >&2
   exit 1
 fi
-for value in "$BURST_COUNT" "$POLL_MS" "$EXPECTED_RUNNING" "$EXPECTED_FREE_PER_HOST"; do
+for value in "$BURST_COUNT" "$MAX_BURST_COUNT" "$BENCHMARK_TIMEOUT_SEC" \
+  "$CLEANUP_TIMEOUT_SEC" "$POLL_MS" "$EXPECTED_RUNNING" "$EXPECTED_FREE_PER_HOST"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
     echo "error: count, polling, running-host, and free-slot values must be positive integers" >&2
     exit 1
   }
 done
+if [ "$BURST_COUNT" -gt "$MAX_BURST_COUNT" ]; then
+  echo "error: BURST_COUNT=$BURST_COUNT exceeds MAX_BURST_COUNT=$MAX_BURST_COUNT" >&2
+  exit 1
+fi
 [[ "$EXPECTED_SUSPENDED_MIN" =~ ^[0-9]+$ ]] || {
   echo "error: EXPECTED_SUSPENDED_MIN must be a non-negative integer" >&2
   exit 1
@@ -80,6 +102,8 @@ done
 
 mkdir -p "$TRACE_DIR"
 : >"$TRACE"
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+GIT_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf unknown)"
 
 now_ms() { date +%s%3N; }
 
@@ -101,17 +125,25 @@ gateway_get() {
   curl -fsS -H "Authorization: Bearer $GATEWAY_TOKEN" "$GATEWAY_URL$1"
 }
 
+owned_sandbox_ids() {
+  jq -r --arg run "$BENCH_RUN_ID" '
+    .[] | select(
+      ((.name // "") | startswith("autoscale-" + $run + "-")) or
+      ((.name // "") | startswith("burst-" + $run + "-"))
+    ) | .id // .sandbox_id // empty
+  '
+}
+
 cleanup_sandboxes() {
-  local current id quiet=0 deadline=$((SECONDS + 30))
+  local current id quiet=0 deadline=$((SECONDS + CLEANUP_TIMEOUT_SEC))
   local -a owned_ids=()
   while [ "$SECONDS" -lt "$deadline" ] && [ "$quiet" -lt 3 ]; do
-    current="$(gateway_get /sandboxes 2>/dev/null || printf '[]')"
-    mapfile -t owned_ids < <(jq -r --arg run "$BENCH_RUN_ID" '
-      .[] | select(
-        ((.name // "") | startswith("autoscale-" + $run + "-")) or
-        ((.name // "") | startswith("burst-" + $run + "-"))
-      ) | .id // .sandbox_id // empty
-    ' <<<"$current" 2>/dev/null || true)
+    if ! current="$(gateway_get /sandboxes 2>/dev/null)"; then
+      quiet=0
+      sleep 1
+      continue
+    fi
+    mapfile -t owned_ids < <(owned_sandbox_ids <<<"$current")
     if [ "${#owned_ids[@]}" -eq 0 ]; then
       quiet=$((quiet + 1))
     else
@@ -123,19 +155,59 @@ cleanup_sandboxes() {
     fi
     sleep 1
   done
+  current="$(gateway_get /sandboxes)" || return 1
+  mapfile -t owned_ids < <(owned_sandbox_ids <<<"$current")
+  [ "${#owned_ids[@]}" -eq 0 ]
 }
 
 on_exit() {
-  local rc=$?
+  local rc=$? cleanup_rc=0 final_sandboxes='null' final_hosts='null' final_mig='null'
   trap - EXIT INT TERM
+  set +e
   if [ "${#POLL_PIDS[@]}" -gt 0 ]; then
     kill "${POLL_PIDS[@]}" >/dev/null 2>&1 || true
     wait "${POLL_PIDS[@]}" >/dev/null 2>&1 || true
   fi
-  [ "$CLEANUP_ARMED" -eq 0 ] || cleanup_sandboxes
-  emit "cleanup_complete" "$(jq -cn --argjson exit_code "$rc" '{exit_code:$exit_code}')"
+  if [ "$CLEANUP_ARMED" -ne 0 ]; then
+    cleanup_sandboxes || cleanup_rc=$?
+  fi
+  final_sandboxes="$(gateway_get /sandboxes 2>/dev/null)" || final_sandboxes='null'
+  final_hosts="$(gateway_get /hosts 2>/dev/null)" || final_hosts='null'
+  final_mig="$(gcloud compute instance-groups managed list-instances "$MIG_NAME" \
+    --project="$PROJECT" --zone="$ZONE" --format=json 2>/dev/null)" || final_mig='null'
+  if [ "$cleanup_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=70; fi
+  emit "cleanup_complete" "$(jq -cn --argjson exit_code "$rc" \
+    --argjson cleanup_ok "$([ "$cleanup_rc" -eq 0 ] && printf true || printf false)" \
+    '{exit_code:$exit_code,cleanup_ok:$cleanup_ok}')"
+  jq -n \
+    --arg run_id "$BENCH_RUN_ID" --arg project "$PROJECT" --arg zone "$ZONE" \
+    --arg mig "$MIG_NAME" --arg gateway "$GATEWAY_URL" \
+    --arg expected_release "$EXPECTED_WORKER_RELEASE" \
+    --arg scenarios "$TRAFFIC_SCENARIOS" --arg result "$RESULT" \
+    --arg started_at "$RUN_STARTED_AT" --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg git_commit "$GIT_COMMIT" --argjson burst_count "$BURST_COUNT" \
+    --argjson timeout_sec "$BENCHMARK_TIMEOUT_SEC" --argjson exit_code "$rc" \
+    --argjson cleanup_ok "$([ "$cleanup_rc" -eq 0 ] && printf true || printf false)" \
+    --argjson final_sandboxes "$final_sandboxes" --argjson final_hosts "$final_hosts" \
+    --argjson final_mig "$final_mig" \
+    '{
+      run_id:$run_id,project:$project,zone:$zone,mig:$mig,gateway:$gateway,
+      expected_release:$expected_release,
+      traffic_scenarios:($scenarios | split(" ") | map(select(length > 0))),
+      burst_count:$burst_count,benchmark_timeout_sec:$timeout_sec,
+      started_at:$started_at,finished_at:$finished_at,git_commit:$git_commit,
+      result:$result,exit_code:$exit_code,cleanup_ok:$cleanup_ok,
+      final:{sandboxes:$final_sandboxes,hosts:$final_hosts,mig_instances:$final_mig}
+    }' >"$RUN_MANIFEST"
+  (
+    cd "$TRACE_DIR" || exit
+    find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 |
+      sort -z | xargs -0 -r sha256sum
+  ) >"$CHECKSUMS"
   echo "trace: $TRACE"
   [ -f "$RESULT" ] && echo "result: $RESULT"
+  echo "run manifest: $RUN_MANIFEST"
+  echo "checksums: $CHECKSUMS"
   echo "benchmark log: $BENCH_LOG"
   exit "$rc"
 }
@@ -165,7 +237,11 @@ fi
 
 initial_hosts="$(gateway_get /hosts)"
 bad_hosts="$(jq --argjson free "$EXPECTED_FREE_PER_HOST" \
-  '[.[] | select(.alive and ((.release_compatible | not) or .slots_used != 0 or .free != $free))] | length' \
+  --arg release "$EXPECTED_WORKER_RELEASE" \
+  '[.[] | select(.alive and (
+    (.release_compatible | not) or (.release // "") != $release or
+    .slots_used != 0 or .free != $free
+  ))] | length' \
   <<<"$initial_hosts")"
 ready_hosts="$(jq '[.[] | select(.alive)] | length' <<<"$initial_hosts")"
 if [ "$ready_hosts" -ne "$EXPECTED_RUNNING" ] || [ "$bad_hosts" -ne 0 ]; then
@@ -357,11 +433,6 @@ emit "demand_marker" "$(jq -cn --argjson count "$BURST_COUNT" --arg scenarios "$
   '{count:$count,concurrency:$count,traffic_scenarios:($scenarios | select(length > 0))}')"
 set +e
 if [ -n "$TRAFFIC_SCENARIOS" ]; then
-  : "${EXPECTED_WORKER_RELEASE:?set EXPECTED_WORKER_RELEASE for traffic correctness runs}"
-  if [ "${LIVE_AUTOSCALE_BENCHMARK:-}" != "I_UNDERSTAND_THIS_CREATES_REAL_VMS" ]; then
-    echo "error: set LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS" >&2
-    exit 1
-  fi
   # Word splitting here is intentional: scenario names contain no whitespace.
   # shellcheck disable=SC2086
   (
@@ -369,13 +440,15 @@ if [ -n "$TRAFFIC_SCENARIOS" ]; then
     SANDBOX_API_URL="$GATEWAY_URL" SANDBOX_API_KEY="$GATEWAY_TOKEN" \
       BENCH_RUN_ID="$BENCH_RUN_ID" AUTOSCALE_MIG_SNAPSHOT="$MIG_SNAPSHOT" \
       AUTOSCALE_TIMELINE="$TRACE" \
-      AUTOSCALE_OUTPUT="$RESULT" "$TSX" autoscale-traffic.ts $TRAFFIC_SCENARIOS
+      AUTOSCALE_OUTPUT="$RESULT" timeout --signal=TERM --kill-after=30s \
+        "${BENCHMARK_TIMEOUT_SEC}s" "$TSX" autoscale-traffic.ts $TRAFFIC_SCENARIOS
   ) >"$BENCH_LOG" 2>&1
 else
   (
     cd "$SDK_DIR"
     SANDBOX_API_URL="$GATEWAY_URL" SANDBOX_API_KEY="$GATEWAY_TOKEN" \
-      BENCH_RUN_ID="$BENCH_RUN_ID" "$TSX" benchmarks/burst-bench.ts \
+      BENCH_RUN_ID="$BENCH_RUN_ID" timeout --signal=TERM --kill-after=30s \
+        "${BENCHMARK_TIMEOUT_SEC}s" "$TSX" benchmarks/burst-bench.ts \
         --count "$BURST_COUNT" --concurrency "$BURST_COUNT" --hold --no-hibernate \
         --output "$RESULT"
   ) >"$BENCH_LOG" 2>&1

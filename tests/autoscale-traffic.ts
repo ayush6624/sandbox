@@ -31,6 +31,10 @@ const PROBE_CONCURRENCY = integerEnv('AUTOSCALE_PROBE_CONCURRENCY', 48, 1)
 const INVARIANT_INTERVAL_MS = integerEnv('AUTOSCALE_INVARIANT_INTERVAL_MS', 500, 100)
 const FLOOR_HOSTS = integerEnv('AUTOSCALE_FLOOR_HOSTS', 2, 1)
 const SLOTS_PER_HOST = integerEnv('AUTOSCALE_SLOTS_PER_HOST', 48, 1)
+const MAX_HOSTS = integerEnv('AUTOSCALE_MAX_HOSTS', 22, FLOOR_HOSTS)
+const MAX_LIVE_SANDBOXES = integerEnv('AUTOSCALE_MAX_LIVE_SANDBOXES', 512, 1)
+const MAX_CREATE_P95_MS = integerEnv('AUTOSCALE_MAX_CREATE_P95_MS', 30_000, 1)
+const MAX_CREATE_MS = integerEnv('AUTOSCALE_MAX_CREATE_MS', 60_000, MAX_CREATE_P95_MS)
 const OUTPUT = process.env.AUTOSCALE_OUTPUT ??
   resolve(dirname(fileURLToPath(import.meta.url)), 'results', `autoscale-traffic-${stamp()}.json`)
 
@@ -116,6 +120,11 @@ class ScenarioContext {
 
   async create(label: string): Promise<Held> {
     this.assertHealthy()
+    if (this.held.size + this.createsInFlight >= MAX_LIVE_SANDBOXES) {
+      throw new Error(
+        `${this.scenario}: refusing more than ${MAX_LIVE_SANDBOXES} simultaneously live creates`
+      )
+    }
     this.createsInFlight++
     try {
       return await this.createTracked(label)
@@ -488,6 +497,7 @@ async function main(): Promise<void> {
     const started = Date.now()
     try {
       await scenario.run(ctx)
+      assertLatencyAcceptance(ctx)
     } catch (error) {
       ctx.record('scenario', error)
     } finally {
@@ -530,6 +540,10 @@ async function main(): Promise<void> {
       ttlMs: TTL_MS,
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
       probeIntervalMs: PROBE_INTERVAL_MS,
+      maxHosts: MAX_HOSTS,
+      maxLiveSandboxes: MAX_LIVE_SANDBOXES,
+      maxCreateP95Ms: MAX_CREATE_P95_MS,
+      maxCreateMs: MAX_CREATE_MS,
     },
     results,
     summary: {
@@ -546,6 +560,12 @@ async function main(): Promise<void> {
 }
 
 async function preflight(): Promise<void> {
+  if (FLOOR_HOSTS * SLOTS_PER_HOST > MAX_LIVE_SANDBOXES) {
+    throw new Error(
+      `preflight: floor capacity ${FLOOR_HOSTS * SLOTS_PER_HOST} exceeds ` +
+      `AUTOSCALE_MAX_LIVE_SANDBOXES=${MAX_LIVE_SANDBOXES}`
+    )
+  }
   const sandboxes = await getSandboxes()
   if (sandboxes.length) throw new Error(`preflight: gateway already owns ${sandboxes.length} sandboxes`)
   const hosts = await getHosts()
@@ -567,7 +587,11 @@ async function preflight(): Promise<void> {
 function assertHostInvariants(hosts: RawHost[]): void {
   const ids = duplicateIds(hosts.map((host) => host.id))
   if (ids.length) throw new Error(`duplicate host ids: ${ids.join(',')}`)
-  for (const host of hosts.filter((candidate) => candidate.alive)) {
+  const alive = hosts.filter((candidate) => candidate.alive)
+  if (alive.length > MAX_HOSTS) {
+    throw new Error(`alive host count ${alive.length} exceeds AUTOSCALE_MAX_HOSTS=${MAX_HOSTS}`)
+  }
+  for (const host of alive) {
     if (host.release !== EXPECTED_RELEASE || host.release_compatible !== true) {
       throw new Error(
         `incompatible host ${host.id}: release=${host.release ?? '<missing>'}, ` +
@@ -589,6 +613,27 @@ function assertHostInvariants(hosts: RawHost[]): void {
       )
     }
   }
+}
+
+function assertLatencyAcceptance(ctx: ScenarioContext): void {
+  if (!ctx.createLatencyMs.length) {
+    throw new Error(`${ctx.scenario}: no successful creates to evaluate`)
+  }
+  const p95 = percentile(ctx.createLatencyMs, 95)
+  const max = Math.max(...ctx.createLatencyMs)
+  if (p95 > MAX_CREATE_P95_MS || max > MAX_CREATE_MS) {
+    throw new Error(
+      `${ctx.scenario}: create latency outside acceptance bounds: ` +
+      `p95=${p95}ms (limit ${MAX_CREATE_P95_MS}ms), ` +
+      `max=${max}ms (limit ${MAX_CREATE_MS}ms)`
+    )
+  }
+}
+
+function percentile(values: number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[index]
 }
 
 interface MigSnapshot {
