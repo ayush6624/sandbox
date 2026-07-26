@@ -12,11 +12,14 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	oldMarker, oldPattern := guestIdentityMarker, sshHostKeyPattern
 	oldSSHDir, oldAuthorized := sshDir, authorizedKeysPath
 	oldRun := runIdentityCommand
+	oldDelay := identityRestartDelay
 	t.Cleanup(func() {
 		guestIdentityMarker, sshHostKeyPattern = oldMarker, oldPattern
 		sshDir, authorizedKeysPath = oldSSHDir, oldAuthorized
 		runIdentityCommand = oldRun
+		identityRestartDelay = oldDelay
 	})
+	identityRestartDelay = 0
 
 	guestIdentityMarker = filepath.Join(dir, "state", "identity")
 	sshHostKeyPattern = filepath.Join(dir, "ssh", "ssh_host_*")
@@ -43,7 +46,9 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 			generations++
 			return os.WriteFile(oldKey, []byte("unique"), 0o600)
 		case "systemctl":
-			restarts++
+			if len(args) > 0 && args[0] == "restart" {
+				restarts++
+			}
 			return nil
 		default:
 			return errors.New("unexpected command")
@@ -70,6 +75,42 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	}
 	if generations != 2 || restarts != 2 {
 		t.Fatalf("clone identity did not rotate: generations %d, restarts %d", generations, restarts)
+	}
+}
+
+func TestRestartSSHServiceRetriesAfterResettingFailure(t *testing.T) {
+	oldRun, oldDelay := runIdentityCommand, identityRestartDelay
+	t.Cleanup(func() {
+		runIdentityCommand = oldRun
+		identityRestartDelay = oldDelay
+	})
+	identityRestartDelay = 0
+
+	restarts, resets := 0, 0
+	runIdentityCommand = func(name string, args ...string) error {
+		if name != "systemctl" || len(args) == 0 {
+			return errors.New("unexpected command")
+		}
+		switch args[0] {
+		case "reset-failed":
+			resets++
+			return nil
+		case "restart":
+			restarts++
+			if restarts < 3 {
+				return errors.New("transient restored-service failure")
+			}
+			return nil
+		default:
+			return errors.New("unexpected systemctl action")
+		}
+	}
+
+	if err := restartSSHService(); err != nil {
+		t.Fatal(err)
+	}
+	if restarts != 3 || resets != 3 {
+		t.Fatalf("restart attempts=%d resets=%d, want 3 and 3", restarts, resets)
 	}
 }
 

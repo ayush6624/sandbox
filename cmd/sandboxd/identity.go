@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
 )
@@ -25,6 +26,7 @@ var (
 		}
 		return nil
 	}
+	identityRestartDelay = 100 * time.Millisecond
 )
 
 func handleGuestIdentity(w http.ResponseWriter, r *http.Request) {
@@ -82,13 +84,35 @@ func initializeGuestIdentity(sandboxID string) error {
 	if !sshHostKeysPresent() {
 		return errors.New("generate ssh host keys: ssh-keygen produced no private host keys")
 	}
-	if err := runIdentityCommand("systemctl", "restart", "ssh.service"); err != nil {
+	if err := restartSSHService(); err != nil {
 		return fmt.Errorf("restart ssh service: %w", err)
 	}
 	if err := writeIdentityMarker(sandboxID); err != nil {
 		return err
 	}
 	return nil
+}
+
+func restartSSHService() error {
+	const attempts = 3
+	// A restored systemd can retain the source VM's failed/start-limit state.
+	// Clear it before the first restart and between retries. The bounded retry
+	// also covers the brief socket handoff race seen when several snapshot
+	// clones rotate their inherited SSH identities concurrently.
+	_ = runIdentityCommand("systemctl", "reset-failed", "ssh.service")
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := runIdentityCommand("systemctl", "restart", "ssh.service"); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt < attempts {
+			time.Sleep(identityRestartDelay * time.Duration(attempt))
+			_ = runIdentityCommand("systemctl", "reset-failed", "ssh.service")
+		}
+	}
+	return lastErr
 }
 
 func sshHostKeysPresent() bool {
