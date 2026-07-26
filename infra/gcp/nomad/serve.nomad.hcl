@@ -100,14 +100,46 @@ printf '%s\t%s\n' serve_task_started "$(date +%s%3N)" >> /run/sandbox/boot-phase
 # adopting it, defeating the whole point of the baked golden data disk. sandboxd
 # is image-pinned: to ship a new agent, rebake (./bake-image.sh bake && golden)
 # and roll. (The pulled sandboxd artifact is left in place, unused, for now.)
-exec ./bin/sandbox serve --config config.json \
-  --listen  "$${NODE_IP}:8080" \
-  --management-transport private_proxy \
-  --advertise "http://$${NODE_IP}:8080" \
-  --host-id "$${HOST_ID}" \
-  --worker-release "$${WORKER_RELEASE}" \
-  --worker-token-file "$${NOMAD_TASK_DIR}/worker.tokens" \
-  --gateway "$${GATEWAY_URL}" --gateway-token-file "$${NOMAD_TASK_DIR}/gateway-control.tokens"
+# Keep this wrapper alive if serve dies from a signal. Nomad 1.7's raw_exec
+# driver can hit EBUSY while recreating the task immediately after a forced
+# server crash; supervising the server child provides deterministic in-place
+# recovery without weakening Nomad's normal task shutdown. Configuration and
+# other ordinary failures still escape to Nomad's bounded restart policy.
+child_pid=""
+stop() {
+  trap - TERM INT
+  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+  fi
+  if [ -n "$child_pid" ]; then
+    wait "$child_pid" 2>/dev/null || true
+  fi
+  exit 0
+}
+trap stop TERM INT
+
+while true; do
+  ./bin/sandbox serve --config config.json \
+    --listen  "$${NODE_IP}:8080" \
+    --management-transport private_proxy \
+    --advertise "http://$${NODE_IP}:8080" \
+    --host-id "$${HOST_ID}" \
+    --worker-release "$${WORKER_RELEASE}" \
+    --worker-token-file "$${NOMAD_TASK_DIR}/worker.tokens" \
+    --gateway "$${GATEWAY_URL}" --gateway-token-file "$${NOMAD_TASK_DIR}/gateway-control.tokens" &
+  child_pid=$!
+  if wait "$child_pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  child_pid=""
+  if [ "$rc" -lt 128 ]; then
+    exit "$rc"
+  fi
+  printf 'sandbox serve exited from signal (status %s); restarting in 2s\n' "$rc" >&2
+  sleep 2
+done
 EOT
       }
 
