@@ -34,6 +34,7 @@ import (
 
 	"github.com/ayush6624/sandbox/internal/client"
 	"github.com/ayush6624/sandbox/internal/cluster"
+	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/wsutil"
 )
@@ -249,7 +250,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /snapshots/{id}/rename", g.handleSnapshotOp)
 	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
 
-	srv := &http.Server{Addr: addr, Handler: bearerAuth(g.token, mux)}
+	srv := &http.Server{Addr: addr, Handler: httpapi.Middleware(bearerAuth(g.token, mux))}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	fmt.Fprintf(os.Stderr, "gateway listening on %s (bearer auth)\n", addr)

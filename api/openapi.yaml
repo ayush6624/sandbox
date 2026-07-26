@@ -1,0 +1,301 @@
+openapi: 3.1.0
+info:
+  title: Sandbox API
+  version: 1.0.0
+  description: |
+    Versioned public contract for creating and operating isolated development
+    sandboxes. Routes outside `/v1` are deprecated compatibility endpoints.
+servers:
+  - url: https://sandbox.example.com
+security:
+  - bearerAuth: []
+tags:
+  - {name: Sandboxes}
+  - {name: Snapshots}
+  - {name: Templates}
+  - {name: Operations}
+paths:
+  /v1/sandboxes:
+    get:
+      tags: [Sandboxes]
+      operationId: listSandboxes
+      parameters:
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/PageToken'}
+        - {name: status, in: query, schema: {type: string, enum: [running, paused]}}
+        - {name: source_type, in: query, schema: {type: string, enum: [default, template, snapshot]}}
+        - {name: created_after, in: query, schema: {type: string, format: date-time}}
+        - {name: created_before, in: query, schema: {type: string, format: date-time}}
+      responses:
+        '200':
+          description: A page of sandboxes.
+          content: {application/json: {schema: {$ref: '#/components/schemas/SandboxList'}}}
+        default: {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Sandboxes]
+      operationId: createSandbox
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateSandboxRequest'}}}
+      responses:
+        '201':
+          description: Sandbox created and ready.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}:
+    parameters: [{$ref: '#/components/parameters/SandboxId'}]
+    get:
+      tags: [Sandboxes]
+      operationId: getSandbox
+      responses:
+        '200': {description: Sandbox, content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [Sandboxes]
+      operationId: updateSandbox
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/merge-patch+json: {schema: {$ref: '#/components/schemas/UpdateSandboxRequest'}}}
+      responses:
+        '200': {description: Updated sandbox, content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+    delete:
+      tags: [Sandboxes]
+      operationId: deleteSandbox
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '204': {description: Sandbox permanently deleted.}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}:pause:
+    post:
+      tags: [Sandboxes]
+      operationId: pauseSandbox
+      parameters:
+        - {$ref: '#/components/parameters/SandboxId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Paused sandbox, content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}:resume:
+    post:
+      tags: [Sandboxes]
+      operationId: resumeSandbox
+      parameters:
+        - {$ref: '#/components/parameters/SandboxId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Running sandbox, content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}/snapshots:
+    post:
+      tags: [Snapshots]
+      operationId: createSnapshot
+      parameters:
+        - {$ref: '#/components/parameters/SandboxId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}, retention_seconds: {type: integer, minimum: 0}}}}}
+      responses:
+        '201': {description: Immutable snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/Snapshot'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/sandbox-batches:
+    post:
+      tags: [Sandboxes, Operations]
+      operationId: createSandboxBatch
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateSandboxBatchRequest'}}}
+      responses:
+        '202': {description: Batch operation accepted, content: {application/json: {schema: {$ref: '#/components/schemas/Operation'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/snapshots:
+    get:
+      tags: [Snapshots]
+      operationId: listSnapshots
+      parameters:
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/PageToken'}
+      responses:
+        '200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/SnapshotList'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/snapshots/{snapshot_id}:
+    delete:
+      tags: [Snapshots]
+      operationId: deleteSnapshot
+      parameters:
+        - {name: snapshot_id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '204': {description: Snapshot deleted.}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/templates:
+    get:
+      tags: [Templates]
+      operationId: listTemplates
+      parameters:
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/PageToken'}
+      responses:
+        '200': {description: Template page, content: {application/json: {schema: {$ref: '#/components/schemas/TemplateList'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/operations:
+    get:
+      tags: [Operations]
+      operationId: listOperations
+      parameters:
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/PageToken'}
+      responses:
+        '200': {description: Operation page, content: {application/json: {schema: {$ref: '#/components/schemas/OperationList'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/operations/{operation_id}:
+    get:
+      tags: [Operations]
+      operationId: getOperation
+      parameters: [{name: operation_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Operation, content: {application/json: {schema: {$ref: '#/components/schemas/Operation'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, maxLength: 255}}
+    SandboxId: {name: sandbox_id, in: path, required: true, schema: {type: string}}
+    PageSize: {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+    PageToken: {name: page_token, in: query, schema: {type: string}}
+  responses:
+    Problem:
+      description: RFC 9457 problem details.
+      content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
+  schemas:
+    Source:
+      oneOf:
+        - {type: object, required: [type], properties: {type: {const: default}}, additionalProperties: false}
+        - {type: object, required: [type, id], properties: {type: {const: template}, id: {type: string}}, additionalProperties: false}
+        - {type: object, required: [type, id], properties: {type: {const: snapshot}, id: {type: string}}, additionalProperties: false}
+      discriminator: {propertyName: type}
+    Lifecycle:
+      type: object
+      properties:
+        ttl_seconds: {type: integer, minimum: 0}
+        idle_timeout_seconds: {type: integer, minimum: 0}
+      additionalProperties: false
+    Resources:
+      type: object
+      required: [vcpu, memory_mib]
+      properties:
+        vcpu: {type: integer, minimum: 1}
+        memory_mib: {type: integer, minimum: 128}
+      additionalProperties: false
+    CreateSandboxRequest:
+      type: object
+      properties:
+        name: {type: string, maxLength: 64}
+        source: {$ref: '#/components/schemas/Source'}
+        lifecycle: {$ref: '#/components/schemas/Lifecycle'}
+        resources: {$ref: '#/components/schemas/Resources'}
+        metadata: {type: object, additionalProperties: {type: string}, maxProperties: 64}
+        ssh_public_key: {type: string}
+      additionalProperties: false
+    UpdateSandboxRequest:
+      type: object
+      properties:
+        name: {type: string, maxLength: 64}
+        lifecycle: {$ref: '#/components/schemas/Lifecycle'}
+        metadata: {type: object, additionalProperties: {type: string}, maxProperties: 64}
+      additionalProperties: false
+    Sandbox:
+      type: object
+      required: [id, status, source, lifecycle, resources, metadata, created_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [running, paused]}
+        source: {$ref: '#/components/schemas/Source'}
+        lifecycle: {$ref: '#/components/schemas/Lifecycle'}
+        resources: {$ref: '#/components/schemas/Resources'}
+        metadata: {type: object, additionalProperties: {type: string}}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    Snapshot:
+      type: object
+      required: [id, source_sandbox_id, state, created_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        source_sandbox_id: {type: string}
+        state: {type: string, enum: [local, durable]}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    Template:
+      type: object
+      required: [id, revision, resources]
+      properties:
+        id: {type: string}
+        revision: {type: string}
+        resources: {$ref: '#/components/schemas/Resources'}
+    BatchItem:
+      type: object
+      required: [index]
+      properties:
+        index: {type: integer}
+        sandbox: {$ref: '#/components/schemas/Sandbox'}
+        error: {$ref: '#/components/schemas/Problem'}
+    Operation:
+      type: object
+      required: [id, type, status, requested, succeeded, failed, created_at]
+      properties:
+        id: {type: string}
+        type: {const: sandbox_batch_create}
+        status: {type: string, enum: [pending, running, succeeded, partially_succeeded, failed]}
+        requested: {type: integer}
+        succeeded: {type: integer}
+        failed: {type: integer}
+        results: {type: array, items: {$ref: '#/components/schemas/BatchItem'}}
+        created_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+    Problem:
+      type: object
+      required: [type, title, status, code, request_id]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        code: {type: string}
+        request_id: {type: string}
+        violations:
+          type: array
+          items:
+            type: object
+            required: [field, description]
+            properties: {field: {type: string}, description: {type: string}}
+    SandboxList:
+      type: object
+      required: [sandboxes]
+      properties: {sandboxes: {type: array, items: {$ref: '#/components/schemas/Sandbox'}}, next_page_token: {type: string}}
+    SnapshotList:
+      type: object
+      required: [snapshots]
+      properties: {snapshots: {type: array, items: {$ref: '#/components/schemas/Snapshot'}}, next_page_token: {type: string}}
+    TemplateList:
+      type: object
+      required: [templates]
+      properties: {templates: {type: array, items: {$ref: '#/components/schemas/Template'}}, next_page_token: {type: string}}
+    OperationList:
+      type: object
+      required: [operations]
+      properties: {operations: {type: array, items: {$ref: '#/components/schemas/Operation'}}, next_page_token: {type: string}}
+    CreateSandboxBatchRequest:
+      type: object
+      required: [count, sandbox]
+      properties:
+        count: {type: integer, minimum: 1, maximum: 100}
+        sandbox: {$ref: '#/components/schemas/CreateSandboxRequest'}
+        max_parallelism: {type: integer, minimum: 1, maximum: 32}
+      additionalProperties: false

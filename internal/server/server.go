@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ayush6624/sandbox/internal/gcsblob"
+	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
@@ -314,7 +315,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /snapshots/{id}/fanout", s.handleFanout)
 	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
 
-	servers := []*http.Server{{Handler: mux}}
+	publicHandler := httpapi.Middleware(mux)
+	servers := []*http.Server{{Handler: publicHandler}}
 	srvErr := make(chan error, 2)
 	go func() { srvErr <- servers[0].Serve(ln) }()
 
@@ -326,7 +328,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("listen tcp %s: %w", s.cfg.ListenAddr, err)
 		}
-		tcpSrv := &http.Server{Handler: bearerAuth(s.cfg.APIToken, mux)}
+		tcpSrv := &http.Server{Handler: httpapi.Middleware(bearerAuth(s.cfg.APIToken, mux))}
 		servers = append(servers, tcpSrv)
 		go func() { srvErr <- tcpSrv.Serve(tcpLn) }()
 		fmt.Fprintf(os.Stderr, "TCP API listening on %s (bearer auth)\n", s.cfg.ListenAddr)
