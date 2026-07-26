@@ -87,7 +87,9 @@ ROW="$(jq -cer --arg id "$PROBE_ID" '.[] | select(.id == $id)' <<<"$LIST")"
 PID="$(jq -er '.pid | select(. > 0)' <<<"$ROW")"
 VMID="$(jq -er '.vm_id | select(length > 0)' <<<"$ROW")"
 CGROUP="$(worker "sudo -n awk -F: '\$1==\"0\"{print \$3}' /proc/$PID/cgroup")"
-EXEC_BODY="$(jq -cn '{cmd:"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '\\''{print $2}'\\''",timeout_sec:20}')"
+EXEC_BODY="$(jq -cn \
+  --arg cmd "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '{print \$2}'" \
+  '{cmd:$cmd,timeout_sec:20}')"
 IDENTITY_BEFORE="$(api -X POST -H 'Content-Type: application/json' --data "$EXEC_BODY" \
   "$SANDBOX_HOST_URL/sandboxes/$PROBE_ID/exec" | jq -er '.stdout')"
 
