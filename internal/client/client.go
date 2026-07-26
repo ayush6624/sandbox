@@ -102,8 +102,8 @@ type CreateOpts struct {
 	// the golden-snapshot hot path (~250 ms) — snapshots bake vcpus/mem.
 	Vcpus  int64 `json:"vcpus,omitempty"`
 	MemMIB int64 `json:"mem_mib,omitempty"`
-	// SSHPubkey, when set, is installed into the sandbox's root authorized_keys
-	// at create so it's reachable over SSH (one OpenSSH public-key line).
+	// SSHPubkey, when set, is installed into the normal sandbox user's
+	// authorized_keys at create (one OpenSSH public-key line).
 	SSHPubkey string `json:"ssh_pubkey,omitempty"`
 }
 

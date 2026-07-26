@@ -130,6 +130,8 @@ APT
   sudo chroot "$BUILD_DIR" bash -c '
     id sandbox >/dev/null 2>&1 ||
       useradd --create-home --uid 1000 --user-group --shell /bin/bash sandbox
+    test "$(id -u sandbox)" = 1000
+    test "$(id -g sandbox)" = 1000
     passwd -l sandbox
     install -d -o sandbox -g sandbox -m 0755 /home/sandbox/app
   '

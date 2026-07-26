@@ -392,8 +392,8 @@ func (s *Server) Serve(ctx context.Context) error {
 			return errors.New("fleet worker requires a separate worker_token or worker_token_file")
 		}
 		if transport.Mode != management.TransportDevelopment &&
-			s.cfg.GatewayURL != "" && s.cfg.WorkerToken != "" &&
-			s.cfg.WorkerToken == s.cfg.APIToken {
+			s.cfg.GatewayURL != "" && clientCreds != nil &&
+			workerCreds.Outbound() == clientCreds.Outbound() {
 			return errors.New("worker_token must differ from api_token outside development mode")
 		}
 		s.workerCredentials = workerCreds
@@ -757,6 +757,10 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	if err := waitForAgent(ctx, sb.GuestIP, 60*time.Second); err != nil {
 		_ = s.destroy(context.Background(), id)
 		return registry.Sandbox{}, fmt.Errorf("sandbox booted but agent never became ready: %w", err)
+	}
+	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
+		_ = s.destroy(context.Background(), id)
+		return registry.Sandbox{}, fmt.Errorf("sandbox booted but identity initialization failed: %w", err)
 	}
 
 	sb.PID = pid

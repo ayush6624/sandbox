@@ -27,6 +27,8 @@ Environment=HOME=/home/sandbox
 WantedBy=multi-user.target
 `
 
+const guestIdentityImageVersion = "2"
+
 const sandboxSSHDConfig = `# Managed by sandbox install-agent — key-only user access.
 PermitRootLogin no
 PubkeyAuthentication yes
@@ -100,6 +102,7 @@ func installAgent(rootfs, agentBin string) error {
 	h := sha256.New()
 	h.Write(bin)
 	h.Write([]byte(sandboxdUnit))
+	h.Write([]byte(guestIdentityImageVersion))
 	h.Write([]byte(sandboxSSHDConfig))
 	h.Write([]byte(sandboxProfile))
 	h.Write([]byte(sandboxBashrc))
@@ -186,6 +189,8 @@ func hardenGuestIdentity(mnt string) error {
 set -eu
 id sandbox >/dev/null 2>&1 ||
   useradd --create-home --uid 1000 --user-group --shell /bin/bash sandbox
+test "$(id -u sandbox)" = 1000
+test "$(id -g sandbox)" = 1000
 passwd -l sandbox >/dev/null
 passwd -l root >/dev/null
 install -d -o sandbox -g sandbox -m 0755 /home/sandbox/app
