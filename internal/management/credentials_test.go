@@ -113,3 +113,27 @@ func TestCredentialsStaticRotationOverlap(t *testing.T) {
 		t.Fatal("wrong credential accepted")
 	}
 }
+
+func TestCredentialsDetectOverlapAcrossRotationSets(t *testing.T) {
+	client, err := NewCredentials([]string{"client-next", "shared-old"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewCredentials([]string{"worker-next", "shared-old"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct, err := NewCredentials([]string{"worker-next", "worker-old"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !client.Overlaps(worker) {
+		t.Fatal("secondary overlap was not detected")
+	}
+	if client.Overlaps(distinct) {
+		t.Fatal("disjoint credential sets reported an overlap")
+	}
+	if client.Overlaps(nil) {
+		t.Fatal("nil credential set reported an overlap")
+	}
+}

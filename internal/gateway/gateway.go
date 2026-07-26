@@ -198,7 +198,7 @@ func (g *Gateway) ConfigureSecurity(clientTokens []string, clientFile string, wo
 		return fmt.Errorf("gateway worker-control credentials: %w", err)
 	}
 	if transport.Mode != management.TransportDevelopment &&
-		clientCreds.Outbound() == workerCreds.Outbound() {
+		clientCreds.Overlaps(workerCreds) {
 		return errors.New("gateway client and worker-control credentials must differ outside development mode")
 	}
 	g.clientCredentials = clientCreds
@@ -1277,9 +1277,13 @@ func (g *Gateway) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		workerOnly := r.URL.Path == "/register" || strings.HasPrefix(r.URL.Path, "/internal/v1/")
-		ok := g.workerCredentials != nil && workerOnly && g.workerCredentials.MatchAuthorization(auth)
+		workerMatch := g.workerCredentials != nil && g.workerCredentials.MatchAuthorization(auth)
+		clientMatch := g.clientCredentials != nil && g.clientCredentials.MatchAuthorization(auth)
+		// Fail closed if independently rotated files ever acquire an
+		// overlapping token after startup.
+		ok := workerOnly && workerMatch && !clientMatch
 		if !workerOnly && g.clientCredentials != nil {
-			ok = g.clientCredentials.MatchAuthorization(auth)
+			ok = clientMatch && !workerMatch
 		}
 		if !ok {
 			err := errors.New("missing or invalid bearer token")

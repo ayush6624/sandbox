@@ -392,8 +392,8 @@ func (s *Server) Serve(ctx context.Context) error {
 			return errors.New("fleet worker requires a separate worker_token or worker_token_file")
 		}
 		if transport.Mode != management.TransportDevelopment &&
-			s.cfg.GatewayURL != "" && clientCreds != nil &&
-			workerCreds.Outbound() == clientCreds.Outbound() {
+			clientCreds != nil && workerCreds != nil &&
+			clientCreds.Overlaps(workerCreds) {
 			return errors.New("worker_token must differ from api_token outside development mode")
 		}
 		s.workerCredentials = workerCreds
@@ -467,9 +467,13 @@ func bearerAuth(clientCreds, workerCreds *management.Credentials, next http.Hand
 		internal := strings.HasPrefix(r.URL.Path, "/internal/v1/") ||
 			strings.HasSuffix(r.URL.Path, "/adopt") ||
 			strings.HasSuffix(r.URL.Path, "/release")
-		ok := workerCreds != nil && workerCreds.MatchAuthorization(auth)
-		if !internal && !ok && clientCreds != nil {
-			ok = clientCreds.MatchAuthorization(auth)
+		workerMatch := workerCreds != nil && workerCreds.MatchAuthorization(auth)
+		clientMatch := clientCreds != nil && clientCreds.MatchAuthorization(auth)
+		// A token present in both independently rotatable domains is never
+		// allowed to cross the internal-control boundary.
+		ok := workerMatch && !clientMatch
+		if !internal {
+			ok = clientMatch && !workerMatch
 		}
 		if !ok {
 			err := errors.New("missing or invalid bearer token")

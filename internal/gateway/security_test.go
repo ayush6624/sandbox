@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -35,6 +36,18 @@ func TestConfigureSecurityRejectsSharedProductionCredential(t *testing.T) {
 	}
 }
 
+func TestConfigureSecurityRejectsSecondaryRotationOverlap(t *testing.T) {
+	g := New("legacy", 20*time.Second, 0, 0)
+	err := g.ConfigureSecurity(
+		[]string{"client-next", "shared-old"}, "",
+		[]string{"worker-next", "shared-old"}, "",
+		management.Transport{Mode: management.TransportPrivateProxy},
+	)
+	if err == nil {
+		t.Fatal("secondary client/worker credential overlap accepted")
+	}
+}
+
 func TestGatewayAuthSeparatesClientAndWorkerDomains(t *testing.T) {
 	g := secureTestGateway(t)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -53,10 +66,15 @@ func TestGatewayAuthSeparatesClientAndWorkerDomains(t *testing.T) {
 		{"worker internal", "/internal/v1/hosts:register", "worker-token", http.StatusNoContent},
 		{"client internal denied", "/internal/v1/hosts:register", "client-token", http.StatusUnauthorized},
 		{"query token denied", "/v1/sandboxes?access_token=client-token", "", http.StatusUnauthorized},
+		{"websocket query token denied", "/v1/sandboxes/x/shell?access_token=client-token", "", http.StatusUnauthorized},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.name == "websocket query token denied" {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", "websocket")
+			}
 			if tt.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tt.token)
 			}
@@ -66,6 +84,47 @@ func TestGatewayAuthSeparatesClientAndWorkerDomains(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, tt.status)
 			}
 		})
+	}
+}
+
+func TestGatewayAuthFailsClosedAfterCredentialFilesOverlap(t *testing.T) {
+	dir := t.TempDir()
+	clientFile := dir + "/client"
+	workerFile := dir + "/worker"
+	if err := os.WriteFile(clientFile, []byte("client-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workerFile, []byte("worker-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := New("legacy", 20*time.Second, 0, 0)
+	if err := g.ConfigureSecurity(
+		nil, clientFile, nil, workerFile,
+		management.Transport{Mode: management.TransportPrivateProxy},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := g.bearerAuth(next)
+
+	nextWorkerFile := workerFile + ".next"
+	if err := os.WriteFile(nextWorkerFile, []byte("client-token\nworker-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(nextWorkerFile, workerFile); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/v1/sandboxes", "/internal/v1/hosts:register"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer client-token")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s accepted overlapping credential: status=%d", path, w.Code)
+		}
 	}
 }
 

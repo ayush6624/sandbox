@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -231,4 +233,73 @@ func TestBearerAuthWebSocket(t *testing.T) {
 			t.Fatalf("worker internal status = %d", w.Code)
 		}
 	})
+
+	t.Run("worker token cannot call client route", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/sandboxes", nil)
+		r.Header.Set("Authorization", "Bearer "+workerToken)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("worker client-route status = %d", w.Code)
+		}
+	})
+}
+
+func TestBearerAuthRejectsOverlappingTokenOnInternalRoute(t *testing.T) {
+	clientCreds, err := management.NewCredentials([]string{"client-next", "shared-old"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCreds, err := management.NewCredentials([]string{"worker-next", "shared-old"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := bearerAuth(clientCreds, workerCreds, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxes/x:adopt", nil)
+	req.Header.Set("Authorization", "Bearer shared-old")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("overlapping token reached internal route: status=%d", w.Code)
+	}
+}
+
+func TestSecureUnixSocketMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "management.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	err = secureUnixSocket(path)
+	if os.Geteuid() != 0 {
+		if err == nil || !strings.Contains(err.Error(), "requires root ownership") {
+			t.Fatalf("non-root secureUnixSocket error = %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("socket mode = %04o, want 0600", got)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("socket stat type = %T", info.Sys())
+	}
+	if stat.Uid != 0 || stat.Gid != 0 {
+		t.Fatalf("socket owner = %d:%d, want 0:0", stat.Uid, stat.Gid)
+	}
 }

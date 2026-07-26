@@ -151,6 +151,27 @@ func (c *Credentials) Outbound() string {
 	return tokens[0]
 }
 
+// Overlaps reports whether two credential sets share any active token. It is
+// used to keep management trust domains disjoint, including during overlap
+// rotations where a shared token may not be either set's preferred outbound
+// credential.
+func (c *Credentials) Overlaps(other *Credentials) bool {
+	if c == nil || other == nil {
+		return false
+	}
+	left := c.tokens()
+	right := other.tokens()
+	matched := 0
+	for _, a := range left {
+		aSum := sha256.Sum256([]byte(a))
+		for _, b := range right {
+			bSum := sha256.Sum256([]byte(b))
+			matched |= subtle.ConstantTimeCompare(aSum[:], bSum[:])
+		}
+	}
+	return matched == 1
+}
+
 func (c *Credentials) Handler(next http.Handler, reject func(http.ResponseWriter, *http.Request)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !c.MatchAuthorization(r.Header.Get("Authorization")) {

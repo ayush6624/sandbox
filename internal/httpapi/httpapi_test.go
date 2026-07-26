@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +11,37 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMiddlewareRedactsCredentialsAndQueryStringsFromLogs(t *testing.T) {
+	var logs bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	h := Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/v1/sandboxes?access_token=query-secret&token=other-secret", nil)
+	req.Header.Set("Authorization", "Bearer header-secret")
+	req.Header.Set("Cookie", "session=cookie-secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	got := logs.String()
+	for _, secret := range []string{"query-secret", "other-secret", "header-secret", "cookie-secret", "access_token", "Authorization"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("request log leaked %q: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "method=GET path=/v1/sandboxes status=204") {
+		t.Fatalf("request log missing safe fields: %s", got)
+	}
+}
 
 func TestMiddlewareAndProblemShareRequestID(t *testing.T) {
 	h := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
