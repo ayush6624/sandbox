@@ -14,6 +14,8 @@ if (!baseUrl || !apiKey) {
 type Json = Record<string, any>;
 const cleanupIds = new Set<string>();
 let snapshotId = "";
+const runId = `v1-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const key = (action: string): string => `${runId}-${action}`;
 
 async function request(
   method: string,
@@ -49,7 +51,7 @@ function expectStatus(actual: Response, expected: number, body?: unknown): void 
 }
 
 async function deleteSandbox(id: string): Promise<void> {
-  const { response, json } = await request("DELETE", `/v1/sandboxes/${id}`, undefined, `cleanup-${id}`);
+  const { response, json } = await request("DELETE", `/v1/sandboxes/${id}`, undefined, key(`cleanup-${id}`));
   assert.ok(response.status === 204 || response.status === 404, JSON.stringify(json));
   cleanupIds.delete(id);
 }
@@ -69,9 +71,9 @@ async function main(): Promise<void> {
     name: "v1-contract-source",
     source: { type: "template", id: "default" },
     lifecycle: { ttl_seconds: 900, idle_timeout_seconds: 600 },
-    metadata: { probe: "v1-contract", role: "source" },
+    metadata: { probe: "v1-contract", run_id: runId, role: "source" },
   };
-  const created = await request("POST", "/v1/sandboxes", createBody, "v1-contract-create");
+  const created = await request("POST", "/v1/sandboxes", createBody, key("create"));
   expectStatus(created.response, 201, created.json);
   const source = created.json as Json;
   cleanupIds.add(source.id);
@@ -81,20 +83,20 @@ async function main(): Promise<void> {
     assert.ok(!(internal in source), `public sandbox leaked ${internal}`);
   }
 
-  const replay = await request("POST", "/v1/sandboxes", createBody, "v1-contract-create");
+  const replay = await request("POST", "/v1/sandboxes", createBody, key("create"));
   expectStatus(replay.response, 201, replay.json);
   assert.equal(replay.json.id, source.id);
   assert.equal(replay.response.headers.get("idempotency-replayed"), "true");
 
-  const filtered = await request("GET", "/v1/sandboxes?page_size=1&source_type=template&metadata.probe=v1-contract");
+  const filtered = await request("GET", `/v1/sandboxes?page_size=1&source_type=template&metadata.run_id=${runId}`);
   expectStatus(filtered.response, 200, filtered.json);
   assert.ok(filtered.json.sandboxes.some((sandbox: Json) => sandbox.id === source.id));
 
   const patched = await request(
     "PATCH",
     `/v1/sandboxes/${source.id}`,
-    { name: "v1-contract-renamed", metadata: { probe: "v1-contract", phase: "patched" } },
-    "v1-contract-patch",
+    { name: "v1-contract-renamed", metadata: { probe: "v1-contract", run_id: runId, phase: "patched" } },
+    key("patch"),
   );
   expectStatus(patched.response, 200, patched.json);
   assert.equal(patched.json.name, "v1-contract-renamed");
@@ -104,16 +106,16 @@ async function main(): Promise<void> {
     "POST",
     `/v1/sandboxes/${source.id}/port-forwards`,
     { guest_port: 3000 },
-    "v1-contract-port",
+    key("port"),
   );
   expectStatus(port.response, 201, port.json);
   assert.equal(port.json.sandbox_id, source.id);
   assert.equal(port.json.status, "active");
 
-  const paused = await request("POST", `/v1/sandboxes/${source.id}:pause`, undefined, "v1-contract-pause");
+  const paused = await request("POST", `/v1/sandboxes/${source.id}:pause`, undefined, key("pause"));
   expectStatus(paused.response, 200, paused.json);
   assert.equal(paused.json.status, "paused");
-  const resumed = await request("POST", `/v1/sandboxes/${source.id}:resume`, undefined, "v1-contract-resume");
+  const resumed = await request("POST", `/v1/sandboxes/${source.id}:resume`, undefined, key("resume"));
   expectStatus(resumed.response, 200, resumed.json);
   assert.equal(resumed.json.status, "running");
 
@@ -121,7 +123,7 @@ async function main(): Promise<void> {
     "POST",
     `/v1/sandboxes/${source.id}/snapshots`,
     { name: "v1-contract-snapshot", retention_seconds: 900 },
-    "v1-contract-snapshot",
+    key("snapshot"),
   );
   expectStatus(snapshot.response, 201, snapshot.json);
   snapshotId = snapshot.json.id;
@@ -137,11 +139,11 @@ async function main(): Promise<void> {
       sandbox: {
         source: { type: "snapshot", id: snapshotId },
         lifecycle: { ttl_seconds: 900 },
-        metadata: { probe: "v1-contract", role: "batch" },
+        metadata: { probe: "v1-contract", run_id: runId, role: "batch" },
       },
       max_parallelism: 2,
     },
-    "v1-contract-batch",
+    key("batch"),
   );
   expectStatus(batch.response, 202, batch.json);
   assert.equal(batch.json.requested, 2);
@@ -163,7 +165,7 @@ async function main(): Promise<void> {
   }
   assert.equal(operation.failed, 0, JSON.stringify(operation.results));
 
-  const inUse = await request("DELETE", `/v1/snapshots/${snapshotId}`, undefined, "v1-contract-snapshot-in-use");
+  const inUse = await request("DELETE", `/v1/snapshots/${snapshotId}`, undefined, key("snapshot-in-use"));
   expectStatus(inUse.response, 409, inUse.json);
   assert.equal(inUse.json.code, "conflict");
 
@@ -172,7 +174,7 @@ async function main(): Promise<void> {
     "DELETE",
     `/v1/snapshots/${snapshotId}`,
     undefined,
-    "v1-contract-snapshot-delete",
+    key("snapshot-delete"),
   );
   expectStatus(deletedSnapshot.response, 204, deletedSnapshot.json);
   snapshotId = "";
@@ -191,7 +193,7 @@ main().catch(async (error) => {
   }
   if (snapshotId) {
     try {
-      await request("DELETE", `/v1/snapshots/${snapshotId}`, undefined, `cleanup-snapshot-${snapshotId}`);
+      await request("DELETE", `/v1/snapshots/${snapshotId}`, undefined, key(`cleanup-snapshot-${snapshotId}`));
     } catch (cleanupError) {
       console.error(`cleanup snapshot ${snapshotId}:`, cleanupError);
     }
