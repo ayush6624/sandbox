@@ -124,8 +124,13 @@ type createRequest struct {
 
 type updateRequest struct {
 	Name      *string            `json:"name"`
-	Lifecycle *Lifecycle         `json:"lifecycle"`
+	Lifecycle *updateLifecycle   `json:"lifecycle"`
 	Metadata  *map[string]string `json:"metadata"`
+}
+
+type updateLifecycle struct {
+	TTLSeconds         *int `json:"ttl_seconds"`
+	IdleTimeoutSeconds *int `json:"idle_timeout_seconds"`
 }
 
 type listResponse[T any] struct {
@@ -215,6 +220,10 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 }
 
 func (h *Handler) listSandboxes(w http.ResponseWriter, r *http.Request) {
+	if err := validateSandboxFilters(r.URL.Query()); err != nil {
+		httpapi.WriteProblem(w, r, 400, "invalid_filter", err.Error())
+		return
+	}
 	rec := h.call(r, http.MethodGet, "/sandboxes", nil)
 	if !translateError(w, r, rec) {
 		return
@@ -232,6 +241,12 @@ func (h *Handler) listSandboxes(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, pub)
 	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
 	page, next, ok := paginate(w, r, items)
 	if !ok {
 		return
@@ -275,7 +290,16 @@ func (h *Handler) updateSandbox(w http.ResponseWriter, r *http.Request) {
 		metadata = *body.Metadata
 	}
 	if body.Lifecycle != nil {
-		ttl, idle = body.Lifecycle.TTLSeconds, body.Lifecycle.IdleTimeoutSeconds
+		if body.Lifecycle.TTLSeconds != nil {
+			ttl = *body.Lifecycle.TTLSeconds
+		}
+		if body.Lifecycle.IdleTimeoutSeconds != nil {
+			idle = *body.Lifecycle.IdleTimeoutSeconds
+		}
+		if ttl < 0 || idle < 0 {
+			httpapi.WriteProblem(w, r, 400, "invalid_request", "lifecycle durations must be non-negative")
+			return
+		}
 	}
 	rec := h.call(r, http.MethodPatch, "/sandboxes/"+url.PathEscape(current.ID)+"/public-fields",
 		map[string]any{"name": name, "metadata": nonNilMetadata(metadata), "ttl_seconds": ttl, "idle_timeout_seconds": idle})
@@ -387,6 +411,12 @@ func (h *Handler) listSnapshots(w http.ResponseWriter, r *http.Request) {
 			items = append(items, publicSnapshot(snap))
 		}
 	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
 	page, next, ok := paginate(w, r, items)
 	if !ok {
 		return
@@ -476,9 +506,9 @@ func (h *Handler) createBatch(w http.ResponseWriter, r *http.Request) {
 	h.operations[op.ID] = op
 	h.mu.Unlock()
 	background := r.Clone(context.WithoutCancel(r.Context()))
-	go h.runBatch(background, op.ID, body.Count, body.MaxParallelism, body.Sandbox)
 	w.Header().Set("Location", "/v1/operations/"+op.ID)
-	writeJSON(w, http.StatusAccepted, op)
+	writeJSON(w, http.StatusAccepted, cloneOperation(op))
+	go h.runBatch(background, op.ID, body.Count, body.MaxParallelism, body.Sandbox)
 }
 
 func (h *Handler) runBatch(parent *http.Request, id string, count, parallel int, create createRequest) {
@@ -528,9 +558,10 @@ func (h *Handler) runBatch(parent *http.Request, id string, count, parallel int,
 }
 
 func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
-	h.mu.RLock()
+	h.mu.Lock()
+	h.pruneOperationsLocked(time.Now())
 	op := cloneOperation(h.operations[r.PathValue("id")])
-	h.mu.RUnlock()
+	h.mu.Unlock()
 	if op == nil {
 		httpapi.WriteProblem(w, r, 404, "operation_not_found", "operation not found")
 		return
@@ -559,6 +590,10 @@ func (h *Handler) createPortForward(w http.ResponseWriter, r *http.Request) {
 		GuestPort int `json:"guest_port"`
 	}
 	if !decodeBody(w, r, &body, true) {
+		return
+	}
+	if body.GuestPort < 1 || body.GuestPort > 65535 {
+		httpapi.WriteProblem(w, r, 400, "invalid_request", "guest_port must be between 1 and 65535")
 		return
 	}
 	rec := h.call(r, http.MethodPost, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/ports", body)
@@ -720,6 +755,28 @@ func matchesSandboxFilters(sb Sandbox, query url.Values) bool {
 		}
 	}
 	return true
+}
+
+func validateSandboxFilters(query url.Values) error {
+	if value := query.Get("status"); value != "" && value != "running" && value != "paused" && value != "deleting" {
+		return errors.New("status must be running, paused, or deleting")
+	}
+	if value := query.Get("source_type"); value != "" && value != "default" && value != "template" && value != "snapshot" {
+		return errors.New("source_type must be default, template, or snapshot")
+	}
+	for _, name := range []string{"created_after", "created_before"} {
+		if value := query.Get(name); value != "" {
+			if _, err := time.Parse(time.RFC3339, value); err != nil {
+				return fmt.Errorf("%s must be an RFC 3339 timestamp", name)
+			}
+		}
+	}
+	for key := range query {
+		if strings.HasPrefix(key, "metadata.") && strings.TrimPrefix(key, "metadata.") == "" {
+			return errors.New("metadata filter must include a key")
+		}
+	}
+	return nil
 }
 
 func paginate[T any](w http.ResponseWriter, r *http.Request, items []T) ([]T, string, bool) {
