@@ -131,3 +131,13 @@ func TestUnknownFieldsUseProblemDetails(t *testing.T) {
 		t.Fatalf("problem missing stable code: %s", w.Body.String())
 	}
 }
+
+func TestListRejectsInvalidFilters(t *testing.T) {
+	h := testHandler(t, newFakeLegacy())
+	req := httptest.NewRequest("GET", "/v1/sandboxes?status=hibernated", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"invalid_filter"`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
