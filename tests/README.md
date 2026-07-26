@@ -109,6 +109,21 @@ It refuses hosts with less than 2 GiB free on either root or data storage,
 checks the control sandbox and API after every pressure phase, and removes only
 the invocation's exact sandbox IDs, loop device, mount, and files.
 
+Live reloadable management credentials have their own exact-restore gate:
+
+```bash
+MANAGEMENT_TOKEN_ROTATION=I_UNDERSTAND_THIS_TEMPORARILY_ROTATES_LIVE_MANAGEMENT_CREDENTIALS \
+MANAGEMENT_URL=https://<management-endpoint> \
+MANAGEMENT_CURRENT_TOKEN=<current-client-token> \
+MANAGEMENT_SSH=you@<management-host> \
+./security-token-rotation-gate.sh
+```
+
+The gate proves overlap rotation, new-only acceptance with rejection of the
+retired key, and then restores and verifies the original credential file
+byte-for-byte. It accepts only an allowlisted root-owned `0600` token file and
+never prints credential values.
+
 The TypeScript suite exits non-zero on failure and writes its JSON report under
 `results/` (gitignored). Both security gates also exit non-zero on a failed
 invariant and stream the failing check to stderr.
