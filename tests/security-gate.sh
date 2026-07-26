@@ -229,6 +229,15 @@ while [ "$#" -gt 0 ]; do
   test "$pids_max" -gt 0
   grep -Eq '^[0-9]+:[0-9]+ .*rbps=[0-9]+' "$cgroup/io.max"
   grep -Eq '^[0-9]+:[0-9]+ .*wbps=[0-9]+' "$cgroup/io.max"
+  # Some host kernels create a per-VM kvm-pit/<firecracker-pid> kernel
+  # thread. When present it must inherit the VM leaf rather than escape the
+  # resource boundary; kernels without an in-kernel PIT expose no such thread.
+  for task in /proc/[0-9]*; do
+    task_pid="${task##*/}"
+    test "$(cat "$task/comm" 2>/dev/null || true)" = "kvm-pit/$pid" || continue
+    task_cgroup="$(awk -F: '$1=="0"{print $3}' "$task/cgroup")"
+    test "$task_cgroup" = "$cg_rel"
+  done
   nofile="$(awk '/Max open files/{print $4}' "/proc/$pid/limits")"
   file_size="$(awk '/Max file size/{print $4}' "/proc/$pid/limits")"
   test "$nofile" != "unlimited"
