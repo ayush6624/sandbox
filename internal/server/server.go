@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ayush6624/sandbox/internal/apiv1"
 	"github.com/ayush6624/sandbox/internal/gcsblob"
 	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/provisioner"
@@ -304,16 +305,21 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes/{id}/shell", s.handleShellProxy())
 	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.handleSnapshot)
 	mux.HandleFunc("POST /sandboxes/{id}/hibernate", s.handleHibernate)
+	mux.HandleFunc("POST /sandboxes/{id}/resume", s.handleResume)
+	mux.HandleFunc("PATCH /sandboxes/{id}/public-fields", s.handlePublicFields)
 	// Cross-host wake (roadmap B4): the gateway dispatches adopt (reconstruct +
 	// wake here) on a route miss or a drain, and release (freeze + drop local,
 	// keep GCS) on the drain source.
 	mux.HandleFunc("POST /sandboxes/{id}/adopt", s.handleAdopt)
 	mux.HandleFunc("POST /sandboxes/{id}/release", s.handleRelease)
+	mux.HandleFunc("POST /internal/v1/sandboxes/{action}", s.handleInternalSandboxAction)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/rename", s.handleRenameSnapshot)
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
 	mux.HandleFunc("POST /snapshots/{id}/fanout", s.handleFanout)
+	mux.HandleFunc("PATCH /snapshots/{id}/public-fields", s.handleSnapshotPublicFields)
 	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
+	apiv1.New(mux).Register(mux)
 
 	publicHandler := httpapi.Middleware(mux)
 	servers := []*http.Server{{Handler: publicHandler}}
@@ -355,6 +361,23 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
+func (s *Server) handleInternalSandboxAction(w http.ResponseWriter, r *http.Request) {
+	id, action, ok := strings.Cut(r.PathValue("action"), ":")
+	if !ok || id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	r.SetPathValue("id", id)
+	switch action {
+	case "adopt":
+		s.handleAdopt(w, r)
+	case "release":
+		s.handleRelease(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 // bearerAuth rejects requests whose Authorization header doesn't carry token.
 // Applied only to the TCP listener — the Unix socket is protected by file mode.
 // WebSocket upgrades get two accommodations for browser clients, which cannot
@@ -376,7 +399,11 @@ func bearerAuth(token string, next http.Handler) http.Handler {
 			if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseUnauthorized, err.Error()) == nil {
 				return
 			}
-			httpError(w, http.StatusUnauthorized, err)
+			if strings.HasPrefix(r.URL.Path, "/v1/") {
+				httpapi.WriteProblem(w, r, http.StatusUnauthorized, "unauthorized", err.Error())
+			} else {
+				httpError(w, http.StatusUnauthorized, err)
+			}
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -772,6 +799,84 @@ func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleResume is the explicit lifecycle seam used by v1. Legacy clients
+// retain implicit wake-on-use behavior.
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	sb, err := s.ensureRunning(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.effectiveResources(sb))
+}
+
+// handlePublicFields persists descriptive state owned by the v1 adapter.
+func (s *Server) handlePublicFields(w http.ResponseWriter, r *http.Request) {
+	current, err := s.reg.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpError(w, http.StatusNotFound, err)
+		return
+	}
+	var body struct {
+		Name               *string            `json:"name"`
+		Metadata           *map[string]string `json:"metadata"`
+		SourceType         *string            `json:"source_type"`
+		SourceID           *string            `json:"source_id"`
+		TTLSeconds         *int               `json:"ttl_seconds"`
+		IdleTimeoutSeconds *int               `json:"idle_timeout_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	name, metadata := current.Name, current.Metadata
+	sourceType, sourceID := current.SourceType, current.SourceID
+	idle, expiresAt := current.HibernateAfterSec, current.ExpiresAt
+	if body.Name != nil {
+		name = *body.Name
+	}
+	if body.Metadata != nil {
+		metadata = *body.Metadata
+	}
+	if body.SourceType != nil {
+		sourceType = *body.SourceType
+	}
+	if body.SourceID != nil {
+		sourceID = *body.SourceID
+	}
+	if body.IdleTimeoutSeconds != nil {
+		idle = *body.IdleTimeoutSeconds
+	}
+	if body.TTLSeconds != nil {
+		expiresAt = nil
+		if *body.TTLSeconds > 0 {
+			expiry := time.Now().Add(time.Duration(*body.TTLSeconds) * time.Second)
+			expiresAt = &expiry
+		}
+	}
+	if err := validateName(name); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if idle < 0 {
+		httpError(w, 400, errors.New("idle_timeout_seconds must be non-negative"))
+		return
+	}
+	if len(metadata) > 64 {
+		httpError(w, 400, errors.New("metadata must contain at most 64 entries"))
+		return
+	}
+	updated, err := s.reg.UpdatePublicFields(r.Context(), current.ID, name, metadata, expiresAt, idle)
+	if err == nil && (sourceType != current.SourceType || sourceID != current.SourceID) {
+		updated, err = s.reg.SetPublicFields(r.Context(), current.ID, sourceType, sourceID, metadata)
+	}
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, s.effectiveResources(updated))
 }
 
 // --- internals ---

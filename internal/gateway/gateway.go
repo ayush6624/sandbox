@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/apiv1"
 	"github.com/ayush6624/sandbox/internal/client"
 	"github.com/ayush6624/sandbox/internal/cluster"
 	"github.com/ayush6624/sandbox/internal/httpapi"
@@ -222,10 +223,14 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", g.handleRegister)
+	mux.HandleFunc("POST /internal/v1/hosts:register", g.handleRegister)
 	mux.HandleFunc("GET /info", g.handleInfo)
 	mux.HandleFunc("GET /hosts", g.handleHosts)
+	mux.HandleFunc("GET /internal/v1/hosts", g.handleHosts)
 	mux.HandleFunc("GET /worker-release", g.handleWorkerRelease)
 	mux.HandleFunc("PUT /worker-release", g.handleWorkerRelease)
+	mux.HandleFunc("GET /internal/v1/worker-release", g.handleWorkerRelease)
+	mux.HandleFunc("PUT /internal/v1/worker-release", g.handleWorkerRelease)
 	mux.HandleFunc("GET /metrics", g.handleMetrics)
 	// Per-host detail, federated: the gateway scrapes each live host's /metrics
 	// (it already holds their addr+token) and re-exports every series with a
@@ -237,6 +242,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	// Drain moves a host's sandboxes elsewhere (release on the source, adopt on
 	// a target) — maintenance, or rebalancing (roadmap B4).
 	mux.HandleFunc("POST /hosts/{host}/drain", g.handleDrain)
+	mux.HandleFunc("POST /internal/v1/hosts/{action}", g.handleInternalHostAction)
 	// Every id-scoped request (GET/DELETE /sandboxes/{id} and all
 	// /sandboxes/{id}/... subpaths, including the /shell WebSocket and the
 	// /exec/stream NDJSON stream) is reverse-proxied to the owning host.
@@ -248,7 +254,9 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /snapshots/{id}/restore", g.handleSnapshotOp)
 	mux.HandleFunc("POST /snapshots/{id}/fanout", g.handleSnapshotOp)
 	mux.HandleFunc("POST /snapshots/{id}/rename", g.handleSnapshotOp)
+	mux.HandleFunc("PATCH /snapshots/{id}/public-fields", g.handleSnapshotOp)
 	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
+	apiv1.New(mux).Register(mux)
 
 	srv := &http.Server{Addr: addr, Handler: httpapi.Middleware(bearerAuth(g.token, mux))}
 	errc := make(chan error, 1)
@@ -266,6 +274,16 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 		}
 		return err
 	}
+}
+
+func (g *Gateway) handleInternalHostAction(w http.ResponseWriter, r *http.Request) {
+	hostID, action, ok := strings.Cut(r.PathValue("action"), ":")
+	if !ok || hostID == "" || action != "drain" {
+		http.NotFound(w, r)
+		return
+	}
+	r.SetPathValue("host", hostID)
+	g.handleDrain(w, r)
 }
 
 // --- host registration ---
@@ -1207,7 +1225,11 @@ func bearerAuth(token string, next http.Handler) http.Handler {
 			if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseUnauthorized, err.Error()) == nil {
 				return
 			}
-			httpError(w, http.StatusUnauthorized, err)
+			if strings.HasPrefix(r.URL.Path, "/v1/") {
+				httpapi.WriteProblem(w, r, http.StatusUnauthorized, "unauthorized", err.Error())
+			} else {
+				httpError(w, http.StatusUnauthorized, err)
+			}
 			return
 		}
 		next.ServeHTTP(w, r)

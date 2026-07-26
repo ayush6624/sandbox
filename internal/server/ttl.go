@@ -64,6 +64,20 @@ func (s *Server) reapExpired(ctx context.Context) {
 					fmt.Fprintf(os.Stderr, "reaper: destroy %s: %v\n", sb.ID, err)
 				}
 			}
+			expiredSnapshots, err := s.reg.ExpiredSnapshots(ctx, now)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "reaper: list expired snapshots: %v\n", err)
+				continue
+			}
+			for _, snap := range expiredSnapshots {
+				fmt.Fprintf(os.Stderr, "reaper: deleting expired snapshot %s (expired %s)\n",
+					snap.ID, snap.ExpiresAt.Format(time.RFC3339))
+				if err := s.deleteSnapshot(context.Background(), snap.ID); err != nil {
+					// An in-use snapshot remains valid and is retried after its
+					// dependent resources are deleted.
+					fmt.Fprintf(os.Stderr, "reaper: delete snapshot %s: %v\n", snap.ID, err)
+				}
+			}
 		}
 	}
 }

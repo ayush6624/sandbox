@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -30,17 +31,20 @@ type Sandbox struct {
 	ID string `json:"id"`
 	// Name is a free-form display label, settable at create time and via
 	// POST /sandboxes/{id}/rename. Not unique, not a lookup key; "" = unnamed.
-	Name       string     `json:"name,omitempty"`
-	PID        int        `json:"pid"`
-	VMID       string     `json:"vm_id"`
-	SocketPath string     `json:"socket_path"`
-	TapDevice  string     `json:"tap_device"`
-	GuestIP    string     `json:"guest_ip"`
-	RootfsPath string     `json:"rootfs_path"`
-	Status     string     `json:"status"`
-	CreatedAt  time.Time  `json:"created_at"`
-	StoppedAt  *time.Time `json:"stopped_at,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"` // nil = no auto-destroy
+	Name       string            `json:"name,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	SourceType string            `json:"source_type,omitempty"`
+	SourceID   string            `json:"source_id,omitempty"`
+	PID        int               `json:"pid"`
+	VMID       string            `json:"vm_id"`
+	SocketPath string            `json:"socket_path"`
+	TapDevice  string            `json:"tap_device"`
+	GuestIP    string            `json:"guest_ip"`
+	RootfsPath string            `json:"rootfs_path"`
+	Status     string            `json:"status"`
+	CreatedAt  time.Time         `json:"created_at"`
+	StoppedAt  *time.Time        `json:"stopped_at,omitempty"`
+	ExpiresAt  *time.Time        `json:"expires_at,omitempty"` // nil = no auto-destroy
 	// HibernateAfterSec overrides the host's idle-hibernation window for this
 	// sandbox: >0 = seconds of idleness before freezing, -1 = never hibernate,
 	// 0 = inherit the host config.
@@ -90,8 +94,12 @@ type Snapshot struct {
 	// SourceRootfsPath is the disk path baked into the Firecracker snapshot —
 	// a restore must place its rootfs copy here, or Firecracker can't reattach
 	// the block device.
-	SourceRootfsPath string    `json:"source_rootfs_path"`
-	CreatedAt        time.Time `json:"created_at"`
+	SourceRootfsPath string     `json:"source_rootfs_path"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	// Durability is "local" until the immutable artifacts and commit marker
+	// are present in the configured object store, then "durable".
+	Durability string `json:"durability,omitempty"`
 	// Golden marks the server-managed pristine snapshot that POST /sandboxes
 	// clones from. At most one snapshot is golden (partial unique index).
 	Golden bool `json:"golden,omitempty"`
@@ -321,6 +329,9 @@ func (r *Registry) migrate() error {
 		vcpus       INTEGER NOT NULL DEFAULT 0,
 		mem_mib     INTEGER NOT NULL DEFAULT 0,
 		name        TEXT NOT NULL DEFAULT ''
+		, metadata  TEXT NOT NULL DEFAULT '{}'
+		, source_type TEXT NOT NULL DEFAULT 'default'
+		, source_id TEXT NOT NULL DEFAULT ''
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status = 'running';
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status = 'running';
@@ -349,6 +360,8 @@ func (r *Registry) migrate() error {
 		vcpus              INTEGER NOT NULL DEFAULT 0,
 		mem_mib            INTEGER NOT NULL DEFAULT 0,
 		name               TEXT NOT NULL DEFAULT ''
+		, expires_at        INTEGER
+		, durability       TEXT NOT NULL DEFAULT 'local'
 	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
@@ -426,6 +439,17 @@ func (r *Registry) migrate() error {
 	for _, col := range []string{
 		`ALTER TABLE sandboxes ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE snapshots ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE snapshots ADD COLUMN expires_at INTEGER`,
+		`ALTER TABLE snapshots ADD COLUMN durability TEXT NOT NULL DEFAULT 'local'`,
+	} {
+		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	for _, col := range []string{
+		`ALTER TABLE sandboxes ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE sandboxes ADD COLUMN source_type TEXT NOT NULL DEFAULT 'default'`,
+		`ALTER TABLE sandboxes ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return err
@@ -865,7 +889,7 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name`
+const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
@@ -879,9 +903,9 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 		format = FormatFull
 	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name)
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name, unixOrNil(s.ExpiresAt), snapshotDurability(s.Durability))
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
@@ -918,8 +942,67 @@ func (r *Registry) ListSnapshots(ctx context.Context) ([]Snapshot, error) {
 	return out, rows.Err()
 }
 
+// SetSnapshotPublicFields persists mutable management metadata without
+// changing the immutable snapshot artifacts.
+func (r *Registry) SetSnapshotPublicFields(ctx context.Context, id, name string, expiresAt *time.Time) (Snapshot, error) {
+	res, err := r.db.ExecContext(ctx, `UPDATE snapshots SET name=?, expires_at=? WHERE id=? AND golden=0`,
+		name, unixOrNil(expiresAt), id)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Snapshot{}, sql.ErrNoRows
+	}
+	return r.GetSnapshot(ctx, id)
+}
+
+// SetSnapshotDurability records whether the object-store commit marker exists.
+func (r *Registry) SetSnapshotDurability(ctx context.Context, id, durability string) error {
+	if durability != "local" && durability != "durable" {
+		return fmt.Errorf("invalid snapshot durability %q", durability)
+	}
+	res, err := r.db.ExecContext(ctx, `UPDATE snapshots SET durability=? WHERE id=?`, durability, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ExpiredSnapshots returns non-golden snapshots whose retention deadline has
+// passed. Deletion still performs dependency checks.
+func (r *Registry) ExpiredSnapshots(ctx context.Context, now time.Time) ([]Snapshot, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=0 AND expires_at IS NOT NULL AND expires_at < ? ORDER BY expires_at`, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Snapshot
+	for rows.Next() {
+		s, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // DeleteSnapshot removes a snapshot row. The caller removes the artifact files.
 func (r *Registry) DeleteSnapshot(ctx context.Context, id string) error {
+	var dependencies int
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT
+		  (SELECT COUNT(*) FROM snapshots WHERE base_id=?1) +
+		  (SELECT COUNT(*) FROM sandboxes WHERE source_type='snapshot' AND source_id=?1)`,
+		id).Scan(&dependencies); err != nil {
+		return err
+	}
+	if dependencies > 0 {
+		return fmt.Errorf("%w: snapshot %s has %d dependent resources", ErrSnapshotInUse, id, dependencies)
+	}
 	res, err := r.db.ExecContext(ctx, `DELETE FROM snapshots WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -934,12 +1017,17 @@ func (r *Registry) DeleteSnapshot(ctx context.Context, id string) error {
 func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var s Snapshot
 	var createdAt int64
+	var expiresAt sql.NullInt64
 	var golden int
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name)
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability)
 	if err != nil {
 		return s, err
 	}
 	s.CreatedAt = time.Unix(createdAt, 0)
+	if expiresAt.Valid {
+		value := time.Unix(expiresAt.Int64, 0)
+		s.ExpiresAt = &value
+	}
 	s.Golden = golden == 1
 	if s.Format == "" {
 		s.Format = FormatFull
@@ -947,8 +1035,15 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 	return s, nil
 }
 
+func snapshotDurability(value string) string {
+	if value == "durable" {
+		return value
+	}
+	return "local"
+}
+
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
-const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name`
+const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name, metadata, source_type, source_id`
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -988,7 +1083,8 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 	var sb Sandbox
 	var createdAt int64
 	var stoppedAt, expiresAt sql.NullInt64
-	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name)
+	var metadata string
+	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name, &metadata, &sb.SourceType, &sb.SourceID)
 	if err != nil {
 		return sb, err
 	}
@@ -1001,7 +1097,47 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 		t := time.Unix(expiresAt.Int64, 0)
 		sb.ExpiresAt = &t
 	}
+	if err := json.Unmarshal([]byte(metadata), &sb.Metadata); err != nil {
+		return sb, fmt.Errorf("decode sandbox metadata: %w", err)
+	}
+	if sb.Metadata == nil {
+		sb.Metadata = map[string]string{}
+	}
 	return sb, nil
+}
+
+// SetPublicFields records v1-only descriptive state after a legacy creation
+// path has allocated the sandbox. It never changes runtime placement.
+func (r *Registry) SetPublicFields(ctx context.Context, id, sourceType, sourceID string, metadata map[string]string) (Sandbox, error) {
+	if sourceType == "" {
+		sourceType = "default"
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	if _, err := r.db.ExecContext(ctx, `UPDATE sandboxes SET source_type=?, source_id=?, metadata=? WHERE id=?`,
+		sourceType, sourceID, string(encoded), id); err != nil {
+		return Sandbox{}, err
+	}
+	return r.Get(ctx, id)
+}
+
+// UpdatePublicFields atomically changes the mutable v1 sandbox fields.
+func (r *Registry) UpdatePublicFields(ctx context.Context, id, name string, metadata map[string]string, expiresAt *time.Time, idleTimeout int) (Sandbox, error) {
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	res, err := r.db.ExecContext(ctx, `UPDATE sandboxes SET name=?, metadata=?, expires_at=?, hibernate_after_sec=? WHERE id=?`,
+		name, string(encoded), unixOrNil(expiresAt), idleTimeout, id)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Sandbox{}, sql.ErrNoRows
+	}
+	return r.Get(ctx, id)
 }
 
 func collectSandboxes(rows *sql.Rows) ([]Sandbox, error) {
@@ -1089,7 +1225,10 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 // resource pool (tap/IP/port) is in use. Handlers map it to 503 + Retry-After
 // (it clears as sandboxes are destroyed or the fleet scales), and the gateway
 // fails a create over to another host on it — unlike a genuine 500.
-var ErrPoolExhausted = errors.New("pool exhausted")
+var (
+	ErrPoolExhausted = errors.New("pool exhausted")
+	ErrSnapshotInUse = errors.New("snapshot in use")
+)
 
 // ErrMemExhausted marks a memory-budget admission rejection. It wraps
 // ErrPoolExhausted so every existing capacity path (503 + Retry-After,

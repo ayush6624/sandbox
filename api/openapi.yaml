@@ -14,6 +14,7 @@ tags:
   - {name: Snapshots}
   - {name: Templates}
   - {name: Operations}
+  - {name: Port forwards}
 paths:
   /v1/sandboxes:
     get:
@@ -100,6 +101,34 @@ paths:
       responses:
         '201': {description: Immutable snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/Snapshot'}}}}
         default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}/port-forwards:
+    get:
+      tags: [Port forwards]
+      operationId: listPortForwards
+      parameters:
+        - {$ref: '#/components/parameters/SandboxId'}
+      responses:
+        '200': {description: Active port forwards, content: {application/json: {schema: {$ref: '#/components/schemas/PortForwardList'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [Port forwards]
+      operationId: createPortForward
+      parameters:
+        - {$ref: '#/components/parameters/SandboxId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [guest_port]
+              properties:
+                guest_port: {type: integer, minimum: 1, maximum: 65535}
+              additionalProperties: false
+      responses:
+        '201': {description: Port forward created, content: {application/json: {schema: {$ref: '#/components/schemas/PortForward'}}}}
+        default: {$ref: '#/components/responses/Problem'}
   /v1/sandbox-batches:
     post:
       tags: [Sandboxes, Operations]
@@ -122,6 +151,14 @@ paths:
         '200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/SnapshotList'}}}}
         default: {$ref: '#/components/responses/Problem'}
   /v1/snapshots/{snapshot_id}:
+    get:
+      tags: [Snapshots]
+      operationId: getSnapshot
+      parameters:
+        - {name: snapshot_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Snapshot, content: {application/json: {schema: {$ref: '#/components/schemas/Snapshot'}}}}
+        default: {$ref: '#/components/responses/Problem'}
     delete:
       tags: [Snapshots]
       operationId: deleteSnapshot
@@ -140,6 +177,15 @@ paths:
         - {$ref: '#/components/parameters/PageToken'}
       responses:
         '200': {description: Template page, content: {application/json: {schema: {$ref: '#/components/schemas/TemplateList'}}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/templates/{template_id}:
+    get:
+      tags: [Templates]
+      operationId: getTemplate
+      parameters:
+        - {name: template_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Template, content: {application/json: {schema: {$ref: '#/components/schemas/Template'}}}}
         default: {$ref: '#/components/responses/Problem'}
   /v1/operations:
     get:
@@ -214,7 +260,7 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
-        status: {type: string, enum: [running, paused]}
+        status: {type: string, enum: [running, paused, deleting]}
         source: {$ref: '#/components/schemas/Source'}
         lifecycle: {$ref: '#/components/schemas/Lifecycle'}
         resources: {$ref: '#/components/schemas/Resources'}
@@ -238,6 +284,15 @@ components:
         id: {type: string}
         revision: {type: string}
         resources: {$ref: '#/components/schemas/Resources'}
+    PortForward:
+      type: object
+      required: [id, sandbox_id, guest_port, host_port, status]
+      properties:
+        id: {type: string}
+        sandbox_id: {type: string}
+        guest_port: {type: integer, minimum: 1, maximum: 65535}
+        host_port: {type: integer, minimum: 1, maximum: 65535}
+        status: {const: active}
     BatchItem:
       type: object
       required: [index]
@@ -291,6 +346,10 @@ components:
       type: object
       required: [operations]
       properties: {operations: {type: array, items: {$ref: '#/components/schemas/Operation'}}, next_page_token: {type: string}}
+    PortForwardList:
+      type: object
+      required: [port_forwards]
+      properties: {port_forwards: {type: array, items: {$ref: '#/components/schemas/PortForward'}}}
     CreateSandboxBatchRequest:
       type: object
       required: [count, sandbox]

@@ -93,6 +93,9 @@ func (s *Server) uploadSnapshot(snap registry.Snapshot) {
 		fmt.Fprintf(os.Stderr, "[snapshot %s] upload failed (snapshot stays host-local): %v\n", snap.ID, err)
 		return
 	}
+	if err := s.reg.SetSnapshotDurability(ctx, snap.ID, "durable"); err != nil {
+		fmt.Fprintf(os.Stderr, "[snapshot %s] record durability: %v\n", snap.ID, err)
+	}
 	fmt.Fprintf(os.Stderr, "[snapshot %s] uploaded to gs://%s (%s): mem=%dMiB rootfs=%dMiB payload in %s\n",
 		snap.ID, s.blob.Bucket(), snap.Format, memBytes>>20, rootfsBytes>>20, time.Since(t0).Round(time.Millisecond))
 }
@@ -221,6 +224,7 @@ func (s *Server) ensureSnapshotLocal(ctx context.Context, snapID string) (regist
 	row := meta
 	row.MemPath, row.StatePath, row.RootfsPath = memPath, statePath, rootfsPath
 	row.Golden = false
+	row.Durability = "durable"
 	if err := s.reg.CreateSnapshot(ctx, row); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, fmt.Errorf("record pulled snapshot: %w", err)

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -685,5 +686,80 @@ func TestNamesPersistAndRename(t *testing.T) {
 	}
 	if err := r.SetSnapshotName(ctx, "nope", "x"); err == nil {
 		t.Fatal("SetSnapshotName on unknown id must fail")
+	}
+}
+
+func TestSandboxPublicFieldsRoundTrip(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	sb, err := r.Create(ctx, "sb-public", "initial", "/tmp/sb-public.ext4", nil, "", 0, 2, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err = r.SetPublicFields(ctx, sb.ID, "snapshot", "snap_123", map[string]string{"run_id": "ci_456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.SourceType != "snapshot" || sb.SourceID != "snap_123" || sb.Metadata["run_id"] != "ci_456" {
+		t.Fatalf("public fields = %+v", sb)
+	}
+	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
+	sb, err = r.UpdatePublicFields(ctx, sb.ID, "renamed", map[string]string{"team": "runtime"}, &expiry, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.Name != "renamed" || sb.Metadata["team"] != "runtime" || sb.HibernateAfterSec != 300 ||
+		sb.ExpiresAt == nil || !sb.ExpiresAt.Equal(expiry) {
+		t.Fatalf("updated public fields = %+v", sb)
+	}
+	if _, err := r.UpdatePublicFields(ctx, "missing", "", nil, nil, 0); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing update error = %v", err)
+	}
+}
+
+func TestSnapshotLifecycleAndDependencyProtection(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	now := time.Now().Truncate(time.Second)
+	snap := Snapshot{
+		ID: "snap-public", SourceID: "source", TapDevice: "fc0", GuestIP: "172.16.0.10",
+		MemPath: "/tmp/mem", StatePath: "/tmp/state", RootfsPath: "/tmp/rootfs",
+		CreatedAt: now,
+	}
+	if err := r.CreateSnapshot(ctx, snap); err != nil {
+		t.Fatal(err)
+	}
+	expiry := now.Add(time.Minute)
+	got, err := r.SetSnapshotPublicFields(ctx, snap.ID, "release-candidate", &expiry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "release-candidate" || got.ExpiresAt == nil || !got.ExpiresAt.Equal(expiry) || got.Durability != "local" {
+		t.Fatalf("snapshot fields = %+v", got)
+	}
+	if err := r.SetSnapshotDurability(ctx, snap.ID, "durable"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = r.GetSnapshot(ctx, snap.ID)
+	if got.Durability != "durable" {
+		t.Fatalf("durability = %q", got.Durability)
+	}
+	if expired, err := r.ExpiredSnapshots(ctx, expiry.Add(time.Second)); err != nil || len(expired) != 1 {
+		t.Fatalf("expired = %+v, %v", expired, err)
+	}
+
+	sb, err := r.Create(ctx, "dependent", "", "/tmp/dependent", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.SetPublicFields(ctx, sb.ID, "snapshot", snap.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DeleteSnapshot(ctx, snap.ID); !errors.Is(err, ErrSnapshotInUse) {
+		t.Fatalf("dependent delete error = %v", err)
+	}
+	if err := r.Destroy(ctx, sb.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DeleteSnapshot(ctx, snap.ID); err != nil {
+		t.Fatalf("delete after dependent removal: %v", err)
 	}
 }

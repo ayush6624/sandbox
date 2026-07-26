@@ -622,9 +622,27 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 // snapshots may still reference them.
 func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.reg.DeleteSnapshot(r.Context(), id); err != nil {
-		httpError(w, 404, err)
+	if err := s.deleteSnapshot(r.Context(), id); err != nil {
+		code := http.StatusNotFound
+		if errors.Is(err, registry.ErrSnapshotInUse) {
+			code = http.StatusConflict
+		}
+		httpError(w, code, err)
 		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteSnapshot(ctx context.Context, id string) error {
+	snap, err := s.reg.GetSnapshot(ctx, id)
+	if err != nil {
+		return err
+	}
+	if snap.Golden {
+		return fmt.Errorf("%w: server-managed template snapshot cannot be deleted", registry.ErrSnapshotInUse)
+	}
+	if err := s.reg.DeleteSnapshot(ctx, id); err != nil {
+		return err
 	}
 	// If the golden snapshot was deleted, stop hot-creating from it. Creates
 	// cold-boot until the next server restart rebuilds a golden snapshot.
@@ -635,5 +653,33 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	if s.blob != nil {
 		go s.deleteSnapshotObjects(id)
 	}
-	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// handleSnapshotPublicFields persists public retention metadata after the
+// immutable snapshot has been captured.
+func (s *Server) handleSnapshotPublicFields(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name             string `json:"name"`
+		RetentionSeconds int    `json:"retention_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if body.RetentionSeconds < 0 {
+		httpError(w, 400, errors.New("retention_seconds must be non-negative"))
+		return
+	}
+	var expiresAt *time.Time
+	if body.RetentionSeconds > 0 {
+		value := time.Now().Add(time.Duration(body.RetentionSeconds) * time.Second)
+		expiresAt = &value
+	}
+	snap, err := s.reg.SetSnapshotPublicFields(r.Context(), r.PathValue("id"), body.Name, expiresAt)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
