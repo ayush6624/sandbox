@@ -76,10 +76,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${REMOTE_DIR}
+ExecStartPre=/bin/sh -c 'umask 077; printf "%s\\n" "${HOST_TOKEN}" > /run/sandbox-worker.tokens; printf "%s\\n" "${GATEWAY_CONTROL_TOKEN}" > /run/sandbox-gateway-control.tokens'
 ExecStart=${REMOTE_DIR}/sandbox serve --config ${CONFIG} \\
   --listen ${ip}:${HOST_PORT} --management-transport private_proxy \\
-  --worker-token ${HOST_TOKEN} \\
-  --gateway ${GW_URL} --gateway-token ${GATEWAY_CONTROL_TOKEN} --advertise http://${ip}:${HOST_PORT}
+  --worker-token-file /run/sandbox-worker.tokens \\
+  --gateway ${GW_URL} --gateway-token-file /run/sandbox-gateway-control.tokens --advertise http://${ip}:${HOST_PORT}
 Restart=always
 RestartSec=2
 
@@ -98,8 +99,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${REMOTE_DIR}
+ExecStartPre=/bin/sh -c 'umask 077; printf "%s\\n" "${GATEWAY_TOKEN}" > /run/sandbox-client.tokens; printf "%s\\n" "${GATEWAY_CONTROL_TOKEN}" > /run/sandbox-worker-control.tokens'
 ExecStart=${REMOTE_DIR}/sandbox gateway --listen ${GW_IP}:${GW_PORT} \\
-  --management-transport private_proxy --token ${GATEWAY_TOKEN} --worker-token ${GATEWAY_CONTROL_TOKEN}
+  --management-transport private_proxy --token-file /run/sandbox-client.tokens \\
+  --worker-token-file /run/sandbox-worker-control.tokens
 Restart=always
 RestartSec=2
 

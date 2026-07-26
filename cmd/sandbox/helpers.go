@@ -34,7 +34,10 @@ func dialClient() (*config.Config, *client.Client, error) {
 	if gwAddr != "" {
 		token := gwAddrToken
 		if token == "" {
-			token = cfg.GatewayToken
+			token = cfg.GatewayAPIToken
+			if token == "" && cfg.ManagementTransport == "development" {
+				token = cfg.GatewayToken
+			}
 		}
 		return cfg, client.NewHTTP(gwAddr, token), nil
 	}

@@ -17,17 +17,20 @@ import (
 )
 
 var (
-	listenAddr    string
-	apiToken      string
-	workerToken   string
-	gatewayURL    string
-	gatewayToken  string
-	transportMode string
-	tlsCertFile   string
-	tlsKeyFile    string
-	advertiseAddr string
-	hostID        string
-	workerRelease string
+	listenAddr       string
+	apiToken         string
+	apiTokenFile     string
+	workerToken      string
+	workerTokenFile  string
+	gatewayURL       string
+	gatewayToken     string
+	gatewayTokenFile string
+	transportMode    string
+	tlsCertFile      string
+	tlsKeyFile       string
+	advertiseAddr    string
+	hostID           string
+	workerRelease    string
 )
 
 func serveCmd() *cobra.Command {
@@ -39,9 +42,12 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfgPath, "config", "configs/devbox.json", "path to JSON config")
 	cmd.Flags().StringVar(&listenAddr, "listen", "", "also serve the API on this TCP address (requires --token); overrides config listen_addr")
 	cmd.Flags().StringVar(&apiToken, "token", "", "bearer token for the TCP listener; overrides config api_token")
+	cmd.Flags().StringVar(&apiTokenFile, "token-file", "", "reloadable newline-delimited client API credentials")
 	cmd.Flags().StringVar(&workerToken, "worker-token", "", "gateway-to-worker bearer credential (must differ from the client token in production)")
+	cmd.Flags().StringVar(&workerTokenFile, "worker-token-file", "", "reloadable newline-delimited gateway-to-worker credentials")
 	cmd.Flags().StringVar(&gatewayURL, "gateway", "", "register with this gateway URL and heartbeat (requires --listen); overrides config gateway_url")
 	cmd.Flags().StringVar(&gatewayToken, "gateway-token", "", "worker-control bearer credential presented to the gateway")
+	cmd.Flags().StringVar(&gatewayTokenFile, "gateway-token-file", "", "reloadable worker-control credentials presented to the gateway")
 	cmd.Flags().StringVar(&transportMode, "management-transport", "", "TCP security mode: tls, private_proxy, or explicit development")
 	cmd.Flags().StringVar(&tlsCertFile, "tls-cert", "", "TLS certificate file (atomically replace to rotate)")
 	cmd.Flags().StringVar(&tlsKeyFile, "tls-key", "", "TLS private-key file (atomically replace to rotate)")
@@ -62,14 +68,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if apiToken != "" {
 		cfg.APIToken = apiToken
 	}
+	if apiTokenFile != "" {
+		cfg.APITokenFile = apiTokenFile
+	}
 	if workerToken != "" {
 		cfg.WorkerToken = workerToken
+	}
+	if workerTokenFile != "" {
+		cfg.WorkerTokenFile = workerTokenFile
 	}
 	if gatewayURL != "" {
 		cfg.GatewayURL = gatewayURL
 	}
 	if gatewayToken != "" {
 		cfg.GatewayControlToken = gatewayToken
+	}
+	if gatewayTokenFile != "" {
+		cfg.GatewayControlTokenFile = gatewayTokenFile
 	}
 	if transportMode != "" {
 		cfg.ManagementTransport = transportMode

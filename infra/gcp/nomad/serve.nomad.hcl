@@ -79,6 +79,9 @@ job "sandbox-serve" {
 set -euo pipefail
 cd "$${NOMAD_TASK_DIR}"
 chmod +x bin/sandbox bin/sandboxd
+umask 077
+printf '%s\n' "$${HOST_TOKEN}" > worker.tokens
+printf '%s\n' "$${GATEWAY_CONTROL_TOKEN}" > gateway-control.tokens
 # Boot-phase stamp (internal/server/bootphase.go). Nomad fetches the `artifact`
 # blocks BEFORE running this script, so reaching here means "alloc placed +
 # release binaries downloaded" — the gap from nomad_started to here is the
@@ -102,8 +105,8 @@ exec ./bin/sandbox serve --config config.json \
   --advertise "http://$${NODE_IP}:8080" \
   --host-id "$${HOST_ID}" \
   --worker-release "$${WORKER_RELEASE}" \
-  --worker-token "$${HOST_TOKEN}" \
-  --gateway "$${GATEWAY_URL}" --gateway-token "$${GATEWAY_CONTROL_TOKEN}"
+  --worker-token-file "$${NOMAD_TASK_DIR}/worker.tokens" \
+  --gateway "$${GATEWAY_URL}" --gateway-token-file "$${NOMAD_TASK_DIR}/gateway-control.tokens"
 EOT
       }
 

@@ -1,9 +1,16 @@
 package management
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestTransportValidation(t *testing.T) {
@@ -68,5 +75,67 @@ func TestTLSConfigRequiresReadablePair(t *testing.T) {
 	}
 	if _, err := (Transport{Mode: TransportTLS, CertFile: cert, KeyFile: key}).TLSConfig(); err == nil {
 		t.Fatal("malformed TLS pair accepted")
+	}
+}
+
+func TestCertificateReloadsAfterAtomicRotation(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	writeTestKeyPair(t, certPath, keyPath, 1)
+	reloader, err := newCertificateReloader(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := reloader.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDER := append([]byte(nil), before.Certificate[0]...)
+
+	nextCert := certPath + ".next"
+	nextKey := keyPath + ".next"
+	writeTestKeyPair(t, nextCert, nextKey, 2)
+	if err := os.Rename(nextCert, certPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(nextKey, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := reloader.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeDER) == string(after.Certificate[0]) {
+		t.Fatal("certificate did not reload after atomic replacement")
+	}
+}
+
+func writeTestKeyPair(t *testing.T, certPath, keyPath string, serial int64) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: "management.test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"management.test"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

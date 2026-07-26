@@ -68,6 +68,12 @@ func (c *Credentials) reload(required bool) error {
 		}
 		return nil // retain the last known-good set during an atomic rotation
 	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if required {
+			return fmt.Errorf("credential file %s must not be group/world accessible (mode %04o)", c.file, info.Mode().Perm())
+		}
+		return nil
+	}
 	c.mu.RLock()
 	unchanged := info.ModTime().Equal(c.modTime) && info.Size() == c.size
 	c.mu.RUnlock()

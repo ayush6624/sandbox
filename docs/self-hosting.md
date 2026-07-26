@@ -129,10 +129,13 @@ the file.
 | Field | Default | Description |
 | --- | --- | --- |
 | `socket_path` | `/run/sandbox.sock` | API Unix socket |
-| `listen_addr` | — | optional TCP listener (`ip:port`); requires `api_token` |
-| `api_token` | — | bearer token for the TCP listener |
-| `gateway_url` / `gateway_token` | — | register + heartbeat to a gateway |
-| `advertise_addr` | `listen_addr` | address the gateway dials back |
+| `listen_addr` / `management_transport` | — | optional TCP listener; transport must be `tls`, `private_proxy`, or explicit `development` |
+| `api_token(s)` / `api_token_file` | — | direct client credentials; token files reload atomically |
+| `worker_token(s)` / `worker_token_file` | — | gateway-to-worker callback credentials |
+| `gateway_url` / `gateway_control_token_file` | — | gateway endpoint and worker-registration credentials |
+| `gateway_api_token` | — | optional CLI client credential; never used for worker control |
+| `tls_cert_file` / `tls_key_file` | — | TLS 1.3 key pair, reloadable after atomic replacement |
+| `advertise_addr` | derived from listener | explicit HTTP(S) URL the gateway dials |
 | `host_id` | hostname | stable identity reported to the gateway |
 | `db_path` | `/var/lib/sandbox/registry.db` | SQLite registry |
 | `rootfs_base` | `/opt/fc/devbox-rootfs.ext4` | immutable base image |

@@ -129,6 +129,12 @@ func (r *certificateReloader) reload(required bool) error {
 		}
 		return nil
 	}
+	if keyInfo.Mode().Perm()&0o077 != 0 {
+		if required {
+			return fmt.Errorf("management TLS key must not be group/world accessible (mode %04o)", keyInfo.Mode().Perm())
+		}
+		return nil
+	}
 	r.mu.RLock()
 	unchanged := certInfo.ModTime().Equal(r.certMod) && keyInfo.ModTime().Equal(r.keyMod)
 	r.mu.RUnlock()

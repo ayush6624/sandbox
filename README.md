@@ -186,8 +186,9 @@ Default config at `configs/devbox.json`. Anything omitted falls back to defaults
 | Field | Default | Description |
 |-------|---------|-------------|
 | `socket_path` | `/run/sandbox.sock` | API Unix socket |
-| `listen_addr` / `api_token` | — | Optional TCP listener with bearer auth |
-| `gateway_url` / `gateway_token` | — | Register this host with a fleet gateway |
+| `listen_addr` / `management_transport` | — | Optional TLS or verified-private TCP listener |
+| `api_token_file` / `worker_token_file` | — | Rotatable client and gateway-callback credentials |
+| `gateway_url` / `gateway_control_token_file` | — | Register with a separate worker-control credential |
 | `db_path` | `/var/lib/sandbox/registry.db` | SQLite registry |
 | `rootfs_base` | `/opt/fc/devbox-rootfs.ext4` | Immutable base image |
 | `rootfs_dir` | `/var/lib/sandbox/rootfs` | Per-sandbox copies (XFS/btrfs → instant reflink clones) |

@@ -25,8 +25,9 @@ type Config struct {
 	WorkerTokenFile     string   `json:"worker_token_file"`
 
 	// --- Gateway registration (optional; multi-host) ---
-	GatewayURL              string   `json:"gateway_url"` // register/heartbeat target; requires listen_addr
-	GatewayToken            string   `json:"gateway_token"`
+	GatewayURL              string   `json:"gateway_url"`           // register/heartbeat target; requires listen_addr
+	GatewayToken            string   `json:"gateway_token"`         // legacy shared token; development only
+	GatewayAPIToken         string   `json:"gateway_api_token"`     // optional CLI client credential
 	GatewayControlToken     string   `json:"gateway_control_token"` // worker-to-gateway credential
 	GatewayControlTokens    []string `json:"gateway_control_tokens"`
 	GatewayControlTokenFile string   `json:"gateway_control_token_file"`

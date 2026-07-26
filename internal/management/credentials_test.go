@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestCredentialsRotateWithoutRestart(t *testing.T) {
@@ -89,6 +88,16 @@ func TestCredentialsHandlerUsesAuthorizationOnly(t *testing.T) {
 	}
 }
 
+func TestCredentialsRejectAccessibleFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("sekrit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewCredentials(nil, path); err == nil {
+		t.Fatal("group/world-readable credential file accepted")
+	}
+}
+
 func TestCredentialsStaticRotationOverlap(t *testing.T) {
 	creds, err := NewCredentials([]string{"next", "current", "next", ""}, "")
 	if err != nil {
@@ -104,7 +113,3 @@ func TestCredentialsStaticRotationOverlap(t *testing.T) {
 		t.Fatal("wrong credential accepted")
 	}
 }
-
-// Ensure the imported time package remains tied to the cache behavior: this
-// also catches accidental reload implementations that only compare mtimes.
-var _ = time.Time{}

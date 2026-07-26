@@ -45,6 +45,10 @@ UNIT
 
 # --- 2. sandbox gateway ---
 install -m 0755 "${REMOTE_DIR}/sandbox" /usr/local/bin/sandbox
+install -d -m 0700 /etc/sandbox-gateway
+printf '%s\n' "$GW_TOKEN" > /etc/sandbox-gateway/client.tokens
+printf '%s\n' "$GATEWAY_CONTROL_TOKEN" > /etc/sandbox-gateway/worker-control.tokens
+chmod 0600 /etc/sandbox-gateway/client.tokens /etc/sandbox-gateway/worker-control.tokens
 cat >/etc/systemd/system/sandbox-gateway.service <<UNIT
 [Unit]
 Description=sandbox multi-host gateway (control plane)
@@ -55,7 +59,8 @@ StateDirectory=sandbox-gateway
 Environment=SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
 ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --management-transport private_proxy \
-  --token ${GW_TOKEN} --worker-token ${GATEWAY_CONTROL_TOKEN} \
+  --token-file /etc/sandbox-gateway/client.tokens \
+  --worker-token-file /etc/sandbox-gateway/worker-control.tokens \
   --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
   --worker-release-file /var/lib/sandbox-gateway/worker-release
 # Single-writer invariant: Nomad Autoscaler is the sole process allowed to
