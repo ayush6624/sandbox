@@ -136,10 +136,26 @@ type Config struct {
 
 	// --- VM template ---
 	FirecrackerBin string `json:"firecracker_bin"`
-	KernelImage    string `json:"kernel_image"`
-	KernelArgs     string `json:"kernel_args"`
-	Vcpus          int64  `json:"vcpus"`
-	MemMIB         int64  `json:"mem_mib"`
+	// VMIsolation selects the VMM host boundary. "jailer" is required for
+	// production; "direct" is an explicit development-only escape hatch.
+	VMIsolation             string `json:"vm_isolation"`
+	JailerBin               string `json:"jailer_bin"`
+	JailerChrootBase        string `json:"jailer_chroot_base"`
+	JailerUIDStart          int    `json:"jailer_uid_start"`
+	JailerGIDStart          int    `json:"jailer_gid_start"`
+	JailerIdentityCount     int    `json:"jailer_identity_count"`
+	JailerMemoryOverheadMIB int64  `json:"jailer_memory_overhead_mib"`
+	JailerPIDsMax           int64  `json:"jailer_pids_max"`
+	JailerCPUWeight         int64  `json:"jailer_cpu_weight"`
+	JailerCPUPeriodUS       int64  `json:"jailer_cpu_period_us"`
+	JailerIOReadBPS         int64  `json:"jailer_io_read_bps"`
+	JailerIOWriteBPS        int64  `json:"jailer_io_write_bps"`
+	JailerNoFile            uint64 `json:"jailer_no_file"`
+	JailerFileSize          uint64 `json:"jailer_file_size"`
+	KernelImage             string `json:"kernel_image"`
+	KernelArgs              string `json:"kernel_args"`
+	Vcpus                   int64  `json:"vcpus"`
+	MemMIB                  int64  `json:"mem_mib"`
 	// DisableSeccomp is a development-only escape hatch. Firecracker's built-in
 	// restrictive seccomp filters are enabled by default on every launch path.
 	DisableSeccomp bool `json:"disable_seccomp"`
@@ -203,6 +219,50 @@ func (c *Config) Defaults() {
 	if c.FirecrackerBin == "" {
 		c.FirecrackerBin = "/usr/local/bin/firecracker"
 	}
+	if c.VMIsolation == "" {
+		c.VMIsolation = "direct"
+	}
+	if c.VMIsolation == "jailer" {
+		if c.JailerBin == "" {
+			c.JailerBin = "/usr/local/bin/jailer"
+		}
+		if c.JailerChrootBase == "" {
+			c.JailerChrootBase = "/mnt/sandbox-data/jailer"
+		}
+		if c.JailerUIDStart == 0 {
+			c.JailerUIDStart = 200000
+		}
+		if c.JailerGIDStart == 0 {
+			c.JailerGIDStart = c.JailerUIDStart
+		}
+		if c.JailerIdentityCount == 0 {
+			c.JailerIdentityCount = 4096
+		}
+		if c.JailerMemoryOverheadMIB == 0 {
+			c.JailerMemoryOverheadMIB = 256
+		}
+		if c.JailerPIDsMax == 0 {
+			c.JailerPIDsMax = 64
+		}
+		if c.JailerCPUWeight == 0 {
+			c.JailerCPUWeight = 100
+		}
+		if c.JailerCPUPeriodUS == 0 {
+			c.JailerCPUPeriodUS = 100000
+		}
+		if c.JailerIOReadBPS == 0 {
+			c.JailerIOReadBPS = 256 << 20
+		}
+		if c.JailerIOWriteBPS == 0 {
+			c.JailerIOWriteBPS = 256 << 20
+		}
+		if c.JailerNoFile == 0 {
+			c.JailerNoFile = 256
+		}
+		if c.JailerFileSize == 0 {
+			c.JailerFileSize = 64 << 30
+		}
+	}
 	if c.KernelImage == "" {
 		c.KernelImage = "/opt/fc/vmlinux"
 	}
@@ -259,6 +319,22 @@ func Load(path string) (*Config, error) {
 	}
 	if c.FirecrackerLogMaxFiles < 0 {
 		return nil, fmt.Errorf("decode %s: firecracker_log_max_files must be >= 0", path)
+	}
+	if c.VMIsolation != "direct" && c.VMIsolation != "jailer" {
+		return nil, fmt.Errorf("decode %s: vm_isolation must be direct or jailer", path)
+	}
+	if c.VMIsolation == "jailer" {
+		if c.DisableSeccomp {
+			return nil, fmt.Errorf("decode %s: disable_seccomp is forbidden with vm_isolation=jailer", path)
+		}
+		if c.JailerUIDStart <= 0 || c.JailerGIDStart <= 0 || c.JailerIdentityCount <= 0 {
+			return nil, fmt.Errorf("decode %s: jailer identity pool must be positive", path)
+		}
+		if c.JailerMemoryOverheadMIB <= 0 || c.JailerPIDsMax <= 0 || c.JailerCPUWeight < 1 || c.JailerCPUWeight > 10000 ||
+			c.JailerCPUPeriodUS <= 0 || c.JailerIOReadBPS <= 0 || c.JailerIOWriteBPS <= 0 ||
+			c.JailerNoFile <= 0 || c.JailerFileSize <= 0 {
+			return nil, fmt.Errorf("decode %s: jailer resource limits must be positive and cpu weight must be 1..10000", path)
+		}
 	}
 	return &c, nil
 }

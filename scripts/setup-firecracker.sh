@@ -7,8 +7,10 @@ ARCH="$(uname -m)"
 
 echo "==> Installing Firecracker ${FC_VERSION} (${ARCH})"
 
-if command -v firecracker &>/dev/null; then
-  echo "  Firecracker already installed: $(firecracker --version 2>&1 | head -1)"
+if command -v firecracker &>/dev/null && command -v jailer &>/dev/null && \
+   firecracker --version 2>&1 | grep -q "${FC_VERSION#v}" && \
+   jailer --version 2>&1 | grep -q "${FC_VERSION#v}"; then
+  echo "  Matching binaries already installed: $(firecracker --version 2>&1 | head -1)"
   exit 0
 fi
 

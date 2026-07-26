@@ -96,6 +96,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 		return " (restrictive Firecracker filters enabled)", nil
 	})
+	if cfg.VMIsolation == "jailer" {
+		check("Jailer isolation", func() (string, error) {
+			return checkJailerPrerequisites(cfg)
+		})
+	} else {
+		warnCheck("Jailer isolation", func() (string, error) {
+			return checkJailerPrerequisites(cfg)
+		})
+	}
 	check("VMM log bound", func() (string, error) {
 		if cfg.FirecrackerLogMaxBytes <= 0 {
 			return "", fmt.Errorf("firecracker_log_max_bytes must be positive")

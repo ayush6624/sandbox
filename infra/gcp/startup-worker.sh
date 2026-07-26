@@ -56,7 +56,9 @@ mountpoint -q "$XFS_MNT" || mount "$XFS_MNT"
 # to fill the whole block device. No-op when already full (blank/freshly-mkfs'd
 # disks, or equal sizes), so it's safe on every boot.
 xfs_growfs "$XFS_MNT" || true
-mkdir -p "$XFS_MNT"/{base,rootfs,snapshots}
+mkdir -p "$XFS_MNT"/{base,rootfs,snapshots,jailer}
+chown root:root "$XFS_MNT/jailer"
+chmod 0755 "$XFS_MNT/jailer"
 phase data_disk_ready
 
 #############################################

@@ -221,7 +221,9 @@ XFS_DEV=/dev/disk/by-id/google-sandbox-xfs
 mkfs.xfs -f "$XFS_DEV"
 mkdir -p /mnt/sandbox-data
 mount "$XFS_DEV" /mnt/sandbox-data
-mkdir -p /mnt/sandbox-data/base /mnt/sandbox-data/rootfs /mnt/sandbox-data/snapshots
+mkdir -p /mnt/sandbox-data/base /mnt/sandbox-data/rootfs /mnt/sandbox-data/snapshots /mnt/sandbox-data/jailer
+chown root:root /mnt/sandbox-data/jailer
+chmod 0755 /mnt/sandbox-data/jailer
 # Stage the base rootfs (sandboxd baked at image time) preserving mtime + the
 # .agent-stamp, so its recorded BaseMtime stays valid on adopting workers and
 # their boot-time install-agent stays a no-op. The stamp is REQUIRED here: a
@@ -235,18 +237,22 @@ sed 's#"snapshot_bucket":[[:space:]]*"[^"]*"#"snapshot_bucket": ""#' \
   /opt/sandbox-bake/configs/devbox-gcp.json > /tmp/golden-bake.json
 cd /opt/sandbox-bake
 chmod +x bin/sandbox bin/sandboxd
-nohup ./bin/sandbox serve --config /tmp/golden-bake.json > /tmp/golden-serve.log 2>&1 &
-SRV=$!
+rm -f /tmp/golden-serve.log
+systemd-run --unit=sandbox-golden-bake --collect \
+  --property=MemoryMax=4G --property=Delegate=yes \
+  --property=StandardOutput=append:/tmp/golden-serve.log \
+  --property=StandardError=append:/tmp/golden-serve.log \
+  /opt/sandbox-bake/bin/sandbox serve --config /tmp/golden-bake.json
 ok=0
 for _ in $(seq 1 180); do
   if grep -q "creates are hot" /tmp/golden-serve.log; then ok=1; break; fi
-  kill -0 "$SRV" 2>/dev/null || { echo "serve exited before golden was ready"; break; }
+  systemctl is-active --quiet sandbox-golden-bake || { echo "serve exited before golden was ready"; break; }
   sleep 1
 done
 [ "$ok" = 1 ] || { echo "=== golden-serve.log ==="; cat /tmp/golden-serve.log; exit 1; }
 # Graceful stop so the golden artifacts + manifest are fully flushed to the disk.
-./bin/sandbox stop-server || kill -TERM "$SRV" || true
-for _ in $(seq 1 60); do kill -0 "$SRV" 2>/dev/null || break; sleep 1; done
+systemctl stop sandbox-golden-bake || true
+for _ in $(seq 1 60); do systemctl is-active --quiet sandbox-golden-bake || break; sleep 1; done
 test -f /mnt/sandbox-data/snapshots/golden.json || { echo "FATAL: golden.json manifest missing"; ls -la /mnt/sandbox-data/snapshots; exit 1; }
 echo "=== golden manifest ==="; cat /mnt/sandbox-data/snapshots/golden.json
 sync

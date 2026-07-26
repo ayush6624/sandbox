@@ -38,7 +38,9 @@ if [ -e "$XFS_DEV" ]; then
   grep -q "$XFS_UUID" /etc/fstab || \
     echo "UUID=$XFS_UUID $XFS_MNT xfs defaults,nofail 0 2" | sudo tee -a /etc/fstab >/dev/null
   mountpoint -q "$XFS_MNT" || sudo mount "$XFS_MNT"
-  sudo mkdir -p "$XFS_MNT"/{base,rootfs,snapshots}
+  sudo mkdir -p "$XFS_MNT"/{base,rootfs,snapshots,jailer}
+  sudo chown root:root "$XFS_MNT/jailer"
+  sudo chmod 0755 "$XFS_MNT/jailer"
   BASE_ASSET_DIR="$XFS_MNT/base"
   echo "  XFS mounted at $XFS_MNT ($(sudo xfs_info "$XFS_MNT" | grep -o 'reflink=[01]'))"
 else

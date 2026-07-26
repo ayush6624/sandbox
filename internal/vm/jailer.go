@@ -58,6 +58,127 @@ func newJailerProcessLauncher(cfg JailerConfig) ProcessLauncher {
 	return &jailerProcessLauncher{cfg: cfg}
 }
 
+// CheckJailerPrerequisites performs the read-only production gate used by
+// doctor and serve before any VMM is admitted.
+func CheckJailerPrerequisites(cfg JailerConfig, firecrackerBin, rootfsBase, rootfsDir, snapshotDir string) (string, error) {
+	cfg.defaults()
+	if os.Geteuid() != 0 {
+		return "", fmt.Errorf("jailer production profile requires root")
+	}
+	if err := validateTrustedFile(cfg.JailerBin, 0, true); err != nil {
+		return "", fmt.Errorf("jailer binary: %w", err)
+	}
+	if err := validateTrustedFile(firecrackerBin, 0, true); err != nil {
+		return "", fmt.Errorf("firecracker binary: %w", err)
+	}
+	jailerVersion, err := executableVersion(cfg.JailerBin)
+	if err != nil {
+		return "", fmt.Errorf("jailer version: %w", err)
+	}
+	firecrackerVersion, err := executableVersion(firecrackerBin)
+	if err != nil {
+		return "", fmt.Errorf("firecracker version: %w", err)
+	}
+	if jailerVersion != firecrackerVersion {
+		return "", fmt.Errorf("jailer %s does not match firecracker %s", jailerVersion, firecrackerVersion)
+	}
+	st, err := os.Stat(cfg.ChrootBaseDir)
+	if err != nil || !st.IsDir() {
+		return "", fmt.Errorf("jailer chroot base must already exist: %w", err)
+	}
+	if err := validateTrustedParents(filepath.Join(cfg.ChrootBaseDir, "sentinel"), 0); err != nil {
+		return "", fmt.Errorf("jailer chroot base: %w", err)
+	}
+	baseDev, err := pathDevice(cfg.ChrootBaseDir)
+	if err != nil {
+		return "", err
+	}
+	for name, path := range map[string]string{
+		"rootfs base": rootfsBase, "rootfs directory": rootfsDir, "snapshot directory": snapshotDir,
+	} {
+		dev, err := pathDevice(path)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
+		if dev != baseDev {
+			return "", fmt.Errorf("%s %s is not on the jailer's reflink filesystem", name, path)
+		}
+	}
+	if err := checkIdentityRangeUnused(cfg.UIDStart, cfg.IdentityCount); err != nil {
+		return "", err
+	}
+	rel, err := currentUnifiedCgroup()
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(rel) == "sandbox-control" {
+		rel = filepath.Dir(rel)
+	}
+	task := filepath.Join(cfg.CgroupRoot, rel)
+	limit, err := os.ReadFile(filepath.Join(task, "memory.max"))
+	if err != nil || strings.TrimSpace(string(limit)) == "max" {
+		return "", fmt.Errorf("serve task cgroup must have a finite aggregate memory.max")
+	}
+	controllers, err := os.ReadFile(filepath.Join(task, "cgroup.controllers"))
+	if err != nil {
+		return "", fmt.Errorf("read task cgroup controllers: %w", err)
+	}
+	have := make(map[string]bool)
+	for _, controller := range strings.Fields(string(controllers)) {
+		have[controller] = true
+	}
+	for _, controller := range []string{"cpu", "memory", "pids", "io"} {
+		if !have[controller] {
+			return "", fmt.Errorf("serve task does not delegate cgroup v2 %s controller", controller)
+		}
+	}
+	return fmt.Sprintf(" (jailer/firecracker %s, task cgroup %s, UID/GID pool %d..%d)",
+		firecrackerVersion, rel, cfg.UIDStart, cfg.UIDStart+cfg.IdentityCount-1), nil
+}
+
+func executableVersion(path string) (string, error) {
+	out, err := exec.Command(path, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s --version: %w", path, err)
+	}
+	for _, field := range strings.Fields(string(out)) {
+		value := strings.TrimPrefix(field, "v")
+		parts := strings.Split(value, ".")
+		if len(parts) != 3 {
+			continue
+		}
+		patch := strings.TrimRight(parts[2], ",;)")
+		if _, err := strconv.Atoi(parts[0]); err != nil {
+			continue
+		}
+		if _, err := strconv.Atoi(parts[1]); err != nil {
+			continue
+		}
+		if _, err := strconv.Atoi(patch); err == nil {
+			return strings.Join([]string{parts[0], parts[1], patch}, "."), nil
+		}
+	}
+	return "", fmt.Errorf("no semantic version in %q", strings.TrimSpace(string(out)))
+}
+
+func checkIdentityRangeUnused(start, count int) error {
+	b, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 3 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err == nil && uid >= start && uid < start+count {
+			return fmt.Errorf("jailer UID pool overlaps host account %s (%d)", fields[0], uid)
+		}
+	}
+	return nil
+}
+
 func (c *JailerConfig) defaults() {
 	if c.JailerBin == "" {
 		c.JailerBin = "/usr/local/bin/jailer"
@@ -189,7 +310,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		SnapshotState: "/snapshots/state",
 		UFFD:          "/run/uffd.socket",
 	}
-	if err := stageReadonly(req.KernelImage, filepath.Join(rootDir, paths.Kernel), uid, gid); err != nil {
+	if err := stageReadonly(req.KernelImage, filepath.Join(rootDir, paths.Kernel), cfg.TrustedOwnerUID); err != nil {
 		cleanupJail()
 		return PreparedLaunch{}, fmt.Errorf("stage kernel: %w", err)
 	}
@@ -198,13 +319,13 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		return PreparedLaunch{}, fmt.Errorf("stage rootfs: %w", err)
 	}
 	if req.SnapshotMem != "" {
-		if err := stageReadonly(req.SnapshotMem, filepath.Join(rootDir, paths.SnapshotMem), uid, gid); err != nil {
+		if err := stageReadonly(req.SnapshotMem, filepath.Join(rootDir, paths.SnapshotMem), cfg.TrustedOwnerUID); err != nil {
 			cleanupJail()
 			return PreparedLaunch{}, fmt.Errorf("stage snapshot memory: %w", err)
 		}
 	}
 	if req.SnapshotState != "" {
-		if err := stageReadonly(req.SnapshotState, filepath.Join(rootDir, paths.SnapshotState), uid, gid); err != nil {
+		if err := stageReadonly(req.SnapshotState, filepath.Join(rootDir, paths.SnapshotState), cfg.TrustedOwnerUID); err != nil {
 			cleanupJail()
 			return PreparedLaunch{}, fmt.Errorf("stage snapshot state: %w", err)
 		}
@@ -328,17 +449,17 @@ func stageWritableRootfs(src, dst string, uid, gid int) error {
 	return os.Chmod(dst, 0600)
 }
 
-func stageReadonly(src, dst string, uid, gid int) error {
+func stageReadonly(src, dst string, trustedOwner int) error {
 	if err := validateRegularInput(src); err != nil {
 		return err
 	}
 	if err := reflinkOrCopy(src, dst); err != nil {
 		return err
 	}
-	if err := os.Chown(dst, uid, gid); err != nil {
+	if err := os.Chown(dst, trustedOwner, -1); err != nil {
 		return err
 	}
-	return os.Chmod(dst, 0400)
+	return os.Chmod(dst, 0444)
 }
 
 func reflinkOrCopy(src, dst string) error {

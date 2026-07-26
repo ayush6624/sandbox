@@ -92,6 +92,15 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s = %q, want %q", path, got, want)
 		}
+		if path != filepath.Join(root, "disks", "rootfs.ext4") {
+			st, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Mode().Perm() != 0444 || statUID(st) != os.Geteuid() {
+				t.Fatalf("trusted staged input %s mode/uid = %o/%d", path, st.Mode().Perm(), statUID(st))
+			}
+		}
 	}
 	assertSameInode(t, rootfs, filepath.Join(root, "disks", "rootfs.ext4"))
 

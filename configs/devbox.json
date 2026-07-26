@@ -8,6 +8,7 @@
   "allow_inter_guest_network": false,
   "nameservers":     "185.12.64.1,185.12.64.2",
   "firecracker_bin": "/usr/local/bin/firecracker",
+  "vm_isolation":    "direct",
   "disable_seccomp": false,
   "firecracker_log_max_bytes": 16777216,
   "firecracker_log_retention_hours": 24,

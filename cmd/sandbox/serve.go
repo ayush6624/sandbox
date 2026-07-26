@@ -107,6 +107,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if cfg.GatewayURL != "" && cfg.ListenAddr == "" {
 		return fmt.Errorf("--gateway requires --listen (the gateway dials back over TCP)")
 	}
+	jailerCfg := jailerConfigFrom(cfg)
+	if jailerCfg != nil {
+		if _, err := checkJailerPrerequisites(cfg); err != nil {
+			return fmt.Errorf("jailer prerequisites: %w", err)
+		}
+		reconciled, err := vm.ReconcileJailer(*jailerCfg)
+		if err != nil {
+			return fmt.Errorf("reconcile jailed VMM state: %w", err)
+		}
+		fmt.Printf("jailer reconciliation: processes=%d jails=%d identities=%d cgroups=%d\n",
+			reconciled.ProcessesTerminated, reconciled.JailsRemoved,
+			reconciled.IdentitiesReleased, reconciled.CgroupsRemoved)
+	}
 
 	reg, err := registry.Open(cfg.DBPath, cfg.Pools)
 	if err != nil {
@@ -140,6 +153,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		LogMaxBytes:    cfg.FirecrackerLogMaxBytes,
 		LogRetention:   time.Duration(cfg.FirecrackerLogRetentionHours) * time.Hour,
 		LogMaxFiles:    cfg.FirecrackerLogMaxFiles,
+		Jailer:         jailerCfg,
 	}
 
 	srv := server.New(server.Config{

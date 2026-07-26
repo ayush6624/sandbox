@@ -43,6 +43,46 @@ func TestSecurityDefaults(t *testing.T) {
 	if c.FirecrackerLogMaxFiles != DefaultFirecrackerLogMaxFiles {
 		t.Fatalf("FirecrackerLogMaxFiles = %d, want %d", c.FirecrackerLogMaxFiles, DefaultFirecrackerLogMaxFiles)
 	}
+	if c.VMIsolation != "direct" {
+		t.Fatalf("VMIsolation default = %q, want explicit development direct mode", c.VMIsolation)
+	}
+}
+
+func TestJailerProfileDefaultsAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"vm_isolation":"jailer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JailerBin != "/usr/local/bin/jailer" || cfg.JailerChrootBase != "/mnt/sandbox-data/jailer" {
+		t.Fatalf("jailer paths = %q, %q", cfg.JailerBin, cfg.JailerChrootBase)
+	}
+	if cfg.JailerUIDStart != 200000 || cfg.JailerGIDStart != 200000 || cfg.JailerIdentityCount != 4096 {
+		t.Fatalf("jailer identity pool = %d:%d x%d", cfg.JailerUIDStart, cfg.JailerGIDStart, cfg.JailerIdentityCount)
+	}
+	if cfg.JailerMemoryOverheadMIB <= 0 || cfg.JailerPIDsMax <= 0 || cfg.JailerIOReadBPS <= 0 || cfg.JailerNoFile <= 0 {
+		t.Fatalf("jailer resource defaults missing: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInsecureJailerProfile(t *testing.T) {
+	for _, body := range []string{
+		`{"vm_isolation":"unknown"}`,
+		`{"vm_isolation":"jailer","disable_seccomp":true}`,
+		`{"vm_isolation":"jailer","jailer_cpu_weight":10001}`,
+		`{"vm_isolation":"jailer","jailer_pids_max":-1}`,
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("Load(%s) succeeded", body)
+		}
+	}
 }
 
 func TestLoadPlacementDelaySec(t *testing.T) {
