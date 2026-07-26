@@ -27,9 +27,16 @@ Environment=HOME=/home/sandbox
 WantedBy=multi-user.target
 `
 
-// Interactive shells run as root with HOME=/home/sandbox (see the unit above),
-// so these rc files — not /root's or /etc/skel's — are what `bash -l` on the
-// /shell pty actually reads. Without them the shell has no color at all.
+const sandboxSSHDConfig = `# Managed by sandbox install-agent — key-only user access.
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AllowUsers sandbox
+`
+
+// User-facing commands and shells run as the sandbox account, so these are the
+// rc files read by `bash -l` on the /shell pty.
 const sandboxProfile = `# ~/.profile: sourced by login shells (sandboxd's /shell runs bash -l).
 if [ -n "$BASH" ] && [ -f "$HOME/.bashrc" ]; then
 	. "$HOME/.bashrc"
@@ -93,6 +100,7 @@ func installAgent(rootfs, agentBin string) error {
 	h := sha256.New()
 	h.Write(bin)
 	h.Write([]byte(sandboxdUnit))
+	h.Write([]byte(sandboxSSHDConfig))
 	h.Write([]byte(sandboxProfile))
 	h.Write([]byte(sandboxBashrc))
 	sum := fmt.Sprintf("%x", h.Sum(nil))
@@ -130,22 +138,25 @@ func installAgent(rootfs, agentBin string) error {
 	if err := os.WriteFile(filepath.Join(mnt, "etc/systemd/system/sandboxd.service"), []byte(sandboxdUnit), 0o644); err != nil {
 		return fmt.Errorf("write unit: %w", err)
 	}
+	if err := hardenGuestIdentity(mnt); err != nil {
+		return err
+	}
 	wants := filepath.Join(mnt, "etc/systemd/system/multi-user.target.wants")
 	if err := os.MkdirAll(wants, 0o755); err != nil {
 		return err
 	}
-	// The default exec cwd (sandboxd falls back to / when it's missing) —
-	// creating it here heals base images built before the rootfs script did.
-	if err := os.MkdirAll(filepath.Join(mnt, "home/sandbox/app"), 0o755); err != nil {
-		return fmt.Errorf("create app dir: %w", err)
-	}
-	// Shell rc files live in /home/sandbox (the shell's HOME), not /root —
-	// written unconditionally, like the unit, so updates propagate.
+	// Shell rc files live in the sandbox user's home and are written
+	// unconditionally, like the unit, so updates propagate.
 	if err := os.WriteFile(filepath.Join(mnt, "home/sandbox/.profile"), []byte(sandboxProfile), 0o644); err != nil {
 		return fmt.Errorf("write .profile: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(mnt, "home/sandbox/.bashrc"), []byte(sandboxBashrc), 0o644); err != nil {
 		return fmt.Errorf("write .bashrc: %w", err)
+	}
+	for _, name := range []string{".profile", ".bashrc"} {
+		if err := os.Chown(filepath.Join(mnt, "home/sandbox", name), 1000, 1000); err != nil {
+			return fmt.Errorf("chown %s: %w", name, err)
+		}
 	}
 	link := filepath.Join(wants, "sandboxd.service")
 	_ = os.Remove(link)
@@ -164,5 +175,35 @@ func installAgent(rootfs, agentBin string) error {
 	}
 
 	fmt.Printf("sandboxd installed into %s and enabled\n", rootfs)
+	return nil
+}
+
+// hardenGuestIdentity upgrades existing base images as well as newly built
+// ones. The rootfs is mounted but not running, so chroot is the least
+// surprising way to let the image's own account tools update passwd/shadow.
+func hardenGuestIdentity(mnt string) error {
+	script := `
+set -eu
+id sandbox >/dev/null 2>&1 ||
+  useradd --create-home --uid 1000 --user-group --shell /bin/bash sandbox
+passwd -l sandbox >/dev/null
+passwd -l root >/dev/null
+install -d -o sandbox -g sandbox -m 0755 /home/sandbox/app
+chown -R sandbox:sandbox /home/sandbox
+rm -f /etc/ssh/ssh_host_*
+systemctl disable ssh.socket >/dev/null 2>&1 || true
+systemctl enable ssh.service >/dev/null 2>&1 || true
+systemctl disable serial-getty@ttyS0.service >/dev/null 2>&1 || true
+`
+	if out, err := exec.Command("chroot", mnt, "/bin/sh", "-c", script).CombinedOutput(); err != nil {
+		return fmt.Errorf("harden guest identity: %w: %s", err, out)
+	}
+	sshDir := filepath.Join(mnt, "etc/ssh/sshd_config.d")
+	if err := os.MkdirAll(sshDir, 0o755); err != nil {
+		return fmt.Errorf("create ssh config dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "sandbox.conf"), []byte(sandboxSSHDConfig), 0o644); err != nil {
+		return fmt.Errorf("write ssh config: %w", err)
+	}
 	return nil
 }

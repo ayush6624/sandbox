@@ -124,36 +124,38 @@ APT
     gh --version | head -1
   '
 
+  # Create the unprivileged identity used by exec, files, PTY, and SSH. Keep
+  # the numeric IDs stable because sandboxd drops each user-facing operation
+  # to this account before touching user data.
+  sudo chroot "$BUILD_DIR" bash -c '
+    id sandbox >/dev/null 2>&1 ||
+      useradd --create-home --uid 1000 --user-group --shell /bin/bash sandbox
+    passwd -l sandbox
+    install -d -o sandbox -g sandbox -m 0755 /home/sandbox/app
+  '
+
   # --- SSH server ---
-  # Key-only root login. The host installs each sandbox's authorized_keys at
-  # create (POST /sandboxes ssh_pubkey → sandboxd /ssh-key → /root/.ssh), and
-  # the userspace port proxy forwards a host port to guest :22 on demand
-  # (wake-on-connect included). Config drop-in overrides the distro default.
+  # Key-only login as the normal sandbox user. Host keys are deliberately not
+  # baked into the image: sandboxd generates them when the host initializes a
+  # newly created sandbox, so snapshot-derived sandboxes never share identity.
   sudo tee "$BUILD_DIR/etc/ssh/sshd_config.d/sandbox.conf" > /dev/null <<'SSHD'
 # Managed by build-devbox-rootfs.sh — sandbox SSH access.
-PermitRootLogin prohibit-password
+PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication no
+KbdInteractiveAuthentication no
+AllowUsers sandbox
 SSHD
   sudo chroot "$BUILD_DIR" bash -c '
     export DEBIAN_FRONTEND=noninteractive
-    # Host keys are not generated in the chroot by the postinst; do it now so
-    # sshd can start on first boot. NB these are baked into the golden image, so
-    # every clone shares host keys — fine for ephemeral dev sandboxes (each is
-    # reached on a distinct host:port, so known_hosts entries do not collide).
-    ssh-keygen -A
+    rm -f /etc/ssh/ssh_host_*
     # Ubuntu 24.04 ships ssh via socket activation; use the always-on service so
-    # the port is listening the instant the guest boots (the host may dial :22
-    # immediately after the readiness gate).
+    # sandboxd can restart it immediately after generating per-sandbox keys.
     systemctl disable ssh.socket 2>/dev/null || true
     systemctl enable ssh.service 2>/dev/null || true
   '
-  # Create the working directory used by exec/files (HOME=/home/sandbox,
-  # default exec cwd /home/sandbox/app — sandboxd falls back to / without it).
-  sudo chroot "$BUILD_DIR" bash -c 'mkdir -p /home/sandbox/app'
 
-  # Shell rc files for /home/sandbox (the HOME of sandboxd's interactive
-  # shells) so `bash -l` gets a color prompt + color aliases. install-agent
+  # Shell rc files for the sandbox user's interactive shells. install-agent
   # rewrites these on every run; keep the content in sync with installagent.go.
   sudo tee "$BUILD_DIR/home/sandbox/.profile" > /dev/null <<'PROFILE'
 # ~/.profile: sourced by login shells (sandboxd's /shell runs bash -l).
@@ -176,6 +178,7 @@ alias ip='ip -color=auto'
 
 PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
 BASHRC
+  sudo chroot "$BUILD_DIR" chown -R sandbox:sandbox /home/sandbox
 
   sudo touch "$BUILD_DIR/.step4-done"
 fi
@@ -276,11 +279,10 @@ net.ipv6.conf.eth0.disable_ipv6 = 1
 net.ipv4.tcp_mtu_probing = 1
 SYSCTL
 
-  # Set root password for serial console debugging
-  echo "root:devbox" | sudo chroot "$BUILD_DIR" chpasswd
-
-  # Enable serial console login
-  sudo chroot "$BUILD_DIR" systemctl enable serial-getty@ttyS0.service 2>/dev/null || true
+  # No baked interactive root credential. Host-side diagnostics remain
+  # available through the VMM log and the root-only management socket.
+  sudo chroot "$BUILD_DIR" passwd -l root
+  sudo chroot "$BUILD_DIR" systemctl disable serial-getty@ttyS0.service 2>/dev/null || true
 
   sudo touch "$BUILD_DIR/.step5-done"
 fi
