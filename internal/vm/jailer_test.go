@@ -159,8 +159,8 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if pid, err := prepared.ProcessPID(); err != nil || pid != os.Getpid() {
-		t.Fatalf("child PID = %d, %v", pid, err)
+	if pid, err := prepared.ProcessPID(); err == nil || pid != 0 {
+		t.Fatalf("unjailed PID file was trusted: PID=%d err=%v", pid, err)
 	}
 
 	prepared.cleanup()

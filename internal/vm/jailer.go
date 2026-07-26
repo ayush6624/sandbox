@@ -396,6 +396,9 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 			if err != nil || pid <= 0 {
 				return 0, fmt.Errorf("invalid firecracker child PID %q", strings.TrimSpace(string(b)))
 			}
+			if err := validateJailedProcess(pid, uid, rootDir); err != nil {
+				return 0, err
+			}
 			return pid, nil
 		},
 		Cleanup: cleanupJail,

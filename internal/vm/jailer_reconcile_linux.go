@@ -55,8 +55,20 @@ func ReconcileJailer(cfg JailerConfig) (JailerReconcileResult, error) {
 		}
 		jailDir := filepath.Join(execDir, vmID)
 		pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
-		if pid, err := readPIDFile(pidFile); err == nil && isOwnedJailedFirecracker(pid, cfg) {
+		if pid, err := readPIDFile(pidFile); err == nil && processAlive(pid) {
+			uid := jailedProcessUID(pid)
+			if uid < cfg.UIDStart || uid >= cfg.UIDStart+cfg.IdentityCount {
+				return result, fmt.Errorf("refusing to release live unverified PID %d from jail %s", pid, vmID)
+			}
+			if err := validateJailedProcess(pid, uid, filepath.Join(jailDir, "root")); err != nil {
+				return result, fmt.Errorf("refusing to release live unverified jail %s: %w", vmID, err)
+			}
+			parent := processParentPID(pid)
 			terminatePID(pid, 2*time.Second)
+			if parent > 0 && processAlive(parent) && isJailerProcess(parent) {
+				_ = syscall.Kill(parent, syscall.SIGTERM)
+				waitPIDExit(parent, 2*time.Second)
+			}
 			result.ProcessesTerminated++
 		}
 		if err := os.RemoveAll(jailDir); err != nil {
@@ -103,14 +115,10 @@ func readPIDFile(path string) (int, error) {
 	return pid, nil
 }
 
-func isOwnedJailedFirecracker(pid int, cfg JailerConfig) bool {
-	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil || strings.TrimSpace(string(comm)) != "firecracker" {
-		return false
-	}
+func jailedProcessUID(pid int) int {
 	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
-		return false
+		return -1
 	}
 	for _, line := range strings.Split(string(status), "\n") {
 		if !strings.HasPrefix(line, "Uid:") {
@@ -118,12 +126,15 @@ func isOwnedJailedFirecracker(pid int, cfg JailerConfig) bool {
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return false
+			return -1
 		}
 		uid, err := strconv.Atoi(fields[1])
-		return err == nil && uid >= cfg.UIDStart && uid < cfg.UIDStart+cfg.IdentityCount
+		if err == nil {
+			return uid
+		}
+		return -1
 	}
-	return false
+	return -1
 }
 
 func terminatePID(pid int, grace time.Duration) {
@@ -136,4 +147,15 @@ func terminatePID(pid int, grace time.Duration) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+	waitPIDExit(pid, time.Second)
+}
+
+func waitPIDExit(pid int, grace time.Duration) {
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
