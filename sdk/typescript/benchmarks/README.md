@@ -109,6 +109,14 @@ The `bench:restore` and `bench:fanout` npm commands also remain compatibility
 aliases, but new automation should use `bench:snapshot-source` and
 `bench:snapshot-batch`.
 
+The snapshot batch suite clamps API `maxParallelism` to 32, the v1 contract
+maximum. Operation completion and command readiness are reported separately.
+Each returned sandbox is polled until `echo benchmark-ready` succeeds (30 s
+default, 250 ms interval), and the JSON retains per-item attempts, latency, and
+operation/readiness errors. Override with `--readiness-timeout-ms` and
+`--readiness-poll-ms`. Any unusable sandbox, partial operation, or unproven
+cleanup makes the process exit nonzero after it writes the diagnostic result.
+
 ## Implementation notes
 
 - `benchmark.ts` is **erasable-syntax-only** TypeScript (no enums, namespaces, or

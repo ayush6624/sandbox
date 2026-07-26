@@ -17,7 +17,11 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { SandboxClient, type ClientSandbox } from '../src/index.js'
+import {
+  SandboxClient,
+  type ClientSandbox,
+  type ProblemDetails,
+} from '../src/index.js'
 import { benchmarkMetadata, benchmarkResourceMetadata } from './metadata.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -26,19 +30,42 @@ const RESULTS_DIR = join(HERE, 'results')
 interface Args {
   counts: number[]
   baseline: boolean
+  readinessTimeoutMs: number
+  readinessPollMs: number
   output?: string
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { counts: [1, 4, 16, 32], baseline: false }
+  const a: Args = {
+    counts: [1, 4, 16, 32],
+    baseline: false,
+    readinessTimeoutMs: 30_000,
+    readinessPollMs: 250,
+  }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
     if (k === '--counts') a.counts = argv[++i]!.split(',').map((x) => Number(x.trim()))
     else if (k === '--baseline') a.baseline = true
+    else if (k === '--readiness-timeout-ms') a.readinessTimeoutMs = Number(argv[++i])
+    else if (k === '--readiness-poll-ms') a.readinessPollMs = Number(argv[++i])
     else if (k === '--output') a.output = argv[++i]
+    else if (k === '--help' || k === '-h') {
+      console.log(
+        'Usage: tsx benchmarks/snapshot-batch-bench.ts [--counts 1,4,16,32] ' +
+        '[--baseline] [--readiness-timeout-ms 30000] [--readiness-poll-ms 250] ' +
+        '[--output file.json]',
+      )
+      process.exit(0)
+    }
     else throw new Error(`unknown arg: ${k}`)
   }
   if (a.counts.some((n) => !Number.isInteger(n) || n < 1)) throw new Error('--counts must be positive integers')
+  if (!Number.isInteger(a.readinessTimeoutMs) || a.readinessTimeoutMs < 1) {
+    throw new Error('--readiness-timeout-ms must be a positive integer')
+  }
+  if (!Number.isInteger(a.readinessPollMs) || a.readinessPollMs < 1) {
+    throw new Error('--readiness-poll-ms must be a positive integer')
+  }
   return a
 }
 
@@ -57,6 +84,100 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, idx: numb
 }
 
 const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(1) : 'n/a')
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+interface ReadinessResult {
+  usable: boolean
+  readinessMs: number
+  attempts: number
+  error?: string
+}
+
+interface ItemResult extends ReadinessResult {
+  index: number
+  sandboxId?: string
+  operationError?: ProblemDetails
+}
+
+interface BatchRow {
+  n: number
+  maxParallelism: number
+  operationWallMs: number
+  readinessWallMs: number
+  wallMs: number
+  perSandboxMs: number
+  ok: number
+  failed: number
+  operationId: string
+  operationStatus: string
+  operationError?: string
+  items: ItemResult[]
+  cleanupErrors: string[]
+  /** @deprecated Historic alias for perSandboxMs. */
+  perCloneMs: number
+}
+
+async function waitUntilUsable(
+  sandbox: ClientSandbox,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<ReadinessResult> {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  let attempts = 0
+  let lastError = 'sandbox did not become command-ready'
+
+  while (Date.now() < deadline) {
+    attempts++
+    const remaining = Math.max(1, deadline - Date.now())
+    try {
+      const result = await sandbox.commands.run('echo benchmark-ready', {
+        timeoutMs: Math.min(5_000, remaining),
+      })
+      if (result.stdout.trim() === 'benchmark-ready') {
+        return { usable: true, readinessMs: Date.now() - started, attempts }
+      }
+      lastError = `unexpected readiness output: ${JSON.stringify(result.stdout.trim())}`
+    } catch (error) {
+      lastError = errorMessage(error)
+    }
+    const remainingAfterAttempt = deadline - Date.now()
+    if (remainingAfterAttempt > 0) await sleep(Math.min(pollMs, remainingAfterAttempt))
+  }
+
+  return {
+    usable: false,
+    readinessMs: Date.now() - started,
+    attempts,
+    error: lastError,
+  }
+}
+
+async function terminateTracked(
+  sandboxes: Iterable<ClientSandbox>,
+): Promise<string[]> {
+  const unique = [...new Map([...sandboxes].map((sandbox) => [sandbox.id, sandbox])).values()]
+  const errors = await mapLimit(unique, 16, async (sandbox) => {
+    let lastError = ''
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await sandbox.terminate()
+        return undefined
+      } catch (error) {
+        const status = (error as { status?: unknown })?.status
+        if (status === 404) return undefined
+        lastError = errorMessage(error)
+        if (attempt < 3) await sleep(250 * attempt)
+      }
+    }
+    return `${sandbox.id}: ${lastError}`
+  })
+  return errors.filter((error): error is string => error !== undefined)
+}
+
+function errorMessage(error: unknown): string {
+  return String((error as Error)?.message ?? error).slice(0, 500)
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
@@ -64,100 +185,202 @@ async function main(): Promise<void> {
   const metadata = benchmarkMetadata('snapshot-source-batch-create', {
     counts: args.counts,
     baseline: args.baseline,
+    max_parallelism: 32,
+    readiness_timeout_ms: args.readinessTimeoutMs,
+    readiness_poll_ms: args.readinessPollMs,
   })
   console.log(`\nSnapshot batch-create benchmark: counts=[${args.counts.join(', ')}] baseline=${args.baseline}`)
   console.log(`Host: ${process.env.SANDBOX_API_URL}`)
 
-  // --- Setup: one source sandbox -> snapshot -> terminate ---
-  console.log('\n[setup] creating source sandbox...')
-  const src = await client.sandboxes.create({
-    requestTimeoutMs: 60 * 60_000,
-    metadata: benchmarkResourceMetadata(metadata),
-  })
-  console.log(`[setup] source ${src.id} ready`)
-  console.log('[setup] snapshotting...')
-  const snap = await src.createSnapshot()
-  console.log(`[setup] snapshot ${snap.id}`)
-  await src.terminate()
-  console.log('[setup] source terminated\n')
-
-  const rows: Array<{
-    n: number
-    wallMs: number
-    perSandboxMs: number
-    ok: number
-    failed: number
-    operationId: string
-    operationStatus: string
-    /** @deprecated Historic alias for perSandboxMs. */
-    perCloneMs: number
-  }> = []
+  let source: ClientSandbox | undefined
+  let snapshotId: string | undefined
+  const tracked = new Map<string, ClientSandbox>()
+  const rows: BatchRow[] = []
+  let baseline:
+    | {
+        n: number
+        wallMs: number
+        perSandboxMs: number
+        created: number
+        failed: number
+        errors: string[]
+        cleanupErrors: string[]
+        /** @deprecated Historic alias for perSandboxMs. */
+        perCloneMs: number
+      }
+    | undefined
+  let runFailed = false
   try {
+    // --- Setup: one source sandbox -> snapshot -> terminate ---
+    console.log('\n[setup] creating source sandbox...')
+    source = await client.sandboxes.create({
+      requestTimeoutMs: 60 * 60_000,
+      metadata: benchmarkResourceMetadata(metadata),
+    })
+    tracked.set(source.id, source)
+    console.log(`[setup] source ${source.id} ready`)
+    console.log('[setup] snapshotting...')
+    const snapshot = await source.createSnapshot()
+    snapshotId = snapshot.id
+    console.log(`[setup] snapshot ${snapshotId}`)
+    const sourceCleanupErrors = await terminateTracked([source])
+    if (sourceCleanupErrors.length) {
+      throw new Error(`source cleanup failed: ${sourceCleanupErrors.join('; ')}`)
+    }
+    tracked.delete(source.id)
+    source = undefined
+    console.log('[setup] source terminated\n')
+
     for (const n of args.counts) {
-      const t = Date.now()
+      const batchStarted = Date.now()
+      const maxParallelism = Math.min(n, 32)
       const operation = await client.sandboxes.createMany({
         count: n,
-        maxParallelism: n,
-        source: { snapshotId: snap.id },
+        maxParallelism,
+        source: { snapshotId },
         requestTimeoutMs: 30 * 60_000,
         metadata: benchmarkResourceMetadata(metadata),
       })
-      const state = await operation.wait({ timeoutMs: 30 * 60_000 })
-      const clones = state.results
-        .map((result) => result.value)
-        .filter((sandbox): sandbox is ClientSandbox => sandbox !== undefined)
-      const wallMs = Date.now() - t
-      // Confirm each clone is actually usable (exec a trivial command).
-      const oks = await mapLimit(clones, 32, async (c) => {
-        try { const r = await c.commands.run('echo ok'); return r.stdout.trim() === 'ok' } catch { return false }
+      let state = operation.state
+      let operationError: string | undefined
+      try {
+        state = await operation.wait({ timeoutMs: 30 * 60_000 })
+      } catch (error) {
+        operationError = errorMessage(error)
+        await operation.refresh().catch(() => {})
+        state = operation.state
+      }
+      const operationWallMs = Date.now() - batchStarted
+      for (const result of state.results) {
+        if (result.value) tracked.set(result.value.id, result.value)
+      }
+
+      const readinessStarted = Date.now()
+      const items = await mapLimit(state.results, 32, async (result, position): Promise<ItemResult> => {
+        if (!result.value) {
+          return {
+            index: result.error ? result.index : position,
+            usable: false,
+            readinessMs: 0,
+            attempts: 0,
+            ...(result.error ? { operationError: result.error } : {
+              error: 'operation returned neither a sandbox nor an error',
+            }),
+          }
+        }
+        return {
+          index: result.index,
+          sandboxId: result.value.id,
+          ...await waitUntilUsable(
+            result.value,
+            args.readinessTimeoutMs,
+            args.readinessPollMs,
+          ),
+        }
       })
-      const ok = oks.filter(Boolean).length
-      rows.push({
+      const readinessWallMs = Date.now() - readinessStarted
+      const wallMs = Date.now() - batchStarted
+      const ok = items.filter((item) => item.usable).length
+      const cleanupErrors = await terminateTracked(
+        state.results
+          .map((result) => result.value)
+          .filter((sandbox): sandbox is ClientSandbox => sandbox !== undefined),
+      )
+      for (const result of state.results) {
+        if (result.value && !cleanupErrors.some((error) => error.startsWith(`${result.value!.id}:`))) {
+          tracked.delete(result.value.id)
+        }
+      }
+      const row: BatchRow = {
         n,
+        maxParallelism,
+        operationWallMs,
+        readinessWallMs,
         wallMs,
         perSandboxMs: wallMs / n,
         ok,
         failed: state.failed,
         operationId: operation.id,
         operationStatus: state.status,
+        ...(operationError === undefined ? {} : { operationError }),
+        items,
+        cleanupErrors,
         perCloneMs: wallMs / n,
-      })
-      console.log(`  N=${String(n).padStart(3)}  batch ${fmt(wallMs)}ms  per-sandbox ${fmt(wallMs / n)}ms  usable ${ok}/${n}`)
-      await mapLimit(clones, 16, async (c) => { try { await c.terminate() } catch { /* best effort */ } })
+      }
+      rows.push(row)
+      const passed =
+        operationError === undefined &&
+        state.status === 'succeeded' &&
+        state.succeeded === n &&
+        state.failed === 0 &&
+        items.length === n &&
+        ok === n &&
+        cleanupErrors.length === 0
+      runFailed ||= !passed
+      console.log(
+        `  N=${String(n).padStart(3)} max-parallel=${String(maxParallelism).padStart(2)} ` +
+        `operation=${fmt(operationWallMs)}ms ready=${fmt(wallMs)}ms ` +
+        `per-sandbox=${fmt(wallMs / n)}ms usable=${ok}/${n} status=${state.status}`,
+      )
+      for (const item of items.filter((result) => !result.usable).slice(0, 5)) {
+        console.error(
+          `    item ${item.index} sandbox=${item.sandboxId ?? 'none'}: ` +
+          `${item.operationError?.detail ?? item.error ?? 'not usable'}`,
+        )
+      }
+      for (const cleanupError of cleanupErrors) {
+        console.error(`    cleanup: ${cleanupError}`)
+      }
+      if (!passed) break
     }
 
     // --- Baseline: N concurrent cold boots, for the largest N ---
-    let baseline: {
-      n: number
-      wallMs: number
-      perSandboxMs: number
-      /** @deprecated Historic alias for perSandboxMs. */
-      perCloneMs: number
-    } | undefined
-    if (args.baseline) {
+    if (args.baseline && !runFailed) {
       const n = Math.max(...args.counts)
       console.log(`\n[baseline] ${n} concurrent default-source creates...`)
       const t = Date.now()
+      const baselineErrors: string[] = []
       const boots = await mapLimit(Array.from({ length: n }), 8, async () => {
         try {
-          return await client.sandboxes.create({
+          const sandbox = await client.sandboxes.create({
             requestTimeoutMs: 30 * 60_000,
             metadata: benchmarkResourceMetadata(metadata),
           })
-        } catch {
+          tracked.set(sandbox.id, sandbox)
+          return sandbox
+        } catch (error) {
+          baselineErrors.push(errorMessage(error))
           return null
         }
       })
       const wallMs = Date.now() - t
-      baseline = { n, wallMs, perSandboxMs: wallMs / n, perCloneMs: wallMs / n }
+      const created = boots.filter((sandbox): sandbox is ClientSandbox => sandbox !== null)
+      const cleanupErrors = await terminateTracked(created)
+      for (const sandbox of created) {
+        if (!cleanupErrors.some((error) => error.startsWith(`${sandbox.id}:`))) tracked.delete(sandbox.id)
+      }
+      baseline = {
+        n,
+        wallMs,
+        perSandboxMs: wallMs / n,
+        created: created.length,
+        failed: n - created.length,
+        errors: baselineErrors,
+        cleanupErrors,
+        perCloneMs: wallMs / n,
+      }
+      runFailed ||= created.length !== n || cleanupErrors.length > 0
       console.log(`  cold boot N=${n}  batch ${fmt(wallMs)}ms  per-boot ${fmt(wallMs / n)}ms`)
-      await mapLimit(boots.filter(Boolean), 16, async (b) => { try { await b!.terminate() } catch { /* best effort */ } })
     }
 
     console.log(`\n${'='.repeat(56)}\n  SNAPSHOT BATCH-CREATE RESULTS\n${'='.repeat(56)}`)
-    console.log('   N   batch(ms)  per-sandbox(ms)  usable  operation')
+    console.log('   N   operation(ms)  ready(ms)  per-sandbox(ms)  usable  operation')
     for (const r of rows) {
-      console.log(`  ${String(r.n).padStart(3)}   ${fmt(r.wallMs).padStart(8)}   ${fmt(r.perSandboxMs).padStart(12)}   ${r.ok}/${r.n}  ${r.operationStatus}`)
+      console.log(
+        `  ${String(r.n).padStart(3)}   ${fmt(r.operationWallMs).padStart(13)} ` +
+        `${fmt(r.wallMs).padStart(10)}   ${fmt(r.perSandboxMs).padStart(12)} ` +
+        `${r.ok}/${r.n}  ${r.operationStatus}`,
+      )
     }
     if (baseline) {
       console.log(`\n  default-source baseline N=${baseline.n}: ${fmt(baseline.wallMs)}ms batch, ${fmt(baseline.perSandboxMs)}ms/sandbox`)
@@ -170,14 +393,35 @@ async function main(): Promise<void> {
     const outPath = args.output ?? join(RESULTS_DIR, `snapshot_batch_${ts}.json`)
     writeFileSync(outPath, JSON.stringify({
       metadata,
+      passed: !runFailed,
       rows,
       baseline,
       // Deprecated compatibility alias for historic fan-out result readers.
       fanout: rows,
     }, null, 2))
     console.log(`\nSaved ${outPath}`)
+    if (runFailed) {
+      throw new Error('snapshot batch benchmark failed; inspect per-item and cleanup results')
+    }
   } finally {
-    try { await client.snapshots.delete(snap.id) } catch { /* best effort */ }
+    const finalCleanupErrors = await terminateTracked(tracked.values())
+    for (const cleanupError of finalCleanupErrors) console.error(`[cleanup] ${cleanupError}`)
+    let snapshotCleanupError: string | undefined
+    if (snapshotId) {
+      try {
+        await client.snapshots.delete(snapshotId)
+      } catch (error) {
+        snapshotCleanupError = `snapshot ${snapshotId}: ${errorMessage(error)}`
+        console.error(`[cleanup] ${snapshotCleanupError}`)
+      }
+    }
+    const cleanupErrors = [
+      ...finalCleanupErrors,
+      ...(snapshotCleanupError ? [snapshotCleanupError] : []),
+    ]
+    if (cleanupErrors.length) {
+      throw new Error(`snapshot batch cleanup failed: ${cleanupErrors.join('; ')}`)
+    }
   }
 }
 
