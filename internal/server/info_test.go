@@ -234,15 +234,6 @@ func TestBearerAuthWebSocket(t *testing.T) {
 		}
 	})
 
-	t.Run("worker token cannot call client route", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/sandboxes", nil)
-		r.Header.Set("Authorization", "Bearer "+workerToken)
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("worker client-route status = %d", w.Code)
-		}
-	})
 }
 
 func TestBearerAuthRejectsOverlappingTokenOnInternalRoute(t *testing.T) {

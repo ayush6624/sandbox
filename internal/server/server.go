@@ -471,9 +471,9 @@ func bearerAuth(clientCreds, workerCreds *management.Credentials, next http.Hand
 		clientMatch := clientCreds != nil && clientCreds.MatchAuthorization(auth)
 		// A token present in both independently rotatable domains is never
 		// allowed to cross the internal-control boundary.
-		ok := workerMatch && !clientMatch
-		if !internal {
-			ok = clientMatch && !workerMatch
+		ok := workerMatch && (!internal || !clientMatch)
+		if !internal && !ok && clientCreds != nil {
+			ok = clientMatch
 		}
 		if !ok {
 			err := errors.New("missing or invalid bearer token")
