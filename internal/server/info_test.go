@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/management"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
 	"github.com/ayush6624/sandbox/internal/wsutil"
@@ -138,30 +139,42 @@ func TestHandleInfo(t *testing.T) {
 	}
 }
 
-// TestBearerAuthWebSocket covers the browser accommodations: ?access_token=
-// only counts on upgrade requests, and an upgrade with a bad token is refused
-// with a post-handshake close frame (4401) instead of a bare HTTP 401.
+// TestBearerAuthWebSocket verifies that credentials never ride in query
+// strings and that worker-only routes reject client credentials.
 func TestBearerAuthWebSocket(t *testing.T) {
-	const token = "sekrit"
+	const clientToken = "client-sekrit"
+	const workerToken = "worker-sekrit"
+	clientCreds, err := management.NewCredentials([]string{clientToken}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCreds, err := management.NewCredentials([]string{workerToken}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	handler := bearerAuth(token, next)
+	handler := bearerAuth(clientCreds, workerCreds, next)
 
-	t.Run("query token accepted on upgrade", func(t *testing.T) {
-		r := httptest.NewRequest("GET", "/sandboxes/x/shell?access_token="+token, nil)
+	t.Run("query token rejected on upgrade", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/sandboxes/x/shell?access_token="+clientToken, nil)
 		r.Header.Set("Upgrade", "websocket")
 		r.Header.Set("Connection", "Upgrade")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
-		if w.Code != 200 {
-			t.Fatalf("got %d, want 200", w.Code)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", w.Code)
 		}
 	})
 
-	t.Run("query token ignored on plain requests", func(t *testing.T) {
+	t.Run("authorization accepted on upgrade", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/sandboxes/x/shell", nil)
+		r.Header.Set("Upgrade", "websocket")
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Authorization", "Bearer "+clientToken)
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest("GET", "/sandboxes?access_token="+token, nil))
-		if w.Code != 401 {
-			t.Fatalf("got %d, want 401 — access_token must not authenticate plain HTTP", w.Code)
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200", w.Code)
 		}
 	})
 
@@ -199,6 +212,23 @@ func TestBearerAuthWebSocket(t *testing.T) {
 		}
 		if !strings.Contains(string(payload[2:]), "bearer token") {
 			t.Fatalf("close reason = %q, should mention the token", payload[2:])
+		}
+	})
+
+	t.Run("client token cannot call internal route", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/internal/v1/sandboxes/x:adopt", nil)
+		r.Header.Set("Authorization", "Bearer "+clientToken)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("client internal status = %d", w.Code)
+		}
+		r = httptest.NewRequest("POST", "/internal/v1/sandboxes/x:adopt", nil)
+		r.Header.Set("Authorization", "Bearer "+workerToken)
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("worker internal status = %d", w.Code)
 		}
 	})
 }

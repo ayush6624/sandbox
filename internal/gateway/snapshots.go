@@ -40,7 +40,7 @@ func (g *Gateway) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	out := []registry.Snapshot{}
 	seen := map[string]bool{}
 	for _, h := range live {
-		req, err := http.NewRequestWithContext(r.Context(), "GET", "http://"+h.addr+"/snapshots", nil)
+		req, err := http.NewRequestWithContext(r.Context(), "GET", client.EndpointURL(h.addr)+"/snapshots", nil)
 		if err != nil {
 			continue
 		}
@@ -107,7 +107,7 @@ func (g *Gateway) handleSnapshotOp(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, fmt.Errorf("read body: %w", err))
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, "http://"+target.addr+r.URL.Path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, client.EndpointURL(target.addr)+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		httpError(w, 500, err)
 		return

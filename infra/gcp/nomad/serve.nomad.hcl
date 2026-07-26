@@ -9,7 +9,7 @@
 # so raw_exec tasks do too.
 
 variable "gateway_url"   { type = string }
-variable "gateway_token" { type = string }
+variable "gateway_control_token" { type = string }
 variable "host_token"    { type = string }
 variable "release"       { type = string }              # git sha under releases/
 variable "bucket"        { type = string }              # GCS release bucket
@@ -98,11 +98,12 @@ printf '%s\t%s\n' serve_task_started "$(date +%s%3N)" >> /run/sandbox/boot-phase
 # and roll. (The pulled sandboxd artifact is left in place, unused, for now.)
 exec ./bin/sandbox serve --config config.json \
   --listen  "$${NODE_IP}:8080" \
-  --advertise "$${NODE_IP}:8080" \
+  --management-transport private_proxy \
+  --advertise "http://$${NODE_IP}:8080" \
   --host-id "$${HOST_ID}" \
   --worker-release "$${WORKER_RELEASE}" \
-  --token "$${HOST_TOKEN}" \
-  --gateway "$${GATEWAY_URL}" --gateway-token "$${GATEWAY_TOKEN}"
+  --worker-token "$${HOST_TOKEN}" \
+  --gateway "$${GATEWAY_URL}" --gateway-token "$${GATEWAY_CONTROL_TOKEN}"
 EOT
       }
 
@@ -123,7 +124,7 @@ EOT
         WORKER_RELEASE = "${var.release}"
         HOST_TOKEN    = "${var.host_token}"
         GATEWAY_URL   = "${var.gateway_url}"
-        GATEWAY_TOKEN = "${var.gateway_token}"
+        GATEWAY_CONTROL_TOKEN = "${var.gateway_control_token}"
       }
 
       kill_signal  = "SIGTERM"   # serve tears down its VMs gracefully on SIGTERM

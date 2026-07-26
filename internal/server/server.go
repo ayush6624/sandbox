@@ -3,8 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,6 +25,7 @@ import (
 	"github.com/ayush6624/sandbox/internal/apiv1"
 	"github.com/ayush6624/sandbox/internal/gcsblob"
 	"github.com/ayush6624/sandbox/internal/httpapi"
+	"github.com/ayush6624/sandbox/internal/management"
 	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
@@ -34,11 +34,19 @@ import (
 
 // Config bundles everything the server needs at startup.
 type Config struct {
-	SocketPath  string
-	ListenAddr  string // optional TCP listener (e.g. tailnet IP:port); requires APIToken
-	APIToken    string // bearer token enforced on the TCP listener only
-	Provisioner *provisioner.Provisioner
-	GatewayIP   string // bridge IP; used as the guest's default gateway
+	SocketPath          string
+	ListenAddr          string
+	ManagementTransport string
+	TLSCertFile         string
+	TLSKeyFile          string
+	APIToken            string
+	APITokens           []string
+	APITokenFile        string
+	WorkerToken         string
+	WorkerTokens        []string
+	WorkerTokenFile     string
+	Provisioner         *provisioner.Provisioner
+	GatewayIP           string // bridge IP; used as the guest's default gateway
 	// GuestSubnetBits is the prefix length shared by the gateway and every
 	// guest NIC (cold-boot GuestCIDR and the clone-path MMDS reidentify
 	// prefix). Must match the gateway CIDR. <=0 falls back to 24.
@@ -85,19 +93,23 @@ type Config struct {
 	// When GatewayURL is set, the server periodically heartbeats to the gateway
 	// so it can route requests to this host. Requires ListenAddr (the gateway
 	// dials back over TCP using APIToken).
-	GatewayURL    string // e.g. "http://100.x.y.z:9090"; empty disables registration
-	GatewayToken  string // bearer the host presents to the gateway
-	AdvertiseAddr string // addr the gateway should dial back; defaults to ListenAddr
-	HostID        string // stable host identity; defaults to hostname
-	WorkerRelease string // deployed worker generation reported in heartbeats
+	GatewayURL       string // e.g. "http://100.x.y.z:9090"; empty disables registration
+	GatewayToken     string // worker-control bearer presented to the gateway
+	GatewayTokens    []string
+	GatewayTokenFile string
+	AdvertiseAddr    string // URL the gateway dials back; defaults from ListenAddr
+	HostID           string // stable host identity; defaults to hostname
+	WorkerRelease    string // deployed worker generation reported in heartbeats
 }
 
 // Server holds runtime state for the sandbox API.
 type Server struct {
-	cfg      Config
-	reg      *registry.Registry
-	machines sync.Map        // map[string]*vm.Machine
-	vmCtx    context.Context // long-lived; tied to Serve's ctx, NOT request ctx
+	cfg                Config
+	reg                *registry.Registry
+	machines           sync.Map        // map[string]*vm.Machine
+	vmCtx              context.Context // long-lived; tied to Serve's ctx, NOT request ctx
+	gatewayCredentials *management.Credentials
+	workerCredentials  *management.Credentials
 
 	// golden is the snapshot POST /sandboxes clones from when hot create is on.
 	// nil until ensureGolden adopts or builds one; cleared if it's deleted.
@@ -272,6 +284,18 @@ func (s *Server) Serve(ctx context.Context) error {
 		go s.ensureGolden(ctx)
 	}
 	if s.cfg.GatewayURL != "" {
+		gatewayCreds, err := management.NewCredentials(
+			append([]string{s.cfg.GatewayToken}, s.cfg.GatewayTokens...),
+			s.cfg.GatewayTokenFile,
+		)
+		if err != nil {
+			return fmt.Errorf("gateway worker-control credentials: %w", err)
+		}
+		s.gatewayCredentials = gatewayCreds
+		if s.cfg.ManagementTransport != string(management.TransportDevelopment) &&
+			!management.IsEncryptedOrPrivateEndpoint(s.cfg.GatewayURL) {
+			return fmt.Errorf("gateway_url %q must use HTTPS or a verifiably private IP", s.cfg.GatewayURL)
+		}
 		go s.heartbeat(ctx)
 	}
 	// Always runs: even with no host-wide default, individual sandboxes can
@@ -290,7 +314,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(s.cfg.SocketPath, 0o600)
+	if err := secureUnixSocket(s.cfg.SocketPath); err != nil {
+		_ = ln.Close()
+		return err
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /info", s.handleInfo)
@@ -333,17 +360,63 @@ func (s *Server) Serve(ctx context.Context) error {
 	go func() { srvErr <- servers[0].Serve(ln) }()
 
 	if s.cfg.ListenAddr != "" {
-		if s.cfg.APIToken == "" {
-			return errors.New("listen_addr is set but api_token is empty — refusing to serve TCP without auth")
+		transport := management.Transport{
+			Mode:     management.TransportMode(s.cfg.ManagementTransport),
+			CertFile: s.cfg.TLSCertFile,
+			KeyFile:  s.cfg.TLSKeyFile,
 		}
+		if err := transport.ValidateListener(s.cfg.ListenAddr); err != nil {
+			return err
+		}
+		clientCreds, err := optionalCredentials(
+			append([]string{s.cfg.APIToken}, s.cfg.APITokens...),
+			s.cfg.APITokenFile,
+		)
+		if err != nil {
+			return fmt.Errorf("client API credentials: %w", err)
+		}
+		workerCreds, err := optionalCredentials(
+			append([]string{s.cfg.WorkerToken}, s.cfg.WorkerTokens...),
+			s.cfg.WorkerTokenFile,
+		)
+		if err != nil {
+			return fmt.Errorf("gateway-to-worker credentials: %w", err)
+		}
+		if transport.Mode == management.TransportDevelopment && workerCreds == nil {
+			workerCreds = clientCreds // legacy single-token compatibility is dev-only
+		}
+		if clientCreds == nil && workerCreds == nil {
+			return errors.New("TCP listener requires client or worker credentials")
+		}
+		if s.cfg.GatewayURL != "" && workerCreds == nil {
+			return errors.New("fleet worker requires a separate worker_token or worker_token_file")
+		}
+		if transport.Mode != management.TransportDevelopment &&
+			s.cfg.GatewayURL != "" && s.cfg.WorkerToken != "" &&
+			s.cfg.WorkerToken == s.cfg.APIToken {
+			return errors.New("worker_token must differ from api_token outside development mode")
+		}
+		s.workerCredentials = workerCreds
 		tcpLn, err := net.Listen("tcp", s.cfg.ListenAddr)
 		if err != nil {
 			return fmt.Errorf("listen tcp %s: %w", s.cfg.ListenAddr, err)
 		}
-		tcpSrv := &http.Server{Handler: httpapi.Middleware(bearerAuth(s.cfg.APIToken, mux))}
+		tlsConfig, err := transport.TLSConfig()
+		if err != nil {
+			_ = tcpLn.Close()
+			return err
+		}
+		if tlsConfig != nil {
+			tcpLn = tls.NewListener(tcpLn, tlsConfig)
+		}
+		tcpSrv := &http.Server{
+			Handler:   httpapi.Middleware(bearerAuth(clientCreds, workerCreds, mux)),
+			TLSConfig: tlsConfig,
+		}
 		servers = append(servers, tcpSrv)
 		go func() { srvErr <- tcpSrv.Serve(tcpLn) }()
-		fmt.Fprintf(os.Stderr, "TCP API listening on %s (bearer auth)\n", s.cfg.ListenAddr)
+		fmt.Fprintf(os.Stderr, "TCP API listening on %s (transport=%s, separated bearer auth)\n",
+			s.cfg.ListenAddr, transport.Mode)
 	}
 
 	select {
@@ -384,23 +457,21 @@ func (s *Server) handleInternalSandboxAction(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-// bearerAuth rejects requests whose Authorization header doesn't carry token.
-// Applied only to the TCP listener — the Unix socket is protected by file mode.
-// WebSocket upgrades get two accommodations for browser clients, which cannot
-// set request headers on a WebSocket: the token may ride in ?access_token=,
-// and a rejection is delivered as a post-handshake close frame (4401) instead
-// of a plain 401 the browser would collapse into an opaque 1006.
-func bearerAuth(token string, next http.Handler) http.Handler {
-	want := sha256.Sum256([]byte("Bearer " + token))
+// bearerAuth keeps client and worker trust domains separate. Internal control
+// routes require the worker credential. Public routes accept either a direct
+// client credential or the worker credential used by the gateway proxy.
+// WebSocket query credentials are deliberately not accepted.
+func bearerAuth(clientCreds, workerCreds *management.Credentials, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		if auth == "" && wsutil.IsUpgrade(r) {
-			if t := r.URL.Query().Get("access_token"); t != "" {
-				auth = "Bearer " + t
-			}
+		internal := strings.HasPrefix(r.URL.Path, "/internal/v1/") ||
+			strings.HasSuffix(r.URL.Path, "/adopt") ||
+			strings.HasSuffix(r.URL.Path, "/release")
+		ok := workerCreds != nil && workerCreds.MatchAuthorization(auth)
+		if !internal && !ok && clientCreds != nil {
+			ok = clientCreds.MatchAuthorization(auth)
 		}
-		got := sha256.Sum256([]byte(auth))
-		if subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
+		if !ok {
 			err := errors.New("missing or invalid bearer token")
 			if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseUnauthorized, err.Error()) == nil {
 				return
@@ -414,6 +485,33 @@ func bearerAuth(token string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func optionalCredentials(tokens []string, file string) (*management.Credentials, error) {
+	hasToken := false
+	for _, token := range tokens {
+		if strings.TrimSpace(token) != "" {
+			hasToken = true
+			break
+		}
+	}
+	if !hasToken && strings.TrimSpace(file) == "" {
+		return nil, nil
+	}
+	return management.NewCredentials(tokens, file)
+}
+
+func secureUnixSocket(path string) error {
+	if os.Geteuid() != 0 {
+		return errors.New("sandbox management Unix socket requires root ownership")
+	}
+	if err := os.Chown(path, 0, 0); err != nil {
+		return fmt.Errorf("chown management Unix socket: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod management Unix socket: %w", err)
+	}
+	return nil
 }
 
 // shutdownAll freezes every tracked sandbox on server stop. Hibernate, not

@@ -105,7 +105,7 @@ sudo ./sandbox stop-server       # graceful: tears down all sandboxes
 
 ### 5. Or use the TypeScript SDK
 
-Expose the API over TCP (`serve --listen <private-ip>:8080 --token <tok>`), then from any machine that can reach it:
+Expose the API over a private TCP address (`serve --listen <private-ip>:8080 --management-transport private_proxy --token <tok>`), then from any machine that can reach it:
 
 ```ts
 import { Sandbox } from 'sandbox'   // sdk/typescript
@@ -148,7 +148,7 @@ additionally serve TCP — e.g. on a Tailscale address for SDK access from other
 machines — with bearer-token auth:
 
 ```bash
-sudo ./sandbox serve --listen <tailnet-ip>:8080 --token $(openssl rand -hex 24)
+sudo ./sandbox serve --listen <tailnet-ip>:8080 --management-transport private_proxy --token $(openssl rand -hex 24)
 # clients send: Authorization: Bearer <token>
 ```
 
@@ -177,7 +177,7 @@ Endpoints (both listeners):
 
 The exec/file/shell endpoints are proxied to the `sandboxd` agent at `guestIP:8090` inside the VM. Full request/response shapes, errors, and limits: [HTTP API reference](docs/http-api.md).
 
-**Multi-host:** `sandbox gateway --listen <ip>:9090 --token <tok>` fronts N hosts with this same API (hosts join with `serve --gateway …`); it adds `GET /hosts` for fleet state and routes id-scoped requests to the owning host. See [Self-hosting](docs/self-hosting.md#multi-host-fleet).
+**Multi-host:** `sandbox gateway --listen <private-ip>:9090 --management-transport private_proxy --token <client-token> --worker-token <worker-control-token>` fronts N hosts with this same API (hosts join with a separate callback credential); it adds `GET /hosts` for fleet state and routes id-scoped requests to the owning host. See [Self-hosting](docs/self-hosting.md#multi-host-fleet).
 
 ## Configuration
 

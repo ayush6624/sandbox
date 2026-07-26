@@ -11,21 +11,28 @@ import (
 
 	"github.com/ayush6624/sandbox/internal/gateway"
 	"github.com/ayush6624/sandbox/internal/gcemig"
+	"github.com/ayush6624/sandbox/internal/management"
 )
 
 var (
-	gwListen        string
-	gwToken         string
-	gwTTL           time.Duration
-	gwQueueWait     time.Duration
-	gwQueueMax      int
-	gwScaleProject  string
-	gwScaleZone     string
-	gwScaleMIG      string
-	gwScaleMax      int
-	gwScaleSlots    int
-	gwScaleHeadroom int
-	gwReleaseFile   string
+	gwListen          string
+	gwToken           string
+	gwTokenFile       string
+	gwWorkerToken     string
+	gwWorkerTokenFile string
+	gwTransportMode   string
+	gwTLSCertFile     string
+	gwTLSKeyFile      string
+	gwTTL             time.Duration
+	gwQueueWait       time.Duration
+	gwQueueMax        int
+	gwScaleProject    string
+	gwScaleZone       string
+	gwScaleMIG        string
+	gwScaleMax        int
+	gwScaleSlots      int
+	gwScaleHeadroom   int
+	gwReleaseFile     string
 )
 
 func gatewayCmd() *cobra.Command {
@@ -34,13 +41,20 @@ func gatewayCmd() *cobra.Command {
 		Short: "Run the multi-host control plane: place sandboxes on, and route requests to, registered hosts",
 		Long: `Run the sandbox gateway.
 
-Hosts register by running 'serve --gateway <this url> --gateway-token <token> --listen <addr> --token <addr-token>'.
+Hosts register with separate worker-control and callback credentials:
+'serve --gateway <url> --gateway-token <worker-control-token> --listen <addr> --worker-token <callback-token>'.
 The gateway exposes the same API as a single server; point the CLI at it with
-'--gateway http://<addr> --gateway-token <token>'.`,
+'--gateway https://<addr> --gateway-token <client-token>'.`,
 		RunE: runGateway,
 	}
 	cmd.Flags().StringVar(&gwListen, "listen", "", "TCP address to listen on, e.g. 100.64.0.1:9090 (required)")
-	cmd.Flags().StringVar(&gwToken, "token", "", "bearer token required on all inbound requests (required)")
+	cmd.Flags().StringVar(&gwToken, "token", "", "public client API bearer credential")
+	cmd.Flags().StringVar(&gwTokenFile, "token-file", "", "reloadable newline-delimited client API credentials")
+	cmd.Flags().StringVar(&gwWorkerToken, "worker-token", "", "worker registration/control credential (required outside development)")
+	cmd.Flags().StringVar(&gwWorkerTokenFile, "worker-token-file", "", "reloadable newline-delimited worker-control credentials")
+	cmd.Flags().StringVar(&gwTransportMode, "management-transport", "", "TCP security mode: tls, private_proxy, or explicit development")
+	cmd.Flags().StringVar(&gwTLSCertFile, "tls-cert", "", "TLS certificate file (atomically replace to rotate)")
+	cmd.Flags().StringVar(&gwTLSKeyFile, "tls-key", "", "TLS private-key file (atomically replace to rotate)")
 	cmd.Flags().DurationVar(&gwTTL, "heartbeat-ttl", 20*time.Second, "drop a host not seen within this window")
 	// queue-wait must cover the autoscaler's worst common path: MIG resize →
 	// standby VM start → nomad join → serve up + golden build → fresh-worker
@@ -66,8 +80,17 @@ func runGateway(cmd *cobra.Command, args []string) error {
 	if gwListen == "" {
 		return errors.New("--listen is required")
 	}
-	if gwToken == "" {
-		return errors.New("--token is required (refusing to run an unauthenticated gateway)")
+	if gwToken == "" && gwTokenFile == "" {
+		return errors.New("--token or --token-file is required")
+	}
+	if gwTransportMode == "" {
+		return errors.New("--management-transport is required")
+	}
+	if gwWorkerToken == "" && gwWorkerTokenFile == "" {
+		if gwTransportMode != string(management.TransportDevelopment) {
+			return errors.New("--worker-token or --worker-token-file is required outside development")
+		}
+		gwWorkerToken = gwToken
 	}
 
 	// The gateway pools many connections per host; don't let the 1024 soft
@@ -78,6 +101,17 @@ func runGateway(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	g := gateway.New(gwToken, gwTTL, gwQueueWait, gwQueueMax)
+	if err := g.ConfigureSecurity(
+		[]string{gwToken}, gwTokenFile,
+		[]string{gwWorkerToken}, gwWorkerTokenFile,
+		management.Transport{
+			Mode:     management.TransportMode(gwTransportMode),
+			CertFile: gwTLSCertFile,
+			KeyFile:  gwTLSKeyFile,
+		},
+	); err != nil {
+		return err
+	}
 	if gwReleaseFile != "" {
 		if err := g.ConfigureWorkerReleaseFile(gwReleaseFile); err != nil {
 			return err

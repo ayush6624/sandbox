@@ -19,9 +19,12 @@ type Heartbeat struct {
 	// Addr is the host's TCP API address the gateway dials back (e.g. its
 	// tailnet IP:port). Must match the host's `serve --listen` address.
 	Addr string `json:"addr"`
-	// Token is the bearer token the gateway must present when calling Addr —
-	// i.e. the host's own api_token. Sent over the (Tailscale) control link.
-	Token string `json:"token"`
+	// ControlToken is the dedicated credential the gateway presents when
+	// calling Addr. It is never a public/client API credential.
+	ControlToken string `json:"control_token"`
+	// Token is accepted only for an explicit development-mode migration from
+	// workers that predate separated control credentials.
+	Token string `json:"token,omitempty"`
 	// Release identifies the worker artifact / Nomad job release running this
 	// serve process. The gateway can route existing sandboxes from an older
 	// release, but must not place new creates there during a rolling update.

@@ -12,16 +12,27 @@ import (
 // Config is the on-disk JSON describing the host's sandbox runtime.
 type Config struct {
 	// --- API ---
-	SocketPath string `json:"socket_path"` // unix socket the server listens on (and the CLI dials)
-	ListenAddr string `json:"listen_addr"` // optional TCP listener, e.g. "100.99.183.74:8080" (tailnet); requires api_token
-	APIToken   string `json:"api_token"`   // bearer token required on the TCP listener
+	SocketPath          string   `json:"socket_path"`          // root-owned unix socket the server listens on
+	ListenAddr          string   `json:"listen_addr"`          // optional TCP listener
+	ManagementTransport string   `json:"management_transport"` // tls, private_proxy, or explicit development
+	TLSCertFile         string   `json:"tls_cert_file"`
+	TLSKeyFile          string   `json:"tls_key_file"`
+	APIToken            string   `json:"api_token"`      // legacy single client credential
+	APITokens           []string `json:"api_tokens"`     // active client credentials; first is preferred
+	APITokenFile        string   `json:"api_token_file"` // newline-delimited, atomically reloadable
+	WorkerToken         string   `json:"worker_token"`   // gateway-to-worker callback credential
+	WorkerTokens        []string `json:"worker_tokens"`
+	WorkerTokenFile     string   `json:"worker_token_file"`
 
 	// --- Gateway registration (optional; multi-host) ---
-	GatewayURL    string `json:"gateway_url"`    // register/heartbeat target, e.g. "http://100.x:9090"; requires listen_addr
-	GatewayToken  string `json:"gateway_token"`  // bearer presented to the gateway
-	AdvertiseAddr string `json:"advertise_addr"` // addr the gateway dials back; defaults to listen_addr
-	HostID        string `json:"host_id"`        // stable host identity; defaults to hostname
-	WorkerRelease string `json:"worker_release"` // deployed worker generation reported in heartbeats
+	GatewayURL              string   `json:"gateway_url"` // register/heartbeat target; requires listen_addr
+	GatewayToken            string   `json:"gateway_token"`
+	GatewayControlToken     string   `json:"gateway_control_token"` // worker-to-gateway credential
+	GatewayControlTokens    []string `json:"gateway_control_tokens"`
+	GatewayControlTokenFile string   `json:"gateway_control_token_file"`
+	AdvertiseAddr           string   `json:"advertise_addr"` // URL gateway dials; defaults from listener transport
+	HostID                  string   `json:"host_id"`
+	WorkerRelease           string   `json:"worker_release"`
 
 	// --- Storage ---
 	DBPath      string `json:"db_path"`      // SQLite registry

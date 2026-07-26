@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs as root ON the control VM (piped in by control.sh deploy). Installs and
 # starts the four control-plane services from the rsync'd assets under
-# $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
+# $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN GATEWAY_CONTROL_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
 # PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
 # HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
 # QUEUE_WAIT QUEUE_MAX REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
@@ -53,7 +53,9 @@ Wants=network-online.target
 [Service]
 StateDirectory=sandbox-gateway
 Environment=SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
-ExecStart=/usr/local/bin/sandbox gateway --listen 0.0.0.0:${GW_PORT} --token ${GW_TOKEN} \
+ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
+  --management-transport private_proxy \
+  --token ${GW_TOKEN} --worker-token ${GATEWAY_CONTROL_TOKEN} \
   --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
   --worker-release-file /var/lib/sandbox-gateway/worker-release
 # Single-writer invariant: Nomad Autoscaler is the sole process allowed to

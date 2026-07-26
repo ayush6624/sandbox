@@ -53,7 +53,7 @@ restarted.
 sudo ./sandbox serve --config configs/devbox.json
 
 # Also over TCP with bearer auth (for the SDK / remote clients):
-sudo ./sandbox serve --listen <private-ip>:8080 --token $(openssl rand -hex 24)
+sudo ./sandbox serve --listen <private-ip>:8080 --management-transport private_proxy --token $(openssl rand -hex 24)
 ```
 
 On startup the server also:
@@ -88,13 +88,15 @@ from heartbeats, so it can restart freely).
 
 ```bash
 # On the gateway machine:
-./sandbox gateway --listen <gw-ip>:9090 --token <GATEWAY_TOKEN>
+./sandbox gateway --listen <gw-ip>:9090 --management-transport private_proxy \
+  --token <CLIENT_TOKEN> --worker-token <GATEWAY_CONTROL_TOKEN>
 
 # On every host:
 sudo ./sandbox serve --config configs/devbox.json \
-  --listen <host-ip>:8080 --token <HOST_TOKEN> \
-  --gateway http://<gw-ip>:9090 --gateway-token <GATEWAY_TOKEN> \
-  --advertise <host-ip>:8080
+  --listen <host-ip>:8080 --management-transport private_proxy \
+  --worker-token <HOST_CALLBACK_TOKEN> \
+  --gateway http://<gw-ip>:9090 --gateway-token <GATEWAY_CONTROL_TOKEN> \
+  --advertise http://<host-ip>:8080
 ```
 
 Hosts heartbeat every 5 s; `GET /hosts` on the gateway shows who's alive.

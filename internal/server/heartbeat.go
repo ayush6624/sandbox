@@ -26,6 +26,11 @@ func (s *Server) heartbeat(ctx context.Context) {
 	advertise := s.cfg.AdvertiseAddr
 	if advertise == "" {
 		advertise = s.cfg.ListenAddr
+		if s.cfg.ManagementTransport == "tls" {
+			advertise = "https://" + advertise
+		} else {
+			advertise = "http://" + advertise
+		}
 	}
 	hostID := s.cfg.HostID
 	if hostID == "" {
@@ -34,7 +39,7 @@ func (s *Server) heartbeat(ctx context.Context) {
 	if hostID == "" {
 		hostID = advertise // last-resort identity
 	}
-	url := s.cfg.GatewayURL + "/register"
+	url := strings.TrimRight(s.cfg.GatewayURL, "/") + "/internal/v1/hosts:register"
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	// Golden adoption/build completes asynchronously after the heartbeat loop
@@ -102,13 +107,15 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	hb := cluster.Heartbeat{
 		HostID:      hostID,
 		Addr:        advertise,
-		Token:       s.cfg.APIToken,
 		Release:     s.cfg.WorkerRelease,
 		SlotsTotal:  s.reg.Pools().Slots(),
 		SlotsUsed:   runningCount,
 		Hibernated:  hibernated,
 		SandboxIDs:  ids,
 		SnapshotIDs: snapIDs,
+	}
+	if s.workerCredentials != nil {
+		hb.ControlToken = s.workerCredentials.Outbound()
 	}
 	// Advertise true allocatable capacity. Memory overrides can make
 	// SlotsTotal-SlotsUsed overstate it. Until the golden snapshot is ready,
@@ -125,8 +132,8 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.cfg.GatewayToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.cfg.GatewayToken)
+	if s.gatewayCredentials != nil {
+		req.Header.Set("Authorization", "Bearer "+s.gatewayCredentials.Outbound())
 	}
 	resp, err := client.Do(req)
 	if err != nil {

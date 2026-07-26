@@ -15,6 +15,7 @@ REPO="$(cd "$DIR/../.." && pwd)"
 source "$DIR/config.env"
 [ -f "$DIR/fleet-secrets.env" ] && source "$DIR/fleet-secrets.env"
 : "${GATEWAY_TOKEN:?run control.sh deploy first (populates fleet-secrets.env)}"
+: "${GATEWAY_CONTROL_TOKEN:?run control.sh deploy first}"
 : "${HOST_TOKEN:?run control.sh deploy first}"
 
 RELEASE="${1:-$(git -C "$REPO" rev-parse --short HEAD)}"
@@ -139,7 +140,7 @@ sshc "curl -fsS -X PUT \
 # be visible to the remote shell's own $VAR expansion on the same command line.
 sshc "nomad job run \
         -var=gateway_url='$GW_URL' \
-        -var=gateway_token='$GATEWAY_TOKEN' \
+        -var=gateway_control_token='$GATEWAY_CONTROL_TOKEN' \
         -var=host_token='$HOST_TOKEN' \
         -var=release='$RELEASE' \
         -var=bucket='$RELEASE_BUCKET' \

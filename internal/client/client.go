@@ -67,12 +67,25 @@ func SharedTransport() http.RoundTripper { return tcpTransport }
 // the gateway to reach hosts. No client-level timeout: exec streams and shells
 // are long-lived, so per-request contexts govern deadlines.
 func NewHTTP(addr, token string) *Client {
+	baseURL := EndpointURL(addr)
+	wsURL := strings.Replace(baseURL, "http://", "ws://", 1)
+	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 	return &Client{
 		http:    &http.Client{Transport: tcpTransport},
-		baseURL: "http://" + addr,
-		wsURL:   "ws://" + addr,
+		baseURL: baseURL,
+		wsURL:   wsURL,
 		token:   token,
 	}
+}
+
+// EndpointURL accepts either the historical host:port form or an explicit
+// HTTP(S) URL. Explicit HTTPS is preserved for encrypted worker callbacks.
+func EndpointURL(addr string) string {
+	addr = strings.TrimRight(strings.TrimSpace(addr), "/")
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return addr
+	}
+	return "http://" + addr
 }
 
 // CreateOpts customizes sandbox creation.

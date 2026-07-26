@@ -13,9 +13,9 @@ API from other languages or shells.
 
 | Listener | Auth | Notes |
 | --- | --- | --- |
-| Unix socket `/run/sandbox.sock` | none (file mode 0600, root) | what the CLI uses on-host |
-| TCP `--listen <ip>:8080` | `Authorization: Bearer <token>` | per-host API |
-| Gateway `--listen <ip>:9090` | `Authorization: Bearer <token>` | fleet front door; same API |
+| Unix socket `/run/sandbox.sock` | none (root:root, mode 0600) | what the CLI uses on-host |
+| TCP `--listen <ip>:8080` | `Authorization: Bearer <token>` over TLS or verified private transport | per-host API |
+| Gateway `--listen <ip>:9090` | client bearer over TLS or verified private transport | fleet front door; worker control uses a separate credential |
 
 All compatibility-route request/response bodies are JSON unless noted. Legacy
 errors remain `{"error": "message"}` with a 4xx/5xx status so existing clients
@@ -27,9 +27,9 @@ Notes for browser frontends:
 - **No CORS headers are set.** A browser can't call the TCP/gateway API
   cross-origin directly — put your own backend (or a same-origin proxy) in
   front and inject the bearer token there.
-- **WebSocket auth**: browsers can't set an `Authorization` header on a
-  WebSocket handshake, so upgrade requests (only) may carry the token as
-  `?access_token=<token>` instead. Auth and routing failures on `/shell` are
+- **WebSocket auth**: use `Authorization: Bearer`, normally injected by a
+  same-origin backend for browser clients. Query-string credentials are
+  rejected. Auth and routing failures on `/shell` are
   delivered as **post-handshake close frames** with code `4000 + HTTP status`
   (`4401` bad token, `4404` unknown sandbox, `4500` failed wake, `4502` agent
   unreachable) and the error message as the close reason — browsers surface
@@ -315,8 +315,9 @@ omitted when zero-valued — treat absent fields as `0`/`""`/`false`
 
 WebSocket upgrade to a real `bash -l` on a pty. This is a **supported client
 API**, not an internal detail. Query params set the initial size (defaults
-80×24) and working directory; browser clients append `&access_token=<token>`
-(headers can't be set on a WebSocket).
+80×24) and working directory. Credentials use the Authorization header; a
+browser connects through a same-origin backend rather than placing secrets in
+the URL.
 
 - **Binary frames**: raw terminal bytes, both directions (guest→client is
   stdout+stderr combined; client→guest is stdin).

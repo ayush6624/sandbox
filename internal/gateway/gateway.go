@@ -13,8 +13,7 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +35,7 @@ import (
 	"github.com/ayush6624/sandbox/internal/client"
 	"github.com/ayush6624/sandbox/internal/cluster"
 	"github.com/ayush6624/sandbox/internal/httpapi"
+	"github.com/ayush6624/sandbox/internal/management"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/wsutil"
 )
@@ -83,8 +83,11 @@ func (h *host) free() int {
 
 // Gateway routes the sandbox API across a fleet of hosts.
 type Gateway struct {
-	token string        // bearer required on all inbound requests
-	ttl   time.Duration // a host not seen within ttl is considered dead
+	token             string // retained for compatibility with in-package tests
+	clientCredentials *management.Credentials
+	workerCredentials *management.Credentials
+	transport         management.Transport
+	ttl               time.Duration // a host not seen within ttl is considered dead
 
 	// queueWait/queueMax bound the create wait queue: a create that finds no
 	// free slot waits up to queueWait for capacity (a destroy, a failed create,
@@ -165,17 +168,43 @@ type DirectScaler interface {
 // registration alike); ttl is the stale-host cutoff. queueWait/queueMax
 // configure the create wait queue (queueWait 0 disables queueing).
 func New(token string, ttl time.Duration, queueWait time.Duration, queueMax int) *Gateway {
+	creds, _ := management.NewCredentials([]string{token}, "")
 	return &Gateway{
-		token:     token,
-		ttl:       ttl,
-		queueWait: queueWait,
-		queueMax:  queueMax,
-		slotFreed: make(chan struct{}),
-		hosts:     map[string]*host{},
-		route:     map[string]string{},
-		snapRoute: map[string]string{},
-		adopts:    map[string]*adoptInflight{},
+		token:             token,
+		clientCredentials: creds,
+		workerCredentials: creds,
+		transport:         management.Transport{Mode: management.TransportDevelopment},
+		ttl:               ttl,
+		queueWait:         queueWait,
+		queueMax:          queueMax,
+		slotFreed:         make(chan struct{}),
+		hosts:             map[string]*host{},
+		route:             map[string]string{},
+		snapRoute:         map[string]string{},
+		adopts:            map[string]*adoptInflight{},
 	}
+}
+
+// ConfigureSecurity separates public-client and worker-control credentials and
+// makes the listener transport explicit. Credential files support overlap
+// rotation without restarting the gateway.
+func (g *Gateway) ConfigureSecurity(clientTokens []string, clientFile string, workerTokens []string, workerFile string, transport management.Transport) error {
+	clientCreds, err := management.NewCredentials(clientTokens, clientFile)
+	if err != nil {
+		return fmt.Errorf("gateway client credentials: %w", err)
+	}
+	workerCreds, err := management.NewCredentials(workerTokens, workerFile)
+	if err != nil {
+		return fmt.Errorf("gateway worker-control credentials: %w", err)
+	}
+	if transport.Mode != management.TransportDevelopment &&
+		clientCreds.Outbound() == workerCreds.Outbound() {
+		return errors.New("gateway client and worker-control credentials must differ outside development mode")
+	}
+	g.clientCredentials = clientCreds
+	g.workerCredentials = workerCreds
+	g.transport = transport
+	return nil
 }
 
 // ConfigureDirectScaleOut enables a queue 0 -> 1 scale-out trigger. The direct
@@ -219,6 +248,9 @@ func (g *Gateway) ConfigureWorkerReleaseFile(path string) error {
 
 // Serve listens on addr until ctx is cancelled.
 func (g *Gateway) Serve(ctx context.Context, addr string) error {
+	if err := g.transport.ValidateListener(addr); err != nil {
+		return err
+	}
 	go g.pruneLoop(ctx)
 
 	mux := http.NewServeMux()
@@ -258,10 +290,26 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
 	apiv1.New(mux).Register(mux)
 
-	srv := &http.Server{Addr: addr, Handler: httpapi.Middleware(bearerAuth(g.token, mux))}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	tlsConfig, err := g.transport.TLSConfig()
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+	if tlsConfig != nil {
+		ln = tls.NewListener(ln, tlsConfig)
+	}
+	srv := &http.Server{
+		Addr:      addr,
+		Handler:   httpapi.Middleware(g.bearerAuth(mux)),
+		TLSConfig: tlsConfig,
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	fmt.Fprintf(os.Stderr, "gateway listening on %s (bearer auth)\n", addr)
+	go func() { errc <- srv.Serve(ln) }()
+	fmt.Fprintf(os.Stderr, "gateway listening on %s (transport=%s, separated bearer auth)\n", addr, g.transport.Mode)
 
 	select {
 	case <-ctx.Done():
@@ -298,6 +346,22 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("heartbeat missing host_id or addr"))
 		return
 	}
+	if g.transport.Mode != management.TransportDevelopment &&
+		!management.IsEncryptedOrPrivateEndpoint(hb.Addr) {
+		httpError(w, http.StatusBadRequest, errors.New("worker address must use HTTPS or a verifiably private IP"))
+		return
+	}
+	callbackToken := hb.ControlToken
+	if callbackToken == "" && g.transport.Mode == management.TransportDevelopment {
+		callbackToken = hb.Token
+		if callbackToken == "" {
+			callbackToken = g.token
+		}
+	}
+	if callbackToken == "" {
+		httpError(w, http.StatusBadRequest, errors.New("heartbeat missing worker control credential"))
+		return
+	}
 
 	g.mu.Lock()
 	// A host's advertised API address is unique within the fleet. Treat it as
@@ -323,7 +387,7 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "gateway: host %s registered (%s)\n", hb.HostID, hb.Addr)
 	}
 	h.addr = hb.Addr
-	h.token = hb.Token
+	h.token = callbackToken
 	h.release = hb.Release
 	h.slotsTotal = hb.SlotsTotal
 	h.slotsUsed = hb.SlotsUsed
@@ -885,7 +949,10 @@ func (g *Gateway) hostProxy(hostID, addr, token string) *httputil.ReverseProxy {
 }
 
 func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReverseProxy {
-	target := &url.URL{Scheme: "http", Host: addr}
+	target, err := url.Parse(client.EndpointURL(addr))
+	if err != nil {
+		target = &url.URL{Scheme: "http", Host: addr}
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = client.SharedTransport()
 	director := proxy.Director
@@ -897,8 +964,8 @@ func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReversePr
 		} else {
 			req.Header.Del("Authorization") // don't leak the gateway token
 		}
-		// The gateway already re-authenticated with the host's token; drop a
-		// browser client's access_token so it doesn't ride further.
+		// Query-string credentials are never accepted. Strip legacy attempts so
+		// a secret cannot ride into worker traces during migration.
 		if q := req.URL.Query(); q.Has("access_token") {
 			q.Del("access_token")
 			req.URL.RawQuery = q.Encode()
@@ -1043,7 +1110,7 @@ func (g *Gateway) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+snap.addr+"/info", nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, client.EndpointURL(snap.addr)+"/info", nil)
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -1206,21 +1273,15 @@ func (g *Gateway) dropHostLocked(id string) {
 
 // --- helpers (mirrors internal/server) ---
 
-// bearerAuth mirrors internal/server: WebSocket upgrades may carry the token
-// as ?access_token= (browsers can't set headers on a WebSocket), and their
-// rejections are delivered as post-handshake close frames (4401) so the page
-// sees the reason instead of an opaque 1006.
-func bearerAuth(token string, next http.Handler) http.Handler {
-	want := sha256.Sum256([]byte("Bearer " + token))
+func (g *Gateway) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		if auth == "" && wsutil.IsUpgrade(r) {
-			if t := r.URL.Query().Get("access_token"); t != "" {
-				auth = "Bearer " + t
-			}
+		workerOnly := r.URL.Path == "/register" || strings.HasPrefix(r.URL.Path, "/internal/v1/")
+		ok := g.workerCredentials != nil && workerOnly && g.workerCredentials.MatchAuthorization(auth)
+		if !workerOnly && g.clientCredentials != nil {
+			ok = g.clientCredentials.MatchAuthorization(auth)
 		}
-		got := sha256.Sum256([]byte(auth))
-		if subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
+		if !ok {
 			err := errors.New("missing or invalid bearer token")
 			if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseUnauthorized, err.Error()) == nil {
 				return

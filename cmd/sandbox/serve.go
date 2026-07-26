@@ -19,8 +19,12 @@ import (
 var (
 	listenAddr    string
 	apiToken      string
+	workerToken   string
 	gatewayURL    string
 	gatewayToken  string
+	transportMode string
+	tlsCertFile   string
+	tlsKeyFile    string
 	advertiseAddr string
 	hostID        string
 	workerRelease string
@@ -35,8 +39,12 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfgPath, "config", "configs/devbox.json", "path to JSON config")
 	cmd.Flags().StringVar(&listenAddr, "listen", "", "also serve the API on this TCP address (requires --token); overrides config listen_addr")
 	cmd.Flags().StringVar(&apiToken, "token", "", "bearer token for the TCP listener; overrides config api_token")
+	cmd.Flags().StringVar(&workerToken, "worker-token", "", "gateway-to-worker bearer credential (must differ from the client token in production)")
 	cmd.Flags().StringVar(&gatewayURL, "gateway", "", "register with this gateway URL and heartbeat (requires --listen); overrides config gateway_url")
-	cmd.Flags().StringVar(&gatewayToken, "gateway-token", "", "bearer token presented to the gateway; overrides config gateway_token")
+	cmd.Flags().StringVar(&gatewayToken, "gateway-token", "", "worker-control bearer credential presented to the gateway")
+	cmd.Flags().StringVar(&transportMode, "management-transport", "", "TCP security mode: tls, private_proxy, or explicit development")
+	cmd.Flags().StringVar(&tlsCertFile, "tls-cert", "", "TLS certificate file (atomically replace to rotate)")
+	cmd.Flags().StringVar(&tlsKeyFile, "tls-key", "", "TLS private-key file (atomically replace to rotate)")
 	cmd.Flags().StringVar(&advertiseAddr, "advertise", "", "address the gateway should dial back; defaults to --listen")
 	cmd.Flags().StringVar(&hostID, "host-id", "", "stable host identity reported to the gateway; defaults to hostname")
 	cmd.Flags().StringVar(&workerRelease, "worker-release", "", "deployed worker generation reported to the gateway")
@@ -54,11 +62,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if apiToken != "" {
 		cfg.APIToken = apiToken
 	}
+	if workerToken != "" {
+		cfg.WorkerToken = workerToken
+	}
 	if gatewayURL != "" {
 		cfg.GatewayURL = gatewayURL
 	}
 	if gatewayToken != "" {
-		cfg.GatewayToken = gatewayToken
+		cfg.GatewayControlToken = gatewayToken
+	}
+	if transportMode != "" {
+		cfg.ManagementTransport = transportMode
+	}
+	if tlsCertFile != "" {
+		cfg.TLSCertFile = tlsCertFile
+	}
+	if tlsKeyFile != "" {
+		cfg.TLSKeyFile = tlsKeyFile
 	}
 	if advertiseAddr != "" {
 		cfg.AdvertiseAddr = advertiseAddr
@@ -108,28 +128,38 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		SocketPath:        cfg.SocketPath,
-		ListenAddr:        cfg.ListenAddr,
-		APIToken:          cfg.APIToken,
-		Provisioner:       prov,
-		GatewayIP:         cfg.GatewayIP,
-		GuestSubnetBits:   cfg.GuestSubnetBits,
-		VMTemplate:        tmpl,
-		HotCreate:         !cfg.DisableHotCreate,
-		CreateConcurrency: cfg.CreateConcurrency,
-		PlacementDelay:    time.Duration(cfg.PlacementDelaySec) * time.Second,
-		MemBudgetMIB:      cfg.MemBudgetMIB,
-		HibernateAfter:    time.Duration(cfg.HibernateAfterSec) * time.Second,
-		UFFDRestore:       cfg.UFFDRestore,
-		UFFDChunkBytes:    uint64(cfg.UFFDChunkKiB) * 1024,
-		UFFDChunkGCS:      cfg.UFFDChunkGCS,
-		UFFDChunkPrefetch: cfg.UFFDChunkPrefetch,
-		SnapshotBucket:    cfg.SnapshotBucket,
-		GatewayURL:        cfg.GatewayURL,
-		GatewayToken:      cfg.GatewayToken,
-		AdvertiseAddr:     cfg.AdvertiseAddr,
-		HostID:            cfg.HostID,
-		WorkerRelease:     cfg.WorkerRelease,
+		SocketPath:          cfg.SocketPath,
+		ListenAddr:          cfg.ListenAddr,
+		APIToken:            cfg.APIToken,
+		APITokens:           cfg.APITokens,
+		APITokenFile:        cfg.APITokenFile,
+		WorkerToken:         cfg.WorkerToken,
+		WorkerTokens:        cfg.WorkerTokens,
+		WorkerTokenFile:     cfg.WorkerTokenFile,
+		ManagementTransport: cfg.ManagementTransport,
+		TLSCertFile:         cfg.TLSCertFile,
+		TLSKeyFile:          cfg.TLSKeyFile,
+		Provisioner:         prov,
+		GatewayIP:           cfg.GatewayIP,
+		GuestSubnetBits:     cfg.GuestSubnetBits,
+		VMTemplate:          tmpl,
+		HotCreate:           !cfg.DisableHotCreate,
+		CreateConcurrency:   cfg.CreateConcurrency,
+		PlacementDelay:      time.Duration(cfg.PlacementDelaySec) * time.Second,
+		MemBudgetMIB:        cfg.MemBudgetMIB,
+		HibernateAfter:      time.Duration(cfg.HibernateAfterSec) * time.Second,
+		UFFDRestore:         cfg.UFFDRestore,
+		UFFDChunkBytes:      uint64(cfg.UFFDChunkKiB) * 1024,
+		UFFDChunkGCS:        cfg.UFFDChunkGCS,
+		UFFDChunkPrefetch:   cfg.UFFDChunkPrefetch,
+		SnapshotBucket:      cfg.SnapshotBucket,
+		GatewayURL:          cfg.GatewayURL,
+		GatewayToken:        firstNonEmpty(cfg.GatewayControlToken, cfg.GatewayToken),
+		GatewayTokens:       cfg.GatewayControlTokens,
+		GatewayTokenFile:    cfg.GatewayControlTokenFile,
+		AdvertiseAddr:       cfg.AdvertiseAddr,
+		HostID:              cfg.HostID,
+		WorkerRelease:       cfg.WorkerRelease,
 	}, reg)
 
 	// Every running sandbox costs a handful of fds (firecracker socket, log,
@@ -142,4 +172,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("sandbox server listening on %s\n", cfg.SocketPath)
 	return srv.Serve(ctx)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

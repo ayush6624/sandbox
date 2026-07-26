@@ -1,8 +1,6 @@
 package main
 
 import (
-	"strings"
-
 	"github.com/spf13/cobra"
 
 	"github.com/ayush6624/sandbox/internal/client"
@@ -38,19 +36,11 @@ func dialClient() (*config.Config, *client.Client, error) {
 		if token == "" {
 			token = cfg.GatewayToken
 		}
-		return cfg, client.NewHTTP(stripScheme(gwAddr), token), nil
+		return cfg, client.NewHTTP(gwAddr, token), nil
 	}
 	sock := cfg.SocketPath
 	if socket != "" {
 		sock = socket
 	}
 	return cfg, client.New(sock), nil
-}
-
-// stripScheme turns "http://host:port" into "host:port" so the same value works
-// for both `serve --gateway` (a URL) and the client (host:port).
-func stripScheme(s string) string {
-	s = strings.TrimPrefix(s, "http://")
-	s = strings.TrimPrefix(s, "https://")
-	return strings.TrimSuffix(s, "/")
 }

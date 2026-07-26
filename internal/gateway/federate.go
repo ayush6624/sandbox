@@ -83,7 +83,7 @@ func (g *Gateway) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 
 // scrapeHost fetches a host's /metrics text with bearer auth.
 func scrapeHost(ctx context.Context, addr, token string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+addr+"/metrics", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", client.EndpointURL(addr)+"/metrics", nil)
 	if err != nil {
 		return "", err
 	}
