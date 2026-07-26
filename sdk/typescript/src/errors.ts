@@ -1,5 +1,23 @@
 import type { CommandResult } from './types.js'
 
+/** RFC 9457 problem details returned by the v1 API. */
+export interface ProblemDetails {
+  type: string
+  title: string
+  status: number
+  detail?: string
+  instance?: string
+  code: string
+  request_id: string
+  violations?: Array<{ field: string; description: string }>
+}
+
+export interface ApiErrorContext {
+  code?: string
+  requestId?: string
+  problem?: ProblemDetails
+}
+
 /**
  * Base class for all errors thrown by the sandbox SDK.
  *
@@ -11,11 +29,20 @@ import type { CommandResult } from './types.js'
 export class SandboxError extends Error {
   /** HTTP status behind this error; absent for client-side failures. */
   readonly status?: number
+  /** Stable v1 problem code. Prefer this over matching the human message. */
+  readonly code?: string
+  /** Request id shared with server logs. */
+  readonly requestId?: string
+  /** Complete RFC 9457 response, when the server returned one. */
+  readonly problem?: ProblemDetails
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, context: ApiErrorContext = {}) {
     super(message)
     this.name = 'SandboxError'
     if (status !== undefined) this.status = status
+    this.code = context.code ?? context.problem?.code
+    this.requestId = context.requestId ?? context.problem?.request_id
+    this.problem = context.problem
   }
 }
 
@@ -24,8 +51,8 @@ export class SandboxError extends Error {
  * the API key is missing, invalid, or not authorized.
  */
 export class AuthenticationError extends SandboxError {
-  constructor(message: string, status?: number) {
-    super(message, status)
+  constructor(message: string, status?: number, context: ApiErrorContext = {}) {
+    super(message, status, context)
     this.name = 'AuthenticationError'
   }
 }
@@ -35,8 +62,8 @@ export class AuthenticationError extends SandboxError {
  * or a file path that does not exist in the guest.
  */
 export class NotFoundError extends SandboxError {
-  constructor(message: string, status?: number) {
-    super(message, status)
+  constructor(message: string, status?: number, context: ApiErrorContext = {}) {
+    super(message, status, context)
     this.name = 'NotFoundError'
   }
 }
@@ -48,8 +75,8 @@ export class NotFoundError extends SandboxError {
  * source (or a previous restore) still holds its baked network identity.
  */
 export class ConflictError extends SandboxError {
-  constructor(message: string, status?: number) {
-    super(message, status)
+  constructor(message: string, status?: number, context: ApiErrorContext = {}) {
+    super(message, status, context)
     this.name = 'ConflictError'
   }
 }
@@ -68,8 +95,8 @@ export class CapacityError extends SandboxError {
   /** Server's `Retry-After` hint in milliseconds; absent when it sent none. */
   readonly retryAfterMs?: number
 
-  constructor(message: string, status?: number, retryAfterMs?: number) {
-    super(message, status)
+  constructor(message: string, status?: number, retryAfterMs?: number, context: ApiErrorContext = {}) {
+    super(message, status, context)
     this.name = 'CapacityError'
     if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs
   }
@@ -81,8 +108,8 @@ export class CapacityError extends SandboxError {
  * hit the client-side request timeout.
  */
 export class TimeoutError extends SandboxError {
-  constructor(message: string, status?: number) {
-    super(message, status)
+  constructor(message: string, status?: number, context: ApiErrorContext = {}) {
+    super(message, status, context)
     this.name = 'TimeoutError'
   }
 }
