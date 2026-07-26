@@ -1,6 +1,60 @@
 # GCP production-readiness validation — 2026-07-26
 
-Status: **passed for remediation release `prod-fixes-20260726-1`**
+Status: **historical remediation release passed; current hardened-image
+validation is in progress**
+
+## Hardened-image validation update — 2026-07-27
+
+Implementation head is `a223889`. The latest release to complete the full
+two-worker security gate is `a97b68f`.
+
+### Confirmed evidence
+
+| Gate | Result |
+|---|---|
+| Full worker security gate | Pass on both active workers at `a97b68f` |
+| Server-crash recovery | Pass |
+| Host-reboot recovery | Pass |
+| Local Go suite | **202 tests passed** |
+| Relevant Go race suite | Pass |
+| TypeScript SDK suite | **43 tests passed** |
+| SDK typecheck and build | Pass |
+| Deterministic OpenAPI generation | Pass |
+| Shell syntax validation | **27 scripts passed** |
+
+The security gate covered live jailer UID/GID allocation, per-VM chroot and
+namespaces, cgroup controls, seccomp, VMM output bounds, non-root guest/SSH
+access, unique independent and snapshot-derived identities, guest isolation
+with permitted egress, and expected/VMM-crash cleanup. The recovery campaign
+then separately proved server-process crash recovery and host reboot
+reconciliation.
+
+### Current rerun: not yet passed
+
+A live `/v1` contract rerun against the hardened fleet exposed a transient
+restored-guest failure: `ssh.service` could remain inactive after identity
+rotation. Commit `a223889` adds bounded retries and unit coverage for restored
+SSH startup. The worker image is currently being rebuilt, after which the
+contract, SDK/e2e, security, and recovery gates must run again.
+
+This document must **not** treat `a223889` or the new image as GCP-validated
+until that sequence completes. In particular, the earlier API/SDK passes below
+prove the contract implementation and the `a97b68f` result proves the prior
+security release; neither is evidence that the in-progress image passed the
+combined release gate.
+
+### Remaining P0 and release evidence
+
+1. Controlled memory, PID, and descriptor exhaustion, and an
+   ENOSPC/log-disk-full case, with bounded failure, worker health, and cleanup
+   assertions.
+2. Live management-token rotation proving the overlap/new key works and the
+   retired key is rejected without stopping the fleet.
+3. Complete `/v1` contract and TypeScript SDK/e2e reruns on the rebuilt image.
+4. Repeat security and recovery gates and record the final image, host kernel,
+   guest kernel, Firecracker, rootfs, and release identifiers.
+5. Only after those correctness gates pass, run the final rigorous benchmark
+   matrix and retain deterministic cleanup evidence.
 
 ## Remediation validation
 
@@ -9,7 +63,7 @@ fixed in focused commits and deployed together as `prod-fixes-20260726-1`
 (`75ecb6b`):
 
 - `4434dc9` serializes Firecracker loads that share a baked snapshot rootfs
-  path, covering hot create, restore, and fanout;
+  path, covering hot create, resume, and snapshot batch creation;
 - `5754d65` bounds graceful shutdown and forces a VMM that does not exit
   promptly;
 - `75ecb6b` makes Nomad Autoscaler the sole production MIG resize writer.

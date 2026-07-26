@@ -19,8 +19,8 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 | Hot create (golden-snapshot clone) | **199–271 ms** server-side, ~0.55 s end-to-end via gateway | create request → in-guest agent answers |
 | Hibernation wake, same identity | **49 ms** server-side | wake start → agent answers |
 | Wake-on-connect (forwarded port) | **133 ms** | TCP connect to host port → guest responds, incl. wake |
-| Snapshot restore (1:1) | **212 ms p50** (pure resume ~14 ms; rest is rootfs reflink) | restore request → agent answers |
-| Fan-out | **83 ms/clone** amortized (32 clones in 2.68 s), 64/64 usable at N=64 | fanout request → all agents answer |
+| Snapshot-source create (legacy 1:1 route) | **212 ms p50** (VMM resume ~14 ms; rest is rootfs reflink) | create request → agent answers |
+| Snapshot batch create | **83 ms/sandbox** amortized (32 in 2.68 s), 64/64 usable at N=64 | batch request → all agents answer |
 | Diff snapshot write | **123 ms** (vs ~1.5 s full); uploads ~24× smaller | pause → snapshot written |
 | Cold boot (baseline) | 3.46 s p50 (GCP), ~2.2 s (Hetzner bare metal) | create request → agent answers |
 | Burst churn | 499/500 creates on 3 hosts (72 slots), 6.9 creates/s sustained | 500 create→exec→kill @ concurrency 96 |
@@ -44,19 +44,20 @@ call returned".
 | Cold boot | 3.46 s p50 | also the fallback path if the golden snapshot is missing |
 | Cold boot with `vcpus`/`mem_mib` override | ~3.7 s | overrides always cold-boot (resources are baked into snapshots) |
 
-### Snapshot restore & fan-out
+### Snapshot source and batch creation
 
-Restore p50 **212 ms** (mean 212, p90 219, 25 iters) vs cold boot p50 3463 ms —
+Snapshot-source create p50 **212 ms** (mean 212, p90 219, 25 iters) vs cold boot p50 3463 ms —
 **16.3×**. The actual Firecracker resume is ~14 ms (load+resume 12 ms, agent
 2 ms — the agent is already running in restored, lazily-faulted memory); the
-rest is the rootfs reflink copy. Cross-host restore from GCS (owner host dead):
+rest is the rootfs reflink copy. Cross-host snapshot-source create from GCS
+(owner host dead):
 **~180 ms** once the base image is cached (rootfs cp 8 ms + load 35 ms + agent
 139 ms); first pull of a 2.1 GiB base costs a one-time 13.2 s per host.
 
-Fan-out scaling (single host, measured 2026-07-01, pre-GARP for N>1 batches —
-single-clone latency now matches hot create):
+Snapshot batch scaling (single host, measured 2026-07-01, pre-GARP for N>1 —
+single-sandbox latency now matches hot create):
 
-| N | batch (ms) | per-clone (ms) | usable |
+| N | batch (ms) | per-sandbox (ms) | usable |
 |--:|--:|--:|--:|
 | 1 | 1695 | 1695 | 1/1 |
 | 8 | 1797 | 225 | 8/8 |
@@ -317,8 +318,8 @@ capacity-targeted burst detected demand in one control-loop interval and
 finished without a 503, pool-exhaustion error, or agent timeout.
 
 The broader stress suite completed **30/31 checks in 138.5 s**. Concurrency,
-churn, load, snapshots, fan-out, hibernation state preservation, ports, and
-hot-create clock correctness passed. The sole failure was
+churn, load, snapshots, snapshot batch creation, hibernation state
+preservation, ports, and hot-create clock correctness passed. The sole failure was
 `clock :: hibernate + wake resteps the clock`; it reproduced 3/5 times after
 the suite and is tracked as a wake-only timing regression rather than being
 folded into the successful burst result.
@@ -406,8 +407,8 @@ the numbers aren't apples-to-apples. Both are shown.
 
 ```bash
 cd sdk/typescript
-npm run bench:restore          # cold boot vs snapshot restore
-npm run bench:fanout           # fan-out scaling
+npm run bench:restore          # default vs snapshot-source create (legacy name)
+npm run bench:fanout           # snapshot batch scaling (legacy script name)
 node benchmarks/burst-bench.ts --count 500 --concurrency 96 --retry-ms 250
 bash ../../scripts/bench-extensive.sh   # full single-host + fleet sweep
 ```

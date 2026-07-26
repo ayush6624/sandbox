@@ -23,8 +23,10 @@ The runtime already has a substantial foundation:
 - Passing Go and TypeScript unit/integration-style tests on the development
   host when local test sockets are available.
 
-The largest remaining risks are the host isolation boundary, the public API
-contract, and operational failure handling.
+The enabled host-isolation paths and public API contract now have substantial
+GCP evidence. The remaining release risks are destructive resource-boundary
+behavior, live credential rotation, combined rebuilt-image regression proof,
+and broader operational failure handling.
 
 ## Public terminology
 
@@ -45,9 +47,10 @@ used to implement it.
 
 This follows the dominant model used by E2B, Daytona, and Modal: create a
 sandbox with a template/image/snapshot as its source. A snapshot is reusable
-one-to-many input. Pause/resume is the one-to-one lifecycle operation. "Fan-out"
-can remain in benchmark and implementation discussions, but not as the primary
-public method.
+one-to-many input. Pause/resume is the one-to-one lifecycle operation.
+"Fan-out" can remain in internal implementation and compatibility-route
+discussions, but public API, SDK, and benchmark labels should use snapshot
+source and batch-create terminology.
 
 Research references:
 
@@ -68,6 +71,11 @@ Research references:
 P0 is complete only when all applicable launch paths—cold boot, hot clone,
 snapshot restore, hibernation wake, and UFFD restore—provide the same security
 properties. A partial mode must not be labelled production-secure.
+
+Overall status: **open**. The enabled production paths have passed the
+two-worker isolation and recovery gates, but resource-exhaustion/ENOSPC, live
+credential rotation, and the final rebuilt-image contract/e2e rerun remain
+release blockers.
 
 ### P0.1 Firecracker seccomp
 
@@ -98,7 +106,7 @@ Fleet evidence (2026-07-25, release `p0-secure-20260725-1`):
 
 ### P0.2 Jailer, privileges, and cgroups
 
-Status: **started — shared mode-aware launcher seam implemented**.
+Status: **implemented and fleet-verified for enabled production paths**.
 
 Detailed design: [P0.2 shared jailer and cgroup design](p0-jailer-design.md).
 
@@ -112,15 +120,14 @@ Use Firecracker's jailer (or a stricter equivalent) for every VM process:
   Firecracker API socket, log sink, and UFFD socket.
 - Cleanup/reconciliation of abandoned jail directories and UID allocations.
 
-The pinned SDK's naive jailer strategy does not cover this repo's raw clone and
-UFFD paths. Implement one shared launcher abstraction first; do not jail only
-cold boots.
-
-The first seam now routes process preparation for cold boot, snapshot restore,
-hot clone, and UFFD restore through one `ProcessLauncher`, with explicit mode,
-host-visible API socket, and idempotent post-exit cleanup contracts. Direct
-execution remains the only implementation; the production jailer is not yet
-enabled.
+The shared launcher routes cold boot, snapshot restore, hot clone, and UFFD
+restore through one `ProcessLauncher`, with explicit mode, host-visible API
+socket, and idempotent post-exit cleanup contracts. The GCP production profile
+enables the jailer, assigns per-VM identities, creates a private mount/PID
+namespace and chroot, and places each VMM in a preconfigured cgroup v2 leaf
+with CPU, memory, PIDs, and block-I/O limits. Snapshot peak memory has an
+explicit bounded allowance. Cleanup handles expected deletion, VMM crashes,
+server crashes, and host reboot reconciliation.
 
 Acceptance:
 
@@ -129,6 +136,18 @@ Acceptance:
 - Snapshot, clone, wake, UFFD, and reconciliation tests pass through the same
   launcher.
 - A guest workload cannot access another VM's jail files.
+
+Fleet evidence (2026-07-27, release `a97b68f`):
+
+- `tests/security-gate.sh` passed independently on both active workers.
+- Live VMMs ran under distinct non-root UID/GID assignments, chroots,
+  namespaces, and cgroup leaves with the configured resource controls.
+- Snapshot batch creates produced distinct identities and isolation state.
+- Expected deletion and injected VMM crash cleanup passed.
+- The server-crash and host-reboot recovery gates passed, including stale
+  runtime reconciliation after service recovery.
+- UFFD remains disabled in the production profile; it is not covered by this
+  release claim.
 
 ### P0.3 Bounded VMM output
 
@@ -195,7 +214,8 @@ Fleet evidence (2026-07-25):
 
 ### P0.5 Guest identity and SSH
 
-Status: **focused gate implemented and fleet-verified; broader fault/resource automation pending**.
+Status: **implemented; fleet gate passed on `a97b68f`, current image rerun in
+progress**.
 
 - Create a normal non-root interactive user.
 - Run exec, files, PTY, and SSH as that user by default.
@@ -214,9 +234,22 @@ Acceptance:
 - Two clones never present the same SSH host key.
 - A user process cannot modify privileged agent state.
 
+Evidence:
+
+- The rootfs initializes a normal `sandbox` user, removes the baked root
+  password, rejects SSH root login, and gives privileged identity/network
+  operations only to narrowly scoped helpers.
+- Independent sandbox and snapshot-derived creates rotate guest identity and
+  SSH host keys; the two-worker security gate verified unique identity and
+  non-root SSH behavior on `a97b68f`.
+- The subsequent live `/v1` contract rerun exposed a transient
+  `ssh.service` startup failure after restore. Commit `a223889` adds bounded
+  startup retry and unit coverage. The worker image containing that fix is
+  being rebuilt and **has not yet passed the GCP contract rerun**.
+
 ### P0.6 Encrypted management transport
 
-Status: **not started**.
+Status: **implemented; final live rotation proof pending**.
 
 - Support TLS on host and gateway TCP listeners, or require and verify a
   private authenticated reverse proxy.
@@ -233,9 +266,24 @@ Acceptance:
 - Gateway-to-worker traffic is authenticated separately from client traffic.
 - Key rotation can occur without stopping the fleet.
 
+Evidence and remaining proof:
+
+- Production listener validation rejects insecure public plaintext binds,
+  preserves the root-only local Unix socket, and supports TLS or a verified
+  private management boundary.
+- Client, worker-control, and administrative credentials have separate
+  domains. Cross-domain use is rejected by tests and gateway/worker routing
+  preserves the worker credential.
+- Bearer-token query strings are rejected and request logging scrubs sensitive
+  query data.
+- Local transport and credential-domain tests pass. A live GCP rotation must
+  still prove that the new key is accepted and the retired key is rejected
+  without stopping the fleet.
+
 ### P0.8 Security verification
 
-Status: **not started**.
+Status: **substantially implemented and fleet-verified; resource-exhaustion
+proofs remain**.
 
 Build host-level tests that execute on Linux/KVM and assert:
 
@@ -249,16 +297,20 @@ Build host-level tests that execute on Linux/KVM and assert:
 Publish the tested host kernel, Firecracker, jailer, guest kernel, and rootfs
 versions as release metadata.
 
-`tests/security-gate.sh` now provides a repeatable direct-worker Linux/KVM gate
-for the implemented controls. It creates two same-host sandboxes, verifies
-seccomp and `NoNewPrivs` from `/proc`, log mode/size and expected-exit cleanup,
-stale FIFO absence, the bridge firewall/sysctl, and guest-to-guest denial. It
-does not yet cover the future jailer/cgroup limits, identity uniqueness, crash
-injection, server crash, or host reboot cases listed above.
+`tests/security-gate.sh` is the repeatable direct-worker Linux/KVM release
+gate. It now covers seccomp and `NoNewPrivs`, per-VM jail identity and
+namespaces, cgroup controls, bounded VMM output, guest and SSH identity,
+guest-to-guest denial with allowed egress, snapshot batch isolation, VMM crash
+cleanup, and expected lifecycle cleanup. `tests/security-recovery-gate.sh`
+covers server-crash and host-reboot reconciliation.
 
-The gate passed independently on both active GCP workers on release
-`p0-secure-20260725-2`. It also proved expected lifecycle deletion removes each
-probe's log after the API destroy completes.
+Both active GCP workers passed the complete security gate on release
+`a97b68f`. The server-crash and host-reboot recovery gates also passed. The
+remaining P0.8 work is destructive resource-exhaustion evidence: memory/PID/FD
+pressure and a controlled ENOSPC/log-disk-full scenario must fail within the
+documented boundary, preserve the host/service, and clean up deterministically.
+Release metadata must record the final tested worker image and kernel/rootfs
+versions after the current image rerun completes.
 
 ### P0 fleet validation record — 2026-07-25
 
@@ -304,13 +356,52 @@ Release `p0-secure-20260725-2` completed the P0.3 logging slice:
 - Focused fleet lifecycle, snapshot/batch-clone, restore, and hibernation tests
   passed **17/17**.
 
-P0.3 aggregate retention is no longer open. Remaining P0 work is P0.2 jailer
-and cgroups, P0.5 guest/SSH identity, P0.6 encrypted management transport, the
-broader crash/reboot/resource cases in P0.8, and opt-in UFFD verification.
+P0.3 aggregate retention is no longer open. This paragraph records the state
+of the 2026-07-25 release; the later P0 implementation and validation record is
+below.
+
+### P0 fleet validation record — 2026-07-27
+
+Current implementation head: `a223889`. Latest fully completed two-worker
+security-gate release: `a97b68f`.
+
+Confirmed:
+
+- Both active GCP workers passed the full security gate on `a97b68f`, including
+  jailer UID/GID, namespaces/chroot, cgroups and I/O bounds, seccomp, bounded
+  output, non-root guest/SSH identity, unique snapshot-derived identities,
+  network isolation and egress, and lifecycle/VMM-crash cleanup.
+- Server-crash recovery passed after adding the worker supervisor and delegated
+  cgroup handling.
+- Host-reboot recovery passed, including service return and stale-runtime
+  reconciliation.
+- Local validation passed **202 Go tests**, the relevant Go race suite,
+  **43 TypeScript SDK tests**, TypeScript typecheck and build, deterministic
+  OpenAPI generation, Linux builds, and syntax validation of **27 shell
+  scripts**.
+
+In progress:
+
+- A live `/v1` contract run found restored guests could transiently leave
+  `ssh.service` inactive. Commit `a223889` adds bounded retry. A new worker
+  image is being rebuilt and the contract/security rerun is still in progress;
+  this fix is **not yet GCP-verified**.
+
+Remaining P0 exit evidence:
+
+1. Controlled memory, PID, and descriptor exhaustion, plus ENOSPC/log-disk-full
+   tests, must prove bounded failure, host availability, and cleanup.
+2. Live management-token rotation must prove overlap/new-key acceptance and
+   retired-key rejection without stopping the fleet.
+3. The rebuilt image must pass the complete `/v1` contract, SDK/e2e, security,
+   and recovery gates with final version metadata.
+4. UFFD requires its own KVM security gate before it can be enabled; it remains
+   outside the current production profile.
 
 ## P1: freeze a versioned API contract
 
-Status: **implemented and GCP fleet-verified**.
+Status: **implemented and previously GCP fleet-verified; current hardened image
+contract rerun in progress**.
 
 The OpenAPI 3.1 contract lives at `api/openapi.yaml`. Both worker and gateway
 serve `/v1` through a compatibility adapter, with sanitized resources,
@@ -340,6 +431,11 @@ Fleet evidence (2026-07-26, release `p1-api-20260726-2`):
 - GCP exposed an empty-body in-process proxy panic during the first probe. The
   regression was fixed in `dc2d2f3`, covered by normal and race tests, and the
   complete gate passed on the corrected immutable release.
+
+This evidence remains valid for the versioned contract implementation, but it
+does not substitute for the current hardened image gate. The current rerun
+found the restored-guest SSH startup issue; `a223889` contains the fix. Do not
+mark the new image contract-compatible until that rerun completes.
 
 ### Contract foundations
 
@@ -437,7 +533,8 @@ deprecated compatibility operation, not a v1 concept.
 
 ## P2: TypeScript SDK v1
 
-Status: **implemented and GCP fleet-verified; npm registry publication pending**.
+Status: **implemented and previously GCP fleet-verified; current image SDK/e2e
+rerun and npm registry publication pending**.
 
 Introduce a configured client:
 
@@ -518,14 +615,17 @@ SDK evidence (2026-07-26, `sandbox@1.0.0`):
 
 ## Recommended delivery order
 
-1. Finish P0.1/P0.3/P0.4 verification on Linux/KVM.
-2. Build the shared jailer launcher and complete P0.2.
-3. Complete guest identity/SSH and management transport.
-4. Add the P0 host-level security suite and make it a release gate.
-5. Land the OpenAPI `/v1` foundations without changing legacy clients.
-6. Implement create-from-source and batch operations.
-7. Ship the SDK v1 facade and migration aliases.
-8. Complete operational failure testing and SLO release gates.
+1. Finish the `a223889` worker-image rebuild and rerun the `/v1`, SDK/e2e,
+   security, and recovery gates.
+2. Prove live management-token rotation, including retired-key rejection.
+3. Run controlled memory/PID/FD pressure and ENOSPC/log-disk-full tests; retain
+   cleanup and host-health evidence.
+4. Publish immutable version metadata for the worker image, host and guest
+   kernels, Firecracker, jailer layout, and rootfs.
+5. Run the final contract/e2e correctness gate and only then execute the
+   rigorous benchmark matrix with deterministic cleanup.
+6. Complete P3 operational failure testing, SLO release gates, and artifact
+   publication.
 
 The service should not be described as safe for arbitrary multi-tenant code
 until all P0 acceptance criteria pass on the production host image.

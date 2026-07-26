@@ -40,6 +40,9 @@ WORKER_API_HOST=<worker-port-forward-ip-or-hostname> \
 ./security-gate.sh
 ```
 
+Set `GUEST_SSH_PROXY_JUMP=<bastion>` when guest port forwards are private and
+must be reached through the control-plane SSH host.
+
 It is a fail-closed production-profile gate. It creates two independent
 sandboxes plus two snapshot-source sandboxes through the v1 `createMany` batch
 contract, then verifies:
@@ -82,10 +85,28 @@ WORKER_SSH=you@<disposable-worker> \
 ```
 
 The recovery gate discovers and validates the exact `sandbox serve` process
-before injecting a server crash, allowing Nomad to restart it. A normal host
-reboot may gracefully pause the probe; the gate accepts either clean deletion
-or a paused probe whose SSH identity survives wake. Both modes reject stale
-jails/cgroups and recheck the bridge firewall after recovery.
+before injecting a server crash. The Nomad task supervisor restarts the server
+child in place; Nomad's bounded task restart remains the fallback for ordinary
+process failures. A normal host reboot may gracefully pause the probe; the gate
+accepts either clean deletion or a paused probe whose SSH identity survives
+wake. Both modes reject stale jails/cgroups and recheck the bridge firewall
+after recovery.
+
+The resource-exhaustion gate is also restricted to an empty disposable worker.
+Guest memory, process, and descriptor pressure is bounded inside a 128 MiB
+probe, while ENOSPC is induced only on a 16–64 MiB run-owned loop filesystem:
+
+```bash
+DISPOSABLE_WORKER_EXHAUSTION=I_UNDERSTAND_THIS_EXHAUSTS_RESOURCES_ON_A_DISPOSABLE_EMPTY_WORKER \
+SANDBOX_HOST_URL=https://<disposable-worker>:8080 \
+SANDBOX_HOST_KEY=<client-token> \
+WORKER_SSH=you@<disposable-worker> \
+./security-exhaustion-gate.sh
+```
+
+It refuses hosts with less than 2 GiB free on either root or data storage,
+checks the control sandbox and API after every pressure phase, and removes only
+the invocation's exact sandbox IDs, loop device, mount, and files.
 
 The TypeScript suite exits non-zero on failure and writes its JSON report under
 `results/` (gitignored). Both security gates also exit non-zero on a failed
