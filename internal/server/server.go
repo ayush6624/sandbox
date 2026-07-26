@@ -101,8 +101,13 @@ type Server struct {
 
 	// golden is the snapshot POST /sandboxes clones from when hot create is on.
 	// nil until ensureGolden adopts or builds one; cleared if it's deleted.
-	golden  atomic.Pointer[registry.Snapshot]
-	stageMu sync.Mutex // serializes re-staging the golden snapshot's baked rootfs
+	golden atomic.Pointer[registry.Snapshot]
+	// stageLocks serialize every Firecracker load that needs the same baked
+	// rootfs path. A snapshot fanout may temporarily stage and then unlink that
+	// path; without this lock, concurrent fanout/restore requests can remove it
+	// while a sibling VMM is still opening the drive.
+	stageLocksMu sync.Mutex
+	stageLocks   map[string]*sync.Mutex
 
 	// blob is the GCS client for snapshot durability; nil when disabled.
 	blob *gcsblob.Client
@@ -191,6 +196,7 @@ const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
+		stageLocks:     map[string]*sync.Mutex{},
 		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
 		startedAt: time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder()}
 	sem := cfg.CreateConcurrency

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/registry"
@@ -201,15 +202,26 @@ func (s *Server) uploadGoldenBase(snap registry.Snapshot) {
 	}
 }
 
+// snapshotStageLock returns the lock for one path baked into Firecracker
+// snapshot state. Callers hold it from staging until every VMM in that request
+// has completed LoadSnapshot.
+func (s *Server) snapshotStageLock(path string) *sync.Mutex {
+	s.stageLocksMu.Lock()
+	defer s.stageLocksMu.Unlock()
+	mu, ok := s.stageLocks[path]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.stageLocks[path] = mu
+	}
+	return mu
+}
+
 // stageSnapshotRootfs makes sure the rootfs path baked into the snapshot
-// exists: Firecracker opens it during LoadSnapshot, before the per-clone
-// PATCH /drives relocates the disk. Unlike fan-out — which stages per call and
-// removes it after — the golden snapshot's staged file is left in place so
-// every create doesn't re-pay the copy. It's re-staged here if something else
-// consumed it (e.g. a 1:1 restore of the golden snapshot ran on it).
+// exists. The caller must hold snapshotStageLock(snap.SourceRootfsPath).
+// Unlike fan-out — which stages per call and removes it after — the golden
+// snapshot's staged file is left in place so every create doesn't re-pay the
+// copy.
 func (s *Server) stageSnapshotRootfs(snap registry.Snapshot) error {
-	s.stageMu.Lock()
-	defer s.stageMu.Unlock()
 	if _, err := os.Stat(snap.SourceRootfsPath); err == nil {
 		return nil
 	}
@@ -219,12 +231,16 @@ func (s *Server) stageSnapshotRootfs(snap registry.Snapshot) error {
 // createFromSnapshot brings up one identity-neutral clone of snap — the same
 // two-phase resume-then-bridge dance as fan-out, for a single sandbox.
 func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
+	stage := s.snapshotStageLock(snap.SourceRootfsPath)
+	stage.Lock()
 	if err := s.stageSnapshotRootfs(snap); err != nil {
+		stage.Unlock()
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 
 	t0 := time.Now()
 	c := s.bringUpClone(snap, name, expiresAt, hibernateAfterSec)
+	stage.Unlock()
 	if c.err != nil {
 		return registry.Sandbox{}, c.err
 	}

@@ -244,6 +244,14 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// The disk path is baked into the snapshot, so the restored VM's rootfs must
 	// live exactly there — Firecracker reattaches the block device by that path.
 	rootfsPath := snap.SourceRootfsPath
+	stage := s.snapshotStageLock(rootfsPath)
+	stage.Lock()
+	stageLocked := true
+	defer func() {
+		if stageLocked {
+			stage.Unlock()
+		}
+	}()
 
 	// Insert the row first: its partial unique indexes gate on the snapshot's
 	// tap + guest IP, so a restore fails cleanly (before any disk work) if the
@@ -286,6 +294,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Errorf("load snapshot + resume: %w", err))
 		return
 	}
+	// Firecracker has opened the baked drive. A fanout may now safely unlink a
+	// temporary staging entry without invalidating this VM's open descriptor.
+	stage.Unlock()
+	stageLocked = false
 	loadMS := time.Since(tLoad).Milliseconds()
 
 	pid, err := vm.PID(m)
@@ -415,6 +427,14 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t0 := time.Now()
+	stage := s.snapshotStageLock(snap.SourceRootfsPath)
+	stage.Lock()
+	stageLocked := true
+	defer func() {
+		if stageLocked {
+			stage.Unlock()
+		}
+	}()
 
 	// Firecracker opens the snapshot's baked rootfs path during LoadSnapshot —
 	// before our per-clone PATCH /drives relocates it — so that path must exist
@@ -453,6 +473,8 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	if stagedBaked {
 		_ = s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath)
 	}
+	stage.Unlock()
+	stageLocked = false
 
 	// Phase 2 (parallel): wait for each clone's reidentify announce, bridge its
 	// tap, DNAT, wait for its agent. The announce wait is per-clone inside
