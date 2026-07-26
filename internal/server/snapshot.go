@@ -318,10 +318,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 	s.machines.Store(id, m)
 	s.act.touch(id)
-	go func(id string) {
-		err := vm.Wait(context.Background(), m)
-		fmt.Fprintf(os.Stderr, "[%s] restored VM exited: %v\n", id, err)
-	}(id)
+	s.watchMachine(id, m, "restored VM")
 
 	// Let the thaw agent step the guest's snapshot-stale wall clock now,
 	// instead of NTP stepping it minutes forward later mid-exec.
@@ -623,10 +620,7 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		s.diffBase.Store(sb.ID, c.baseSnap)
 	}
 	s.act.touch(sb.ID)
-	go func(id string) {
-		_ = vm.Wait(context.Background(), m)
-		fmt.Fprintf(os.Stderr, "[%s] clone VM exited\n", id)
-	}(sb.ID)
+	s.watchMachine(sb.ID, m, "clone VM")
 	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
 		return fmt.Errorf("agent never ready on %s: %w", sb.GuestIP, err)
 	}

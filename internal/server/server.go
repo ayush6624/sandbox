@@ -654,11 +654,7 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	s.machines.Store(id, m)
 	s.act.touch(id)
 
-	// Watch for early death so we don't silently leak rows.
-	go func(id string) {
-		err := vm.Wait(context.Background(), m)
-		fmt.Fprintf(os.Stderr, "[%s] VM exited: %v\n", id, err)
-	}(id)
+	s.watchMachine(id, m, "VM")
 
 	if err := waitForAgent(ctx, sb.GuestIP, 60*time.Second); err != nil {
 		_ = s.destroy(context.Background(), id)

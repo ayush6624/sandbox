@@ -463,10 +463,7 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 		return fmt.Errorf("finish start: %w", err)
 	}
 	s.machines.Store(sb.ID, m)
-	go func(id string) {
-		_ = vm.Wait(context.Background(), m)
-		fmt.Fprintf(os.Stderr, "[%s] woken VM exited\n", id)
-	}(sb.ID)
+	s.watchMachine(sb.ID, m, "woken VM")
 
 	// Step the guest's snapshot-stale wall clock (same as 1:1 restore).
 	if err := vm.PushEpoch(ctx, rt.SocketPath); err != nil {
