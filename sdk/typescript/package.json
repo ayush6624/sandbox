@@ -44,9 +44,14 @@
     "example:create-many": "tsx examples/create-many.ts",
     "example:fanout": "tsx examples/fanout.ts",
     "bench": "tsx benchmarks/run-bench.ts",
+    "bench:snapshot-source": "tsx benchmarks/snapshot-source-bench.ts",
+    "bench:snapshot-batch": "tsx benchmarks/snapshot-batch-bench.ts",
+    "bench:burst": "tsx benchmarks/burst-bench.ts",
+    "bench:fleet": "tsx benchmarks/fleet-bench.ts",
+    "bench:lifecycle": "tsx benchmarks/lifecycle-bench.ts",
     "bench:restore": "tsx benchmarks/restore-bench.ts",
     "bench:fanout": "tsx benchmarks/fanout-bench.ts",
-    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts"
+    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

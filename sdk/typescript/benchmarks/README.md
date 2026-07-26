@@ -14,6 +14,14 @@ zero npm dependencies, no Python, no native addons.
   `run_benchmarks.py`). It drives a sandbox microVM through this SDK:
   **create → detect specs → copy `benchmark.ts` into the guest → run it → parse
   its JSON → tear down.**
+- **`snapshot-source-bench.ts`** — compares default-source creation with
+  snapshot-source creation using `SandboxClient`.
+- **`snapshot-batch-bench.ts`** — scales the typed v1 batch operation over a
+  single immutable snapshot source.
+- **`fleet-bench.ts`** and **`burst-bench.ts`** — exercise fleet-wide workload
+  throughput and create/exec/terminate churn through the v1 client.
+- **`lifecycle-bench.ts`** — measures typed create, pause, resume-to-usable, and
+  terminate latencies.
 
 ## What it measures
 
@@ -50,6 +58,11 @@ npm run bench -- --mode fsync              # synchronous=FULL, stresses fsync
 npm run bench -- --mode large              # ~35 MB DB + 128 MB blob, exceeds cache
 npm run bench -- --mode default --iterations 5
 npm run bench -- --output results/mine.json
+npm run bench:snapshot-source -- --iterations 25
+npm run bench:snapshot-batch -- --counts 1,2,4,8,16,32 --baseline
+npm run bench:fleet -- --count 64 --mode default
+npm run bench:burst -- --count 500 --concurrency 96 --retry-ms 250
+npm run bench:lifecycle -- --iterations 25
 ```
 
 | Flag | Default | Meaning |
@@ -80,6 +93,21 @@ Prints `benchmark.ts`'s per-iteration breakdown, then a comparison table and
 ranking, and writes a one-element array (one provider) to `results/` — the same
 per-provider shape as upstream `results/*.json`. The `results/` directory is
 gitignored.
+
+All host-side suites use the resource-oriented v1 `SandboxClient` and attach a
+`metadata` object containing schema version, workload parameters, run ID,
+API/SDK versions, target, and deployed release. For fleet runs, set:
+
+```bash
+export BENCH_RUN_ID=gcp-20260726-extensive
+export SANDBOX_RELEASE=p1-api-20260726-2
+```
+
+Historic JSON fields such as `restore`, `fanout`, `perCloneMs`, and `killMs`
+remain as deprecated aliases so dashboards can compare new runs with old ones.
+The `bench:restore` and `bench:fanout` npm commands also remain compatibility
+aliases, but new automation should use `bench:snapshot-source` and
+`bench:snapshot-batch`.
 
 ## Implementation notes
 
