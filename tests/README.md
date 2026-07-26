@@ -18,7 +18,7 @@ npm install
 export SANDBOX_API_URL=http://<gateway-or-host>:<port>
 export SANDBOX_API_KEY=<token>
 
-# Optional: snapshot/restore/fanout are host-local endpoints (the gateway
+# Optional: snapshot and snapshot-source batch creation are host-local endpoints (the gateway
 # doesn't route them yet) — point these at one host directly:
 export SANDBOX_HOST_URL=http://<host>:8080
 export SANDBOX_HOST_KEY=<host-token>
@@ -33,19 +33,63 @@ The focused Linux/KVM security gate targets one worker directly so both probe
 sandboxes share its bridge:
 
 ```bash
-SANDBOX_HOST_URL=http://<worker-ip>:8080 \
+SANDBOX_HOST_URL=https://<worker-ip>:8080 \
 SANDBOX_HOST_KEY=<host-token> \
 WORKER_SSH=you@<worker-ip> \
+WORKER_API_HOST=<worker-port-forward-ip-or-hostname> \
 ./security-gate.sh
 ```
 
-It verifies live Firecracker seccomp state, root-only bounded logs, SDK FIFO
-hygiene, expected-exit log cleanup, bridge firewall state, and direct
-guest-to-guest denial. Its exit trap deletes only the two named probes it
-creates.
+It is a fail-closed production-profile gate. It creates two independent
+sandboxes plus two snapshot-source sandboxes through the v1 `createMany` batch
+contract, then verifies:
 
-Exit code is non-zero on any failure; a JSON report lands in `results/`
-(gitignored).
+- unique non-root VMM users and mount/PID namespaces;
+- cgroup v2 placement and finite CPU, memory, PID, file-descriptor, and
+  block-I/O controls;
+- root-owned per-VM jails, allocation records, and cross-jail denial;
+- seccomp, bounded logs, FIFO hygiene, bridge isolation, and allowed egress;
+- default guest UID/GID 1000 and denial of guest access to privileged agent
+  state/endpoints;
+- key-only SSH as `sandbox` with UID 1000 and rejection of remote root login;
+- unique SSH host identities for independent and snapshot-source creates, with
+  identity preserved through pause/resume;
+- reconciliation and jail/cgroup cleanup after one unexpected VMM crash; and
+- expected lifecycle cleanup.
+
+Its exit trap deletes only resources created by that invocation. The worker
+must use the production jailer profile; direct-development mode fails the gate.
+Set `JAILER_BASE` only when the worker intentionally uses a non-default jail
+root. `CURL_CA_BUNDLE` can point curl at a private management CA. An `http://`
+URL is rejected unless the operator explicitly sets
+`PRIVATE_MANAGEMENT_PROXY_ACK=I_VERIFIED_PRIVATE_AUTHENTICATED_PROXY` after
+verifying that the listener is reachable only through a private authenticated
+proxy.
+
+Server-crash and host-reboot cases are deliberately isolated in a destructive
+gate. It requires an empty disposable worker and refuses to start without an
+explicit acknowledgement:
+
+```bash
+DISPOSABLE_WORKER_RECOVERY=I_UNDERSTAND_THIS_RESTARTS_OR_REBOOTS_A_DISPOSABLE_WORKER \
+RECOVERY_MODE=server-crash \
+SANDBOX_HOST_URL=https://<disposable-worker>:8080 \
+SANDBOX_HOST_KEY=<client-token> \
+WORKER_SSH=you@<disposable-worker> \
+./security-recovery-gate.sh
+
+# Repeat with RECOVERY_MODE=host-reboot.
+```
+
+The recovery gate discovers and validates the exact `sandbox serve` process
+before injecting a server crash, allowing Nomad to restart it. A normal host
+reboot may gracefully pause the probe; the gate accepts either clean deletion
+or a paused probe whose SSH identity survives wake. Both modes reject stale
+jails/cgroups and recheck the bridge firewall after recovery.
+
+The TypeScript suite exits non-zero on failure and writes its JSON report under
+`results/` (gitignored). Both security gates also exit non-zero on a failed
+invariant and stream the failing check to stderr.
 
 `diag.ts` is a standalone fleet diagnostic (guest DNS, pnpm shim, `/home/sandbox`
 layout) handy when a run fails in odd ways: `npx tsx diag.ts`.
@@ -67,7 +111,7 @@ suspect the network path first and re-run before blaming the fleet.
 | `concurrency` | burst creates (unique ids/IPs/ports, placement spread, all usable), 16 parallel execs on one agent, mixed parallel API load, create-during-kill overlap |
 | `churn` | sequential + batched create→exec→kill cycles, immediate reuse, **leak check: fleet returns to baseline count** |
 | `load` | N sandboxes running a verified CPU+disk workload concurrently, memory pressure, many-small-files disk churn |
-| `snapshots` | snapshot → restore (disk **and** live memory state resume), fanout N (shared state, isolated writes, unique identities), list/delete housekeeping — *skipped unless `SANDBOX_HOST_URL`/`SANDBOX_HOST_KEY` are set* |
+| `snapshots` | snapshot → resume (disk **and** live memory state), snapshot-source batch create N (shared source, isolated writes, unique identities), list/delete housekeeping — *skipped unless `SANDBOX_HOST_URL`/`SANDBOX_HOST_KEY` are set* |
 | `clock` | guest wall clock matches host time on hot create (golden snapshot may be hours old) and after hibernate + wake |
 
 ## Sizing knobs
@@ -79,7 +123,7 @@ All optional, with modest defaults so a full run fits comfortably on one
 | --- | --- | --- |
 | `STRESS_BURST` | 24 | concurrent creates in the burst test |
 | `STRESS_LOAD_N` | 16 | sandboxes running the load workload |
-| `STRESS_FANOUT_N` | 8 | clones in the fanout test |
+| `STRESS_FANOUT_N` | 8 | sandboxes in the snapshot-source batch test (legacy environment variable name) |
 | `STRESS_CHURN_CYCLES` | 8 | sequential churn cycles |
 | `STRESS_CHURN_ROUNDS` / `STRESS_CHURN_BATCH` | 3 / 6 | batched churn rounds × size |
 
