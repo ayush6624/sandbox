@@ -13,7 +13,7 @@
  *       [--iterations 1] [--create-concurrency 8] [--run-concurrency 64] [--output file.json]
  */
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import {
   NotFoundError,
@@ -135,8 +135,12 @@ const stats = (xs: number[]) => {
 }
 const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : 'n/a')
 
+export function gatewayHostsEndpoint(baseURL: string): string {
+  return baseURL.replace(/\/+$/, '') + '/hosts'
+}
+
 async function gatewayHosts(): Promise<unknown> {
-  const url = (process.env.SANDBOX_API_URL ?? '').replace(/\/+$/, '') + '/internal/v1/hosts'
+  const url = gatewayHostsEndpoint(process.env.SANDBOX_API_URL ?? '')
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${process.env.SANDBOX_API_KEY ?? ''}` },
     signal: AbortSignal.timeout(10_000),
@@ -378,4 +382,6 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? (e.stack ?? e.message) : e); process.exit(1) })
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => { console.error(e instanceof Error ? (e.stack ?? e.message) : e); process.exit(1) })
+}

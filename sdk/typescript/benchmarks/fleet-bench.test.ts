@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { gatewayHostsEndpoint } from './fleet-bench.js'
 
 const SCRIPT = fileURLToPath(new URL('./fleet-bench.ts', import.meta.url))
 
@@ -16,6 +17,10 @@ test('fleet benchmark documents safe arguments without requiring credentials', (
   const result = run(['--help'])
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /--cleanup-timeout-ms 10000/)
+})
+
+test('fleet inventory uses the client-authenticated public hosts endpoint', () => {
+  assert.equal(gatewayHostsEndpoint('https://gateway.example/'), 'https://gateway.example/hosts')
 })
 
 for (const [name, args, expected] of [
