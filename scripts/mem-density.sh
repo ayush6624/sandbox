@@ -55,7 +55,8 @@ wait_for_zero_vmm(){
 del_all(){
   local id
   for id in "$@"; do
-    h -X DELETE "$API/v1/sandboxes/$id" >/dev/null 2>&1 || true
+    h -X DELETE "$API/v1/sandboxes/$id" \
+      -H "Idempotency-Key: $BENCH_RUN_ID-delete-$id" >/dev/null 2>&1 || true
   done
 }
 cleanup(){
@@ -63,7 +64,8 @@ cleanup(){
   trap - EXIT INT TERM
   del_all "${IDS[@]}"
   if [ -n "$SNAPSHOT_ID" ]; then
-    h -X DELETE "$API/v1/snapshots/$SNAPSHOT_ID" >/dev/null 2>&1 || true
+    h -X DELETE "$API/v1/snapshots/$SNAPSHOT_ID" \
+      -H "Idempotency-Key: $BENCH_RUN_ID-delete-snapshot-$SNAPSHOT_ID" >/dev/null 2>&1 || true
   fi
   exit "$rc"
 }
@@ -148,7 +150,8 @@ echo "  snapshot-source: procs=$fc_c rss=$((fc_rss/1024))MB pss=$((fc_pss/1024))
 del_all "${IDS[@]}"
 IDS=()
 wait_for_zero_vmm
-h -X DELETE "$API/v1/snapshots/$SNAPSHOT_ID" >/dev/null
+h -X DELETE "$API/v1/snapshots/$SNAPSHOT_ID" \
+  -H "Idempotency-Key: $BENCH_RUN_ID-delete-snapshot-$SNAPSHOT_ID" >/dev/null
 SNAPSHOT_ID=""
 sleep 2
 
