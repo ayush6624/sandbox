@@ -2,6 +2,7 @@ package apiv1
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -290,6 +291,76 @@ func TestBatchOperationReturnsEveryIndexedResult(t *testing.T) {
 	for i, result := range op.Results {
 		if result.Index != i || result.Sandbox == nil || result.Error != nil {
 			t.Fatalf("result[%d]=%+v", i, result)
+		}
+	}
+}
+
+func TestBatchOperationConcurrentPollingProducesValidJSON(t *testing.T) {
+	fake := newFakeLegacy()
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/sandboxes" {
+			// Keep the operation running long enough for many GETs to overlap
+			// result publication.
+			time.Sleep(time.Millisecond)
+		}
+		fake.ServeHTTP(w, r)
+	})
+	mux := http.NewServeMux()
+	New(legacy).Register(mux)
+	h := http.Handler(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-batches",
+		strings.NewReader(`{"count":100,"sandbox":{},"max_parallelism":32}`))
+	req.Header.Set("Idempotency-Key", "concurrent-poll")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("batch=%d body=%s", w.Code, w.Body.String())
+	}
+	var started Operation
+	if err := json.Unmarshal(w.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+
+	const pollers = 16
+	errs := make(chan error, pollers)
+	var wg sync.WaitGroup
+	for range pollers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				get := httptest.NewRequest(http.MethodGet, "/v1/operations/"+started.ID, nil)
+				got := httptest.NewRecorder()
+				h.ServeHTTP(got, get)
+				if got.Code != http.StatusOK {
+					errs <- fmt.Errorf("poll status=%d body=%s", got.Code, got.Body.String())
+					return
+				}
+				var op Operation
+				if err := json.Unmarshal(got.Body.Bytes(), &op); err != nil {
+					errs <- fmt.Errorf("invalid operation JSON: %w: %q", err, got.Body.String())
+					return
+				}
+				if op.Succeeded+op.Failed > op.Requested {
+					errs <- fmt.Errorf("impossible operation counts: %+v", op)
+					return
+				}
+				if op.CompletedAt != nil {
+					if op.Succeeded != op.Requested || op.Failed != 0 {
+						errs <- fmt.Errorf("incomplete terminal operation: %+v", op)
+					}
+					return
+				}
+			}
+			errs <- fmt.Errorf("operation %s did not complete", started.ID)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
 		}
 	}
 }
