@@ -15,7 +15,7 @@
  * Point SANDBOX_API_URL at a single host's API: snapshots are host-local.
  */
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import {
   SandboxClient,
@@ -153,7 +153,7 @@ async function waitUntilUsable(
   }
 }
 
-async function terminateTracked(
+export async function terminateTracked(
   sandboxes: Iterable<ClientSandbox>,
 ): Promise<string[]> {
   const unique = [...new Map([...sandboxes].map((sandbox) => [sandbox.id, sandbox])).values()]
@@ -179,6 +179,110 @@ function errorMessage(error: unknown): string {
   return String((error as Error)?.message ?? error).slice(0, 500)
 }
 
+interface SandboxDiscoveryClient {
+  sandboxes: {
+    list(options: { metadata: Record<string, string> }): AsyncIterable<ClientSandbox>
+  }
+}
+
+interface CleanupOptions {
+  attempts?: number
+  delayMs?: number
+}
+
+/**
+ * Discover and terminate resources attributed to exactly this benchmark run.
+ *
+ * Operation polling can fail before its result list reaches the client, so the
+ * tracked map alone is insufficient. Server-side metadata filters are backed by
+ * an exact client-side check before termination as a defense against a broken or
+ * unexpectedly broad filter implementation.
+ */
+export async function cleanupRunSandboxes(
+  client: SandboxDiscoveryClient,
+  tracked: Map<string, ClientSandbox>,
+  resourceMetadata: Record<string, string>,
+  options: CleanupOptions = {},
+): Promise<string[]> {
+  const attempts = options.attempts ?? 10
+  const delayMs = options.delayMs ?? 1_000
+  if (!resourceMetadata.benchmark_run_id) {
+    return ['refusing metadata cleanup without benchmark_run_id']
+  }
+
+  let lastDiscoveryError = ''
+  let lastTerminationErrors: string[] = []
+  let emptySweeps = 0
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let discoverySucceeded = false
+    try {
+      for await (const sandbox of client.sandboxes.list({ metadata: resourceMetadata })) {
+        const exactMatch = Object.entries(resourceMetadata)
+          .every(([key, value]) => sandbox.metadata[key] === value)
+        if (exactMatch) tracked.set(sandbox.id, sandbox)
+      }
+      discoverySucceeded = true
+      lastDiscoveryError = ''
+    } catch (error) {
+      lastDiscoveryError = `metadata discovery attempt ${attempt}: ${errorMessage(error)}`
+    }
+
+    if (discoverySucceeded) {
+      lastTerminationErrors = await terminateTracked(tracked.values())
+      for (const id of [...tracked.keys()]) {
+        if (!lastTerminationErrors.some((error) => error.startsWith(`${id}:`))) {
+          tracked.delete(id)
+        }
+      }
+      if (tracked.size === 0 && lastTerminationErrors.length === 0) {
+        emptySweeps++
+        // A second sweep catches resources published just after an operation
+        // polling failure without turning cleanup into an unbounded wait.
+        if (emptySweeps >= 2) return []
+      } else {
+        emptySweeps = 0
+      }
+    } else {
+      emptySweeps = 0
+    }
+
+    if (attempt < attempts) await sleep(delayMs)
+  }
+
+  return [
+    ...lastTerminationErrors,
+    ...(lastDiscoveryError ? [lastDiscoveryError] : []),
+    ...(tracked.size > 0 && lastTerminationErrors.length === 0
+      ? [`metadata cleanup incomplete for ${tracked.size} sandbox(es)`]
+      : []),
+    ...(tracked.size === 0 && !lastDiscoveryError && lastTerminationErrors.length === 0
+      ? ['metadata cleanup could not be verified with two empty sweeps']
+      : []),
+  ]
+}
+
+export async function deleteSnapshotWithRetry(
+  client: Pick<SandboxClient, 'snapshots'>,
+  snapshotId: string,
+  options: CleanupOptions = {},
+): Promise<string | undefined> {
+  const attempts = options.attempts ?? 3
+  const delayMs = options.delayMs ?? 250
+  let lastError = ''
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await client.snapshots.delete(snapshotId)
+      return undefined
+    } catch (error) {
+      const status = (error as { status?: unknown })?.status
+      if (status === 404) return undefined
+      lastError = errorMessage(error)
+      if (attempt < attempts) await sleep(delayMs * attempt)
+    }
+  }
+  return `snapshot ${snapshotId}: ${lastError}`
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const client = new SandboxClient()
@@ -189,6 +293,7 @@ async function main(): Promise<void> {
     readiness_timeout_ms: args.readinessTimeoutMs,
     readiness_poll_ms: args.readinessPollMs,
   })
+  const resourceMetadata = benchmarkResourceMetadata(metadata)
   console.log(`\nSnapshot batch-create benchmark: counts=[${args.counts.join(', ')}] baseline=${args.baseline}`)
   console.log(`Host: ${process.env.SANDBOX_API_URL}`)
 
@@ -215,7 +320,7 @@ async function main(): Promise<void> {
     console.log('\n[setup] creating source sandbox...')
     source = await client.sandboxes.create({
       requestTimeoutMs: 60 * 60_000,
-      metadata: benchmarkResourceMetadata(metadata),
+      metadata: resourceMetadata,
     })
     tracked.set(source.id, source)
     console.log(`[setup] source ${source.id} ready`)
@@ -239,7 +344,7 @@ async function main(): Promise<void> {
         maxParallelism,
         source: { snapshotId },
         requestTimeoutMs: 30 * 60_000,
-        metadata: benchmarkResourceMetadata(metadata),
+        metadata: resourceMetadata,
       })
       let state = operation.state
       let operationError: string | undefined
@@ -344,7 +449,7 @@ async function main(): Promise<void> {
         try {
           const sandbox = await client.sandboxes.create({
             requestTimeoutMs: 30 * 60_000,
-            metadata: benchmarkResourceMetadata(metadata),
+            metadata: resourceMetadata,
           })
           tracked.set(sandbox.id, sandbox)
           return sandbox
@@ -404,14 +509,16 @@ async function main(): Promise<void> {
       throw new Error('snapshot batch benchmark failed; inspect per-item and cleanup results')
     }
   } finally {
-    const finalCleanupErrors = await terminateTracked(tracked.values())
+    const finalCleanupErrors = await cleanupRunSandboxes(
+      client,
+      tracked,
+      resourceMetadata,
+    )
     for (const cleanupError of finalCleanupErrors) console.error(`[cleanup] ${cleanupError}`)
     let snapshotCleanupError: string | undefined
     if (snapshotId) {
-      try {
-        await client.snapshots.delete(snapshotId)
-      } catch (error) {
-        snapshotCleanupError = `snapshot ${snapshotId}: ${errorMessage(error)}`
+      snapshotCleanupError = await deleteSnapshotWithRetry(client, snapshotId)
+      if (snapshotCleanupError) {
         console.error(`[cleanup] ${snapshotCleanupError}`)
       }
     }
@@ -425,4 +532,6 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? (e.stack ?? e.message) : e); process.exit(1) })
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => { console.error(e instanceof Error ? (e.stack ?? e.message) : e); process.exit(1) })
+}
