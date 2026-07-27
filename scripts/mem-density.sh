@@ -16,6 +16,7 @@ BENCH_RUN_ID="${BENCH_RUN_ID:0:48}"
 SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
 IDS=()
 SNAPSHOT_ID=""
+INVALID_OPERATION_RESPONSES=0
 case "$API" in
   https://*) ;;
   http://127.0.0.1:*|http://localhost:*|http://\[::1\]:*) ;;
@@ -122,8 +123,16 @@ BATCH="$(h -X POST "$API/v1/sandbox-batches" -H 'Content-Type: application/json'
   -H "Idempotency-Key: $BENCH_RUN_ID-batch" \
   -d "$BATCH_BODY")"
 OPERATION_ID="$(jq -er '.id' <<<"$BATCH")"
+OPERATION=""
 for _ in $(seq 1 1200); do
-  OPERATION="$(h "$API/v1/operations/$OPERATION_ID")"
+  if ! CANDIDATE="$(h "$API/v1/operations/$OPERATION_ID" 2>/dev/null)" ||
+    ! jq -e 'type == "object" and (.id | type == "string")' \
+      <<<"$CANDIDATE" >/dev/null 2>&1; then
+    INVALID_OPERATION_RESPONSES=$((INVALID_OPERATION_RESPONSES + 1))
+    sleep 0.25
+    continue
+  fi
+  OPERATION="$CANDIDATE"
   [ "$(jq -r '.completed_at // empty' <<<"$OPERATION")" != "" ] && break
   sleep 0.25
 done
@@ -131,6 +140,8 @@ done
   echo "error: snapshot-source batch did not complete" >&2
   exit 1
 }
+[ "$INVALID_OPERATION_RESPONSES" -eq 0 ] ||
+  echo "  operation polling retried $INVALID_OPERATION_RESPONSES invalid response(s)" >&2
 IDS=()
 while IFS= read -r id; do
   [ -n "$id" ] && IDS+=("$id")
@@ -178,11 +189,13 @@ wait_for_zero_vmm
 jq -nc \
   --arg run_id "$BENCH_RUN_ID" --arg release "$SANDBOX_RELEASE" \
   --argjson n "$N" \
+  --argjson invalid_operation_responses "$INVALID_OPERATION_RESPONSES" \
   --argjson fo_n "$FO_N" --argjson fo_rss "$fc_rss" --argjson fo_pss "$fc_pss" \
   --argjson cb_n "$CB_N" --argjson cb_rss "$cb_rss" --argjson cb_pss "$cb_pss" \
   '{metadata:{schema_version:2,benchmark:"memory-density",run_id:$run_id,
               release:$release,api_version:"v1"},
     requested:$n,
+    diagnostics:{invalid_operation_responses:$invalid_operation_responses},
     snapshot_source:{procs:$fo_n, rss_mb:($fo_rss/1024|floor), pss_mb:($fo_pss/1024|floor)},
     default_source:{procs:$cb_n, rss_mb:($cb_rss/1024|floor), pss_mb:($cb_pss/1024|floor)},
     fanout:{procs:$fo_n, rss_mb:($fo_rss/1024|floor), pss_mb:($fo_pss/1024|floor)},
