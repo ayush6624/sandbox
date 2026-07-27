@@ -86,8 +86,9 @@ for spec in "32 default" "64 default" "128 default" "64 fsync" "64 large"; do
   echo "--- fleet count=$1 mode=$2 ---"
   SANDBOX_API_URL="$GATEWAY_URL" SANDBOX_API_KEY="$SANDBOX_API_KEY" \
     "$TSX" benchmarks/fleet-bench.ts \
-    --count "$1" --mode "$2" --create-concurrency 12 --run-concurrency "$1" \
-    --output "$BENCH/fleet_${1}_${2}.json"
+      --count "$1" --mode "$2" --create-concurrency 12 --run-concurrency "$1" \
+      --request-timeout-ms 120000 --cleanup-timeout-ms 30000 \
+      --output "$BENCH/fleet_${1}_${2}.json"
 done
 
 banner "4/4 MEMORY DENSITY: $SINGLE_HOST_COUNT snapshot-source vs default-source sandboxes"

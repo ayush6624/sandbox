@@ -33,6 +33,7 @@ interface Args {
   iterations: number
   createConcurrency: number
   runConcurrency: number
+  requestTimeoutMs: number
   cleanupTimeoutMs: number
   output?: string
 }
@@ -44,6 +45,7 @@ function parseArgs(argv: string[]): Args {
     iterations: 1,
     createConcurrency: 8,
     runConcurrency: 64,
+    requestTimeoutMs: 120_000,
     cleanupTimeoutMs: 10_000,
   }
   for (let i = 0; i < argv.length; i++) {
@@ -59,6 +61,7 @@ function parseArgs(argv: string[]): Args {
     else if (k === '--iterations') a.iterations = Number(argv[++i])
     else if (k === '--create-concurrency') a.createConcurrency = Number(argv[++i])
     else if (k === '--run-concurrency') a.runConcurrency = Number(argv[++i])
+    else if (k === '--request-timeout-ms') a.requestTimeoutMs = Number(argv[++i])
     else if (k === '--cleanup-timeout-ms') a.cleanupTimeoutMs = Number(argv[++i])
     else if (k === '--output') a.output = argv[++i]
     else if (k === '--help' || k === '-h') {
@@ -66,6 +69,7 @@ function parseArgs(argv: string[]): Args {
         'Usage: tsx benchmarks/fleet-bench.ts [--count 64] ' +
         '[--mode default|fsync|large] [--iterations 1] ' +
         '[--create-concurrency 8] [--run-concurrency 64] ' +
+        '[--request-timeout-ms 120000] ' +
         '[--cleanup-timeout-ms 10000] [--output file.json]',
       )
       process.exit(0)
@@ -77,6 +81,7 @@ function parseArgs(argv: string[]): Args {
     ['--iterations', a.iterations],
     ['--create-concurrency', a.createConcurrency],
     ['--run-concurrency', a.runConcurrency],
+    ['--request-timeout-ms', a.requestTimeoutMs],
     ['--cleanup-timeout-ms', a.cleanupTimeoutMs],
   ] as const) {
     if (!Number.isInteger(value) || value < 1) {
@@ -221,13 +226,14 @@ async function safeGatewayHosts(): Promise<{ value?: unknown; error?: string }> 
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
-  const client = new SandboxClient()
+  const client = new SandboxClient({ requestTimeoutMs: args.requestTimeoutMs })
   const metadata = benchmarkMetadata('fleet-sqlite-filesystem', {
     count: args.count,
     mode: args.mode,
     iterations: args.iterations,
     create_concurrency: args.createConcurrency,
     run_concurrency: args.runConcurrency,
+    request_timeout_ms: args.requestTimeoutMs,
     cleanup_timeout_ms: args.cleanupTimeoutMs,
   })
   const workload = readFileSync(WORKLOAD_SCRIPT, 'utf8')

@@ -16,6 +16,7 @@ function run(args: string[]) {
 test('fleet benchmark documents safe arguments without requiring credentials', () => {
   const result = run(['--help'])
   assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /--request-timeout-ms 120000/)
   assert.match(result.stdout, /--cleanup-timeout-ms 10000/)
 })
 
@@ -28,6 +29,7 @@ for (const [name, args, expected] of [
   ['count', ['--count', '0'], /--count must be a positive integer/],
   ['iterations', ['--iterations', '1.5'], /--iterations must be a positive integer/],
   ['create concurrency', ['--create-concurrency', '-1'], /--create-concurrency must be a positive integer/],
+  ['request timeout', ['--request-timeout-ms', '0'], /--request-timeout-ms must be a positive integer/],
   ['cleanup timeout', ['--cleanup-timeout-ms', 'NaN'], /--cleanup-timeout-ms must be a positive integer/],
 ] as const) {
   test(`fleet benchmark rejects invalid ${name}`, () => {
