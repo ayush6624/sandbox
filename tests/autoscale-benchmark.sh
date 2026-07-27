@@ -55,6 +55,10 @@ EXPECTED_RUNNING="${EXPECTED_RUNNING:-2}"
 EXPECTED_SUSPENDED_MIN="${EXPECTED_SUSPENDED_MIN:-2}"
 EXPECTED_FREE_PER_HOST="${EXPECTED_FREE_PER_HOST:-48}"
 TRACE_DIR="${TRACE_DIR:-$REPO/tests/results/autoscale-$(date -u +%Y%m%dT%H%M%SZ)}"
+case "$TRACE_DIR" in
+  /*) ;;
+  *) TRACE_DIR="$REPO/$TRACE_DIR" ;;
+esac
 TRACE="$TRACE_DIR/timeline.jsonl"
 TRAFFIC_SCENARIOS="${TRAFFIC_SCENARIOS:-}"
 RESULT="$TRACE_DIR/$([ -n "$TRAFFIC_SCENARIOS" ] && printf traffic.json || printf burst.json)"
