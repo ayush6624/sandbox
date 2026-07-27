@@ -36,6 +36,24 @@ func liveGateway(hosts ...*host) *Gateway {
 // that call awaitHost directly.
 func (g *Gateway) queueDeadline() time.Time { return time.Now().Add(g.queueWait) }
 
+func TestHostOnlyNormalizesAdvertisedManagementAddress(t *testing.T) {
+	tests := map[string]string{
+		"10.160.0.62:8080":         "10.160.0.62",
+		"http://10.160.0.62:8080":  "10.160.0.62",
+		"https://worker.test:8443": "worker.test",
+		"[fd00::62]:8080":          "[fd00::62]",
+		"https://[fd00::62]:8443":  "[fd00::62]",
+		"worker-without-port.test": "worker-without-port.test",
+	}
+	for input, want := range tests {
+		t.Run(input, func(t *testing.T) {
+			if got := hostOnly(input); got != want {
+				t.Fatalf("hostOnly(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
 func TestPickHostBinPacks(t *testing.T) {
 	// b has fewer free slots (fuller); bin-pack must prefer it so a and c can
 	// drain to empty and become removable.

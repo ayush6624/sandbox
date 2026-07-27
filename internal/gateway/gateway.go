@@ -808,10 +808,22 @@ func (g *Gateway) triggerDirectScaleOut() {
 // hostOnly strips the port from an addr, so clients can pair it with a
 // sandbox's forwarded ports (which live on the host, not the gateway).
 func hostOnly(addr string) string {
+	if parsed, err := url.Parse(addr); err == nil && parsed.Host != "" {
+		if host := parsed.Hostname(); host != "" {
+			return portHost(host)
+		}
+	}
 	if h, _, err := net.SplitHostPort(addr); err == nil {
-		return h
+		return portHost(h)
 	}
 	return addr
+}
+
+func portHost(host string) string {
+	if strings.Contains(host, ":") {
+		return "[" + strings.Trim(host, "[]") + "]"
+	}
+	return host
 }
 
 // pickHost returns a snapshot of the live host to place a new sandbox on, or
