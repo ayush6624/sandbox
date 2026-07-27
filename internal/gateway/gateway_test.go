@@ -917,8 +917,8 @@ func TestPenaltyExpires(t *testing.T) {
 func TestMetricsExposition(t *testing.T) {
 	t.Setenv("SANDBOX_RELEASE", "abc123")
 	g := liveGateway(
-		&host{id: "h1", slotsTotal: 24, slotsUsed: 10},
-		&host{id: "h2", slotsTotal: 24, slotsUsed: 5},
+		&host{id: "h1", slotsTotal: 24, slotsUsed: 10, reserved: 20},
+		&host{id: "h2", slotsTotal: 24, slotsUsed: 5, reserved: 4},
 	)
 	// A stale host must not inflate totals.
 	stale := &host{id: "dead", slotsTotal: 24, slotsUsed: 24}
@@ -937,7 +937,9 @@ func TestMetricsExposition(t *testing.T) {
 		"sandbox_hosts_live 2",
 		"sandbox_slots_total 48",
 		"sandbox_slots_used 15",
-		"sandbox_slots_free 33",
+		// h1 clamps 10 used + 20 reserved to 24; h2 contributes 5 + 4.
+		"sandbox_slots_committed 33",
+		"sandbox_slots_free 15",
 		"sandbox_routes 2",
 		"sandbox_create_queue_depth 3",
 		"sandbox_direct_scale_out_total 0",
@@ -957,5 +959,29 @@ func TestMetricsExposition(t *testing.T) {
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain; version=0.0.4") {
 		t.Errorf("wrong content-type %q", ct)
+	}
+}
+
+func TestMetricsCommittedSlotsCoverHeldBurstBeforeHeartbeat(t *testing.T) {
+	g := liveGateway(
+		&host{id: "h1", slotsTotal: 48, slotsUsed: 24, slotsFree: 24, reserved: 24},
+		&host{id: "h2", slotsTotal: 48, slotsUsed: 24, slotsFree: 24, reserved: 24},
+	)
+	g.queued.Store(64)
+
+	rr := httptest.NewRecorder()
+	g.handleMetrics(rr, httptest.NewRequest("GET", "/metrics", nil))
+	body := rr.Body.String()
+
+	// 96 committed + 64 queued = 160 slots, which the recording rule maps to
+	// ceil(160/48) = 4 workers. slots_used alone exposed only 48 and yielded 3.
+	for _, want := range []string{
+		"sandbox_slots_used 48",
+		"sandbox_slots_committed 96",
+		"sandbox_create_queue_depth 64",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q\n---\n%s", want, body)
+		}
 	}
 }

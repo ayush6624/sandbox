@@ -81,6 +81,20 @@ func (h *host) free() int {
 	return f
 }
 
+// committed is running occupancy plus create reservations assigned to this
+// host but not yet completed. A heartbeat can observe a create before its HTTP
+// response arrives, so clamp that brief double-count to physical capacity.
+func (h *host) committed() int {
+	n := h.slotsUsed + h.reserved
+	if n < 0 {
+		return 0
+	}
+	if n > h.slotsTotal {
+		return h.slotsTotal
+	}
+	return n
+}
+
 // Gateway routes the sandbox API across a fleet of hosts.
 type Gateway struct {
 	token             string // retained for compatibility with in-package tests
@@ -774,14 +788,7 @@ func (g *Gateway) triggerDirectScaleOut() {
 				continue
 			}
 			live++
-			// A heartbeat can land after the host has committed a create but
-			// before its HTTP response releases our reservation. Clamp that
-			// brief double-count to the host's physical running capacity.
-			running := h.slotsUsed + h.reserved
-			if running > h.slotsTotal {
-				running = h.slotsTotal
-			}
-			occupied += running + h.hibernated
+			occupied += h.committed() + h.hibernated
 		}
 		g.mu.RUnlock()
 

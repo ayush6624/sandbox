@@ -16,7 +16,7 @@ import (
 // bearer auth as every other endpoint; its scrape config carries the token.
 //
 // The autoscaler's scaling signal is derived downstream from these:
-// workers_desired = ceil((sandbox_slots_used + headroom) / slots_per_host).
+// workers_desired = ceil((sandbox_slots_committed + headroom) / slots_per_host).
 // Only live hosts (seen within ttl) are counted, so a dead host's capacity
 // doesn't mask real demand.
 func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -27,6 +27,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	var (
 		liveHosts             int
 		totalSlots, usedSlots int
+		committedSlots        int
 		freeSlots             int
 		hibernated            int
 		routes                int
@@ -44,6 +45,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		liveHosts++
 		totalSlots += h.slotsTotal
 		usedSlots += h.slotsUsed
+		committedSlots += h.committed()
 		freeSlots += h.free()
 		hibernated += h.hibernated
 		if expectedRelease != "" && h.release != expectedRelease {
@@ -65,12 +67,15 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_hosts_live", "Number of hosts seen within the heartbeat TTL.", liveHosts)
 	gauge("sandbox_slots_total", "Total sandbox slots across live hosts.", totalSlots)
 	gauge("sandbox_slots_used", "Used sandbox slots across live hosts.", usedSlots)
+	gauge("sandbox_slots_committed", "Running and in-flight reserved sandbox slots across live hosts, clamped per host.", committedSlots)
 	// slots_free is host-reported allocatable capacity (minus in-flight
 	// reservations) — the truth to PLACE against. NB the autoscaler's recording
 	// rule does NOT use (slots_total - slots_free) for occupancy: a still-warming
 	// host reports slots_free=0 as a placement gate while running zero sandboxes,
 	// which total-free would misread as fully occupied and over-scale. The rule
-	// uses (slots_used + hibernated) instead. slots_free is for placement only.
+	// uses (slots_committed + hibernated) instead. slots_free is for placement
+	// only. slots_committed closes the scrape-time gap before worker heartbeats
+	// report creates already assigned by the gateway.
 	gauge("sandbox_slots_free", "Allocatable sandbox slots across live hosts (host-reported).", freeSlots)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
 	gauge("sandbox_hibernated", "Idle sandboxes frozen to disk across live hosts (hold no slot).", hibernated)

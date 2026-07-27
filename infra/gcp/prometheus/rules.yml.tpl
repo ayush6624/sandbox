@@ -3,22 +3,29 @@
 # sandbox:workers_desired is the scaling signal: how many worker hosts we want
 # so that OCCUPIED capacity PLUS queued creates PLUS a headroom buffer fit.
 #
-# Occupancy is (slots_used + hibernated), NOT (slots_total - slots_free). A host
+# Occupancy is (slots_committed + hibernated), NOT (slots_total - slots_free).
+# slots_committed is each host's running slots plus gateway create reservations,
+# clamped to that host's physical capacity. This closes the first-scrape gap
+# where a held burst has been assigned but the worker heartbeat has not reported
+# the new sandboxes yet; without it, 96 assigned + 64 queued could appear as
+# only 48 used + 64 queued and under-scale a four-worker burst to three.
+#
+# A host
 # still WARMING advertises slots_free=0 as a PLACEMENT gate (so it doesn't attract
 # a cold-boot storm), yet it runs ZERO sandboxes — so (total - free) misreads it
 # as fully occupied, a phantom ~SLOTS_PER_HOST spike per warming host that
 # max_over_time then LATCHES into a ~1-host over-scale for the whole scale-down
-# window (observed live: a scale-up to 3 bounced to 4). slots_used is the
-# host-reported RUNNING count (a warming host contributes 0, no phantom); adding
+# window (observed live: a scale-up to 3 bounced to 4). slots_committed is zero
+# for a warming host with neither running sandboxes nor reservations; adding
 # hibernated keeps the original intent — scale for hibernation-heavy fleets, whose
 # frozen sandboxes hold ports and will wake — without the warming artifact.
-# (slots_used + hibernated slightly over-counts hibernation vs total-free, but
+# (slots_committed + hibernated slightly over-counts hibernation vs total-free, but
 # that's conservative and hibernated is ~0 in the steady state.)
 #
 # Both terms MUST be scoped to {job="sandbox-gateway"} (the gateway's
 # fleet-aggregate /metrics): sandbox_hibernated (and the old slots_free) are ALSO
 # exported per-host by the federation (job="sandbox-hosts", /metrics/hosts), so an
-# unscoped sum() DOUBLE-COUNTS. slots_used is gateway-only, queue_depth/rejected
+# unscoped sum() DOUBLE-COUNTS. slots_committed is gateway-only, queue_depth/rejected
 # are gateway-only, creates_ok is host-only — but scope the two occupancy terms
 # defensively so a future federation of either can't silently corrupt the signal.
 #
@@ -58,4 +65,4 @@ groups:
     interval: 10s
     rules:
       - record: sandbox:workers_desired
-        expr: clamp_min(ceil((sum(sandbox_slots_used{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
+        expr: clamp_min(ceil((sum(sandbox_slots_committed{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
