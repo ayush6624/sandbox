@@ -158,6 +158,7 @@ interface Run {
   idx: number
   id?: string
   createMs?: number
+  uploadMs?: number
   runMs?: number
   totalTime?: number
   error?: string
@@ -278,12 +279,27 @@ async function main(): Promise<void> {
     peakHosts = await safeGatewayHosts()
     console.log('   ', JSON.stringify(peakHosts.value ?? { error: peakHosts.error }))
 
-    console.log(`\n[2/4] Running workload in ${live.length} sandboxes (concurrency ${args.runConcurrency})...`)
-    const cmd = `node --no-warnings ${GUEST_SCRIPT_PATH} --mode ${args.mode} --iterations ${args.iterations}`
+    console.log(`\n[2/4] Staging workload in ${live.length} sandboxes (concurrency ${args.runConcurrency})...`)
     await mapLimit(live, args.runConcurrency, async (run) => {
       const started = Date.now()
       try {
         await run.sbx!.files.write(GUEST_SCRIPT_PATH, workload)
+        run.uploadMs = Date.now() - started
+        process.stdout.write('.')
+      } catch (error) {
+        run.workloadError = `stage: ${errorMessage(error)}`
+        run.error = `run: ${run.workloadError}`
+        process.stdout.write('x')
+      }
+    })
+    const staged = live.filter((run) => run.uploadMs !== undefined)
+    console.log(`\n  staged ${staged.length}/${live.length}`)
+
+    console.log(`\n[2/4] Running workload in ${staged.length} sandboxes (concurrency ${args.runConcurrency})...`)
+    const cmd = `node --no-warnings ${GUEST_SCRIPT_PATH} --mode ${args.mode} --iterations ${args.iterations}`
+    await mapLimit(staged, args.runConcurrency, async (run) => {
+      const started = Date.now()
+      try {
         const response = await run.sbx!.commands.run(cmd, { timeoutMs: 600_000 })
         run.runMs = Date.now() - started
         const parsed = parseBenchmarkJson(response.stdout)
@@ -320,6 +336,7 @@ async function main(): Promise<void> {
     const workloadOk = runs.filter((run) => run.totalTime !== undefined).length
     const cleanupVerified = createdRuns.filter((run) => run.cleanupVerified).length
     const createS = stats(runs.filter((run) => run.createMs !== undefined).map((run) => run.createMs! / 1000))
+    const uploadS = stats(runs.filter((run) => run.uploadMs !== undefined).map((run) => run.uploadMs! / 1000))
     const runWallS = stats(runs.filter((run) => run.totalTime !== undefined).map((run) => run.runMs! / 1000))
     const benchS = stats(runs.filter((run) => run.totalTime !== undefined).map((run) => run.totalTime!))
     const passed =
@@ -338,6 +355,7 @@ async function main(): Promise<void> {
     console.log(`  failures:         ${runs.filter((run) => run.error || run.cleanupError).length}`)
     console.log(`  fleet wall time:  ${fmt(fleetWall)}s`)
     console.log(`  create time  (s): mean ${fmt(createS.mean)}  p50 ${fmt(createS.p50)}  p95 ${fmt(createS.p95)}  max ${fmt(createS.max)}`)
+    console.log(`  upload time  (s): mean ${fmt(uploadS.mean)}  p50 ${fmt(uploadS.p50)}  p95 ${fmt(uploadS.p95)}  max ${fmt(uploadS.max)}`)
     console.log(`  workload wall(s): mean ${fmt(runWallS.mean)}  p50 ${fmt(runWallS.p50)}  p95 ${fmt(runWallS.p95)}  max ${fmt(runWallS.max)}`)
     console.log(`  bench total  (s): mean ${fmt(benchS.mean)}  p50 ${fmt(benchS.p50)}  p95 ${fmt(benchS.p95)}  min ${fmt(benchS.min)}  max ${fmt(benchS.max)}`)
 
@@ -357,6 +375,7 @@ async function main(): Promise<void> {
       created,
       workloadOk,
       createStats: createS,
+      uploadStats: uploadS,
       runWallStats: runWallS,
       benchStats: benchS,
       peakHosts,
@@ -371,6 +390,7 @@ async function main(): Promise<void> {
         idx: run.idx,
         id: run.id,
         createMs: run.createMs,
+        uploadMs: run.uploadMs,
         runMs: run.runMs,
         totalTime: run.totalTime,
         error: run.error,
