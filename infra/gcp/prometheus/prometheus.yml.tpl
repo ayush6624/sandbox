@@ -3,10 +3,12 @@
 # The gateway deliberately listens only on the private VPC address, so local
 # control-plane consumers must use that address rather than loopback.
 global:
-  scrape_interval: 10s
-  # 10s (was 15s) so the sandbox:workers_desired recording rule refreshes on the
-  # same cadence as the scrape — keeps the autoscaler's scale-up signal fresh.
-  evaluation_interval: 10s
+  scrape_interval: 5s
+  # The held-burst SLO includes worker resume and sandbox bring-up, so a 10s
+  # scrape plus 10s rule evaluation consumed too much of the 30s p95 budget
+  # before GCE even saw the resize. These gateway-only operations are cheap;
+  # keep them at 5s while the fan-out worker scrape below remains at 30s.
+  evaluation_interval: 5s
 
 rule_files:
   - /etc/prometheus/rules.yml

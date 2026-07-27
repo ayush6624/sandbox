@@ -60,9 +60,10 @@
 # the autoscaler holds — a safe default.
 groups:
   - name: sandbox
-    # 10s (was 15s): recompute the scale-up signal on the scrape cadence so the
-    # autoscaler (also 10s now) never acts on a stale desired-count.
-    interval: 10s
+    # Recompute on the 5s gateway scrape cadence. A 10s scrape + 10s rule
+    # evaluation left too little of the 30s create-latency SLO for standby
+    # resume and sandbox bring-up.
+    interval: 5s
     rules:
       - record: sandbox:workers_desired
         expr: clamp_min(ceil((sum(sandbox_slots_committed{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)

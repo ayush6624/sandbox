@@ -46,3 +46,27 @@ func TestWorkersDesiredUsesInstantCommittedOccupancy(t *testing.T) {
 		t.Fatalf("canonical desired workers = %d, want 4", desired)
 	}
 }
+
+func TestScaleOutControlLoopFitsHeldBurstLatencyBudget(t *testing.T) {
+	prometheusConfig, err := os.ReadFile("prometheus.yml.tpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(prometheusConfig)
+	for _, want := range []string{
+		"scrape_interval: 5s",
+		"evaluation_interval: 5s",
+	} {
+		if !strings.Contains(config, want) {
+			t.Errorf("Prometheus control loop missing %q", want)
+		}
+	}
+
+	policy, err := os.ReadFile("../nomad/policies/workers.hcl.tpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(policy), `evaluation_interval = "5s"`) {
+		t.Error("Nomad Autoscaler policy must evaluate scale-out demand every 5s")
+	}
+}
