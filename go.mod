@@ -10,7 +10,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d
 	golang.org/x/sys v0.46.0
 	golang.org/x/term v0.44.0
 	modernc.org/sqlite v1.50.1

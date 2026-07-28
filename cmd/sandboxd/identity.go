@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,7 +15,6 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
-	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -109,9 +106,10 @@ func initializeGuestIdentity(sandboxID string) error {
 
 func restartSSHService() error {
 	// Snapshot restores preserve sshd's master PID. Signal that process
-	// directly, then prove its listener serves the newly generated key before
-	// returning. This avoids systemd's D-Bus round trip and `sshd -t` while
-	// retaining a deterministic no-inherited-key readiness gate.
+	// directly, then prove it completed re-exec by observing a replacement
+	// port-22 listener inode. sshd loads host keys before opening that listener,
+	// so this avoids systemd's D-Bus round trip and `sshd -t` while retaining a
+	// deterministic no-inherited-key readiness gate.
 	if err := reloadSSHDirect(); err == nil {
 		return nil
 	}
@@ -119,8 +117,8 @@ func restartSSHService() error {
 	// A successful reload makes sshd re-exec and adopt the new host key without
 	// tearing down the listener. This is both safer for concurrent connections
 	// and materially faster than a full systemd restart on snapshot clones.
-	// Keep it as the compatibility fallback for guests without ssh-keyscan or
-	// an sshd PID file.
+	// Keep it as the compatibility fallback for guests without procfs or an
+	// sshd PID file.
 	if err := runIdentityCommand("systemctl", "reload", "ssh.service"); err == nil {
 		return nil
 	}
@@ -163,60 +161,57 @@ func reloadSSHWithSignal() error {
 	if strings.TrimSpace(string(comm)) != "sshd" {
 		return fmt.Errorf("pid %d is %q, not sshd", pid, strings.TrimSpace(string(comm)))
 	}
+	oldListener, err := sshdListenerInode(pid)
+	if err != nil {
+		return fmt.Errorf("find sshd listener: %w", err)
+	}
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 		return fmt.Errorf("signal sshd pid %d: %w", pid, err)
 	}
 
-	expected, err := os.ReadFile(sshHostKeyPath("ed25519") + ".pub")
-	if err != nil {
-		return fmt.Errorf("read generated ssh public key: %w", err)
-	}
-
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		matched, scanErr := sshListenerServesKey(expected)
-		if scanErr == nil && matched {
+		newListener, listenerErr := sshdListenerInode(pid)
+		if listenerErr == nil && newListener != "" && newListener != oldListener {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("sshd did not serve the new host key: %w", scanErr)
+			return fmt.Errorf("sshd did not replace listener inode %s: %w", oldListener, listenerErr)
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 }
 
-var errSSHHostKeyObserved = errors.New("ssh host key observed")
-
-func sshListenerServesKey(expected []byte) (bool, error) {
-	want, _, _, _, err := ssh.ParseAuthorizedKey(expected)
+func sshdListenerInode(pid int) (string, error) {
+	socketInodes := make(map[string]struct{})
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
 	if err != nil {
-		return false, fmt.Errorf("parse generated ssh public key: %w", err)
+		return "", err
 	}
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:22", 200*time.Millisecond)
-	if err != nil {
-		return false, err
+	for _, entry := range entries {
+		target, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, entry.Name()))
+		if err == nil && strings.HasPrefix(target, "socket:[") && strings.HasSuffix(target, "]") {
+			socketInodes[strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")] = struct{}{}
+		}
 	}
-	defer conn.Close()
 
-	matched := false
-	cfg := &ssh.ClientConfig{
-		User:              "sandbox-key-probe",
-		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519},
-		HostKeyCallback: func(_ string, _ net.Addr, got ssh.PublicKey) error {
-			matched = bytes.Equal(got.Marshal(), want.Marshal())
-			// Stop before user authentication: the host-key proof is complete.
-			return errSSHHostKeyObserved
-		},
-		Timeout: 200 * time.Millisecond,
+	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		raw, err := os.ReadFile(table)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			fields := strings.Fields(line)
+			// local_address ends in :0016 (port 22), state 0A is LISTEN,
+			// and field 9 is the socket inode in both proc tables.
+			if len(fields) > 9 && strings.HasSuffix(fields[1], ":0016") && fields[3] == "0A" {
+				if _, ok := socketInodes[fields[9]]; ok {
+					return fields[9], nil
+				}
+			}
+		}
 	}
-	_, _, _, handshakeErr := ssh.NewClientConn(conn, "127.0.0.1:22", cfg)
-	if matched {
-		return true, nil
-	}
-	if !errors.Is(handshakeErr, errSSHHostKeyObserved) {
-		return false, handshakeErr
-	}
-	return false, nil
+	return "", errors.New("port 22 listener not owned by sshd")
 }
 
 // sshHostKeyPath names a host key beside the ones sshHostKeyPattern matches, so
