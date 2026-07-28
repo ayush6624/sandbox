@@ -78,15 +78,15 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	generations, restarts := 0, 0
+	generations, reloads := 0, 0
 	runIdentityCommand = func(name string, args ...string) error {
 		switch name {
 		case "ssh-keygen":
 			generations++
 			return os.WriteFile(keygenTarget(t, args), []byte("unique"), 0o600)
 		case "systemctl":
-			if len(args) > 0 && args[0] == "restart" {
-				restarts++
+			if len(args) > 0 && args[0] == "reload" {
+				reloads++
 			}
 			return nil
 		default:
@@ -97,8 +97,8 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	if err := initializeGuestIdentity("sandbox-one"); err != nil {
 		t.Fatal(err)
 	}
-	if generations != 1 || restarts != 1 {
-		t.Fatalf("first initialization commands = generations %d, restarts %d", generations, restarts)
+	if generations != 1 || reloads != 1 {
+		t.Fatalf("first initialization commands = generations %d, reloads %d", generations, reloads)
 	}
 	if _, err := os.Stat(authorizedKeysPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("inherited authorized_keys was not removed: %v", err)
@@ -106,14 +106,14 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	if err := initializeGuestIdentity("sandbox-one"); err != nil {
 		t.Fatal(err)
 	}
-	if generations != 1 || restarts != 1 {
-		t.Fatalf("same identity was not idempotent: generations %d, restarts %d", generations, restarts)
+	if generations != 1 || reloads != 1 {
+		t.Fatalf("same identity was not idempotent: generations %d, reloads %d", generations, reloads)
 	}
 	if err := initializeGuestIdentity("sandbox-two"); err != nil {
 		t.Fatal(err)
 	}
-	if generations != 2 || restarts != 2 {
-		t.Fatalf("clone identity did not rotate: generations %d, restarts %d", generations, restarts)
+	if generations != 2 || reloads != 2 {
+		t.Fatalf("clone identity did not rotate: generations %d, reloads %d", generations, reloads)
 	}
 }
 
@@ -160,6 +160,8 @@ func TestRestartSSHServiceRetriesAfterResettingFailure(t *testing.T) {
 			return errors.New("unexpected command")
 		}
 		switch args[0] {
+		case "reload":
+			return errors.New("restored service cannot reload")
 		case "reset-failed":
 			resets++
 			return nil

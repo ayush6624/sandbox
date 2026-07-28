@@ -202,6 +202,33 @@ func initializeGuestIdentity(ctx context.Context, guestIP, sandboxID string) err
 	return nil
 }
 
+// setGuestSnapshotPoll arms the thaw agent's short MMDS poll immediately
+// before Pause+Snapshot. The armed state is captured in guest memory, so a
+// clone observes its new identity promptly without making every running guest
+// poll MMDS aggressively. Old agents return 404 and retain the safe legacy
+// behavior.
+func setGuestSnapshotPoll(ctx context.Context, guestIP string, armed bool) {
+	body, _ := json.Marshal(agentapi.SnapshotPollRequest{Armed: armed})
+	url := fmt.Sprintf("http://%s:%d/snapshot-poll", guestIP, agentapi.Port)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "snapshot poll arm=%t %s: %v\n", armed, guestIP, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		msg, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "snapshot poll arm=%t %s: HTTP %d: %s\n",
+			armed, guestIP, resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+}
+
 // installSSHKey pushes an SSH public key to the guest agent's POST /ssh-key so
 // the sandbox is reachable over SSH the moment create returns. Called after the
 // readiness gate on both the cold and hot (golden-clone) create paths. Unlike

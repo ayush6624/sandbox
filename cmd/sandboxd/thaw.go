@@ -5,10 +5,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/agentapi"
 )
 
 // The Firecracker MMDS link-local endpoint. A fan-out clone resumes carrying the
@@ -16,8 +21,20 @@ import (
 // clone's fresh identity into MMDS (see internal/vm.StartClone), and this agent
 // reads it and reconfigures eth0 so the clone stops impersonating the source.
 const (
-	mmdsAddr  = "169.254.169.254"
-	mmdsIface = "eth0"
+	mmdsAddr        = "169.254.169.254"
+	mmdsIface       = "eth0"
+	normalPollDelay = 200 * time.Millisecond
+	armedPollDelay  = 5 * time.Millisecond
+)
+
+var (
+	snapshotPollArmed atomic.Bool
+	thawPollWake      = make(chan struct{}, 1)
+	runIPBatch        = func(batch string) ([]byte, error) {
+		cmd := exec.Command("ip", "-batch", "-")
+		cmd.Stdin = strings.NewReader(batch)
+		return cmd.CombinedOutput()
+	}
 )
 
 // cloneIdentity is the document the host writes into MMDS for a clone. A 1:1
@@ -45,8 +62,13 @@ func runThawAgent() {
 	client := &http.Client{Timeout: 1 * time.Second}
 	var lastGen, lastEpoch string
 	for {
-		ensureMMDSRoute()
 		id, err := fetchIdentity(client)
+		if err != nil {
+			// A cold boot may not have the link-local route yet. Snapshot
+			// restores inherit it, so keep this process spawn off their hot path.
+			ensureMMDSRoute()
+			id, err = fetchIdentity(client)
+		}
 		if err == nil && id.Gen != "" && id.Gen != lastGen {
 			if err := applyIdentity(id); err != nil {
 				log.Printf("thaw: apply identity gen=%s failed: %v", id.Gen, err)
@@ -58,6 +80,7 @@ func runThawAgent() {
 				if err := announceIdentity(mmdsIface, id.IP, id.MAC); err != nil {
 					log.Printf("thaw: garp announce failed: %v", err)
 				}
+				snapshotPollArmed.Store(false)
 			}
 		}
 		if err == nil && id.EpochMS != "" && id.EpochMS != lastEpoch {
@@ -66,9 +89,39 @@ func runThawAgent() {
 			} else {
 				log.Printf("thaw: stepped clock to epoch_ms=%s", id.EpochMS)
 				lastEpoch = id.EpochMS
+				// Same-identity restores have no new generation, but a new
+				// epoch still proves the armed snapshot has resumed.
+				snapshotPollArmed.Store(false)
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
+		waitForThawPoll()
+	}
+}
+
+func handleSnapshotPoll(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.SnapshotPollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	snapshotPollArmed.Store(req.Armed)
+	select {
+	case thawPollWake <- struct{}{}:
+	default:
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"armed": req.Armed})
+}
+
+func waitForThawPoll() {
+	delay := normalPollDelay
+	if snapshotPollArmed.Load() {
+		delay = armedPollDelay
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-thawPollWake:
 	}
 }
 
@@ -118,20 +171,35 @@ func applyIdentity(id cloneIdentity) error {
 	if prefix == "" {
 		prefix = "24"
 	}
-	steps := [][]string{
-		{"ip", "link", "set", mmdsIface, "down"},
-		{"ip", "addr", "flush", "dev", mmdsIface},
-		{"ip", "link", "set", mmdsIface, "address", id.MAC},
-		{"ip", "link", "set", mmdsIface, "up"},
-		{"ip", "addr", "add", id.IP + "/" + prefix, "dev", mmdsIface},
-		{"ip", "route", "replace", "default", "via", id.GW},
+	if net.ParseIP(id.IP).To4() == nil {
+		return fmt.Errorf("bad IPv4 %q", id.IP)
 	}
-	for _, args := range steps {
-		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-			return &ipError{args: args, out: string(out), err: err}
-		}
+	if net.ParseIP(id.GW).To4() == nil {
+		return fmt.Errorf("bad gateway IPv4 %q", id.GW)
 	}
-	ensureMMDSRoute()
+	if mac, err := net.ParseMAC(id.MAC); err != nil || len(mac) != 6 {
+		return fmt.Errorf("bad MAC %q", id.MAC)
+	}
+	bits, err := strconv.Atoi(prefix)
+	if err != nil || bits < 1 || bits > 32 {
+		return fmt.Errorf("bad IPv4 prefix %q", prefix)
+	}
+
+	// One iproute2 batch replaces eight short-lived `ip` processes on every
+	// clone. Besides saving process startup, the commands remain ordered and
+	// the tap is still unbridged until the GARP acknowledgement.
+	batch := strings.Join([]string{
+		"link set dev " + mmdsIface + " down",
+		"addr flush dev " + mmdsIface,
+		"link set dev " + mmdsIface + " address " + id.MAC,
+		"link set dev " + mmdsIface + " up",
+		"addr add " + id.IP + "/" + prefix + " dev " + mmdsIface,
+		"route replace default via " + id.GW,
+		"route replace " + mmdsAddr + "/32 dev " + mmdsIface,
+	}, "\n") + "\n"
+	if out, err := runIPBatch(batch); err != nil {
+		return fmt.Errorf("ip batch: %w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 

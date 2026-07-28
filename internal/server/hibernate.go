@@ -251,7 +251,9 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	// next wake's prewarm (nil for non-UFFD-chunk machines). Roadmap B3.
 	vm.SealUFFDRecording(m)
 	workingSet := vm.UFFDWorkingSet(m)
+	setGuestSnapshotPoll(ctx, sb.GuestIP, true)
 	if err := vm.Pause(ctx, m); err != nil {
+		setGuestSnapshotPoll(context.Background(), sb.GuestIP, false)
 		return fmt.Errorf("pause: %w", err)
 	}
 	err = vm.Snapshot(ctx, m, memPath, statePath, snapType)
@@ -271,6 +273,7 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 		if rerr := vm.Resume(context.Background(), m); rerr != nil {
 			fmt.Fprintf(os.Stderr, "[%s] resume after failed hibernate snapshot: %v\n", id, rerr)
 		}
+		setGuestSnapshotPoll(context.Background(), sb.GuestIP, false)
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 		return fmt.Errorf("snapshot: %w", err)
 	}
@@ -484,6 +487,7 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 // announce. Gen must differ from anything the frozen agent has seen, or it
 // would skip the reidentify.
 func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, statePath string) error {
+	startedAt := time.Now()
 	if err := s.cfg.Provisioner.CreateTapUnbridged(sb.TapDevice); err != nil {
 		return fmt.Errorf("create tap: %w", err)
 	}
@@ -494,6 +498,7 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 	}
 	opts := s.cfg.VMTemplate
 	opts.SocketPath = ""
+	setupTime := time.Since(startedAt)
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
 		MemPath:         memPath,
 		StatePath:       statePath,
@@ -511,7 +516,10 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 		}
 		return fmt.Errorf("start clone: %w", err)
 	}
-	c := &clone{sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp}
+	c := &clone{
+		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
+		startedAt: startedAt, setupTime: setupTime, launchTime: rt.LaunchTimings,
+	}
 	return s.finishClone(ctx, c)
 }
 

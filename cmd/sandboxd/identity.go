@@ -102,6 +102,13 @@ func initializeGuestIdentity(sandboxID string) error {
 }
 
 func restartSSHService() error {
+	// A successful reload makes sshd re-exec and adopt the new host key without
+	// tearing down the listener. This is both safer for concurrent connections
+	// and materially faster than a full systemd restart on snapshot clones.
+	if err := runIdentityCommand("systemctl", "reload", "ssh.service"); err == nil {
+		return nil
+	}
+
 	const attempts = 3
 	// A restored systemd can retain the source VM's failed/start-limit state.
 	// Clear it before the first restart and between retries. The bounded retry

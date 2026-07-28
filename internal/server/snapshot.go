@@ -105,7 +105,9 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 
 	// Resume on every exit path so a failed snapshot doesn't leave the source
 	// sandbox frozen.
+	setGuestSnapshotPoll(ctx, sb.GuestIP, true)
 	if err := vm.Pause(ctx, m); err != nil {
+		setGuestSnapshotPoll(context.Background(), sb.GuestIP, false)
 		return registry.Snapshot{}, 500, fmt.Errorf("pause: %w", err)
 	}
 	resumed := false
@@ -115,6 +117,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 			if err := vm.Resume(context.Background(), m); err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] resume after snapshot failed: %v\n", id, err)
 			}
+			setGuestSnapshotPoll(context.Background(), sb.GuestIP, false)
 		}
 	}
 	defer resume()
@@ -358,6 +361,9 @@ type clone struct {
 	sb         registry.Sandbox
 	m          *vm.Machine
 	vmID, sock string
+	startedAt  time.Time
+	setupTime  time.Duration
+	launchTime vm.LaunchTimings
 	arp        *provisioner.ARPListener // opened on the unbridged tap before resume; nil = fixed-sleep fallback
 	// baseSnap is the snapshot this machine was loaded from — the base its
 	// dirty-page bitmap tracks against (recorded into Server.diffBase by
@@ -531,6 +537,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 // bringUpClone allocates resources for one clone and resumes it on an unbridged
 // tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
 func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) *clone {
+	startedAt := time.Now()
 	id := uuid.NewString()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 	// Clones of the golden snapshot record it as their diff base; clones of a
@@ -561,6 +568,7 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 	}
 	opts := s.cfg.VMTemplate
 	opts.SocketPath = ""
+	setupTime := time.Since(startedAt)
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
 		MemPath:         snap.MemPath,
 		StatePath:       snap.StatePath,
@@ -581,7 +589,8 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 	}
 	return &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
-		baseSnap: snap.ID, independent: true,
+		baseSnap: snap.ID, independent: true, startedAt: startedAt,
+		setupTime: setupTime, launchTime: rt.LaunchTimings,
 	}
 }
 
@@ -591,6 +600,7 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	sb, m := c.sb, c.m
 
+	phaseStarted := time.Now()
 	// The tap must stay off the bridge until the guest sheds the snapshot's
 	// baked IP. Normally the thaw agent's gratuitous ARP tells us the moment
 	// that happens (~200-400ms); the timeout covers agents that predate the
@@ -612,7 +622,9 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	} else {
 		time.Sleep(reidentifyMargin)
 	}
+	reidentifyTime := time.Since(phaseStarted)
 
+	phaseStarted = time.Now()
 	pid, err := vm.PID(m)
 	if err != nil {
 		_ = vm.StopForce(m)
@@ -632,19 +644,38 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	}
 	s.act.touch(sb.ID)
 	s.watchMachine(sb.ID, m, "clone VM")
+	finishStartTime := time.Since(phaseStarted)
+	phaseStarted = time.Now()
 	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
 		return fmt.Errorf("agent never ready on %s: %w", sb.GuestIP, err)
 	}
+	agentTime := time.Since(phaseStarted)
 	// Deterministic clock step before the clone is handed out — covers hot
 	// creates, fan-out, and clone-path wakes (StartClone's MMDS epoch_ms is
 	// polled and can lag the readiness gate by a tick).
+	phaseStarted = time.Now()
 	syncGuestClock(ctx, sb.GuestIP)
+	clockTime := time.Since(phaseStarted)
+	identityTime := time.Duration(0)
 	if c.independent {
+		phaseStarted = time.Now()
 		if err := initializeGuestIdentity(ctx, sb.GuestIP, sb.ID); err != nil {
 			return fmt.Errorf("initialize guest identity: %w", err)
 		}
+		identityTime = time.Since(phaseStarted)
 	}
+	launch := c.launchTime
+	fmt.Fprintf(os.Stderr,
+		"[%s] clone phases: setup=%s prepare=%s process_api=%s snapshot_load=%s drive=%s mmds=%s resume=%s reidentify=%s finish=%s agent=%s clock=%s identity=%s total=%s\n",
+		sb.ID, roundMS(c.setupTime), roundMS(launch.Prepare), roundMS(launch.ProcessToAPI),
+		roundMS(launch.SnapshotLoad), roundMS(launch.DrivePatch), roundMS(launch.MMDS),
+		roundMS(launch.Resume), roundMS(reidentifyTime), roundMS(finishStartTime),
+		roundMS(agentTime), roundMS(clockTime), roundMS(identityTime), roundMS(time.Since(c.startedAt)))
 	return nil
+}
+
+func roundMS(d time.Duration) time.Duration {
+	return d.Round(time.Millisecond)
 }
 
 // handleListSnapshots returns all saved snapshots.

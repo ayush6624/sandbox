@@ -111,6 +111,21 @@ type UFFDChunkSource struct {
 type RuntimeConfig struct {
 	SocketPath string
 	VMID       string
+	// LaunchTimings records the hot-clone process/API critical path. It is
+	// populated by StartClone and intentionally excluded from persisted state.
+	LaunchTimings LaunchTimings
+}
+
+// LaunchTimings attributes the serial host-side work required to start a
+// snapshot clone. These durations are diagnostic only; they do not affect the
+// launch contract or weaken any jailer validation.
+type LaunchTimings struct {
+	Prepare      time.Duration
+	ProcessToAPI time.Duration
+	SnapshotLoad time.Duration
+	DrivePatch   time.Duration
+	MMDS         time.Duration
+	Resume       time.Duration
 }
 
 // Snapshot types accepted by Snapshot(). Diff writes only the pages dirtied

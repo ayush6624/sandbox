@@ -43,6 +43,7 @@ func main() {
 	mux.HandleFunc("GET /shell", handleShell)
 	mux.HandleFunc("POST /clock", hostOnly(handleClock))
 	mux.HandleFunc("POST /identity", hostOnly(handleGuestIdentity))
+	mux.HandleFunc("POST /snapshot-poll", hostOnly(handleSnapshotPoll))
 	mux.HandleFunc("POST /ssh-key", hostOnly(handleSSHKey))
 
 	// A real /etc/resolv.conf, not a symlink into /proc — c-ares-based

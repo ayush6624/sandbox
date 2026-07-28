@@ -616,15 +616,18 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	if err = opts.applyDefaults(); err != nil {
 		return nil, RuntimeConfig{}, err
 	}
+	var timings LaunchTimings
 	vmID := uuid.NewString()
 	opts.SnapshotMemPath = c.MemPath
 	opts.SnapshotStatePath = c.StatePath
 	opts.RootfsPath = c.CloneRootfsPath
 
+	phaseStarted := time.Now()
 	prepared, err := prepareLaunch(ctx, opts, LaunchHotClone, vmID, opts.SocketPath)
 	if err != nil {
 		return nil, RuntimeConfig{}, err
 	}
+	timings.Prepare = time.Since(phaseStarted)
 	cmd := prepared.Command
 	opts.SocketPath = prepared.HostAPIPath
 	logPath := filepath.Join(opts.LogDir, fmt.Sprintf("firecracker-%s.log", vmID))
@@ -634,6 +637,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		cmd.Stderr = f
 		logCloser = f
 	}
+	phaseStarted = time.Now()
 	if err = cmd.Start(); err != nil {
 		if logCloser != nil {
 			_ = logCloser.Close()
@@ -667,6 +671,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	if err = waitAPI(ctx, client); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("firecracker API never came up: %w", err)
 	}
+	timings.ProcessToAPI = time.Since(phaseStarted)
 
 	// 1. Load the snapshot without resuming, remapping the host tap. The iface_id
 	// must match what the source VM registered: the SDK names interfaces by index
@@ -682,13 +687,17 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		"resume_vm":             false,
 		"network_overrides":     []map[string]any{{"iface_id": "1", "host_dev_name": c.TapDevice}},
 	}
+	phaseStarted = time.Now()
 	if err = fcAPI(ctx, client, "PUT", "/snapshot/load", load); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("load snapshot: %w", err)
 	}
+	timings.SnapshotLoad = time.Since(phaseStarted)
 	// 2. Relocate the rootfs to this clone's CoW copy.
+	phaseStarted = time.Now()
 	if err = fcAPI(ctx, client, "PATCH", "/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": prepared.Paths.Rootfs}); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("relocate rootfs: %w", err)
 	}
+	timings.DrivePatch = time.Since(phaseStarted)
 	// 3. Push the clone's fresh identity into MMDS for the guest thaw agent.
 	// epoch_ms lets the guest step its snapshot-stale wall clock at thaw,
 	// instead of NTP stepping it minutes forward later, mid-exec.
@@ -700,15 +709,21 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		"gen":      c.Gen,
 		"epoch_ms": strconv.FormatInt(time.Now().UnixMilli(), 10),
 	}
+	phaseStarted = time.Now()
 	if err = fcAPI(ctx, client, "PUT", "/mmds", mmds); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("set mmds: %w", err)
 	}
+	timings.MMDS = time.Since(phaseStarted)
 	// 4. Resume.
+	phaseStarted = time.Now()
 	if err = fcAPI(ctx, client, "PATCH", "/vm", map[string]any{"state": "Resumed"}); err != nil {
 		return nil, RuntimeConfig{}, fmt.Errorf("resume: %w", err)
 	}
+	timings.Resume = time.Since(phaseStarted)
 
-	return &Machine{raw: rm, diffCapable: true}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+	return &Machine{raw: rm, diffCapable: true}, RuntimeConfig{
+		SocketPath: opts.SocketPath, VMID: vmID, LaunchTimings: timings,
+	}, nil
 }
 
 // RestoreUFFD restores a snapshot on its ORIGINAL identity (same-identity wake)

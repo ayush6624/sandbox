@@ -228,8 +228,8 @@ scripts/              Host setup shell scripts
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
   `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
   `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override
-  can't be served from the golden snapshot — it always takes the cold path (~2 s vs ~250 ms
-  hot). Restore/fanout bodies **reject** nonzero `vcpus`/`mem_mib` with 400 (a restored VM
+  can't be served from the golden snapshot — it always takes the slower cold path.
+  Restore/fanout bodies **reject** nonzero `vcpus`/`mem_mib` with 400 (a restored VM
   runs whatever its snapshot baked; snapshot rows record the source's values so restored/
   cloned rows report the truth). Hibernate/wake restores from snapshot, so overrides survive
   automatically. **API responses always report effective resources**: the registry keeps
@@ -346,6 +346,16 @@ scripts/              Host setup shell scripts
   then `sandbox ssh <id>` (forwards :22 on first use) or
   `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
   `--jump <bastion>`.
+- **Current jailed production create baseline (2026-07-28, release `4e4b457`):**
+  after rebuilding the worker/rootfs with Ed25519-only host-key generation,
+  baking a `jailer-v1` golden data image, and rolling the full MIG, 25 sequential
+  lifecycle iterations through the gateway measured create p50 **986 ms**, p95
+  **1,021 ms** (min 959 ms; first-sample max 1,444 ms). Worker logs put successful
+  hot-create handling at **776–811 ms**, so the remaining gap is predominantly
+  inside the worker's jailed clone path, not gateway routing. Resume plus an
+  `echo ready` usability probe measured p50 **976 ms**, p95 **1,040 ms**. The
+  sub-500 ms create target is therefore still open; do not attribute the full
+  residual to any one jailer stage until the launch path has phase timing.
 - **known_hosts is keyed on the sandbox ID, not host:port**
   (`cmd/sandbox/ssh.go`). Host keys are unique per sandbox but host ports are
   recycled from a pool, so OpenSSH's default identity — `[host]:port` — makes

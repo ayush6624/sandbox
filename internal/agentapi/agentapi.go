@@ -95,6 +95,14 @@ type GuestIdentityRequest struct {
 	SandboxID string `json:"sandbox_id"`
 }
 
+// SnapshotPollRequest switches the thaw agent into/out of rapid MMDS polling.
+// The host arms it immediately before pausing a VM for snapshot, so the
+// captured process resumes looking for clone identity without imposing a high
+// steady-state poll rate on every running sandbox.
+type SnapshotPollRequest struct {
+	Armed bool `json:"armed"`
+}
+
 // SSHKeyRequest installs an SSH public key for the normal sandbox user. The
 // host calls this only after guest identity initialization has cleared any key
 // inherited from the source image or snapshot. Idempotent: the file is
