@@ -38,6 +38,8 @@ sudo ./sandbox hibernate <id>                        # freeze an idle sandbox to
 sudo ./sandbox rename <id> "my devbox"               # set a sandbox's display name ("" clears)
 sudo ./sandbox exec <id> -- "node --version"         # run a command in the guest
 sudo ./sandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest
+sudo ./sandbox ssh <id> [-- cmd...]                  # SSH in as the sandbox user (forwards :22 on first use)
+sudo ./sandbox ssh-config <id>                       # print an ssh_config stanza (for plain ssh/scp/rsync)
 sudo ./sandbox read <id> /path                       # file out of the guest → stdout
 sudo ./sandbox write <id> /path [--from local]       # stdin/local file → guest
 sudo ./sandbox ls <id> [/path]                       # list a guest directory
@@ -317,33 +319,51 @@ scripts/              Host setup shell scripts
   activation disabled) so :22 listens the instant the guest boots. There is no
   root login — `root@` is refused by sshd, not merely unauthorized.
   **Host keys are unique per sandbox and never baked into the image**: the base
-  rootfs ships with none
-  and sandboxd's `POST /identity` (`initializeGuestIdentity`,
-  cmd/sandboxd/identity.go) removes any inherited ones and generates a fresh key
-  on every independent create — so no two sandboxes, golden clones included, can
-  impersonate each other. **Ed25519 only** (~7 ms), and `sandbox.conf` pins
-  `HostKey /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
+  rootfs ships with none, and sandboxd's `POST /identity`
+  (`initializeGuestIdentity`, cmd/sandboxd/identity.go) removes any inherited
+  ones and generates a fresh key on every independent create — so no two
+  sandboxes, golden clones included, can impersonate each other. **Ed25519
+  only** (~7 ms), and `sandbox.conf` pins `HostKey
+  /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
   RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
   2-vCPU guest and was essentially the entire `/identity` call. That config is
   written by both `build-devbox-rootfs.sh` and `install-agent` (the latter
-  repairs an older base image) — keep the two in sync. `POST /sandboxes` takes an optional
-  `ssh_pubkey` (one OpenSSH key line, `validateSSHPubkey` in server.go — rejects
-  multi-line/unknown-type); after the create readiness gate (both cold and hot
-  paths), `installSSHKey` (proxy.go) posts it to sandboxd's `POST /ssh-key`, which
-  writes `/home/sandbox/.ssh/authorized_keys` — under `withGuestFilesystem`, so
-  the dir and file land owned by `sandbox:sandbox` (0700/0600) as sshd demands.
-  It is NOT best-effort like `syncGuestClock`: a key-install failure destroys the
-  sandbox and fails the create, so a box handed back with SSH requested is always
-  reachable. The key lives in the rootfs, so it
-  survives hibernation/wake with no re-push. Reach it by exposing guest :22 as a
-  host port (`sandbox expose <id> 22`) — the userspace TCP proxy forwards it with
-  wake-on-connect, so an incoming SSH connection wakes a hibernated sandbox and
-  pins it for the session, exactly like a forwarded HTTP port — then
-  `ssh -p <host_port> sandbox@<host>`. Old baked sandboxd 404s `/ssh-key` (re-run
-  `install-agent`; rebuild the base for openssh first). **Fleet caveat:** the
-  gateway is an HTTP reverse-proxy and does NOT forward raw TCP, so fleet SSH
-  needs a ProxyJump to the owning worker (or a WS tunnel) — not wired up yet.
-  CLI: `sandbox up --ssh-key ~/.ssh/id_ed25519.pub` (file path or key literal).
+  repairs an older base image) — keep the two in sync. `POST /sandboxes` takes
+  an optional `ssh_pubkey` (one OpenSSH key line, `validateSSHPubkey` in
+  server.go — rejects multi-line/unknown-type); after the create readiness gate
+  (both cold and hot paths), `installSSHKey` (proxy.go) posts it to sandboxd's
+  `POST /ssh-key`, which writes `/home/sandbox/.ssh/authorized_keys` — under
+  `withGuestFilesystem`, so the dir and file land owned by `sandbox:sandbox`
+  (0700/0600) as sshd demands. It is NOT best-effort like `syncGuestClock`: a
+  key-install failure destroys the sandbox and fails the create, so a box handed
+  back with SSH requested is always reachable. The key lives in the rootfs, so
+  it survives hibernation/wake with no re-push. Reach it by exposing guest :22
+  as a host port — the userspace TCP proxy forwards it with wake-on-connect, so
+  an incoming SSH connection wakes a hibernated sandbox and pins it for the
+  session, exactly like a forwarded HTTP port. Old baked sandboxd 404s
+  `/ssh-key` (re-run `install-agent`; rebuild the base for openssh first).
+  CLI: `sandbox up --ssh-key ~/.ssh/id_ed25519.pub` (file path or key literal),
+  then `sandbox ssh <id>` (forwards :22 on first use) or
+  `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
+  `--jump <bastion>`.
+- **known_hosts is keyed on the sandbox ID, not host:port**
+  (`cmd/sandbox/ssh.go`). Host keys are unique per sandbox but host ports are
+  recycled from a pool, so OpenSSH's default identity — `[host]:port` — makes
+  the *second* sandbox handed port N look like a compromise of the first:
+  `REMOTE HOST IDENTIFICATION HAS CHANGED!` and a refused connection. The fix is
+  `HostKeyAlias=sandbox-<id>` (a UUID, never reused), which both `sandbox ssh`
+  and the generated stanza set, plus `CheckHostIP=no` (when on, OpenSSH *also*
+  stores an address-keyed entry and the collision returns; it only defaults off
+  since OpenSSH 8.5) and `StrictHostKeyChecking=accept-new` (a fresh alias has
+  no stored key to compare against, so the prompt is pure friction, while a
+  changed key for an alias already known still fails). Don't "fix" this with
+  `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — that disables
+  the check instead of scoping it, and it's why `tests/security-gate.sh` needs
+  those flags. `sshOptions` is the single source for the set; a test asserts the
+  wrapper and the stanza can't drift. **Fleet caveat:** the gateway is an HTTP
+  reverse-proxy and does NOT forward raw TCP, so fleet SSH needs a ProxyJump to
+  the owning worker (`--jump`; the sandbox's `host_addr` names that worker) or a
+  WS tunnel — the gateway itself will never route it.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
