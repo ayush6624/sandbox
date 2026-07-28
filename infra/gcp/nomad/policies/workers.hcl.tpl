@@ -35,9 +35,28 @@ scaling "sandbox_workers" {
     cooldown            = "1m"
     evaluation_interval = "5s"
 
+    # SCALE-IN ONLY. The gateway is the sole scale-OUT writer (its
+    # queue-triggered, level-triggered direct path reacts in ~1s where this loop
+    # needs ~10s, and ~189s if the request lands in the confirmation blackout).
+    # Two independent writers that GROW the group can ratchet it above demand,
+    # so this policy is capped to never request more than the fleet already has.
+    #
+    # The cap is max(hosts_live, scale_out_requested), not hosts_live alone:
+    # for ~13s after the gateway resizes, the new workers exist but have not
+    # heartbeated, so hosts_live reads low and an uncapped policy would scale
+    # the fleet straight back down in the middle of the burst it was sized for.
+    # scale_out_requested is the gateway's grow-only watermark, which
+    # re-baselines to the live host count once the create queue drains — so
+    # scale-in still works, just never against an in-flight scale-out.
+    #
+    # `(A < B) or B` is PromQL's element-wise min: the comparison yields A when
+    # A<B and nothing otherwise, so `or B` supplies B in the other case. Both
+    # sides reduce to an empty label set here, so they match. The ceiling itself
+    # is the recording rule sandbox:workers_scale_in_ceiling. Verified against
+    # the live fleet in both directions before deploying.
     check "workers_desired" {
       source = "prometheus"
-      query  = "max_over_time(sandbox:workers_desired[${SCALE_DOWN_WINDOW}])"
+      query  = "(max_over_time(sandbox:workers_desired[${SCALE_DOWN_WINDOW}]) < sandbox:workers_scale_in_ceiling) or sandbox:workers_scale_in_ceiling"
 
       strategy "pass-through" {}
     }

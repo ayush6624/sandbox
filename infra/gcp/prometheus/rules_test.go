@@ -70,3 +70,56 @@ func TestScaleOutControlLoopFitsHeldBurstLatencyBudget(t *testing.T) {
 		t.Error("Nomad Autoscaler policy must evaluate scale-out demand every 5s")
 	}
 }
+
+// The autoscaler is capped to scale-in only, and the cap must include the
+// gateway's grow-only watermark. Capping on sandbox_hosts_live alone would read
+// "too many nodes" during the ~13s in which resized workers exist but have not
+// heartbeated, and scale the fleet back down mid-burst.
+func TestScaleInCeilingIncludesGatewayWatermark(t *testing.T) {
+	rules, err := os.ReadFile("rules.yml.tpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(rules)
+	if !strings.Contains(body, "record: sandbox:workers_scale_in_ceiling") {
+		t.Fatal("sandbox:workers_scale_in_ceiling recording rule is missing")
+	}
+
+	var expr string
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, "record: sandbox:workers_scale_in_ceiling") {
+			continue
+		}
+		for _, next := range lines[i+1:] {
+			if trimmed := strings.TrimSpace(next); strings.HasPrefix(trimmed, "expr:") {
+				expr = trimmed
+				break
+			}
+		}
+		break
+	}
+	if expr == "" {
+		t.Fatal("scale-in ceiling expression not found")
+	}
+	for _, want := range []string{
+		`sum(sandbox_hosts_live{job="sandbox-gateway"})`,
+		`sum(sandbox_scale_out_requested{job="sandbox-gateway"})`,
+		// Keeps scale-in alive against a gateway predating the watermark metric.
+		"or vector(0)",
+	} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("scale-in ceiling missing %q:\n%s", want, expr)
+		}
+	}
+
+	// The policy must consume the ceiling, or the autoscaler is still a
+	// competing scale-OUT writer alongside the gateway.
+	policy, err := os.ReadFile("../nomad/policies/workers.hcl.tpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(policy), "sandbox:workers_scale_in_ceiling") {
+		t.Error("worker policy does not cap its target with sandbox:workers_scale_in_ceiling")
+	}
+}

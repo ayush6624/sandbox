@@ -67,3 +67,23 @@ groups:
     rules:
       - record: sandbox:workers_desired
         expr: clamp_min(ceil((sum(sandbox_slots_committed{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
+      # Ceiling for the autoscaler's SCALE-IN-ONLY policy. The gateway owns
+      # scale-out (its direct path reacts in ~1s vs this loop's ~10s, and ~189s
+      # if the request lands in the gce-mig confirmation blackout), so the
+      # autoscaler must never request MORE nodes than the fleet already has —
+      # two writers that both grow can ratchet the group above demand.
+      #
+      # max(hosts_live, scale_out_requested), NOT hosts_live alone: for ~13s
+      # after the gateway resizes, the new workers exist but have not
+      # heartbeated, so hosts_live reads low and an uncapped policy would scale
+      # the fleet back down in the middle of the burst it was just sized for.
+      # sandbox_scale_out_requested is the gateway's grow-only watermark, which
+      # re-baselines to the live host count once the create queue drains, so
+      # scale-in still works — just never against an in-flight scale-out.
+      #
+      # `(A > B) or B` is PromQL element-wise max. `or vector(0)` keeps the rule
+      # alive against a gateway that predates sandbox_scale_out_requested;
+      # without it the series is absent, the whole expression is empty, and
+      # scale-in would silently stop.
+      - record: sandbox:workers_scale_in_ceiling
+        expr: (sum(sandbox_hosts_live{job="sandbox-gateway"}) > (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))) or (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))

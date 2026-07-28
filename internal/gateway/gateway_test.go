@@ -3,11 +3,13 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -983,5 +985,168 @@ func TestMetricsCommittedSlotsCoverHeldBurstBeforeHeartbeat(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q\n---\n%s", want, body)
 		}
+	}
+}
+
+// countingDirectScaler records every requested target so tests can assert both
+// how many resizes were issued and their values.
+type countingDirectScaler struct {
+	mu      sync.Mutex
+	targets []int
+	err     error
+}
+
+func (s *countingDirectScaler) ScaleOut(_ context.Context, desired int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.targets = append(s.targets, desired)
+	return s.err
+}
+
+func (s *countingDirectScaler) seen() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.targets...)
+}
+
+// waitForTargets polls until the scaler has recorded at least n targets.
+func (s *countingDirectScaler) waitForTargets(t *testing.T, n int) []int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := s.seen(); len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d direct scale-out targets; got %v", n, s.seen())
+	return nil
+}
+
+// A burst that keeps the queue non-empty must still grow the fleet as demand
+// rises. The old edge trigger fired only on queue 0 -> 1, so a second wave had
+// to wait for the Prometheus/Nomad loop — the ~10 s of p95 this path exists to
+// remove, and up to ~189 s inside the autoscaler's scale-out blackout.
+func TestGrowingDemandRescalesWhileQueueStaysNonEmpty(t *testing.T) {
+	h := &host{id: "a", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
+	g := liveGateway(h)
+	g.queueWait, g.queueMax = time.Minute, 64
+	scaler := &countingDirectScaler{}
+	if err := g.ConfigureDirectScaleOut(scaler, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Wave one: 4 queued against 4 occupied slots => 8 slots => 2 workers.
+	for i := 0; i < 4; i++ {
+		go g.awaitHost(ctx, g.queueDeadline(), nil)
+	}
+	first := scaler.waitForTargets(t, 1)
+	if first[0] != 2 {
+		t.Fatalf("first wave desired = %d, want 2", first[0])
+	}
+
+	// Wave two, with the queue never returning to zero: 12 queued + 4 occupied
+	// => 16 slots => 4 workers.
+	for i := 0; i < 8; i++ {
+		go g.awaitHost(ctx, g.queueDeadline(), nil)
+	}
+	got := scaler.waitForTargets(t, 2)
+	last := got[len(got)-1]
+	if last <= 2 {
+		t.Fatalf("second wave did not grow the target; targets=%v", got)
+	}
+	if last > 5 {
+		t.Fatalf("second wave over-scaled to %d (demand+1 ceiling is 5); targets=%v", last, got)
+	}
+}
+
+// The watermark is grow-only: draining demand must never issue a shrinking
+// resize, because scale-in belongs to the Nomad autoscaler alone.
+func TestDirectScaleOutNeverShrinks(t *testing.T) {
+	h := &host{id: "a", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
+	g := liveGateway(h)
+	g.queueWait, g.queueMax = time.Minute, 64
+	scaler := &countingDirectScaler{}
+	if err := g.ConfigureDirectScaleOut(scaler, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	for i := 0; i < 8; i++ {
+		go g.awaitHost(ctx, g.queueDeadline(), nil)
+	}
+	peak := scaler.waitForTargets(t, 1)[0]
+
+	// Release every waiter, then let the drain-path notifies settle.
+	cancel()
+	time.Sleep(10 * directScaleDebounce)
+
+	for _, target := range scaler.seen() {
+		if target < peak {
+			t.Fatalf("issued shrinking resize to %d after peak %d; targets=%v",
+				target, peak, scaler.seen())
+		}
+	}
+}
+
+// After the queue empties the watermark must re-baseline to the live fleet, or
+// an autoscaler scale-in would leave it pinned high and permanently suppress
+// the next burst's scale-out.
+func TestWatermarkRebaselinesAfterQueueDrains(t *testing.T) {
+	h := &host{id: "a", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
+	g := liveGateway(h)
+	g.queueWait, g.queueMax = time.Minute, 64
+	scaler := &countingDirectScaler{}
+	if err := g.ConfigureDirectScaleOut(scaler, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	for i := 0; i < 8; i++ {
+		go g.awaitHost(ctx, g.queueDeadline(), nil)
+	}
+	scaler.waitForTargets(t, 1)
+	if got := g.directRequested.Load(); got <= 1 {
+		t.Fatalf("watermark did not rise during burst; got %d", got)
+	}
+	cancel()
+
+	// Queue drains -> watermark falls back to the one live host.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if g.directRequested.Load() == 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("watermark did not re-baseline to live host count; got %d", g.directRequested.Load())
+}
+
+// A failed resize must not advance the watermark past what the provider
+// accepted in a way that blocks retry: the next evaluation has to be able to
+// ask again. It must also be counted.
+func TestFailedDirectScaleOutIsCountedAndRetriable(t *testing.T) {
+	h := &host{id: "a", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
+	g := liveGateway(h)
+	g.queueWait, g.queueMax = time.Minute, 64
+	scaler := &countingDirectScaler{err: errors.New("resize refused")}
+	if err := g.ConfigureDirectScaleOut(scaler, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < 4; i++ {
+		go g.awaitHost(ctx, g.queueDeadline(), nil)
+	}
+	scaler.waitForTargets(t, 1)
+	if n := g.directScaleFailed.Load(); n == 0 {
+		t.Fatal("failed direct scale-out was not counted")
+	}
+	if n := g.directScaleStarted.Load(); n == 0 {
+		t.Fatal("started direct scale-out was not counted")
 	}
 }

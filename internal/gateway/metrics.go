@@ -88,6 +88,12 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# HELP sandbox_creates_total Sandboxes the gateway successfully brought up.\n# TYPE sandbox_creates_total counter\nsandbox_creates_total %d\n", g.createsOK.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_total Queue-triggered direct scale-out requests submitted to the scaler.\n# TYPE sandbox_direct_scale_out_total counter\nsandbox_direct_scale_out_total %d\n", g.directScaleStarted.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_failed_total Queue-triggered direct scale-out requests that failed.\n# TYPE sandbox_direct_scale_out_failed_total counter\nsandbox_direct_scale_out_failed_total %d\n", g.directScaleFailed.Load())
+	// The grow-only watermark the gateway has already asked the MIG to reach.
+	// The autoscaler's scale-IN policy caps its target with this, so it cannot
+	// undercut an in-flight scale-out: for ~13s after a resize the new workers
+	// exist but have not heartbeated, so sandbox_hosts_live alone would read as
+	// "too many nodes" and scale the fleet straight back down mid-burst.
+	gauge("sandbox_scale_out_requested", "Largest worker count the gateway has requested (grow-only watermark).", int(g.directRequested.Load()))
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))

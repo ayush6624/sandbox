@@ -62,10 +62,22 @@ ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --token-file /etc/sandbox-gateway/client.tokens \
   --worker-token-file /etc/sandbox-gateway/worker-control.tokens \
   --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
-  --worker-release-file /var/lib/sandbox-gateway/worker-release
-# Single-writer invariant: Nomad Autoscaler is the sole process allowed to
-# resize the production MIG. Do not enable the gateway's optional direct-scale
-# flags here; two independent writers can ratchet the target far above demand.
+  --worker-release-file /var/lib/sandbox-gateway/worker-release \
+  --direct-scale-project ${PROJECT} \
+  --direct-scale-zone ${ZONE} \
+  --direct-scale-mig ${MIG_NAME} \
+  --direct-scale-max ${MIG_MAX} \
+  --direct-scale-slots-per-host ${SLOTS_PER_HOST} \
+  --direct-scale-headroom ${HEADROOM_SLOTS:-0}
+# Single-writer invariant: the GATEWAY is the sole process allowed to GROW the
+# production MIG, and the Nomad Autoscaler policy is capped to scale-IN only
+# (see nomad/policies/workers.hcl.tpl and the sandbox:workers_scale_in_ceiling
+# recording rule). Two independent writers that both grow can ratchet the target
+# far above demand, so do not remove that cap while these flags are set.
+# The gateway owns scale-out because its queue-triggered path decides in ~1s
+# where the Prometheus/autoscaler loop needs ~10s — and ~189s when the request
+# lands inside the gce-mig confirmation blackout. Measured: that difference is
+# ~10s of held-burst p95.
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576

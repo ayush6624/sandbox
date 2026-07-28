@@ -131,14 +131,31 @@ type Gateway struct {
 	slotFreedMu sync.Mutex
 	slotFreed   chan struct{}
 
-	// directScaler is the fast path for queue pressure. On the first waiter
-	// (queue 0 -> 1), the gateway briefly debounces to collect the burst, then
-	// asks the scaler to grow to fit occupied + reserved + queued demand. The
-	// normal Prometheus/Nomad autoscaler remains the reconciliation loop.
+	// directScaler is the scale-out path for queue pressure, and where it is
+	// configured it is the SOLE writer that grows the group: the Nomad
+	// autoscaler is left to scale IN only, because two independent writers can
+	// ratchet the target far above demand.
+	//
+	// It is LEVEL-triggered, not edge-triggered. Every event that can change
+	// demand (a create entering the queue, a host heartbeat) requests a
+	// re-evaluation; evaluations coalesce through directDirty/directScalePending
+	// so a 160-create burst still costs one debounce and one resize. An earlier
+	// version fired only on the queue's 0 -> 1 edge, so demand that grew while
+	// the queue stayed non-empty had to wait for the Prometheus/Nomad loop —
+	// worth ~10 s of p95 on the canonical held burst, and up to ~189 s when it
+	// landed inside the autoscaler's scale-out blackout.
+	//
+	// directRequested is a grow-only watermark of the largest target already
+	// requested, so repeated evaluations during one burst do not re-issue
+	// shrinking or duplicate resizes. It re-baselines to the live host count
+	// once the queue empties; otherwise autoscaler scale-in would leave it
+	// pinned high and permanently suppress the next burst's scale-out.
 	directScaler       DirectScaler
 	directSlotsPerHost int
 	directHeadroom     int
 	directScalePending atomic.Bool
+	directDirty        atomic.Bool
+	directRequested    atomic.Int64
 	directScaleStarted atomic.Int64
 	directScaleFailed  atomic.Int64
 
@@ -457,6 +474,9 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// A heartbeat can bring capacity (new host, corrected free count) — let a
 	// queued create retry now rather than on its next poll tick.
 	g.notifySlotFreed()
+	// It also changes the inputs to desired-capacity sizing (a worker becoming
+	// eligible, occupancy moving), so re-evaluate scale-out at the same time.
+	g.notifyDirectScale()
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -732,10 +752,15 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 		g.queued.Add(-1)
 		return nil
 	}
-	if depth == 1 {
-		g.triggerDirectScaleOut()
-	}
-	defer g.queued.Add(-1)
+	// Level-triggered: notify on EVERY enqueue, not just the 0 -> 1 edge, so a
+	// burst that keeps the queue non-empty still re-sizes as it grows.
+	// Evaluations coalesce, so the extra notifies are nearly free.
+	g.notifyDirectScale()
+	defer func() {
+		g.queued.Add(-1)
+		// Re-baseline the watermark once the queue drains.
+		g.notifyDirectScale()
+	}()
 
 	timeout := time.NewTimer(wait)
 	defer timeout.Stop()
@@ -762,54 +787,110 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 
 const directScaleDebounce = 50 * time.Millisecond
 
-// triggerDirectScaleOut coalesces the queue's empty -> non-empty edge. The
-// short debounce lets concurrent requests enter the queue and lets in-flight
-// reservations become visible, without paying a scrape/evaluation interval.
-func (g *Gateway) triggerDirectScaleOut() {
-	if g.directScaler == nil || !g.directScalePending.CompareAndSwap(false, true) {
+// notifyDirectScale requests a coalesced re-evaluation of desired capacity.
+// Safe and cheap to call from any demand-changing path: evaluations collapse
+// into at most one in-flight worker, and an evaluation that does not raise the
+// watermark issues no provider call at all.
+func (g *Gateway) notifyDirectScale() {
+	if g.directScaler == nil {
 		return
 	}
-	go func() {
-		defer g.directScalePending.Store(false)
-		timer := time.NewTimer(directScaleDebounce)
-		defer timer.Stop()
-		<-timer.C
+	g.directDirty.Store(true)
+	if !g.directScalePending.CompareAndSwap(false, true) {
+		// An evaluator already owns the work and will observe directDirty.
+		return
+	}
+	go g.directScaleWorker()
+}
 
-		queued := int(g.queued.Load())
-		if queued == 0 {
+// directScaleWorker drains re-evaluation requests until none remain. The short
+// debounce before each pass lets concurrent requests enter the queue and lets
+// in-flight reservations become visible, without paying a scrape interval.
+func (g *Gateway) directScaleWorker() {
+	for {
+		for g.directDirty.Swap(false) {
+			timer := time.NewTimer(directScaleDebounce)
+			<-timer.C
+			timer.Stop()
+			g.evaluateDirectScaleOut()
+		}
+		g.directScalePending.Store(false)
+		// A notify landing between the Swap above and this Store would have
+		// seen pending==true and declined to spawn, so re-check before exiting.
+		if !g.directDirty.Load() {
 			return
 		}
-
-		now := time.Now()
-		live, occupied := 0, 0
-		g.mu.RLock()
-		for _, h := range g.hosts {
-			if now.Sub(h.lastSeen) > g.ttl {
-				continue
-			}
-			live++
-			occupied += h.committed() + h.hibernated
+		if !g.directScalePending.CompareAndSwap(false, true) {
+			return // another goroutine took ownership
 		}
-		g.mu.RUnlock()
+	}
+}
 
-		desired := (occupied + queued + g.directHeadroom + g.directSlotsPerHost - 1) / g.directSlotsPerHost
-		if desired <= live {
-			// A non-empty queue proves the currently registered fleet cannot
-			// place the request, even if stale accounting says it should fit.
-			desired = live + 1
-		}
+// evaluateDirectScaleOut sizes the fleet to current demand and requests a
+// resize only when that exceeds the grow-only watermark.
+func (g *Gateway) evaluateDirectScaleOut() {
+	queued := int(g.queued.Load())
 
-		g.directScaleStarted.Add(1)
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		if err := g.directScaler.ScaleOut(ctx, desired); err != nil {
-			g.directScaleFailed.Add(1)
-			fmt.Fprintf(os.Stderr, "gateway: direct scale-out to %d workers failed: %v\n", desired, err)
-			return
+	now := time.Now()
+	live, occupied := 0, 0
+	g.mu.RLock()
+	for _, h := range g.hosts {
+		if now.Sub(h.lastSeen) > g.ttl {
+			continue
 		}
-		fmt.Fprintf(os.Stderr, "gateway: direct scale-out requested %d workers (live=%d occupied=%d queued=%d)\n",
-			desired, live, occupied, queued)
-	}()
+		live++
+		occupied += h.committed() + h.hibernated
+	}
+	g.mu.RUnlock()
+
+	if queued == 0 {
+		// Idle. Re-baseline the watermark down to the fleet's true size so the
+		// next burst can grow from there; never below, or a scale-in would
+		// suppress scale-out forever.
+		if int64(live) < g.directRequested.Load() {
+			g.directRequested.Store(int64(live))
+		}
+		return
+	}
+
+	demand := ceilDiv(occupied+queued+g.directHeadroom, g.directSlotsPerHost)
+	desired := demand
+	if desired <= live {
+		// A non-empty queue proves the currently registered fleet cannot
+		// place the request, even if stale accounting says it should fit.
+		desired = live + 1
+	}
+	// Bound the stale-accounting nudge by what demand actually justifies. Without
+	// this, every new worker that joins while the queue is still draining would
+	// push desired to live+1 again and ratchet the group above demand.
+	if ceiling := demand + 1; desired > ceiling {
+		desired = ceiling
+	}
+	if int64(desired) <= g.directRequested.Load() {
+		return // already asked for at least this much
+	}
+	g.directRequested.Store(int64(desired))
+
+	g.directScaleStarted.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := g.directScaler.ScaleOut(ctx, desired); err != nil {
+		g.directScaleFailed.Add(1)
+		fmt.Fprintf(os.Stderr, "gateway: direct scale-out to %d workers failed: %v\n", desired, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "gateway: direct scale-out requested %d workers (live=%d occupied=%d queued=%d)\n",
+		desired, live, occupied, queued)
+}
+
+func ceilDiv(n, d int) int {
+	if d <= 0 {
+		return 0
+	}
+	if n <= 0 {
+		return 0
+	}
+	return (n + d - 1) / d
 }
 
 // hostOnly strips the port from an addr, so clients can pair it with a
