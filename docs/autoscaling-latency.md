@@ -27,7 +27,9 @@ dependencies after boot immediately ready.
 
 ## Current performance and critical path
 
-The latest held-burst benchmark started with two ready workers, each with 48
+### Best measured path — event-driven scale-out (2026-07-25, `0b049db`)
+
+The held-burst benchmark started with two ready workers, each with 48
 slots, then issued 160 simultaneous creates. The remaining 64 requests waited
 while the MIG resumed two suspended standby workers.
 
@@ -45,6 +47,66 @@ older control-loop path.
 The result says that the initial decision is no longer the dominant cost.
 Worker resume is the hard lower bound for requests that exceed ready capacity,
 and sandbox creation under contention accounts for much of the remaining tail.
+
+**That number was produced with the gateway's direct scale-out path enabled.**
+Production later disabled it to preserve the single-writer invariant on the
+MIG (the `sandbox-gateway` unit documents this), which is what the
+2026-07-27 measurement below re-measures.
+
+### Production path today — autoscaler-only (2026-07-27, `ea0f707`)
+
+Same canonical workload — floor of 2 running workers (96 slots) plus 6
+suspended standby, 160 held creates. Evidence bundle:
+`tests/results/autoscale-20260727-legacy-held-final/` (all `SHA256SUMS`
+verified). 160/160 succeeded, zero errors, zero residual sandboxes.
+
+Create latency is cleanly **bimodal**, and the split falls exactly on the
+ready-capacity boundary:
+
+| Mode | Count | Range | Mean | What it is |
+| --- | ---: | ---: | ---: | --- |
+| Fast | 96 | 4.411–17.664 s | 11.922 s | placed immediately on the 2 ready workers |
+| Slow | 64 | 24.328–38.422 s | 31.285 s | queued, waiting for scale-out |
+
+The two modes are separated by a 6.664 s gap with no samples in it. Because
+only 96 of 160 requests are fast, **p95 (36.162 s) is entirely determined by
+the queued 64** — it is the 57th-slowest of that group. Meeting a 30 s p95
+therefore requires almost the whole slow mode to finish under 30 s, not merely
+a better average.
+
+Decomposing the slow mode against `timeline.jsonl` (times relative to run
+start; requests issued ≈15.5 s, queue depth 64 observed at 17.5 s):
+
+| Span | Time | Note |
+| --- | ---: | --- |
+| Demand → MIG resize issued (`mig_target` 2→5) | ~10.2 s | autoscaler decision latency |
+| Resize → new worker advertises free slots | ~13.0 s | resume + serve + golden adopt + heartbeat |
+| **Demand → usable new capacity** | **~23.2 s** | matches the 24.328 s slow-mode floor |
+| Drain of the queued 64 across new workers | up to 14.1 s | `create_concurrency=24`, 2 waves |
+
+Two observations follow.
+
+1. **The decision, not the resume, is the regression.** Event-driven scale-out
+   made this span ≤1.095 s; the Prometheus/Nomad-autoscaler loop makes it
+   ~10.2 s even after `ea0f707` tightened the cadence to 5 s. Recovering most
+   of that ~9 s is the single largest available win and is exactly
+   [improvement 2](#2-make-direct-scale-out-level-triggered).
+2. **Per-worker create throughput is the floor on the rest.** The live fleet
+   runs `create_concurrency=24` against 48 slots on an `n2-standard-16`, so a
+   saturated worker absorbs 48 creates in ~13 s (~3.7 creates/s). Raising the
+   semaphore does not raise that ceiling — the host is already CPU/I-O bound —
+   so drain time only falls by spreading the burst over more workers.
+
+A plausible route to p95 ≤30 s is therefore ~16 s to usable capacity (needs
+the decision back near ~1 s) plus ~12 s of drain. It is achievable but tight,
+and it depends on restoring event-driven scale-out **without** reintroducing
+two independent MIG writers.
+
+One further defect is visible at 36.4 s: a resumed standby worker
+(`32dc09d1`) first heartbeats advertising release `a97b68f` with
+`release_compatible:false`, and only re-heartbeats as `a223889` 2.5 s later.
+That is [improvement 7](#7-keep-standby-workers-release-compatible) — standby
+workers suspended before a roll come back stale and are briefly ineligible.
 
 ### Current request path
 

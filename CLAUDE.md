@@ -497,8 +497,19 @@ scripts/              Host setup shell scripts
   standby pool, stability is unreachable by construction: the MIG keeps replenishing suspended
   workers in the background (~190 s). We don't need GCE's confirmation, since real readiness
   arrives on the gateway heartbeat (now measured by `sandbox_worker_ready_seconds`). So
-  `retry_attempts` is set from `AUTOSCALER_RETRY_ATTEMPTS` (default 3 = a 30 s blackout).
-  Failing fast is safe: on confirm failure the handler returns to Idle **without** entering
+  `retry_attempts` is set from `AUTOSCALER_RETRY_ATTEMPTS` (default 3).
+  **This does NOT shorten the blackout to 30 s — that earlier claim was wrong and was
+  disproved on 2026-07-25.** `retry_attempts=3` only makes the
+  `failed to confirm scale out ... reached retry limit` ERROR appear sooner (~21 s, 3 attempts
+  × ~7 s gRPC timeout); the policy is not released then. Timing consecutive
+  `calculating scaling target` lines measured **188.87 s and 188.94 s** in a single 160-burst —
+  a deterministic ~189 s blackout, matching the background standby-replenish window, and not
+  explained by `cooldown = "1m"`. **Always re-verify a blackout claim by the gap between
+  consecutive `calculating scaling target` lines, never by the error timestamp.** The practical
+  consequence: a burst gets exactly ONE scaling action, then ~3 min of nothing; and because the
+  check uses `max_over_time(...[15m])`, the post-blackout evaluation replays the stale peak and
+  over-scales *after* demand is gone. Failing fast is still safe: on confirm failure the handler
+  returns to Idle **without** entering
   cooldown, and the next evaluation compares desired against the MIG target size the resize
   already set, so it no-ops unless demand genuinely grew. Requires **autoscaler ≥ 0.4.8**
   (older builds silently ignore the key and keep 150 s) — hence the bump to 0.5.0, which also

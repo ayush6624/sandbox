@@ -1,8 +1,11 @@
 # Benchmarks
 
-**Updated 2026-07-25.** The instrumented headline/detail numbers were measured
-2026-07-01 → 2026-07-12 (server release `b801d6d`+); a full end-to-end SDK
-re-run on the current fleet (commit `06f5c16`) is in
+**Updated 2026-07-27.** The current hardened-release matrix and its remaining
+autoscaling latency gap are recorded in
+[2026-07-27 hardened-release validation](#2026-07-27-hardened-release-validation).
+The older instrumented headline/detail numbers were measured 2026-07-01 →
+2026-07-12 (server release `b801d6d`+); a full end-to-end SDK re-run on that
+fleet (commit `06f5c16`) is in
 [2026-07-23 fleet re-run](#2026-07-23-fleet-re-run-commit-06f5c16), followed by
 the historical [2026-07-24 stopped-worker burst](#2026-07-24-stress-and-autoscaling-burst-commit-1cefc65)
 and the release-gated
@@ -14,6 +17,10 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 
 ## Headline
 
+Only the burst-churn and autoscaling-held-burst rows below are current
+2026-07-27 hardened-release results. The other rows are historical headlines
+retained for comparison.
+
 | Metric | Result | Clock |
 |---|---|---|
 | Hot create (golden-snapshot clone) | **199–271 ms** server-side, ~0.55 s end-to-end via gateway | create request → in-guest agent answers |
@@ -23,14 +30,130 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 | Snapshot batch create | **83 ms/sandbox** amortized (32 in 2.68 s), 64/64 usable at N=64 | batch request → all agents answer |
 | Diff snapshot write | **123 ms** (vs ~1.5 s full); uploads ~24× smaller | pause → snapshot written |
 | Cold boot (baseline) | 3.46 s p50 (GCP), ~2.2 s (Hetzner bare metal) | create request → agent answers |
-| Burst churn | 499/500 creates on 3 hosts (72 slots), 6.9 creates/s sustained | 500 create→exec→kill @ concurrency 96 |
-| Autoscaling held burst | **160/160 created in 18.653 s**, 0 failures; demand → resize ≤1.095 s | 160 simultaneous creates held until all settled, starting from 2×48 slots plus suspended standby |
+| Burst churn | **500/500**, 0 errors, 5.0 creates/s sustained | 500 create→exec→terminate @ concurrency 96, hardened release |
+| Autoscaling held burst | **160/160**, 0 errors; p50 15.739 s / p95 36.162 s / max 38.422 s | correctness and 60 s maximum pass; 30 s p95 SLO still fails |
 | Autoscaling traffic validation | **896/896 creates**, **31,256/31,256 connect+identity-exec probes**, 0 failures | standby-boundary, second-wave, long-lived reconciliation, and churn traffic |
 
-Environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB, nested KVM), guests
-2 vCPU / 1 GB, Firecracker v1.15.0, XFS reflink storage; client on the same
-tailnet. "Usable" always means the in-guest agent answers — never "the create
-call returned".
+Historical headline environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB,
+nested KVM), guests 2 vCPU / 1 GB, Firecracker v1.15.0, XFS reflink storage;
+client on the same tailnet. "Usable" always means the in-guest agent answers —
+never "the create call returned".
+
+## 2026-07-27 hardened-release validation
+
+This is the current production-readiness baseline. The worker artifact was
+release `a223889`; the final gateway/autoscaler held-burst run was commit
+`ea0f707`. Tests ran on the GCP production fleet's `n2-standard-16` workers
+with 48 slots per worker, 2 vCPU / 1 GiB guests, nested KVM, and XFS reflink
+storage. The direct-worker matrix used the authenticated private management
+path; fleet tests used the gateway. All counts below include an in-guest
+usability check, not merely a successful create response.
+
+All benchmark sections dated before 2026-07-27 are retained as **historical**
+comparisons. They describe different releases and must not be used as the
+current production acceptance result.
+
+### Snapshot source and snapshot batch create
+
+Twenty-five paired creates showed no latency advantage for a snapshot source
+in this hardened configuration:
+
+| Source | Mean | p50 | p90 | Min | Max |
+|---|---:|---:|---:|---:|---:|
+| Default source | 1.989 s | 1.906 s | 2.614 s | 1.432 s | 3.776 s |
+| Snapshot source | 2.031 s | 1.927 s | 2.761 s | 1.448 s | 3.582 s |
+
+Snapshot batch create used `max_parallelism=32`. Every operation succeeded,
+every returned sandbox became command-ready, and every sandbox and snapshot
+was cleaned up:
+
+| N | Batch operation | Readiness | Total | Per-sandbox | Usable |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2.247 s | 0.226 s | 2.473 s | 2.473 s | 1/1 |
+| 2 | 2.262 s | 0.406 s | 2.668 s | 1.334 s | 2/2 |
+| 4 | 2.943 s | 0.419 s | 3.362 s | 0.841 s | 4/4 |
+| 8 | 3.631 s | 0.412 s | 4.043 s | 0.505 s | 8/8 |
+| 16 | 7.239 s | 0.851 s | 8.090 s | 0.506 s | 16/16 |
+| 32 | 13.251 s | 1.068 s | 14.319 s | 0.447 s | 32/32 |
+| 48 | 20.475 s | 0.896 s | 21.371 s | 0.445 s | 48/48 |
+
+The N=48 default-source batch baseline completed in 18.100 s, or 0.377 s per
+sandbox. Snapshot batch create therefore remains a correctness and shared-source
+abstraction in this release, not a demonstrated create-latency optimization.
+
+### Fleet workload matrix
+
+Every fleet run created the requested count, completed its verified in-guest
+workload, and proved per-sandbox cleanup. The 128-sandbox run scaled beyond the
+two-worker floor.
+
+| Count / mode | Create p50 | Create p95 | Create max | Workload wall p50 / p95 | Fleet wall | Result / cleanup |
+|---|---:|---:|---:|---:|---:|---:|
+| 32 default | 3.472 s | 5.912 s | 6.425 s | 49.240 / 51.265 s | 63.313 s | 32/32, 32/32 |
+| 64 default | 3.258 s | 5.398 s | 5.605 s | 83.138 / 87.954 s | 107.874 s | 64/64, 64/64 |
+| 128 default | 2.973 s | 5.109 s | 6.045 s | 77.267 / 81.184 s | 116.053 s | 128/128, 128/128 |
+| 64 fsync | 3.323 s | 5.347 s | 5.890 s | 48.369 / 50.350 s | 177.097 s | 64/64, 64/64 |
+| 64 large | 3.437 s | 5.456 s | 6.319 s | 222.478 / 229.021 s | 249.565 s | 64/64, 64/64 |
+
+The cleanup verdict is resource-level: every created sandbox was verified
+absent. Immediate host heartbeats can retain stale occupancy while deletion
+reconciliation completes, so they are not used as the cleanup clock.
+
+### Memory density
+
+At N=48, snapshot-source sandboxes used 4,708 MiB RSS / 4,708 MiB PSS versus
+5,228 MiB RSS / 5,227 MiB PSS for default-source sandboxes. That is 520 MiB
+less RSS and 519 MiB less PSS, about a 10% reduction (1.11× density), with all
+48 Firecracker processes present in both arms and zero remaining afterward.
+
+### Sustained churn burst
+
+The 500-sandbox create → exec → terminate burst at concurrency 96 completed
+**500/500** with zero capacity, pool, agent-readiness, workload, or termination
+errors. Wall time was 100.092 s (5.0 completed sandboxes/s).
+
+| Phase | Mean | p50 | p90 | p95 | p99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| Create | 9.600 s | 9.435 s | 13.216 s | 22.119 s | 24.656 s | 26.466 s |
+| Exec | 8.393 s | 8.478 s | 12.095 s | 13.748 s | 14.658 s | 15.923 s |
+| Terminate | 103 ms | 91 ms | 165 ms | 206 ms | 312 ms | 531 ms |
+
+### Autoscaling held burst
+
+The hardened campaign exposed an under-scaling interaction, proved the
+committed demand-sizing fix, and then repeated the canonical 160-create run at
+gateway/autoscaler commit `ea0f707`:
+
+| Run | Creates / errors | Wall | p50 | p90 | p95 | p99 | Max | Acceptance |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Initial hardened run (`2ca73c9`) | 160/160, 0 | 253.805 s | 15.820 s | 229.977 s | 231.297 s | 232.534 s | 232.699 s | correctness pass; p95 and max fail |
+| Committed sizing fix (`e0b3588`) | 160/160, 0 | 58.599 s | 15.737 s | 35.165 s | 36.468 s | 37.089 s | 37.268 s | correctness/max pass; p95 fail |
+| Final canonical run (`ea0f707`) | **160/160, 0** | **59.728 s** | **15.739 s** | **35.056 s** | **36.162 s** | **37.528 s** | **38.422 s** | correctness/max pass; p95 fail |
+
+In the initial run, the two warm workers served 96 requests and the first
+scale action added only one 48-slot worker. Sixteen requests then remained
+queued for roughly 3.8 minutes. The sizing fix requested enough capacity in
+one action, removed that pathological tail, and preserved zero-error cleanup.
+
+The final result passes the zero-correctness-error requirement and the
+create-max ≤60 s limit. It does **not** pass the create-p95 ≤30 s SLO:
+36.162 s remains 6.162 s over budget. Production readiness should therefore
+record autoscaling correctness and bounded maximum latency as passed while
+keeping p95 responsiveness open.
+
+The `ea0f707` run's latency is cleanly bimodal — 96 fast creates
+(4.411–17.664 s) placed on the ready workers, and 64 queued creates
+(24.328–38.422 s) waiting on scale-out, separated by a 6.664 s empty gap — so
+p95 is determined entirely by the queued group. Roughly 10.2 s of the queued
+path is autoscaler decision latency, ~13.0 s is worker resume to advertised
+capacity, and up to 14.1 s is per-worker create drain. The full decomposition,
+the evidence bundle, and why event-driven scale-out previously reached
+18.653 s are in
+[Autoscaling and burst-start latency](autoscaling-latency.md#production-path-today--autoscaler-only-2026-07-27-ea0f707).
+
+The targeted traffic group and the isolated three-cycle sawtooth campaign have
+not yet been rerun on the 2026-07-27 hardened release. The successful 2026-07-25
+traffic results below are historical evidence only.
 
 ## Our numbers in detail
 
@@ -66,9 +189,10 @@ single-sandbox latency now matches hot create):
 | 48 | 3435 | 72 | 48/48 |
 | 64 | 5719 | 89 | 64/64 |
 
-64 clones in 5.7 s vs 72.8 s of cold boots (**12.7×**); memory density at N=64
-is **925 MB PSS vs 10.1 GB** (10.9×) because clones mmap the same snapshot
-memory file. Runnable suite: [`sdk/typescript/benchmarks/`](../sdk/typescript/benchmarks/README.md).
+64 snapshot-source sandboxes in 5.7 s vs 72.8 s of default-source cold boots
+(**12.7×**); memory density at N=64 is **925 MB PSS vs 10.1 GB** (10.9×)
+because snapshot-source sandboxes mmap the same snapshot memory file. Runnable
+suite: [`sdk/typescript/benchmarks/`](../sdk/typescript/benchmarks/README.md).
 
 ### Hibernation
 
@@ -105,27 +229,28 @@ are SDK **end-to-end** wall-times — "time until you can `exec`" — with the W
 tailnet hop stripped out. They complement, not replace, the instrumented
 server-side numbers above.
 
-Create & restore latency (worker-local, 20 iters):
+Default-source and snapshot-source create latency (worker-local, 20 iters):
 
 | Path | p50 | mean | p90 | max |
 |---|--:|--:|--:|--:|
 | Hot create (`Sandbox.create`, golden clone) | 478 ms | 479 ms | 509 ms | 518 ms |
-| Snapshot restore (`Sandbox.restore`) | **84 ms** | 95 ms | 88 ms | 305 ms |
+| Snapshot-source create (historical `Sandbox.restore`) | **84 ms** | 95 ms | 88 ms | 305 ms |
 
-Restore is **5.7×** faster than a hot create end-to-end; the hot create itself
-beats the ~0.55 s tallied from a tailnet client, since this run has no WAN hop
-(server-side is still ~0.25 s).
+Snapshot-source create is **5.7×** faster than a default-source hot create
+end-to-end; the hot create itself beats the ~0.55 s tallied from a tailnet
+client, since this run has no WAN hop (server-side is still ~0.25 s).
 
-Fan-out (one host, N clones from one snapshot):
+Snapshot batch create (one host, N sandboxes from one snapshot):
 
-| N | batch | per-clone | usable |
+| N | batch | per-sandbox | usable |
 |--:|--:|--:|--:|
 | 1 | 337 ms | 337 ms | 1/1 |
 | 8 | 663 ms | 83 ms | 8/8 |
 | 16 | 1.28 s | 80 ms | 16/16 |
 | 32 | 2.66 s | **83 ms** | 32/32 |
 
-vs 32 cold boots at 147 ms/boot (4.69 s batch) → **1.8×**, all clones usable.
+vs 32 default-source creates at 147 ms/sandbox (4.69 s batch) → **1.8×**, all
+snapshot-source sandboxes usable.
 
 Fleet & burst (via the gateway, bin-packed across both hosts):
 
@@ -370,7 +495,7 @@ the numbers aren't apples-to-apples. Both are shown.
 
 | Provider | Number | Status |
 |---|--:|---|
-| **This project** | **84 ms/clone** amortized (32 in 2.68 s); single clone ≈ hot create ~250 ms | measured |
+| **This project** | **84 ms/sandbox** amortized snapshot batch create (32 in 2.68 s); one snapshot-source create ≈250 ms | measured |
 | Morph Cloud | <250 ms; "dozens of instances in milliseconds" | vendor claim / press |
 | CodeSandbox / Together | ~0.5 s fork overhead (docs); 2 s in the 2022 eng blog | vendor docs + eng blog |
 | Modal | supported (N restores from one snapshot) | no latency published |
@@ -407,22 +532,44 @@ the numbers aren't apples-to-apples. Both are shown.
 
 ```bash
 cd sdk/typescript
-npm run bench:restore          # default vs snapshot-source create (legacy name)
-npm run bench:fanout           # snapshot batch scaling (legacy script name)
-node benchmarks/burst-bench.ts --count 500 --concurrency 96 --retry-ms 250
-bash ../../scripts/bench-extensive.sh   # full single-host + fleet sweep
+npm run bench:snapshot-source -- --iterations 25
+npm run bench:snapshot-batch -- --counts 1,2,4,8,16,32,48 --baseline
+npm run bench:burst -- --count 500 --concurrency 96 --retry-ms 250 \
+  --output results/burst-500.json
+
+cd ../..
+# Requires HOST_URL, GATEWAY_URL, SANDBOX_HOST_KEY, SANDBOX_API_KEY,
+# SSH_HOST, and SANDBOX_RELEASE.
+SINGLE_HOST_COUNT=48 bash scripts/bench-extensive.sh
 ```
 
-E2e latency checks (hibernate wake, wake-on-connect, clock): `cd tests && npm run e2e`.
+End-to-end correctness and stress: `cd tests && npm test`. Focused load sizing
+uses `STRESS_BURST`, `STRESS_LOAD_N`, `STRESS_FANOUT_N`,
+`STRESS_CHURN_CYCLES`, `STRESS_CHURN_ROUNDS`, and `STRESS_CHURN_BATCH`;
+`STRESS_FANOUT_N` is the legacy environment-variable name for snapshot batch
+create size.
 Raw run JSON lands in `sdk/typescript/benchmarks/results/` and `tests/results/`
 (gitignored; each folder's README describes the files).
 
-Full destructive autoscaling traffic validation:
+The comparable held burst runs from the Linux control VM with a clean
+2×48-slot floor and suspended standby:
 
 ```bash
 export EXPECTED_WORKER_RELEASE=<deployed-release>
 export LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
-export TRAFFIC_SCENARIOS="sawtooth-scale-cycle standby-refill-boundary held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
+export BURST_COUNT=160
+./tests/autoscale-benchmark.sh
+```
+
+After the fleet returns to its exact floor, the still-pending hardened-release
+campaigns are run separately:
+
+```bash
+export TRAFFIC_SCENARIOS="standby-refill-boundary held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
+./tests/autoscale-benchmark.sh
+
+# Wait for the exact floor again.
+export TRAFFIC_SCENARIOS="sawtooth-scale-cycle"
 ./tests/autoscale-benchmark.sh
 ```
 

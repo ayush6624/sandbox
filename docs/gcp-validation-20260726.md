@@ -1,28 +1,37 @@
 # GCP production-readiness validation — 2026-07-26
 
-Status: **historical remediation release passed; current hardened-image
-validation is in progress**
+Status: **hardened-image correctness/security passed; rigorous workload matrix
+passed; autoscaling p95 and remaining traffic campaigns are open**
 
 ## Hardened-image validation update — 2026-07-27
 
-Implementation head is `a223889`. The latest release to complete the full
-two-worker security gate is `a97b68f`.
+Repository/control-plane head is `ea0f707`. Workers run release `a223889`.
+The active immutable fleet is:
+
+- worker image `sandbox-worker-20260727-000120` (image ID
+  `4020148980465518867`);
+- golden data image `sandbox-golden-data-20260727-001237` (image ID
+  `4459982300482619317`);
+- instance template `sandbox-workers-tpl-20260727-002100`.
 
 ### Confirmed evidence
 
 | Gate | Result |
 |---|---|
-| Full worker security gate | Pass on both active workers at `a97b68f` |
+| Full worker security gate | Pass on both rebuilt active workers at `a223889` |
 | Server-crash recovery | Pass |
 | Host-reboot recovery | Pass |
-| Local Go suite | **202 tests passed** |
-| Relevant Go race suite | Pass |
-| TypeScript SDK suite | **43 tests passed** |
+| Full API/SDK/e2e suite | **64/64** in 360.7 s |
+| Port-forward suite | **8/8** |
+| Local Go suite | **207 tests passed** |
+| Full Go race suite | Pass |
+| TypeScript SDK suite | **49/49 tests passed** |
 | SDK typecheck and build | Pass |
 | Deterministic OpenAPI generation | Pass |
-| Shell syntax validation | **27 scripts passed** |
+| Shell syntax validation | **29 scripts passed** |
 | Bounded resource exhaustion | Pass on disposable worker |
 | Live client-token rotation | Pass with exact restoration |
+| Runtime npm audit | **0 vulnerabilities** |
 
 The security gate covered live jailer UID/GID allocation, per-VM chroot and
 namespaces, cgroup controls, seccomp, VMM output bounds, non-root guest/SSH
@@ -31,30 +40,75 @@ with permitted egress, and expected/VMM-crash cleanup. The recovery campaign
 then separately proved server-process crash recovery and host reboot
 reconciliation.
 
-### Current rerun: not yet passed
+The rebuilt-image rerun is complete. The transient restored-guest
+`ssh.service` failure was fixed in `a223889`; the new image then passed the
+complete contract, SDK/e2e, security, server-crash, and host-reboot sequence.
+The first rerun also found an advertised port-forward host parsing defect,
+fixed in gateway commit `1ae90f7`.
 
-A live `/v1` contract rerun against the hardened fleet exposed a transient
-restored-guest failure: `ssh.service` could remain inactive after identity
-rotation. Commit `a223889` adds bounded retries and unit coverage for restored
-SSH startup. Worker image `sandbox-worker-20260727-000120` and golden data image
-`sandbox-golden-data-20260727-001237` are ready. The MIG rollout is pending,
-after which the contract, SDK/e2e, security, and recovery gates must run again.
+### Immutable release metadata
 
-This document must **not** treat `a223889` or the new image as GCP-validated
-until that sequence completes. In particular, the earlier API/SDK passes below
-prove the contract implementation and the `a97b68f` result proves the prior
-security release; neither is evidence that the in-progress image passed the
-combined release gate.
+- Host: Ubuntu 24.04, kernel
+  `6.17.0-1021-gcp #24~24.04.1-Ubuntu`, Firecracker and jailer `v1.15.0`.
+- Guest kernel: `6.18.36+`; kernel SHA-256
+  `25576852390f4883c913ba26c42e6de5569c8a0cff6769800924db8631a3b6c3`.
+- Rootfs: Ubuntu 24.04 LTS, ext4 UUID
+  `ac1c575a-3944-44ad-8953-030155a71aef`, SHA-256
+  `13d7b4a1cccd6f60c2f9b3d9877bee35f2903a4ea7d9fa84747945802cea46c7`.
+- Golden manifest SHA-256
+  `bf6e04142b602943197086b48afe41674d7acb0fe1f471f297f54450d8cf591b`;
+  golden snapshot ID `93372ba7-f355-4df7-b58b-935f93da3061`.
+- Worker artifact SHA-256
+  `30d97aaa8771300282ca6c75a299e116cce1d643992a8b842e4cd8544c7a6a8d`;
+  gateway artifact SHA-256
+  `73f7a6215247342668eeef040862266533bc63c14af3cf5cbb87d7a84eb3d55b`.
 
-### Remaining P0 and release evidence
+Both Go binaries report `vcs.modified=true`. Their hashes and GCP/GCS object
+generations identify the deployed bytes exactly, but clean reproducible build
+provenance remains open.
 
-1. Complete `/v1` contract and TypeScript SDK/e2e reruns on the rebuilt image.
-2. Repeat security and recovery gates and record the final image, host kernel,
-   guest kernel, Firecracker, rootfs, and release identifiers.
-3. Only after those correctness gates pass, run the final rigorous benchmark
-   matrix and retain deterministic cleanup evidence.
+### 2026-07-27 rigorous workload matrix
+
+All rows below completed with exact sandbox cleanup:
+
+| Workload | Result |
+|---|---|
+| Snapshot-source latency | default p50 1.906 s; snapshot p50 1.927 s (0.99x) |
+| Snapshot batch create | N=1,2,4,8,16,32,48 all usable; N=48 21.371 s total / 445 ms per sandbox |
+| Fleet default | 32/32 (create p95 5.912 s), 64/64 (5.398 s), 128/128 (5.109 s) |
+| Fleet fsync | 64/64; workload p95 50.350 s |
+| Fleet large | 64/64; workload p95 229.021 s |
+| Sustained churn | 500/500 in 100.092 s; create p95 22.119 s; terminate p95 206 ms |
+| Memory density | N=48 snapshot-source PSS 4,708 MiB vs default 5,227 MiB, 9.9% lower |
+
+The successful 128 and large-workload runs executed directly on the control
+VM. Laptop runs through one SSH port forward saturated that tunnel and were
+discarded as transport artifacts, not product results.
+
+### Autoscaling finding and fix
+
+The first canonical 160-create held burst was lossless but failed latency:
+160/160 succeeded with zero residual sandboxes, while create p95/max were
+231.297/232.699 s. Prometheus counted only heartbeat-visible `slots_used`, not
+gateway reservations, so 96 assigned plus 64 queued requests initially
+requested only three workers. The remaining 16 then waited behind the MIG
+standby-refill stability window.
+
+Commit `e0b3588` adds the per-host-clamped `sandbox_slots_committed` metric and
+uses it in the desired-worker rule. The next run remained lossless and reduced
+p95/max to 36.468/37.268 s. Commit `ea0f707` also tightened the cheap
+gateway/rule/autoscaler cadence to 5 seconds. Its release-attributed final run
+again passed correctness and cleanup (160/160, zero errors, zero listed
+sandboxes; p50/p90/p95/p99/max
+15.739/35.056/36.162/37.528/38.422 s), but the p95 acceptance bound is 30 s.
+Therefore the pathological stall is fixed and the 60-second max bound passes,
+but autoscaling responsiveness remains open. The targeted traffic group and
+isolated sawtooth campaign also remain pending.
 
 ## Remediation validation
+
+The sections from here through “Earlier failed campaign” are retained as
+historical evidence and are superseded by the rebuilt-image results above.
 
 The three blockers found in the earlier `p1-api-20260726-2` campaign were
 fixed in focused commits and deployed together as `prod-fixes-20260726-1`
@@ -205,6 +259,16 @@ coordination before production.
   preserve indexed operation errors, verify partial cleanup, and fail closed.
 - `f5927ab` — validate fleet workload arguments, persist partial evidence,
   retry teardown, verify deletion, and fail closed.
+- `6a08870` — recover run-owned resources after operation-poll disconnects and
+  make snapshot cleanup bounded and retryable.
+- `3d237a6`, `74a80de`, `e8dd721` — use public fleet inventory, explicit
+  request budgets, and stage workloads before timed execution.
+- `a850ee1`, `e9308be`, `f548fa8` — make density cleanup idempotent, stress
+  concurrent operation JSON polling, and retry malformed poll responses.
+- `dfa6d19`, `2ca73c9` — normalize evidence paths and update the SDK
+  development runner.
+- `e0b3588`, `ea0f707` — count in-flight create reservations in autoscaling
+  demand and tighten the scale-out control loop.
 
 These are in addition to the v1 terminology/API migration and live-campaign
 guard commits immediately preceding them.
@@ -214,6 +278,19 @@ guard commits immediately preceding them.
 Raw results remain on the GCP control node under:
 
 `/home/ayush/web-sandbox/tests/results/gcp-20260726T063507Z/`
+
+Current local gitignored evidence is under:
+
+- `tests/results/run_2026-07-27T07-44-47-400Z.json`;
+- `sdk/typescript/benchmarks/results/gcp-20260727-extensive-rerun/`;
+- `tests/results/autoscale-20260727-legacy-held-rerun/`;
+- `tests/results/autoscale-20260727-legacy-held-committed-fix/`.
+
+The final `ea0f707` autoscale bundle remains on the control VM at
+`/home/ayush/web-sandbox/tests/results/autoscale-20260727-legacy-held-final/`;
+copying it locally was blocked when the GCP command budget expired. Every
+autoscale bundle includes `run.json`, `timeline.jsonl`, `benchmark.log`, and
+`SHA256SUMS`.
 
 | File | SHA-256 |
 |---|---|
@@ -228,14 +305,19 @@ Worker journal collection was not available from the control service account,
 so the next diagnostic run should collect worker logs through an authorized
 path while reproducing N=8.
 
-## Required sequence before resuming the campaign
+## Remaining sequence
 
-1. Fix and integration-test concurrent snapshot-source batch creation.
-2. Fix and latency-test termination after pause/resume.
-3. Coordinate the gateway and Nomad MIG scaling writers.
-4. Deploy a new worker/gateway release and rerun the 64-test correctness gate.
-5. Rerun lifecycle, snapshot source, snapshot batch N=1..48, 500-job churn, and
-   the hardened fleet filesystem modes.
-6. Only after every resource gate and cleanup proof passes, run the 160 held
-   burst, targeted autoscaling scenarios, and isolated sawtooth campaign in the
-   order documented in `docs/benchmarks.md`.
+The old steps 1–5 are complete. Continue only after GCP command capacity is
+available:
+
+1. Copy the final `ea0f707` autoscale evidence bundle locally and inspect its
+   precise demand-to-resize/readiness timeline.
+2. Close or explicitly revise the p95 ≤30 s autoscaling SLO; do not treat the
+   current 36.162 s p95 as a pass.
+3. Return to the exact two-running/six-suspended floor, then run the targeted
+   traffic group followed by the isolated sawtooth campaign.
+4. Rotate the worker-control and host credentials exposed by a diagnostic
+   Nomad inspection, roll the job safely, and repeat the credential-domain
+   gate.
+5. Produce clean, reproducible worker and gateway binaries so release metadata
+   no longer reports `vcs.modified=true`.
