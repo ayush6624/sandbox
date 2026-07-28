@@ -80,7 +80,7 @@ func (g *Gateway) adoptElsewhere(id string, exclude map[string]bool) (string, bo
 		tried[k] = true
 	}
 	for attempt := 0; attempt < maxCreateAttempts; attempt++ {
-		h := g.reserveHost(tried)
+		h := g.reserveHostOrdinary(tried)
 		if h == nil {
 			return "", false // no live host with capacity to take it
 		}
@@ -89,7 +89,7 @@ func (g *Gateway) adoptElsewhere(id string, exclude map[string]bool) (string, bo
 			hostID := g.landReservation(h, id)
 			return hostID, true
 		}
-		g.release(h.id, false)
+		g.releaseReservation(h, false)
 
 		var ae *client.APIError
 		switch {

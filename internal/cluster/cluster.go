@@ -45,6 +45,10 @@ type Heartbeat struct {
 	// workers produce both values from one registry snapshot and gateways
 	// defensively clamp heartbeats from older releases.
 	SlotsFree *int `json:"slots_free,omitempty"`
+	// WarmReady is the number of fully initialized hidden VMs that can be
+	// claimed without entering the normal clone path. Gateways prefer this
+	// capacity across hosts before falling back to ordinary free slots.
+	WarmReady int `json:"warm_ready,omitempty"`
 	// Hibernated is the number of idle sandboxes frozen to disk on this host.
 	// They appear in SandboxIDs (requests must route here to wake them) but
 	// consume no slots.

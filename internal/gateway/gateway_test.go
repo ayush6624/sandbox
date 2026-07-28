@@ -116,15 +116,54 @@ func TestReserveHostCapsAtCapacity(t *testing.T) {
 		}
 	}
 	// A failed create releases its reservation, freeing exactly one slot.
-	g.release("a", false)
+	g.releaseReservation(&host{id: "a"}, false)
 	if g.hosts["a"].free() != 1 {
 		t.Fatalf("after failed release, host a free=%d want 1", g.hosts["a"].free())
 	}
 	// A landed create releases its reservation, optimistically advances used,
 	// and debits advertised free.
-	g.release("b", true)
+	g.releaseReservation(&host{id: "b"}, true)
 	if h := g.hosts["b"]; h.free() != 0 || h.slotsUsed != 1 || h.reserved != 23 {
 		t.Fatalf("after landed release, host b used=%d reserved=%d free=%d", h.slotsUsed, h.reserved, h.free())
+	}
+}
+
+func TestReserveHostConsumesReadyCapacityAcrossHostsBeforeColdFallback(t *testing.T) {
+	g := liveGateway(
+		&host{id: "a", slotsTotal: 10, warmReady: 2},
+		&host{id: "b", slotsTotal: 10, warmReady: 2},
+		// Deliberately fuller: ordinary bin-packing would choose this first,
+		// but it has no ready VM and must wait until ready capacity is gone.
+		&host{id: "cold", slotsTotal: 10, slotsUsed: 9},
+	)
+	var got []*host
+	for range 5 {
+		got = append(got, g.reserveHost(nil))
+	}
+	for i := 0; i < 4; i++ {
+		if got[i] == nil || !got[i].reservationWarm || got[i].id == "cold" {
+			t.Fatalf("reservation %d = %+v, want ready host", i, got[i])
+		}
+	}
+	if got[4] == nil || got[4].reservationWarm || got[4].id != "cold" {
+		t.Fatalf("fallback reservation = %+v, want ordinary fullest host cold", got[4])
+	}
+	if g.hosts["a"].warmReserved != 2 || g.hosts["b"].warmReserved != 2 {
+		t.Fatalf("ready reservations not spread by pool exhaustion: a=%d b=%d",
+			g.hosts["a"].warmReserved, g.hosts["b"].warmReserved)
+	}
+	g.releaseReservation(got[0], false)
+	if got[0].id == "a" && g.hosts["a"].warmReady != 1 ||
+		got[0].id == "b" && g.hosts["b"].warmReady != 1 {
+		t.Fatalf("failed warm request did not pessimistically consume ready capacity")
+	}
+
+	ordinary := liveGateway(
+		&host{id: "ready", slotsTotal: 10, warmReady: 8},
+		&host{id: "fuller", slotsTotal: 10, slotsUsed: 9},
+	).reserveHostOrdinary(nil)
+	if ordinary == nil || ordinary.id != "fuller" || ordinary.reservationWarm {
+		t.Fatalf("ordinary reservation consumed create-ready capacity: %+v", ordinary)
 	}
 }
 

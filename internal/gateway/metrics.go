@@ -21,14 +21,15 @@ import (
 // doesn't mask real demand.
 func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	type hostMetric struct {
-		id                string
-		total, used, free int
+		id                      string
+		total, used, free, warm int
 	}
 	var (
 		liveHosts             int
 		totalSlots, usedSlots int
 		committedSlots        int
 		freeSlots             int
+		warmReady             int
 		hibernated            int
 		routes                int
 		releaseMismatches     int
@@ -47,11 +48,12 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		usedSlots += h.slotsUsed
 		committedSlots += h.committed()
 		freeSlots += h.free()
+		warmReady += h.warmFree()
 		hibernated += h.hibernated
 		if expectedRelease != "" && h.release != expectedRelease {
 			releaseMismatches++
 		}
-		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed, free: h.free()})
+		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed, free: h.free(), warm: h.warmFree()})
 	}
 	routes = len(g.route)
 	g.mu.RUnlock()
@@ -77,6 +79,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// only. slots_committed closes the scrape-time gap before worker heartbeats
 	// report creates already assigned by the gateway.
 	gauge("sandbox_slots_free", "Allocatable sandbox slots across live hosts (host-reported).", freeSlots)
+	gauge("sandbox_warm_ready", "Fully initialized ready VMs available across live hosts.", warmReady)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
 	gauge("sandbox_hibernated", "Idle sandboxes frozen to disk across live hosts (hold no slot).", hibernated)
 	gauge("sandbox_worker_release_mismatch", "Live workers gated from placement because their release is not current.", releaseMismatches)
@@ -120,6 +123,10 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# HELP sandbox_host_slots_free Allocatable slots on a live host (host-reported, minus reservations).\n# TYPE sandbox_host_slots_free gauge\n")
 	for _, h := range perHost {
 		fmt.Fprintf(&b, "sandbox_host_slots_free{host=%q} %d\n", h.id, h.free)
+	}
+	fmt.Fprintf(&b, "# HELP sandbox_host_warm_ready Ready VMs available on a live host, minus warm reservations.\n# TYPE sandbox_host_warm_ready gauge\n")
+	for _, h := range perHost {
+		fmt.Fprintf(&b, "sandbox_host_warm_ready{host=%q} %d\n", h.id, h.warm)
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

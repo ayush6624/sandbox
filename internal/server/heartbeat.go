@@ -93,6 +93,11 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		fmt.Fprintf(os.Stderr, "heartbeat: snapshot routed capacity: %v\n", err)
 		return
 	}
+	warmReady, err := s.reg.WarmCount(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "heartbeat: count ready pool: %v\n", err)
+		warmReady = 0
+	}
 	ids := make([]string, len(routed))
 	runningCount, hibernated := 0, 0
 	for i, sb := range routed {
@@ -119,6 +124,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		Release:     s.cfg.WorkerRelease,
 		SlotsTotal:  s.reg.Pools().Slots(),
 		SlotsUsed:   runningCount,
+		WarmReady:   warmReady,
 		Hibernated:  hibernated,
 		SandboxIDs:  ids,
 		SnapshotIDs: snapIDs,

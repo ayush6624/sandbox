@@ -58,6 +58,7 @@ type host struct {
 	// For old host binaries whose
 	// heartbeats lack the field, handleRegister falls back to total-used.
 	slotsFree  int
+	warmReady  int // worker-reported fully initialized VMs ready for atomic claim
 	hibernated int // idle sandboxes frozen to disk on the host (hold no slot)
 	// reserved counts creates dispatched to this host but not yet completed.
 	// Without it, a burst of concurrent creates all read the same stale
@@ -65,6 +66,13 @@ type host struct {
 	// until its pool exhausts. Reserving at pick time makes concurrent picks
 	// see each other, so they spread and cleanly 503 at capacity instead.
 	reserved int
+	// warmReserved is the subset of reservations selected against warmReady.
+	// Keeping it separate lets concurrent placement spread across ready pools
+	// before falling back to ordinary clone capacity.
+	warmReserved int
+	// reservationWarm exists only on the snapshot returned by reserveHost and
+	// tells completion which counter to release.
+	reservationWarm bool
 	// penaltyUntil makes the host unplaceable until this instant. Set when a
 	// create on it fails with a capacity-class error (its advertised free was
 	// stale — trust nothing until heartbeats correct it) or a connection
@@ -75,6 +83,14 @@ type host struct {
 
 func (h *host) free() int {
 	f := h.slotsFree - h.reserved
+	if f < 0 {
+		return 0
+	}
+	return f
+}
+
+func (h *host) warmFree() int {
+	f := h.warmReady - h.warmReserved
 	if f < 0 {
 		return 0
 	}
@@ -441,6 +457,7 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.release = hb.Release
 	h.slotsTotal = hb.SlotsTotal
 	h.slotsUsed = hb.SlotsUsed
+	h.warmReady = hb.WarmReady
 	h.slotsFree = hb.SlotsTotal - hb.SlotsUsed // old host binary: best guess
 	if hb.SlotsFree != nil {
 		h.slotsFree = *hb.SlotsFree
@@ -459,6 +476,12 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.slotsUsed > h.slotsTotal {
 		h.slotsUsed = h.slotsTotal
+	}
+	if h.warmReady < 0 {
+		h.warmReady = 0
+	}
+	if h.warmReady > h.slotsTotal {
+		h.warmReady = h.slotsTotal
 	}
 	maxFree := h.slotsTotal - h.slotsUsed
 	if h.slotsFree < 0 {
@@ -553,7 +576,7 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		g.release(h.id, false) // create failed: free the reservation
+		g.releaseReservation(h, false) // create failed: free the reservation
 		if r.Context().Err() != nil {
 			// The CLIENT went away mid-create; the error is our own context
 			// cancellation, not the host's fault. Penalizing here would let a
@@ -633,15 +656,41 @@ func (g *Gateway) penalize(hostID string, d time.Duration, zeroFree bool) {
 // Returns a snapshot copy, or nil if no host has capacity. The caller MUST
 // release() exactly once.
 func (g *Gateway) reserveHost(exclude map[string]bool) *host {
+	return g.reserveHostMode(exclude, true)
+}
+
+// reserveHostOrdinary is used by snapshot adoption, which cannot consume a
+// default-create ready VM.
+func (g *Gateway) reserveHostOrdinary(exclude map[string]bool) *host {
+	return g.reserveHostMode(exclude, false)
+}
+
+func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool) *host {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
 	var best *host
+	preferWarm := false
+	if useWarm {
+		for _, h := range g.hosts {
+			if exclude[h.id] || now.Before(h.penaltyUntil) ||
+				now.Sub(h.lastSeen) > g.ttl || h.free() <= 0 {
+				continue
+			}
+			if h.warmFree() > 0 {
+				preferWarm = true
+				break
+			}
+		}
+	}
 	for _, h := range g.hosts {
 		if exclude[h.id] || now.Before(h.penaltyUntil) {
 			continue
 		}
 		if now.Sub(h.lastSeen) > g.ttl || h.free() <= 0 {
+			continue
+		}
+		if preferWarm && h.warmFree() <= 0 {
 			continue
 		}
 		if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
@@ -653,6 +702,10 @@ func (g *Gateway) reserveHost(exclude map[string]bool) *host {
 	}
 	best.reserved++
 	snap := *best
+	if preferWarm {
+		best.warmReserved++
+		snap.reservationWarm = true
+	}
 	return &snap
 }
 
@@ -665,15 +718,25 @@ func (g *Gateway) reserveHost(exclude map[string]bool) *host {
 // landings, but cap it at physical capacity so that race cannot report an
 // impossible slots_used > slots_total. The next heartbeat supplies the exact
 // count; slotsFree + reserved remain the placement accounting bridge.
-func (g *Gateway) release(hostID string, landed bool) {
+func (g *Gateway) releaseReservation(reserved *host, landed bool) {
 	g.mu.Lock()
-	h := g.hosts[hostID]
+	h := g.hosts[reserved.id]
 	if h == nil {
 		g.mu.Unlock()
 		return
 	}
 	if h.reserved > 0 {
 		h.reserved--
+	}
+	if reserved.reservationWarm && h.warmReserved > 0 {
+		h.warmReserved--
+	}
+	// Once a request was dispatched against a ready VM, stop advertising that
+	// VM even if the request failed: the worker may have claimed it before
+	// returning the error. A later heartbeat restores the count when the
+	// request never reached the worker or replenishment completed.
+	if reserved.reservationWarm && h.warmReady > 0 {
+		h.warmReady--
 	}
 	if landed {
 		if h.slotsUsed < h.slotsTotal {
@@ -718,11 +781,17 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 		if h.reserved > 0 {
 			h.reserved--
 		}
+		if reserved.reservationWarm && h.warmReserved > 0 {
+			h.warmReserved--
+		}
 		if h.slotsUsed < h.slotsTotal {
 			h.slotsUsed++
 		}
 		if h.slotsFree > 0 {
 			h.slotsFree--
+		}
+		if reserved.reservationWarm && h.warmReady > 0 {
+			h.warmReady--
 		}
 	}
 	g.route[sandboxID] = routeID
@@ -1374,6 +1443,7 @@ func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 		SlotsUsed  int    `json:"slots_used"`
 		Hibernated int    `json:"hibernated"`
 		Free       int    `json:"free"`
+		WarmReady  int    `json:"warm_ready"`
 		Alive      bool   `json:"alive"`
 		LastSeenMS int64  `json:"last_seen_ms_ago"`
 	}
@@ -1385,6 +1455,7 @@ func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 			ID: h.id, Addr: h.addr, Release: h.release, Compatible: compatible,
 			SlotsTotal: h.slotsTotal, SlotsUsed: h.slotsUsed,
 			Hibernated: h.hibernated, Free: h.free(), Alive: time.Since(h.lastSeen) <= g.ttl,
+			WarmReady:  h.warmFree(),
 			LastSeenMS: time.Since(h.lastSeen).Milliseconds(),
 		})
 	}
