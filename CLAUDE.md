@@ -311,10 +311,13 @@ scripts/              Host setup shell scripts
   backstop. Don't "fix" the MTU by setting the tap/bridge instead — virtio-net won't
   propagate it to the guest.
 - **SSH into a sandbox rides the existing port proxy.** The base rootfs bakes
-  `openssh-server` (key-only login: `PasswordAuthentication no`, in
-  `sshd_config.d/sandbox.conf`), and `ssh.service` is enabled (socket activation
-  disabled) so :22 listens the instant the guest boots. **Host keys are unique
-  per sandbox and never baked into the image**: the base rootfs ships with none
+  `openssh-server` (key-only login as the unprivileged **`sandbox` user**, uid
+  1000: `PermitRootLogin no`, `PasswordAuthentication no`, `AllowUsers sandbox`,
+  in `sshd_config.d/sandbox.conf`), and `ssh.service` is enabled (socket
+  activation disabled) so :22 listens the instant the guest boots. There is no
+  root login — `root@` is refused by sshd, not merely unauthorized.
+  **Host keys are unique per sandbox and never baked into the image**: the base
+  rootfs ships with none
   and sandboxd's `POST /identity` (`initializeGuestIdentity`,
   cmd/sandboxd/identity.go) removes any inherited ones and generates a fresh key
   on every independent create — so no two sandboxes, golden clones included, can
@@ -327,14 +330,16 @@ scripts/              Host setup shell scripts
   `ssh_pubkey` (one OpenSSH key line, `validateSSHPubkey` in server.go — rejects
   multi-line/unknown-type); after the create readiness gate (both cold and hot
   paths), `installSSHKey` (proxy.go) posts it to sandboxd's `POST /ssh-key`, which
-  writes `/root/.ssh/authorized_keys`. It is NOT best-effort like `syncGuestClock`:
-  a key-install failure destroys the sandbox and fails the create, so a box handed
-  back with SSH requested is always reachable. The key lives in the rootfs, so it
+  writes `/home/sandbox/.ssh/authorized_keys` — under `withGuestFilesystem`, so
+  the dir and file land owned by `sandbox:sandbox` (0700/0600) as sshd demands.
+  It is NOT best-effort like `syncGuestClock`: a key-install failure destroys the
+  sandbox and fails the create, so a box handed back with SSH requested is always
+  reachable. The key lives in the rootfs, so it
   survives hibernation/wake with no re-push. Reach it by exposing guest :22 as a
   host port (`sandbox expose <id> 22`) — the userspace TCP proxy forwards it with
   wake-on-connect, so an incoming SSH connection wakes a hibernated sandbox and
   pins it for the session, exactly like a forwarded HTTP port — then
-  `ssh -p <host_port> root@<host>`. Old baked sandboxd 404s `/ssh-key` (re-run
+  `ssh -p <host_port> sandbox@<host>`. Old baked sandboxd 404s `/ssh-key` (re-run
   `install-agent`; rebuild the base for openssh first). **Fleet caveat:** the
   gateway is an HTTP reverse-proxy and does NOT forward raw TCP, so fleet SSH
   needs a ProxyJump to the owning worker (or a WS tunnel) — not wired up yet.
