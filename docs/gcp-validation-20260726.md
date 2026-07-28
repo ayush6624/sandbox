@@ -138,20 +138,33 @@ fell from ~23.2 s to ~13.0 s, which is now pure worker resume time.
 Autoscaling correctness, the 60-second maximum, and the 30-second p95 bound
 therefore all pass.
 
-**One defect was found in the same run.** The scale-in cap does not actually
-confine the autoscaler to scale-in: ~2.5 minutes after the burst drained it
-logged `from=5 to=6 reason="scaling up because metric is 6"`. The ceiling is
+**One defect was found in the same run, and fixed.** The `af3833a` scale-in cap
+did not confine the autoscaler: ~2.5 minutes after the burst drained it logged
+`from=5 to=6 reason="scaling up because metric is 6"`. The ceiling was
 `max(sandbox_hosts_live, sandbox_scale_out_requested)`, and `hosts_live` (8)
 exceeded the MIG `targetSize` (5) because resumed standby workers heartbeat to
-the gateway without being counted in that target — so a latched
-`max_over_time` peak of 6 was a legal scale-up. This did not affect the p95
-result, but the single-writer invariant is not yet enforced and the fleet can
-still over-scale after demand is gone. The fix is to cap on the MIG's real
-`targetSize`, which the gateway can read and export directly; not yet
-implemented.
+the gateway without being counted in that target — so a latched `max_over_time`
+peak of 6 was a legal scale-up. The p95 result was unaffected, but the fleet
+could still over-scale after demand was gone.
 
-Still open: that fix, the targeted traffic group, the isolated sawtooth
-campaign, and a confirmed return to the fleet floor.
+`d93c80a` caps on the provider's `targetSize` instead: the gateway polls it and
+exports `sandbox_mig_target_size`, and since that is the value the gce-mig
+target compares against, `min(desired, targetSize)` can only hold or shrink.
+All four PromQL cases were verified live, including the defect case
+(`targetSize=5`, latched demand 6 → target 5).
+
+The verification burst on `d93c80a` passed with the cap in place: 160/160, zero
+errors, `cleanup_ok`, zero residual sandboxes, p50/p95/max
+**16.471/26.667/28.474 s**, wall 49.3 s — still inside the 30-second p95 SLO —
+with **one** gateway resize and **zero** autoscaler scale-up attempts (down
+from one). The autoscaler's only actions were `from=2 to=2 "capped count from 1
+to 2 to stay within limits"`, i.e. scale-in held at `MIG_MIN`. Bundle
+`tests/results/autoscale-20260728-targetsize-cap/`.
+
+The fleet also returned to the floor cleanly after the `af3833a` burst
+(`targetSize=2`, zero sandboxes).
+
+Still open: the targeted traffic group and the isolated sawtooth campaign.
 
 ## Remediation validation
 

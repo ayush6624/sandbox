@@ -143,10 +143,11 @@ The watermark term is required: for ~13 s after a resize the new workers exist
 but have not heartbeated, so capping on `hosts_live` alone would scale the
 fleet back down mid-burst.
 
-#### Known gap: the cap does not actually make the autoscaler scale-in-only
+#### The first cap leaked, and why (fixed in `d93c80a`)
 
-Measured on this same run, ~2.5 min after the burst finished, the autoscaler
-still scaled **out**:
+The `af3833a` ceiling was `max(sandbox_hosts_live,
+sandbox_scale_out_requested)`, and it did **not** hold. ~2.5 min after that
+burst drained, the autoscaler still scaled **out**:
 
 ```text
 06:56:47 policy_handler: from=5 to=6 reason="scaling up because metric is 6"
@@ -154,24 +155,47 @@ still scaled **out**:
          Group: reached retry limit
 ```
 
-The cap was permissive because `sandbox_hosts_live` (8) exceeded the MIG's
-`targetSize` (5): resumed standby workers heartbeat to the gateway without
-being part of the target the autoscaler compares against. So the ceiling was 8,
+`sandbox_hosts_live` (8) exceeded the MIG's `targetSize` (5), because resumed
+standby workers heartbeat to the gateway without being part of the target the
+autoscaler compares against. So the ceiling was 8,
 `max_over_time(desired[15m])` had latched the burst peak of 6, and
-`min(6, 8) = 6 > 5` was a legal scale-up.
+`min(6, 8) = 6 > 5` was a legal scale-up — the classic "over-scale after demand
+is gone", since `max_over_time` replays a stale peak for the whole window.
 
-This did **not** affect the p95 result — the gateway issued the single resize
-that served the burst, and this fired after the burst had drained — but it
-reproduces the known "over-scales after demand is gone" behavior, since
-`max_over_time` replays a stale peak for the whole window. The invariant that
-`validate-scaling-owner.sh` and the surrounding comments describe is therefore
-**not yet enforced**.
+The lesson is that a heartbeat-derived count is not a substitute for the
+provider's own number. `d93c80a` therefore caps on `targetSize` itself: the
+gateway polls it (`gcemig.TargetSize`, on the 10 s scrape cadence plus once
+after each resize) and exports `sandbox_mig_target_size`. Because that is the
+same value the gce-mig target compares against, `min(desired, targetSize)` can
+only hold or shrink. A failed poll keeps the last known value, and before any
+poll succeeds the series is absent and the rule falls back to the old looser
+form — which can still admit a scale-out but never blocks scale-in, the safer
+failure direction.
 
-The fix is to cap on the MIG's real `targetSize` rather than a heartbeat-derived
-proxy. The gateway already holds the GCE client and the IAM permission, so it
-can read `targetSize` and export it as `sandbox_mig_target_size`, making the
-ceiling exact and removing the need for the `hosts_live`/watermark maximum
-entirely. Not yet implemented.
+Verified against live Prometheus in all four cases, including the exact defect:
+`targetSize=5` with a latched demand of 6 now yields a policy target of **5**,
+not 6.
+
+#### Verification run (2026-07-28, `d93c80a`)
+
+Same canonical workload. Bundle
+`tests/results/autoscale-20260728-targetsize-cap/` (`SHA256SUMS` verified,
+`cleanup_ok`, zero residual sandboxes).
+
+| | `af3833a` | `d93c80a` |
+| --- | ---: | ---: |
+| Create p50 | 16.004 s | 16.471 s |
+| Create p95 | 26.074 s | **26.667 s** |
+| Create max | 26.995 s | 28.474 s |
+| Wall time | 48.2 s | 49.3 s |
+| Gateway resizes | 1 | 1 |
+| **Autoscaler scale-up attempts** | **1** | **0** |
+
+160/160 with zero errors in both. p95 stays inside the 30 s SLO, so capping
+correctly costs nothing. The autoscaler's only remaining actions were
+`from=2 to=2 reason="capped count from 1 to 2 to stay within limits"` — it
+wanted to scale *in* to 1 and `MIG_MIN` held it at 2, which is exactly the
+intended division of labour.
 
 One further defect is visible at 36.4 s: a resumed standby worker
 (`32dc09d1`) first heartbeats advertising release `a97b68f` with

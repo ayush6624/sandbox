@@ -675,9 +675,10 @@ single-writer autoscaling correctness, hardened benchmark cleanup, and
 multi-shape autoscaling correctness. P3 remains open because:
 
 - autoscaling create correctness and create p95 both now pass on the canonical
-  held burst (`af3833a`: 160/160, p95 26.074 s against a 30 s SLO), but the
-  targeted traffic group, the isolated sawtooth campaign, and the post-burst
-  return to floor under the new capped scale-in policy are not yet confirmed;
+  held burst (`d93c80a`: 160/160, p95 26.667 s against a 30 s SLO, one gateway
+  resize and zero autoscaler scale-up attempts), and the post-burst return to
+  floor is confirmed, but the targeted traffic group and the isolated sawtooth
+  campaign are not yet rerun;
 - the control-plane release now builds clean (`vcs.modified=false`), but the
   worker image still carries a dirty-stamped `sandboxd`, and signing, SBOMs,
   and provenance are not yet demonstrated;
@@ -694,9 +695,9 @@ multi-shape autoscaling correctness. P3 remains open because:
    provenance/SBOMs for both artifacts, and rerun the release smoke gate
    against those exact checksums. The control-plane half is done (`af3833a`
    stamps `vcs.modified=false`).
-3. Finish the autoscaling campaign now that create p95 is inside the SLO:
-   confirm the return to floor under the capped scale-in policy, then run the
-   targeted traffic group and the isolated sawtooth campaign.
+3. Finish the autoscaling campaign now that create p95 is inside the SLO and
+   the scale-in cap holds: run the targeted traffic group and the isolated
+   sawtooth campaign.
 4. Resolve or formally accept the development-only generator-chain audit
    findings, select npm publication authority, and publish the SDK.
 5. Complete the remaining P3 failure testing, observability/SLO gates,
