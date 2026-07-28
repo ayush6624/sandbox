@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
+	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -168,15 +171,11 @@ func reloadSSHWithSignal() error {
 	if err != nil {
 		return fmt.Errorf("read generated ssh public key: %w", err)
 	}
-	want := strings.Fields(string(expected))
-	if len(want) < 2 {
-		return errors.New("generated ssh public key is malformed")
-	}
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		out, scanErr := exec.Command("ssh-keyscan", "-T", "1", "-t", "ed25519", "127.0.0.1").CombinedOutput()
-		if scanErr == nil && sshKeyscanMatches(out, want[0], want[1]) {
+		matched, scanErr := sshListenerServesKey(expected)
+		if scanErr == nil && matched {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -186,14 +185,35 @@ func reloadSSHWithSignal() error {
 	}
 }
 
-func sshKeyscanMatches(out []byte, keyType, keyBody string) bool {
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[1] == keyType && fields[2] == keyBody {
-			return true
-		}
+var errSSHHostKeyObserved = errors.New("ssh host key observed")
+
+func sshListenerServesKey(expected []byte) (bool, error) {
+	want, _, _, _, err := ssh.ParseAuthorizedKey(expected)
+	if err != nil {
+		return false, fmt.Errorf("parse generated ssh public key: %w", err)
 	}
-	return false
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:22", 200*time.Millisecond)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+
+	matched := false
+	cfg := &ssh.ClientConfig{
+		User:              "sandbox-key-probe",
+		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519},
+		HostKeyCallback: func(_ string, _ net.Addr, got ssh.PublicKey) error {
+			matched = bytes.Equal(got.Marshal(), want.Marshal())
+			// Stop before user authentication: the host-key proof is complete.
+			return errSSHHostKeyObserved
+		},
+		Timeout: 200 * time.Millisecond,
+	}
+	_, _, _, handshakeErr := ssh.NewClientConn(conn, "127.0.0.1:22", cfg)
+	if !errors.Is(handshakeErr, errSSHHostKeyObserved) {
+		return false, handshakeErr
+	}
+	return matched, nil
 }
 
 // sshHostKeyPath names a host key beside the ones sshHostKeyPattern matches, so

@@ -213,16 +213,6 @@ func TestRestartSSHServiceUsesVerifiedDirectReload(t *testing.T) {
 	}
 }
 
-func TestSSHKeyscanMatchesGeneratedKey(t *testing.T) {
-	out := []byte("# 127.0.0.1:22 SSH-2.0-OpenSSH\n127.0.0.1 ssh-ed25519 AAAAcorrect\n")
-	if !sshKeyscanMatches(out, "ssh-ed25519", "AAAAcorrect") {
-		t.Fatal("matching keyscan output was rejected")
-	}
-	if sshKeyscanMatches(out, "ssh-ed25519", "AAAAinherited") {
-		t.Fatal("inherited keyscan output was accepted")
-	}
-}
-
 func TestValidSandboxIdentity(t *testing.T) {
 	for _, id := range []string{"sandbox-1", "4dcda1a6_9.test"} {
 		if !validSandboxIdentity(id) {

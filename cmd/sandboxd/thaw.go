@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,7 +25,6 @@ const (
 	mmdsAddr        = "169.254.169.254"
 	mmdsIface       = "eth0"
 	normalPollDelay = 200 * time.Millisecond
-	armedPollDelay  = 5 * time.Millisecond
 )
 
 var (
@@ -98,8 +98,8 @@ func runThawAgent() {
 		}
 		// The snapshot arm endpoint does not return until the polling goroutine
 		// reaches this point. That makes the captured state deterministic: the
-		// restored clone is sleeping on the 5 ms armed timer, rather than
-		// potentially retaining a partially elapsed 200 ms normal timer.
+		// restored clone is actively reading MMDS, rather than potentially
+		// retaining a partially elapsed 200 ms normal timer.
 		if snapshotPollArmed.Load() {
 			select {
 			case thawPollReady <- struct{}{}:
@@ -142,11 +142,17 @@ readyDrained:
 }
 
 func waitForThawPoll() {
-	delay := normalPollDelay
 	if snapshotPollArmed.Load() {
-		delay = armedPollDelay
+		// Do not create a timer in the snapshot-armed state. Firecracker restores
+		// a captured guest timer relative to the old monotonic clock, which can
+		// turn even a nominal 5 ms sleep into the normal ~200 ms delay. A tight
+		// loop here is bounded to the few milliseconds between arm and Pause,
+		// then to the first successful clone identity read; steady-state guests
+		// immediately return to the low-frequency timer below.
+		runtime.Gosched()
+		return
 	}
-	timer := time.NewTimer(delay)
+	timer := time.NewTimer(normalPollDelay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
