@@ -346,16 +346,28 @@ scripts/              Host setup shell scripts
   then `sandbox ssh <id>` (forwards :22 on first use) or
   `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
   `--jump <bastion>`.
-- **Current jailed production create baseline (2026-07-28, release `4e4b457`):**
-  after rebuilding the worker/rootfs with Ed25519-only host-key generation,
-  baking a `jailer-v1` golden data image, and rolling the full MIG, 25 sequential
-  lifecycle iterations through the gateway measured create p50 **986 ms**, p95
-  **1,021 ms** (min 959 ms; first-sample max 1,444 ms). Worker logs put successful
-  hot-create handling at **776–811 ms**, so the remaining gap is predominantly
-  inside the worker's jailed clone path, not gateway routing. Resume plus an
-  `echo ready` usability probe measured p50 **976 ms**, p95 **1,040 ms**. The
-  sub-500 ms create target is therefore still open; do not attribute the full
-  residual to any one jailer stage until the launch path has phase timing.
+- **Current jailed production create result (2026-07-29, release `c990555`):**
+  a one-VM-per-worker ready pool (`warm_pool_size: 1`) brings 25 sequential
+  lifecycle creates through the production gateway to p50 **198 ms**, p95
+  **204 ms** (min 196 ms; first-sample max 399 ms). The direct-worker run was
+  p50 **196 ms**, p95 **201 ms**. Results are in
+  `sdk/typescript/benchmarks/results/lifecycle_c990555_gateway_20260729.json`
+  and `lifecycle_c990555_20260729.json` (results are gitignored).
+  A warming row is a normal jailed Firecracker VM with its own UID/GID, cgroup
+  leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
+  clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and
+  memory capacity but is excluded from routes/lists; create atomically promotes
+  it to `running`, applies request fields/key, and replenishes the pool in the
+  background. `sandbox_warming` exposes the hidden count.
+  **Corrected attribution:** phase timing on an exhausted pool measured a hot
+  jailed launch at roughly **24–47 ms** (`prepare` + process-to-API; a cold
+  first staging pass can be ~123 ms), not the previously inferred ~390 ms.
+  The resumed guest's network re-identification was **333–399 ms** and SSH
+  identity readiness **125–136 ms**; a private tap wake hint did not remove
+  that guest-resume floor. An exhausted ready pool therefore still falls back
+  to an ordinary secure clone (~734 ms end-to-end in the production probe).
+  Size the pool for the latency-critical arrival burst; do not weaken or bypass
+  the jailer/network/identity gates to make the fallback look faster.
 - **known_hosts is keyed on the sandbox ID, not host:port**
   (`cmd/sandbox/ssh.go`). Host keys are unique per sandbox but host ports are
   recycled from a pool, so OpenSSH's default identity — `[host]:port` — makes
