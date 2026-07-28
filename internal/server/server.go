@@ -168,6 +168,11 @@ type Server struct {
 	createSem chan struct{}
 	warmOnce  sync.Once
 	warmKick  chan struct{}
+	// readyPoolSettled closes when the initial configured ready pool is full,
+	// or after a bounded failure window. Heartbeats keep placement closed until
+	// then so the first request does not race pool construction.
+	readyPoolSettled     chan struct{}
+	readyPoolSettledOnce sync.Once
 	// warmed is closed once ensureGolden has settled (adopted, built, or
 	// failed). Until then the heartbeat advertises SlotsFree=0 so the gateway
 	// doesn't route a burst of guaranteed-cold creates at a host that's still
@@ -204,6 +209,9 @@ type serverMetrics struct {
 	hibernations atomic.Int64 // sandboxes frozen to disk (idle reaper, manual, or shutdown)
 	wakes        atomic.Int64 // successful thaws from hibernation
 	wakeFailures atomic.Int64 // wake attempts that rolled back to hibernated
+	warmClaims   atomic.Int64 // creates served by a fully initialized ready VM
+	warmMisses   atomic.Int64 // eligible creates that found the ready pool empty
+	warmFailures atomic.Int64 // background ready-VM builds that failed
 }
 
 // fcOverheadMIB is the per-VM memory charged on top of the guest's mem_mib:
@@ -225,6 +233,10 @@ func New(cfg Config, reg *registry.Registry) *Server {
 	}
 	s.createSem = make(chan struct{}, sem)
 	s.warmKick = make(chan struct{}, 1)
+	s.readyPoolSettled = make(chan struct{})
+	if cfg.WarmPoolSize <= 0 {
+		close(s.readyPoolSettled)
+	}
 	s.warmed = make(chan struct{})
 	if !cfg.HotCreate {
 		close(s.warmed) // nothing to warm up: cold creates are the steady state
@@ -545,7 +557,8 @@ func (s *Server) shutdownAll() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if sb, err := s.reg.Get(ctx, id); err == nil && sb.Status == registry.StatusWarming {
+			if sb, err := s.reg.Get(ctx, id); err == nil &&
+				(sb.Status == registry.StatusPreparing || sb.Status == registry.StatusWarming) {
 				if err := s.destroy(context.Background(), id); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] shutdown destroy warm sandbox: %v\n", id, err)
 				}
@@ -832,6 +845,8 @@ type Info struct {
 	MaxMemMIB int64 `json:"max_mem_mib"`
 	// HotCreate reports whether POST /sandboxes is served from a golden snapshot.
 	HotCreate bool `json:"hot_create"`
+	// WarmPoolSize is the configured number of hidden, fully initialized VMs.
+	WarmPoolSize int `json:"warm_pool_size"`
 	// HibernateAfterSec is the host's default idle-hibernation window (0 = off).
 	HibernateAfterSec int `json:"hibernate_after_sec"`
 	// HostID identifies this host in fleet mode; empty standalone.
@@ -845,6 +860,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		MaxVcpus:          maxVcpus(),
 		MaxMemMIB:         s.maxMemMIB(),
 		HotCreate:         s.cfg.HotCreate,
+		WarmPoolSize:      s.cfg.WarmPoolSize,
 		HibernateAfterSec: int(s.cfg.HibernateAfter / time.Second),
 		HostID:            s.cfg.HostID,
 	})

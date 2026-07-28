@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -218,7 +219,7 @@ func TestWarmSandboxConsumesCapacityButStaysUnroutedUntilClaimed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create warm: %v", err)
 	}
-	if warm.Status != StatusWarming {
+	if warm.Status != StatusPreparing {
 		t.Fatalf("warm status = %q", warm.Status)
 	}
 	if got, _ := r.FreeSlots(ctx); got != 2 {
@@ -232,8 +233,18 @@ func TestWarmSandboxConsumesCapacityButStaysUnroutedUntilClaimed(t *testing.T) {
 	} else if len(routed) != 0 || free != 2 {
 		t.Fatalf("routed=%+v free=%d, want hidden warm and free=2", routed, free)
 	}
+	if _, err := r.ClaimWarm(ctx, "", nil, 0); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("preparing VM was claimable: %v", err)
+	}
+	if err := r.MarkWarmReady(ctx, warm.ID); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
 
 	expiry := time.Now().Add(time.Minute)
+	if _, err := r.db.ExecContext(ctx, `UPDATE sandboxes SET created_at=? WHERE id=?`, time.Now().Add(-time.Hour).Unix(), warm.ID); err != nil {
+		t.Fatalf("age warm row: %v", err)
+	}
+	claimedAfter := time.Now().Add(-time.Second)
 	claimed, err := r.ClaimWarm(ctx, "claimed", &expiry, 42)
 	if err != nil {
 		t.Fatalf("claim warm: %v", err)
@@ -242,11 +253,75 @@ func TestWarmSandboxConsumesCapacityButStaysUnroutedUntilClaimed(t *testing.T) {
 		claimed.Name != "claimed" || claimed.HibernateAfterSec != 42 {
 		t.Fatalf("bad claimed row: %+v", claimed)
 	}
+	if claimed.CreatedAt.Before(claimedAfter) {
+		t.Fatalf("claim preserved prewarm creation time: %s", claimed.CreatedAt)
+	}
 	if routed, _ := r.ListRouted(ctx); len(routed) != 1 || routed[0].ID != warm.ID {
 		t.Fatalf("claimed VM missing from routes: %+v", routed)
 	}
 	if _, err := r.ClaimWarm(ctx, "", nil, 0); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("empty warm pool error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestConcurrentWarmClaimsAreUniqueAndBounded(t *testing.T) {
+	r, ctx := testRegistryWithPools(t, Pools{
+		TapPrefix: "fc", TapMax: 8,
+		GuestIPMin: "172.16.0.10", GuestIPMax: "172.16.0.17",
+		PortMin: 5200, PortMax: 5207,
+	}), context.Background()
+	for i := range 4 {
+		id := fmt.Sprintf("warm-%d", i)
+		if _, err := r.CreateWarm(ctx, id, "/tmp/"+id+".ext4", "golden", 0, 0); err != nil {
+			t.Fatalf("create warm %d: %v", i, err)
+		}
+		if err := r.MarkWarmReady(ctx, id); err != nil {
+			t.Fatalf("mark warm %d ready: %v", i, err)
+		}
+	}
+
+	const contenders = 16
+	results := make(chan Sandbox, contenders)
+	errs := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for i := range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sb, err := r.ClaimWarm(ctx, fmt.Sprintf("claim-%d", i), nil, 0)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- sb
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	seen := map[string]bool{}
+	for sb := range results {
+		if seen[sb.ID] {
+			t.Fatalf("warm sandbox claimed twice: %s", sb.ID)
+		}
+		seen[sb.ID] = true
+	}
+	if len(seen) != 4 {
+		t.Fatalf("successful claims=%d, want 4", len(seen))
+	}
+	misses := 0
+	for err := range errs {
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("claim error = %v, want sql.ErrNoRows", err)
+		}
+		misses++
+	}
+	if misses != contenders-4 {
+		t.Fatalf("misses=%d, want %d", misses, contenders-4)
+	}
+	if n, err := r.WarmCount(ctx); err != nil || n != 0 {
+		t.Fatalf("warm count=%d err=%v, want 0", n, err)
 	}
 }
 

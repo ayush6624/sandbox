@@ -107,6 +107,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if cfg.GatewayURL != "" && cfg.ListenAddr == "" {
 		return fmt.Errorf("--gateway requires --listen (the gateway dials back over TCP)")
 	}
+	if err := validateWarmPoolConfig(*cfg); err != nil {
+		return err
+	}
 	jailerCfg := jailerConfigFrom(cfg)
 	if jailerCfg != nil {
 		if _, err := checkJailerPrerequisites(cfg); err != nil {
@@ -202,6 +205,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("sandbox server listening on %s\n", cfg.SocketPath)
 	return srv.Serve(ctx)
+}
+
+func validateWarmPoolConfig(cfg config.Config) error {
+	if cfg.WarmPoolSize < 0 {
+		return fmt.Errorf("warm_pool_size must be >= 0")
+	}
+	if cfg.WarmPoolSize == 0 {
+		return nil
+	}
+	if cfg.DisableHotCreate {
+		return fmt.Errorf("warm_pool_size requires hot create")
+	}
+	if slots := cfg.Pools.Slots(); cfg.WarmPoolSize >= slots {
+		return fmt.Errorf("warm_pool_size %d must be smaller than the %d-slot tap/IP pool", cfg.WarmPoolSize, slots)
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {

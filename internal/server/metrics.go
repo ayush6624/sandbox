@@ -40,12 +40,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	gauge("sandbox_running", "Sandboxes running on this host (hold a tap, IP, port, and guest memory).", int64(st.Running))
 	gauge("sandbox_warming", "Hidden ready sandboxes reserved for low-latency creates.", int64(st.Warming))
+	gauge("sandbox_warm_preparing", "Hidden ready-pool VMs still completing readiness gates.", int64(st.Preparing))
 	gauge("sandbox_hibernated", "Sandboxes frozen to disk on this host (hold only their host port).", int64(st.Hibernated))
 	gauge("sandbox_slots_free", "Allocatable slots right now: smallest per-pool availability, memory-bounded.", int64(st.SlotsFree))
 
 	// Per-pool used/total so an operator can see which pool binds. The label
 	// distinguishes the three pools that a create draws from.
-	fmt.Fprintf(&b, "# HELP sandbox_pool_used Resources held per pool (tap/ip: running only; port: running+hibernated+extra).\n# TYPE sandbox_pool_used gauge\n")
+	fmt.Fprintf(&b, "# HELP sandbox_pool_used Resources held per pool (tap/ip: running+warming; port: explicit mappings).\n# TYPE sandbox_pool_used gauge\n")
 	fmt.Fprintf(&b, "sandbox_pool_used{pool=\"tap\"} %d\n", st.TapUsed)
 	fmt.Fprintf(&b, "sandbox_pool_used{pool=\"ip\"} %d\n", st.IPUsed)
 	fmt.Fprintf(&b, "sandbox_pool_used{pool=\"port\"} %d\n", st.PortUsed)
@@ -54,7 +55,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "sandbox_pool_total{pool=\"ip\"} %d\n", st.IPTotal)
 	fmt.Fprintf(&b, "sandbox_pool_total{pool=\"port\"} %d\n", st.PortTotal)
 
-	gauge("sandbox_committed_mem_mib", "Sum of running sandboxes' effective mem_mib + VMM overhead.", st.CommittedMemMIB)
+	gauge("sandbox_committed_mem_mib", "Sum of running and warming sandboxes' effective mem_mib + VMM overhead.", st.CommittedMemMIB)
 	gauge("sandbox_mem_budget_mib", "Committed-memory admission ceiling (0 = disabled).", st.MemBudgetMIB)
 
 	var goldenReady int64
@@ -67,6 +68,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	counter("sandbox_creates_ok_total", "POST /sandboxes that brought a sandbox up (hot clone or cold boot).", s.met.createsOK.Load())
 	counter("sandbox_creates_error_total", "POST /sandboxes that failed to bring a sandbox up (after validation).", s.met.createsErr.Load())
+	counter("sandbox_warm_claims_total", "Creates served from fully initialized ready VMs.", s.met.warmClaims.Load())
+	counter("sandbox_warm_misses_total", "Eligible creates that found no ready VM and used the normal clone path.", s.met.warmMisses.Load())
+	counter("sandbox_warm_build_failures_total", "Background ready-VM build failures.", s.met.warmFailures.Load())
 	counter("sandbox_hibernations_total", "Sandboxes frozen to disk (idle reaper, manual, or shutdown).", s.met.hibernations.Load())
 	counter("sandbox_wakes_total", "Sandboxes successfully thawed from hibernation.", s.met.wakes.Load())
 	counter("sandbox_wake_failures_total", "Wake attempts that rolled back to hibernated.", s.met.wakeFailures.Load())

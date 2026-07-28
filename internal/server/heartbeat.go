@@ -48,9 +48,15 @@ func (s *Server) heartbeat(ctx context.Context) {
 	// is closed it stays closed; nil the local channel after observing it to
 	// avoid a permanently-ready select case and a heartbeat busy loop.
 	warmed := (<-chan struct{})(s.warmed)
+	poolSettled := (<-chan struct{})(s.readyPoolSettled)
 	select {
 	case <-warmed:
 		warmed = nil
+	default:
+	}
+	select {
+	case <-poolSettled:
+		poolSettled = nil
 	default:
 	}
 
@@ -68,6 +74,9 @@ func (s *Server) heartbeat(ctx context.Context) {
 			return
 		case <-warmed:
 			warmed = nil
+			s.sendHeartbeat(ctx, client, url, hostID, advertise)
+		case <-poolSettled:
+			poolSettled = nil
 			s.sendHeartbeat(ctx, client, url, hostID, advertise)
 		case <-ticker.C:
 			s.sendHeartbeat(ctx, client, url, hostID, advertise)
@@ -158,6 +167,11 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 func (s *Server) advertisedFreeSlots(free int) int {
 	select {
 	case <-s.warmed:
+	default:
+		return 0
+	}
+	select {
+	case <-s.readyPoolSettled:
 	default:
 		return 0
 	}

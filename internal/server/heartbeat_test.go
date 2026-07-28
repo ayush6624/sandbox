@@ -30,7 +30,9 @@ func TestWarmCompletionSendsImmediateHeartbeat(t *testing.T) {
 	s.cfg.AdvertiseAddr = "worker:8080"
 	s.cfg.HostID = "worker-1"
 	s.cfg.WorkerRelease = "release-2"
+	s.cfg.WarmPoolSize = 1
 	s.warmed = make(chan struct{})
+	s.readyPoolSettled = make(chan struct{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -52,14 +54,28 @@ func TestWarmCompletionSendsImmediateHeartbeat(t *testing.T) {
 	close(s.warmed)
 	select {
 	case hb := <-heartbeats:
-		if hb.SlotsFree == nil || *hb.SlotsFree != 3 {
-			t.Fatalf("warm slots_free = %v, want 3", hb.SlotsFree)
+		if hb.SlotsFree == nil || *hb.SlotsFree != 0 {
+			t.Fatalf("golden-only slots_free = %v, want 0 until ready pool settles", hb.SlotsFree)
 		}
 		if elapsed := time.Since(start); elapsed >= heartbeatInterval {
 			t.Fatalf("warm heartbeat waited for periodic tick: %s", elapsed)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("warm completion did not send an immediate heartbeat")
+	}
+
+	start = time.Now()
+	s.settleReadyPool()
+	select {
+	case hb := <-heartbeats:
+		if hb.SlotsFree == nil || *hb.SlotsFree != 3 {
+			t.Fatalf("ready-pool slots_free = %v, want 3", hb.SlotsFree)
+		}
+		if elapsed := time.Since(start); elapsed >= heartbeatInterval {
+			t.Fatalf("ready-pool heartbeat waited for periodic tick: %s", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ready-pool completion did not send an immediate heartbeat")
 	}
 }
 
@@ -101,5 +117,19 @@ func TestPlacementDelayFailsClosedWhenBootAgeUnavailable(t *testing.T) {
 	}
 	if got := s.advertisedFreeSlots(3); got != 0 {
 		t.Fatalf("boot-age error advertised %d free slots, want 0", got)
+	}
+}
+
+func TestReadyPoolGateHoldsCapacityUntilInitialPoolSettles(t *testing.T) {
+	s, _ := capacityTestServer(t)
+	s.cfg.WarmPoolSize = 2
+	s.readyPoolSettled = make(chan struct{})
+
+	if got := s.advertisedFreeSlots(3); got != 0 {
+		t.Fatalf("unsettled ready pool advertised %d free slots, want 0", got)
+	}
+	s.settleReadyPool()
+	if got := s.advertisedFreeSlots(3); got != 3 {
+		t.Fatalf("settled ready pool advertised %d free slots, want 3", got)
 	}
 }
