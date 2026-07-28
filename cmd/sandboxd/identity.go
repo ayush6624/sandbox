@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
@@ -26,6 +28,7 @@ var (
 		}
 		return nil
 	}
+	reloadSSHDirect      = reloadSSHWithSignal
 	identityRestartDelay = 100 * time.Millisecond
 )
 
@@ -102,9 +105,19 @@ func initializeGuestIdentity(sandboxID string) error {
 }
 
 func restartSSHService() error {
+	// Snapshot restores preserve sshd's master PID. Signal that process
+	// directly, then prove its listener serves the newly generated key before
+	// returning. This avoids systemd's D-Bus round trip and `sshd -t` while
+	// retaining a deterministic no-inherited-key readiness gate.
+	if err := reloadSSHDirect(); err == nil {
+		return nil
+	}
+
 	// A successful reload makes sshd re-exec and adopt the new host key without
 	// tearing down the listener. This is both safer for concurrent connections
 	// and materially faster than a full systemd restart on snapshot clones.
+	// Keep it as the compatibility fallback for guests without ssh-keyscan or
+	// an sshd PID file.
 	if err := runIdentityCommand("systemctl", "reload", "ssh.service"); err == nil {
 		return nil
 	}
@@ -128,6 +141,59 @@ func restartSSHService() error {
 		}
 	}
 	return lastErr
+}
+
+func reloadSSHWithSignal() error {
+	const pidPath = "/run/sshd.pid"
+	rawPID, err := os.ReadFile(pidPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", pidPath, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil || pid <= 1 {
+		return fmt.Errorf("invalid sshd pid %q", strings.TrimSpace(string(rawPID)))
+	}
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return fmt.Errorf("verify sshd pid %d: %w", pid, err)
+	}
+	if strings.TrimSpace(string(comm)) != "sshd" {
+		return fmt.Errorf("pid %d is %q, not sshd", pid, strings.TrimSpace(string(comm)))
+	}
+	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+		return fmt.Errorf("signal sshd pid %d: %w", pid, err)
+	}
+
+	expected, err := os.ReadFile(sshHostKeyPath("ed25519") + ".pub")
+	if err != nil {
+		return fmt.Errorf("read generated ssh public key: %w", err)
+	}
+	want := strings.Fields(string(expected))
+	if len(want) < 2 {
+		return errors.New("generated ssh public key is malformed")
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		out, scanErr := exec.Command("ssh-keyscan", "-T", "1", "-t", "ed25519", "127.0.0.1").CombinedOutput()
+		if scanErr == nil && sshKeyscanMatches(out, want[0], want[1]) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sshd did not serve the new host key: %w", scanErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func sshKeyscanMatches(out []byte, keyType, keyBody string) bool {
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == keyType && fields[2] == keyBody {
+			return true
+		}
+	}
+	return false
 }
 
 // sshHostKeyPath names a host key beside the ones sshHostKeyPattern matches, so

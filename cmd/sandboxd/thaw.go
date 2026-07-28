@@ -30,6 +30,8 @@ const (
 var (
 	snapshotPollArmed atomic.Bool
 	thawPollWake      = make(chan struct{}, 1)
+	thawPollReady     = make(chan struct{}, 1)
+	thawPollReadyWait = 500 * time.Millisecond
 	runIPBatch        = func(batch string) ([]byte, error) {
 		cmd := exec.Command("ip", "-batch", "-")
 		cmd.Stdin = strings.NewReader(batch)
@@ -94,6 +96,16 @@ func runThawAgent() {
 				snapshotPollArmed.Store(false)
 			}
 		}
+		// The snapshot arm endpoint does not return until the polling goroutine
+		// reaches this point. That makes the captured state deterministic: the
+		// restored clone is sleeping on the 5 ms armed timer, rather than
+		// potentially retaining a partially elapsed 200 ms normal timer.
+		if snapshotPollArmed.Load() {
+			select {
+			case thawPollReady <- struct{}{}:
+			default:
+			}
+		}
 		waitForThawPoll()
 	}
 }
@@ -104,10 +116,27 @@ func handleSnapshotPoll(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
 		return
 	}
+	if req.Armed {
+		for {
+			select {
+			case <-thawPollReady:
+			default:
+				goto readyDrained
+			}
+		}
+	}
+readyDrained:
 	snapshotPollArmed.Store(req.Armed)
 	select {
 	case thawPollWake <- struct{}{}:
 	default:
+	}
+	if req.Armed {
+		select {
+		case <-thawPollReady:
+		case <-time.After(thawPollReadyWait):
+			log.Printf("snapshot-poll: thaw loop did not acknowledge fast polling within %s", thawPollReadyWait)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"armed": req.Armed})
 }

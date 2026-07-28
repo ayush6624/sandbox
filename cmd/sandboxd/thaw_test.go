@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestApplyIdentityUsesOneValidatedIPBatch(t *testing.T) {
@@ -43,20 +44,31 @@ func TestApplyIdentityUsesOneValidatedIPBatch(t *testing.T) {
 
 func TestSnapshotPollHandlerArmsAndDisarms(t *testing.T) {
 	snapshotPollArmed.Store(false)
+	oldReadyWait := thawPollReadyWait
+	thawPollReadyWait = time.Second
 	t.Cleanup(func() {
 		snapshotPollArmed.Store(false)
+		thawPollReadyWait = oldReadyWait
 		for {
 			select {
 			case <-thawPollWake:
+			case <-thawPollReady:
 			default:
 				return
 			}
 		}
 	})
 
+	ackDone := make(chan struct{})
+	go func() {
+		defer close(ackDone)
+		<-thawPollWake
+		thawPollReady <- struct{}{}
+	}()
 	req := httptest.NewRequest(http.MethodPost, "/snapshot-poll", strings.NewReader(`{"armed":true}`))
 	rec := httptest.NewRecorder()
 	handleSnapshotPoll(rec, req)
+	<-ackDone
 	if rec.Code != http.StatusOK || !snapshotPollArmed.Load() {
 		t.Fatalf("arm response=%d armed=%t body=%s", rec.Code, snapshotPollArmed.Load(), rec.Body.String())
 	}

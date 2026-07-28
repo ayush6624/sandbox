@@ -16,13 +16,16 @@ func setupIdentityEnv(t *testing.T) string {
 	oldMarker, oldPattern := guestIdentityMarker, sshHostKeyPattern
 	oldSSHDir, oldAuthorized := sshDir, authorizedKeysPath
 	oldRun := runIdentityCommand
+	oldDirect := reloadSSHDirect
 	oldDelay := identityRestartDelay
 	t.Cleanup(func() {
 		guestIdentityMarker, sshHostKeyPattern = oldMarker, oldPattern
 		sshDir, authorizedKeysPath = oldSSHDir, oldAuthorized
 		runIdentityCommand = oldRun
+		reloadSSHDirect = oldDirect
 		identityRestartDelay = oldDelay
 	})
+	reloadSSHDirect = func() error { return errors.New("direct reload unavailable in test") }
 	identityRestartDelay = 0
 
 	guestIdentityMarker = filepath.Join(dir, "state", "identity")
@@ -148,10 +151,13 @@ func TestInitializeGuestIdentityGeneratesEd25519HostKeyOnly(t *testing.T) {
 
 func TestRestartSSHServiceRetriesAfterResettingFailure(t *testing.T) {
 	oldRun, oldDelay := runIdentityCommand, identityRestartDelay
+	oldDirect := reloadSSHDirect
 	t.Cleanup(func() {
 		runIdentityCommand = oldRun
+		reloadSSHDirect = oldDirect
 		identityRestartDelay = oldDelay
 	})
+	reloadSSHDirect = func() error { return errors.New("direct reload unavailable in test") }
 	identityRestartDelay = 0
 
 	restarts, resets := 0, 0
@@ -181,6 +187,39 @@ func TestRestartSSHServiceRetriesAfterResettingFailure(t *testing.T) {
 	}
 	if restarts != 3 || resets != 3 {
 		t.Fatalf("restart attempts=%d resets=%d, want 3 and 3", restarts, resets)
+	}
+}
+
+func TestRestartSSHServiceUsesVerifiedDirectReload(t *testing.T) {
+	oldRun, oldDirect := runIdentityCommand, reloadSSHDirect
+	t.Cleanup(func() {
+		runIdentityCommand = oldRun
+		reloadSSHDirect = oldDirect
+	})
+
+	directCalls := 0
+	reloadSSHDirect = func() error {
+		directCalls++
+		return nil
+	}
+	runIdentityCommand = func(string, ...string) error {
+		return errors.New("systemctl must not run after direct reload")
+	}
+	if err := restartSSHService(); err != nil {
+		t.Fatal(err)
+	}
+	if directCalls != 1 {
+		t.Fatalf("direct reload calls=%d, want 1", directCalls)
+	}
+}
+
+func TestSSHKeyscanMatchesGeneratedKey(t *testing.T) {
+	out := []byte("# 127.0.0.1:22 SSH-2.0-OpenSSH\n127.0.0.1 ssh-ed25519 AAAAcorrect\n")
+	if !sshKeyscanMatches(out, "ssh-ed25519", "AAAAcorrect") {
+		t.Fatal("matching keyscan output was rejected")
+	}
+	if sshKeyscanMatches(out, "ssh-ed25519", "AAAAinherited") {
+		t.Fatal("inherited keyscan output was accepted")
 	}
 }
 
