@@ -516,6 +516,9 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 		}
 		return fmt.Errorf("start clone: %w", err)
 	}
+	if err := provisioner.WakeThawAgent(sb.TapDevice); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] thaw wake on %s failed (poll fallback remains): %v\n", sb.ID, sb.TapDevice, err)
+	}
 	c := &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
 		startedAt: startedAt, setupTime: setupTime, launchTime: rt.LaunchTimings,

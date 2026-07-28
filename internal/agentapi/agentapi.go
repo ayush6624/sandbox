@@ -8,6 +8,14 @@ import "time"
 // reaches it directly at guestIP:Port over the bridge (no DNAT involved).
 const Port = 8090
 
+// ThawWakeEtherType and ThawWakeMagic identify the private Ethernet frame the
+// host sends across an unbridged tap immediately after resuming a clone. It is
+// only a latency hint; MMDS polling remains the correctness fallback.
+const (
+	ThawWakeEtherType = 0x88B5
+	ThawWakeMagic     = "sandbox-thaw-v1"
+)
+
 // DefaultTimeout bounds command execution when ExecRequest.TimeoutSec is 0.
 const DefaultTimeout = 60 * time.Second
 

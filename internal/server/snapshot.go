@@ -593,6 +593,9 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", err)}
 	}
+	if err := provisioner.WakeThawAgent(sb.TapDevice); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] thaw wake on %s failed (poll fallback remains): %v\n", id, sb.TapDevice, err)
+	}
 	return &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
 		baseSnap: snap.ID, independent: true, startedAt: startedAt,
