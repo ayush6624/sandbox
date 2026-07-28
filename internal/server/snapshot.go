@@ -117,7 +117,13 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 			if err := vm.Resume(context.Background(), m); err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] resume after snapshot failed: %v\n", id, err)
 			}
-			setGuestSnapshotPoll(context.Background(), sb.GuestIP, false)
+			// A golden source is destroyed immediately below. Do not disarm it:
+			// Firecracker can resume against the snapshot's memory backing, so
+			// writing false here can leak the normal polling state back into
+			// the supposedly armed golden snapshot.
+			if !golden {
+				setGuestSnapshotPoll(context.Background(), sb.GuestIP, false)
+			}
 		}
 	}
 	defer resume()

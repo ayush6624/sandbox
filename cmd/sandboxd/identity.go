@@ -210,10 +210,13 @@ func sshListenerServesKey(expected []byte) (bool, error) {
 		Timeout: 200 * time.Millisecond,
 	}
 	_, _, _, handshakeErr := ssh.NewClientConn(conn, "127.0.0.1:22", cfg)
+	if matched {
+		return true, nil
+	}
 	if !errors.Is(handshakeErr, errSSHHostKeyObserved) {
 		return false, handshakeErr
 	}
-	return matched, nil
+	return false, nil
 }
 
 // sshHostKeyPath names a host key beside the ones sshHostKeyPattern matches, so

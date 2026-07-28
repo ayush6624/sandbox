@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -62,7 +61,6 @@ func announceIdentity(iface, ipStr, macStr string) error {
 		if err := unix.Sendto(fd, frame, 0, dst); err != nil {
 			return err
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 	return nil
 }
