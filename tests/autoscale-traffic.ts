@@ -221,10 +221,21 @@ class ScenarioContext {
   }
 
   async kill(held: Held): Promise<void> {
+    // Drop from `held` BEFORE issuing the delete, not after. The invariant
+    // monitor runs concurrently and asserts that every id still in `held` is
+    // present in GET /sandboxes, so a delete that completes while the id is
+    // still in the map is a guaranteed false failure. Deleting first made
+    // create-exec-kill-churn report
+    // "held sandbox <id> disappeared from gateway list" on 2026-07-28 after 229
+    // successful creates — the sandbox had been deleted by this very call
+    // (DELETE ... 204, one second after two successful execs). At 360 churn
+    // iterations and concurrency 96 the window is near-certain to be hit.
+    this.held.delete(held.sandbox.sandboxId)
     try {
       await held.sandbox.kill()
-      this.held.delete(held.sandbox.sandboxId)
     } catch (error) {
+      // Put it back so killAll() still retries it during cleanup.
+      this.held.set(held.sandbox.sandboxId, held)
       this.record('kill', error, held)
     }
   }
