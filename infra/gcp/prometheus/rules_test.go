@@ -133,3 +133,38 @@ func TestScaleInCeilingIncludesGatewayWatermark(t *testing.T) {
 		t.Error("worker policy does not cap its target with sandbox:workers_scale_in_ceiling")
 	}
 }
+
+// The scale-in policy query MUST be wrapped so its result is label-free.
+// `(A < B) or B` has branch-dependent labels: max_over_time() strips __name__ so
+// branch A is bare, while branch B is the raw recording rule and keeps
+// __name__. The autoscaler's Prometheus APM plugin reads a named result as NO
+// DATA, so pass-through produced a target of 0 and the fleet could not scale in
+// — 259 consecutive count.original:0 evaluations on 2026-07-28. It breaks
+// exactly when the ceiling binds, i.e. mid-burst.
+func TestScaleInPolicyQueryIsLabelFree(t *testing.T) {
+	policy, err := os.ReadFile("../nomad/policies/workers.hcl.tpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var query string
+	for _, line := range strings.Split(string(policy), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "query") && strings.Contains(trimmed, "workers_desired") {
+			query = trimmed
+			break
+		}
+	}
+	if query == "" {
+		t.Fatal("scale-in policy query not found")
+	}
+	if !strings.Contains(query, "sandbox:workers_scale_in_ceiling") {
+		t.Fatalf("policy query lost its scale-in ceiling:\n%s", query)
+	}
+	// The whole min() expression must sit inside an aggregation that drops
+	// labels. Without it the `or` fallback branch returns a named series.
+	value := query[strings.Index(query, "\"")+1:]
+	value = strings.TrimSuffix(value, "\"")
+	if !strings.HasPrefix(value, "sum(") || !strings.HasSuffix(value, ")") {
+		t.Errorf("policy query must be wrapped in a label-dropping aggregation (sum(...)):\n%s", value)
+	}
+}

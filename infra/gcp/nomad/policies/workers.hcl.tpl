@@ -63,9 +63,21 @@ scaling "sandbox_workers" {
     # sides reduce to an empty label set here, so they match. The ceiling itself
     # is the recording rule sandbox:workers_scale_in_ceiling. Verified against
     # the live fleet in both directions before deploying.
+    # The outer sum() is REQUIRED, not cosmetic. `(A < B) or B` returns A when
+    # the comparison holds and B otherwise, and those two branches have
+    # DIFFERENT label sets: max_over_time() strips __name__, so branch A is
+    # label-free, while branch B is the raw recording rule and still carries
+    # __name__="sandbox:workers_scale_in_ceiling". The autoscaler's Prometheus
+    # APM plugin reads a named result as no data, so the metric silently became
+    # 0 and pass-through produced a target of 0 (capped to min). Measured
+    # 2026-07-28: 259 consecutive evaluations logged count.original:0 with an
+    # empty reason_history, and the fleet could not scale in at all. It fails
+    # exactly when the ceiling BINDS — i.e. during a burst — which is the worst
+    # possible time. sum() drops every label, so both branches present the same
+    # single label-free sample the plugin got before this cap existed.
     check "workers_desired" {
       source = "prometheus"
-      query  = "(max_over_time(sandbox:workers_desired[${SCALE_DOWN_WINDOW}]) < sandbox:workers_scale_in_ceiling) or sandbox:workers_scale_in_ceiling"
+      query  = "sum((max_over_time(sandbox:workers_desired[${SCALE_DOWN_WINDOW}]) < sandbox:workers_scale_in_ceiling) or sandbox:workers_scale_in_ceiling)"
 
       strategy "pass-through" {}
     }
