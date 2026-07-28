@@ -213,6 +213,12 @@ cmd_golden() {
   scp "${SSH_OPTS[@]}" "$tar" "${SSH_USER}@${EXT_IP}:/tmp/gsrc.tgz"
   sshx 'sudo rm -rf /opt/sandbox-bake && sudo mkdir -p /opt/sandbox-bake && sudo tar xzf /tmp/gsrc.tgz -C /opt/sandbox-bake && rm /tmp/gsrc.tgz'
 
+  echo ">> [2b/5] refresh sandboxd in the base rootfs from this release"
+  # Do not assume the worker-family head and the local release were baked from
+  # the same commit. The golden data disk is the rootfs source for new workers;
+  # install + stamp the exact sandboxd copied above before staging that rootfs.
+  sshx 'cd /opt/sandbox-bake && sudo ./bin/sandbox install-agent --config configs/devbox.json --agent ./bin/sandboxd'
+
   echo ">> [3/5] stage rootfs + build golden on the data disk (serve standalone, ~1 min)"
   sshx 'sudo bash -s' <<'GOLDEN'
 set -euxo pipefail
