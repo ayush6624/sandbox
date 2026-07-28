@@ -35,7 +35,16 @@ scaling "sandbox_workers" {
     cooldown            = "1m"
     evaluation_interval = "5s"
 
-    # SCALE-IN ONLY. The gateway is the sole scale-OUT writer (its
+    # INTENDED TO BE SCALE-IN ONLY, BUT NOT YET AIRTIGHT. Measured 2026-07-28:
+    # this policy still scaled out (from=5 to=6) after a burst drained, because
+    # the ceiling below uses sandbox_hosts_live, which counts resumed standby
+    # workers that heartbeat to the gateway without being part of the MIG
+    # targetSize the autoscaler compares against — so hosts_live=8 vs target=5
+    # left room for a latched max_over_time peak of 6. Fix is to cap on the
+    # MIG's real targetSize (the gateway holds the GCE client and permission to
+    # read and export it). See docs/autoscaling-latency.md "Known gap".
+    #
+    # The gateway is the sole scale-OUT writer (its
     # queue-triggered, level-triggered direct path reacts in ~1s where this loop
     # needs ~10s, and ~189s if the request lands in the confirmation blackout).
     # Two independent writers that GROW the group can ratchet it above demand,

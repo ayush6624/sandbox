@@ -63,9 +63,28 @@ fixed in gateway commit `1ae90f7`.
   gateway artifact SHA-256
   `73f7a6215247342668eeef040862266533bc63c14af3cf5cbb87d7a84eb3d55b`.
 
-Both Go binaries report `vcs.modified=true`. Their hashes and GCP/GCS object
-generations identify the deployed bytes exactly, but clean reproducible build
-provenance remains open.
+Those two binaries reported `vcs.modified=true`. Their hashes and GCP/GCS object
+generations identify the deployed bytes exactly, but they were not clean builds.
+
+**Resolved 2026-07-28.** Go stamps `vcs.modified=true` whenever
+`git status --porcelain` is non-empty, untracked files included, so leftover
+worktree and editor state was enough to dirty every release. Those paths are now
+ignored (`af3833a`), and the release built from that clean tree stamps:
+
+- `vcs.revision=af3833af3908362f06876518b11b6bf3ae205120`,
+  `vcs.time=2026-07-28T06:46:56Z`, **`vcs.modified=false`**, Go 1.25.3;
+- `sandbox` SHA-256
+  `2d693a64fa087dd7459a17574c894e26486a523e3f07e6b788ac6b94b035a715`,
+  22,196,862 bytes, GCS generation `1785221285677119`;
+- `sandboxd` SHA-256
+  `eb7eab6eba42d502532012ef918d61c0050a35b14db6386edaf65c24f7e52cc6`,
+  9,855,960 bytes, GCS generation `1785221270889960`;
+- published at `gs://ratio-experiments-sandbox-releases/releases/af3833a/`.
+
+The control plane runs this release. Workers still run `a223889` — the gateway
+change is control-plane only, and `worker-release` persists across the gateway
+restart, so no worker was release-gated during the deploy. Rebaking the worker
+image onto a clean-stamped `sandboxd` remains outstanding.
 
 ### 2026-07-27 rigorous workload matrix
 
@@ -101,9 +120,38 @@ gateway/rule/autoscaler cadence to 5 seconds. Its release-attributed final run
 again passed correctness and cleanup (160/160, zero errors, zero listed
 sandboxes; p50/p90/p95/p99/max
 15.739/35.056/36.162/37.528/38.422 s), but the p95 acceptance bound is 30 s.
-Therefore the pathological stall is fixed and the 60-second max bound passes,
-but autoscaling responsiveness remains open. The targeted traffic group and
-isolated sawtooth campaign also remain pending.
+
+Decomposing that run showed ~10.2 s of the queued-create path was
+Nomad-autoscaler decision latency, ~13.0 s worker resume, and the rest
+per-worker drain. Commit `af3833a` therefore makes the **gateway** the sole
+scale-out writer — level-triggered on every demand change, with a grow-only
+watermark bounded at demand+1 — and caps the autoscaler to scale-in only via
+the `sandbox:workers_scale_in_ceiling` recording rule. Both PromQL branches
+were verified against the live fleet before deploying.
+
+The rerun on the same floor and worker release `a223889` passes the SLO:
+160/160, zero errors, verified cleanup, p50/p95/p99/max
+**16.004/26.074/26.805/26.995 s**, wall 48.2 s. Exactly one resize was issued
+(`sandbox_direct_scale_out_total 1`, zero failures). Demand → usable capacity
+fell from ~23.2 s to ~13.0 s, which is now pure worker resume time.
+
+Autoscaling correctness, the 60-second maximum, and the 30-second p95 bound
+therefore all pass.
+
+**One defect was found in the same run.** The scale-in cap does not actually
+confine the autoscaler to scale-in: ~2.5 minutes after the burst drained it
+logged `from=5 to=6 reason="scaling up because metric is 6"`. The ceiling is
+`max(sandbox_hosts_live, sandbox_scale_out_requested)`, and `hosts_live` (8)
+exceeded the MIG `targetSize` (5) because resumed standby workers heartbeat to
+the gateway without being counted in that target — so a latched
+`max_over_time` peak of 6 was a legal scale-up. This did not affect the p95
+result, but the single-writer invariant is not yet enforced and the fleet can
+still over-scale after demand is gone. The fix is to cap on the MIG's real
+`targetSize`, which the gateway can read and export directly; not yet
+implemented.
+
+Still open: that fix, the targeted traffic group, the isolated sawtooth
+campaign, and a confirmed return to the fleet floor.
 
 ## Remediation validation
 

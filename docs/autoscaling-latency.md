@@ -102,6 +102,77 @@ the decision back near ~1 s) plus ~12 s of drain. It is achievable but tight,
 and it depends on restoring event-driven scale-out **without** reintroducing
 two independent MIG writers.
 
+### Resolved — gateway-owned scale-out (2026-07-28, `af3833a`)
+
+That is what `af3833a` does: the gateway became the sole scale-**out** writer
+with a level-triggered, grow-only watermark, and the Nomad autoscaler was
+capped to scale-**in** only via the `sandbox:workers_scale_in_ceiling`
+recording rule. Same canonical workload, same floor, same worker release
+`a223889`. Evidence bundle
+`tests/results/autoscale-20260728-gateway-scaleout/` (`SHA256SUMS` verified).
+
+| Metric | `ea0f707` | `af3833a` | Δ |
+| --- | ---: | ---: | ---: |
+| Create p50 | 15.739 s | 16.004 s | +0.265 s |
+| **Create p95** | **36.162 s** | **26.074 s** | **−10.088 s** |
+| Create max | 38.422 s | 26.995 s | −11.427 s |
+| Wall time | 59.728 s | 48.2 s | −11.5 s |
+| Demand → usable capacity | ~23.2 s | ~13.0 s | −10.2 s |
+| Largest adjacent-sample gap | 6.664 s | 1.297 s | −5.367 s |
+| Queued (slow-mode) creates | 64 | 39 | −25 |
+
+160/160 succeeded with zero errors and verified cleanup in both runs. The
+improvement matches the predicted ~10 s of autoscaler decision latency almost
+exactly, and the distribution is no longer bimodal — capacity now arrives fast
+enough that queued creates blend into the placed ones.
+
+Exactly one resize was issued for the whole burst
+(`sandbox_direct_scale_out_total 1`, `..._failed_total 0`), logged as
+`direct scale-out requested 5 workers (live=2 occupied=96 queued=64)`, so the
+coalescing and the demand+1 ceiling both held — no ratchet above demand.
+
+The remaining ~13.0 s is worker resume to advertised capacity. That is now the
+hard floor for any request exceeding ready capacity, so further gains need
+[improvement 6](#6-maintain-a-prepared-microvm-pool) or a larger ready
+headroom, not a faster control loop.
+
+**Scale-in is capped, not disabled.** The policy target is
+`min(max_over_time(sandbox:workers_desired[window]), max(hosts_live,
+sandbox_scale_out_requested))`. A low `desired` still drives scale-in normally.
+The watermark term is required: for ~13 s after a resize the new workers exist
+but have not heartbeated, so capping on `hosts_live` alone would scale the
+fleet back down mid-burst.
+
+#### Known gap: the cap does not actually make the autoscaler scale-in-only
+
+Measured on this same run, ~2.5 min after the burst finished, the autoscaler
+still scaled **out**:
+
+```text
+06:56:47 policy_handler: from=5 to=6 reason="scaling up because metric is 6"
+06:57:08 unable to scale target: ... failed to confirm scale out GCE Instance
+         Group: reached retry limit
+```
+
+The cap was permissive because `sandbox_hosts_live` (8) exceeded the MIG's
+`targetSize` (5): resumed standby workers heartbeat to the gateway without
+being part of the target the autoscaler compares against. So the ceiling was 8,
+`max_over_time(desired[15m])` had latched the burst peak of 6, and
+`min(6, 8) = 6 > 5` was a legal scale-up.
+
+This did **not** affect the p95 result — the gateway issued the single resize
+that served the burst, and this fired after the burst had drained — but it
+reproduces the known "over-scales after demand is gone" behavior, since
+`max_over_time` replays a stale peak for the whole window. The invariant that
+`validate-scaling-owner.sh` and the surrounding comments describe is therefore
+**not yet enforced**.
+
+The fix is to cap on the MIG's real `targetSize` rather than a heartbeat-derived
+proxy. The gateway already holds the GCE client and the IAM permission, so it
+can read `targetSize` and export it as `sandbox_mig_target_size`, making the
+ceiling exact and removing the need for the `hosts_live`/watermark maximum
+entirely. Not yet implemented.
+
 One further defect is visible at 36.4 s: a resumed standby worker
 (`32dc09d1`) first heartbeats advertising release `a97b68f` with
 `release_compatible:false`, and only re-heartbeats as `a223889` 2.5 s later.

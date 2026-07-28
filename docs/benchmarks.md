@@ -31,7 +31,7 @@ retained for comparison.
 | Diff snapshot write | **123 ms** (vs ~1.5 s full); uploads ~24× smaller | pause → snapshot written |
 | Cold boot (baseline) | 3.46 s p50 (GCP), ~2.2 s (Hetzner bare metal) | create request → agent answers |
 | Burst churn | **500/500**, 0 errors, 5.0 creates/s sustained | 500 create→exec→terminate @ concurrency 96, hardened release |
-| Autoscaling held burst | **160/160**, 0 errors; p50 15.739 s / p95 36.162 s / max 38.422 s | correctness and 60 s maximum pass; 30 s p95 SLO still fails |
+| Autoscaling held burst | **160/160**, 0 errors; p50 16.004 s / **p95 26.074 s** / max 26.995 s | correctness, 60 s maximum, and the 30 s p95 SLO all pass |
 | Autoscaling traffic validation | **896/896 creates**, **31,256/31,256 connect+identity-exec probes**, 0 failures | standby-boundary, second-wave, long-lived reconciliation, and churn traffic |
 
 Historical headline environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB,
@@ -128,32 +128,45 @@ gateway/autoscaler commit `ea0f707`:
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | Initial hardened run (`2ca73c9`) | 160/160, 0 | 253.805 s | 15.820 s | 229.977 s | 231.297 s | 232.534 s | 232.699 s | correctness pass; p95 and max fail |
 | Committed sizing fix (`e0b3588`) | 160/160, 0 | 58.599 s | 15.737 s | 35.165 s | 36.468 s | 37.089 s | 37.268 s | correctness/max pass; p95 fail |
-| Final canonical run (`ea0f707`) | **160/160, 0** | **59.728 s** | **15.739 s** | **35.056 s** | **36.162 s** | **37.528 s** | **38.422 s** | correctness/max pass; p95 fail |
+| Autoscaler-only canonical run (`ea0f707`) | 160/160, 0 | 59.728 s | 15.739 s | 35.056 s | 36.162 s | 37.528 s | 38.422 s | correctness/max pass; p95 fail |
+| Gateway-owned scale-out (`af3833a`) | **160/160, 0** | **48.2 s** | **16.004 s** | — | **26.074 s** | **26.805 s** | **26.995 s** | **all pass, incl. the 30 s p95 SLO** |
 
 In the initial run, the two warm workers served 96 requests and the first
 scale action added only one 48-slot worker. Sixteen requests then remained
 queued for roughly 3.8 minutes. The sizing fix requested enough capacity in
 one action, removed that pathological tail, and preserved zero-error cleanup.
 
-The final result passes the zero-correctness-error requirement and the
-create-max ≤60 s limit. It does **not** pass the create-p95 ≤30 s SLO:
-36.162 s remains 6.162 s over budget. Production readiness should therefore
-record autoscaling correctness and bounded maximum latency as passed while
-keeping p95 responsiveness open.
-
-The `ea0f707` run's latency is cleanly bimodal — 96 fast creates
-(4.411–17.664 s) placed on the ready workers, and 64 queued creates
+The `ea0f707` run passed correctness and the create-max ≤60 s limit but missed
+the create-p95 ≤30 s SLO by 6.162 s. Its latency was cleanly bimodal — 96 fast
+creates (4.411–17.664 s) placed on the ready workers, and 64 queued creates
 (24.328–38.422 s) waiting on scale-out, separated by a 6.664 s empty gap — so
-p95 is determined entirely by the queued group. Roughly 10.2 s of the queued
-path is autoscaler decision latency, ~13.0 s is worker resume to advertised
-capacity, and up to 14.1 s is per-worker create drain. The full decomposition,
-the evidence bundle, and why event-driven scale-out previously reached
-18.653 s are in
+p95 was determined entirely by the queued group. Roughly 10.2 s of the queued
+path was autoscaler decision latency, ~13.0 s worker resume to advertised
+capacity, and up to 14.1 s per-worker create drain.
+
+`af3833a` moves scale-out to the gateway (level-triggered, grow-only) and caps
+the Nomad autoscaler to scale-in, removing that decision latency. The result
+matches the prediction almost exactly: **p95 26.074 s, a 10.088 s
+improvement**, max 26.995 s (−11.427 s), wall 48.2 s (−11.5 s), still
+160/160 with zero errors and verified cleanup. One resize was issued for the
+whole burst (`sandbox_direct_scale_out_total 1`, zero failures), logged as
+`direct scale-out requested 5 workers (live=2 occupied=96 queued=64)`.
+
+The distribution is no longer bimodal: the largest gap between adjacent
+samples fell from 6.664 s to 1.297 s, and the queued group shrank from 64
+samples to 39 — new capacity now arrives fast enough that queued creates blend
+into the placed ones. Demand → usable new capacity fell from ~23.2 s to
+~13.0 s, which is now essentially pure worker resume time and the hard floor
+for anything exceeding ready capacity.
+
+Evidence bundle `tests/results/autoscale-20260728-gateway-scaleout/`
+(`SHA256SUMS` verified). Full decomposition of both runs in
 [Autoscaling and burst-start latency](autoscaling-latency.md#production-path-today--autoscaler-only-2026-07-27-ea0f707).
 
 The targeted traffic group and the isolated three-cycle sawtooth campaign have
-not yet been rerun on the 2026-07-27 hardened release. The successful 2026-07-25
-traffic results below are historical evidence only.
+not yet been rerun on the hardened release, and the post-burst return to the
+fleet floor under the new capped scale-in policy is still being observed. The
+successful 2026-07-25 traffic results below are historical evidence only.
 
 ## Our numbers in detail
 

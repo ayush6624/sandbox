@@ -9,10 +9,17 @@ set -euo pipefail
 # inside the gce-mig confirmation blackout. On the canonical 160-create held
 # burst that difference was ~10s of create p95.
 #
-# The Nomad Autoscaler keeps the scale-IN half, capped so it can never request
+# The Nomad Autoscaler keeps the scale-IN half, capped so it should not request
 # MORE nodes than the fleet already has. Two writers that both grow can ratchet
 # the target far above demand, which is what the previous version of this script
 # guarded against by forbidding the gateway's flags outright.
+#
+# KNOWN GAP: the cap is not yet airtight. It uses sandbox_hosts_live, which
+# counts resumed standby workers that heartbeat to the gateway but are not part
+# of the MIG targetSize the autoscaler compares against, so the autoscaler was
+# still observed scaling out (from=5 to=6) after a burst drained on 2026-07-28.
+# These checks therefore assert the intended wiring is present, NOT that the
+# invariant holds. See docs/autoscaling-latency.md "Known gap".
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -46,4 +53,4 @@ grep -q 'record: sandbox:workers_scale_in_ceiling' "$RULES" ||
 grep -q 'sandbox_scale_out_requested' "$RULES" ||
   fail "scale-in ceiling ignores the gateway watermark sandbox_scale_out_requested"
 
-echo "PASS: gateway is the sole MIG scale-out writer; autoscaler is capped to scale-in"
+echo "PASS: gateway scale-out wiring present; autoscaler cap configured (see KNOWN GAP above)"

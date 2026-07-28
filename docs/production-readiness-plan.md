@@ -435,10 +435,17 @@ P0 scope boundaries:
    disabled and outside the current production profile.
 2. P0.7 shared-service tenant authorization, quotas, and API
    rate/concurrency limits remain explicitly deferred.
-3. The deployed gateway and worker binaries embed the expected full VCS
-   revisions but report `vcs.modified=true`. Their exact SHA-256 checksums and
-   immutable GCS generations identify what was tested, but a clean,
-   reproducible artifact build remains a P3 release-engineering gap.
+3. The `a223889`/`ea0f707` binaries above embedded the expected full VCS
+   revisions but reported `vcs.modified=true`. That is fixed as of `af3833a`:
+   the ignore rules now keep the tree clean, and the control-plane release
+   built from it stamps `vcs.modified=false` at revision
+   `af3833af3908362f06876518b11b6bf3ae205120` (`sandbox` SHA-256
+   `2d693a64fa087dd7459a17574c894e26486a523e3f07e6b788ac6b94b035a715`, GCS
+   generation `1785221285677119`; `sandboxd` SHA-256
+   `eb7eab6eba42d502532012ef918d61c0050a35b14db6386edaf65c24f7e52cc6`, GCS
+   generation `1785221270889960`). Workers still run the `a223889` image, so
+   rebaking onto a clean-stamped `sandboxd` — plus signing and SBOMs — remains
+   a P3 release-engineering gap.
 
 ## P1: freeze a versioned API contract
 
@@ -667,11 +674,13 @@ bounded resource exhaustion and isolated ENOSPC, live credential rotation,
 single-writer autoscaling correctness, hardened benchmark cleanup, and
 multi-shape autoscaling correctness. P3 remains open because:
 
-- autoscaling create correctness is fixed, but create p95 under the rigorous
-  held-load campaign remains outside the release SLO and needs performance
-  work;
-- the deployed gateway and worker artifacts report `vcs.modified=true`, so
-  clean reproducible builds, signing, and provenance are not yet demonstrated;
+- autoscaling create correctness and create p95 both now pass on the canonical
+  held burst (`af3833a`: 160/160, p95 26.074 s against a 30 s SLO), but the
+  targeted traffic group, the isolated sawtooth campaign, and the post-burst
+  return to floor under the new capped scale-in policy are not yet confirmed;
+- the control-plane release now builds clean (`vcs.modified=false`), but the
+  worker image still carries a dirty-stamped `sandboxd`, and signing, SBOMs,
+  and provenance are not yet demonstrated;
 - the development dependency audit has four high-severity generator-chain
   findings, despite a zero-vulnerability runtime dependency audit;
 - the tracing/SLO, transactional storage, broad outage matrix, backup/restore,
@@ -681,11 +690,13 @@ multi-shape autoscaling correctness. P3 remains open because:
 
 1. Preserve the passing `a223889` rebuilt-image `/v1`, SDK/e2e, security, and
    recovery evidence and reconfirm final local test counts.
-2. Produce clean reproducible gateway and worker artifacts from the release
-   commit, publish their signed provenance/SBOMs, and rerun the release smoke
-   gate against those exact checksums.
-3. Bring autoscaling create p95 inside its release SLO while retaining the
-   passing correctness, capacity, and deterministic-cleanup properties.
+2. Rebake the worker image onto a clean-stamped `sandboxd`, publish signed
+   provenance/SBOMs for both artifacts, and rerun the release smoke gate
+   against those exact checksums. The control-plane half is done (`af3833a`
+   stamps `vcs.modified=false`).
+3. Finish the autoscaling campaign now that create p95 is inside the SLO:
+   confirm the return to floor under the capped scale-in policy, then run the
+   targeted traffic group and the isolated sawtooth campaign.
 4. Resolve or formally accept the development-only generator-chain audit
    findings, select npm publication authority, and publish the SDK.
 5. Complete the remaining P3 failure testing, observability/SLO gates,

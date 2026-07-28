@@ -93,6 +93,12 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// undercut an in-flight scale-out: for ~13s after a resize the new workers
 	// exist but have not heartbeated, so sandbox_hosts_live alone would read as
 	// "too many nodes" and scale the fleet straight back down mid-burst.
+	//
+	// NB that cap is max(hosts_live, this) and is NOT yet a tight bound —
+	// hosts_live counts resumed standby workers outside the MIG targetSize, so
+	// the autoscaler can still scale out. Capping on the real targetSize (which
+	// this gateway could read and export) is the fix; see
+	// docs/autoscaling-latency.md "Known gap".
 	gauge("sandbox_scale_out_requested", "Largest worker count the gateway has requested (grow-only watermark).", int(g.directRequested.Load()))
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
