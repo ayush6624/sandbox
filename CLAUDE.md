@@ -166,15 +166,18 @@ scripts/              Host setup shell scripts
   unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
   opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
   and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, slots_free,
-  sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
+  warm_ready, sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
   `registry.FreeSlots`: tap/IP availability bounded by memory admission) — NOT
   `slots_total - slots_used`, which can overstate capacity when larger memory overrides are
   running; a host still building its golden snapshot advertises `slots_free=0` so fresh
   hosts aren't boot-stormed with cold creates.
   The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
   its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
-  each host reports. `POST /sandboxes` bin-packs onto the fullest live host with free slots
-  (reserve-at-pick so concurrent creates see each other); a create that a host rejects with a
+  each host reports. `POST /sandboxes` first consumes fleet-wide `warm_ready` capacity,
+  bin-packing and reserving those ready VMs across hosts before it falls back to the fullest
+  host with ordinary free slots. Snapshot adoption deliberately uses ordinary placement so
+  it cannot steal default-create ready capacity. Both modes reserve at pick time so concurrent
+  creates see each other. A create that a host rejects with a
   capacity-class error (503/429, e.g. pool exhaustion) or a connection failure **fails over**
   to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
   host errors return 502 without retry. When no slot is free the create
@@ -346,19 +349,36 @@ scripts/              Host setup shell scripts
   then `sandbox ssh <id>` (forwards :22 on first use) or
   `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
   `--jump <bastion>`.
-- **Current jailed production create result (2026-07-29, release `c990555`):**
-  a one-VM-per-worker ready pool (`warm_pool_size: 1`) brings 25 sequential
-  lifecycle creates through the production gateway to p50 **198 ms**, p95
-  **204 ms** (min 196 ms; first-sample max 399 ms). The direct-worker run was
-  p50 **196 ms**, p95 **201 ms**. Results are in
+- **Current jailed production create result (2026-07-29, release `9b6a9fc`;
+  pool hardening landed in `f12c004`):** the production pool is **8 ready VMs per active worker**
+  (`warm_pool_size: 8`). A 16-way hold burst across two active workers was
+  **16/16 ready-pool hits**, zero misses/errors, and zero pool-build failures.
+  Measured from the control VM (removing the Greece→India SSH/Tailscale path),
+  two runs were p50 **71/82 ms**, p95 **130/118 ms**, max **130/118 ms**.
+  A create that also installed a fresh Ed25519 client public key completed in
+  **92 ms**. The same 16-way workload from Greece was p50 **414 ms**, p95
+  **589 ms**: all 16 were still confirmed ready hits, so that tail is transport
+  RTT/tunneling rather than VM creation. The earlier 25-create sequential
+  gateway run remains p50 **198 ms**, p95 **204 ms** (direct worker p50
+  **196 ms**, p95 **201 ms**). Its results are in
   `sdk/typescript/benchmarks/results/lifecycle_c990555_gateway_20260729.json`
-  and `lifecycle_c990555_20260729.json` (results are gitignored).
-  A warming row is a normal jailed Firecracker VM with its own UID/GID, cgroup
+  and `lifecycle_c990555_20260729.json`; the current remote burst artifacts are
+  `burst_9b6a9fc_warmaware16_20260729.json` and
+  `burst_9b6a9fc_warmaware16_repeat_20260729.json` (results are gitignored).
+  A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
   leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
   clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and
   memory capacity but is excluded from routes/lists; create atomically promotes
-  it to `running`, applies request fields/key, and replenishes the pool in the
-  background. `sandbox_warming` exposes the hidden count.
+  it to `running`, resets `created_at` to claim time, applies request fields/key,
+  and replenishes the pool concurrently in the background. A build remains
+  `preparing` and unclaimable until every launch/readiness/security gate has
+  completed; only then does `MarkWarmReady` promote it. The maintainer polls as
+  well as accepting kicks, so an unexpectedly dead ready VM is replenished.
+  Pool startup waits through the standby placement-delay window so refill VMs
+  can suspend without nested-VM interference. `sandbox_warming`,
+  `sandbox_warm_preparing`, `sandbox_warm_claims_total`,
+  `sandbox_warm_misses_total`, and `sandbox_warm_build_failures_total` expose
+  this lifecycle; the gateway also exports aggregate/per-host `warm_ready`.
   **Corrected attribution:** phase timing on an exhausted pool measured a hot
   jailed launch at roughly **24–47 ms** (`prepare` + process-to-API; a cold
   first staging pass can be ~123 ms), not the previously inferred ~390 ms.
