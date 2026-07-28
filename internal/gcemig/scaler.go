@@ -57,6 +57,30 @@ func New(project, zone, mig string, max int) (*Scaler, error) {
 	}, nil
 }
 
+func (s *Scaler) endpoint() string {
+	return fmt.Sprintf("%s/projects/%s/zones/%s/instanceGroupManagers/%s",
+		strings.TrimRight(s.apiBase, "/"),
+		url.PathEscape(s.project), url.PathEscape(s.zone), url.PathEscape(s.mig))
+}
+
+// TargetSize reads the MIG's current target size. This is the authority on how
+// many workers the group has been told to run — unlike a heartbeat-derived
+// count, which also sees resumed standby instances that are not part of the
+// target. The autoscaler's scale-in ceiling is built from this.
+func (s *Scaler) TargetSize(ctx context.Context) (int, error) {
+	token, err := s.token(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var state struct {
+		TargetSize int `json:"targetSize"`
+	}
+	if err := s.doJSON(ctx, http.MethodGet, s.endpoint(), token, &state); err != nil {
+		return 0, fmt.Errorf("read MIG target size: %w", err)
+	}
+	return state.TargetSize, nil
+}
+
 // ScaleOut grows the MIG to desired, capped at the configured maximum. It is a
 // no-op when the MIG target is already at or above desired.
 func (s *Scaler) ScaleOut(ctx context.Context, desired int) error {
@@ -67,27 +91,21 @@ func (s *Scaler) ScaleOut(ctx context.Context, desired int) error {
 		return nil
 	}
 
+	current, err := s.TargetSize(ctx)
+	if err != nil {
+		return err
+	}
+	if current >= desired {
+		return nil
+	}
+
 	token, err := s.token(ctx)
 	if err != nil {
 		return err
 	}
-	endpoint := fmt.Sprintf("%s/projects/%s/zones/%s/instanceGroupManagers/%s",
-		strings.TrimRight(s.apiBase, "/"),
-		url.PathEscape(s.project), url.PathEscape(s.zone), url.PathEscape(s.mig))
-
-	var state struct {
-		TargetSize int `json:"targetSize"`
-	}
-	if err := s.doJSON(ctx, http.MethodGet, endpoint, token, &state); err != nil {
-		return fmt.Errorf("read MIG target size: %w", err)
-	}
-	if state.TargetSize >= desired {
-		return nil
-	}
-
-	resizeURL := endpoint + "/resize?size=" + strconv.Itoa(desired)
+	resizeURL := s.endpoint() + "/resize?size=" + strconv.Itoa(desired)
 	if err := s.doJSON(ctx, http.MethodPost, resizeURL, token, nil); err != nil {
-		return fmt.Errorf("resize MIG from %d to %d: %w", state.TargetSize, desired, err)
+		return fmt.Errorf("resize MIG from %d to %d: %w", current, desired, err)
 	}
 	return nil
 }

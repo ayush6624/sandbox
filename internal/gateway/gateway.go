@@ -159,6 +159,14 @@ type Gateway struct {
 	directScaleStarted atomic.Int64
 	directScaleFailed  atomic.Int64
 
+	// migTarget is the provider's own target worker count, polled when the
+	// scaler implements TargetSizer. Exported as sandbox_mig_target_size so the
+	// autoscaler's scale-in ceiling can be exact; migTargetKnown stays false
+	// until a poll succeeds, so a provider error publishes no series rather than
+	// a misleading zero.
+	migTarget      atomic.Int64
+	migTargetKnown atomic.Bool
+
 	// expectedRelease gates placement during worker rollouts. A suspended VM
 	// can resume an old serve process and heartbeat before Nomad replaces its
 	// stale allocation. Keep its routes, but force free capacity to zero until
@@ -193,6 +201,16 @@ type Gateway struct {
 // Implementations must treat desired as a grow-only request.
 type DirectScaler interface {
 	ScaleOut(context.Context, int) error
+}
+
+// TargetSizer is an optional DirectScaler capability: the provider's current
+// target worker count. When available the gateway exports it as
+// sandbox_mig_target_size, which is what the autoscaler's scale-in ceiling is
+// built from. A heartbeat-derived count is NOT a substitute — it also counts
+// resumed standby workers that sit outside the target, which is what let the
+// autoscaler scale out (from=5 to=6) past its cap on 2026-07-28.
+type TargetSizer interface {
+	TargetSize(context.Context) (int, error)
 }
 
 // New returns a Gateway. token gates all inbound requests (clients and host
@@ -283,6 +301,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 		return err
 	}
 	go g.pruneLoop(ctx)
+	go g.migTargetLoop(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", g.handleRegister)
@@ -881,6 +900,48 @@ func (g *Gateway) evaluateDirectScaleOut() {
 	}
 	fmt.Fprintf(os.Stderr, "gateway: direct scale-out requested %d workers (live=%d occupied=%d queued=%d)\n",
 		desired, live, occupied, queued)
+	// Re-read immediately so the exported target reflects this resize instead of
+	// staying a poll interval stale — the scale-in ceiling is derived from it.
+	if sizer, ok := g.directScaler.(TargetSizer); ok {
+		g.refreshMIGTarget(context.Background(), sizer)
+	}
+}
+
+// migTargetPollInterval matches the Prometheus scrape cadence: one cheap
+// provider GET per interval keeps sandbox_mig_target_size fresh enough for the
+// scale-in ceiling without adding meaningful API load.
+const migTargetPollInterval = 10 * time.Second
+
+// migTargetLoop keeps the exported provider target size current. It is a no-op
+// unless the configured scaler can report one.
+func (g *Gateway) migTargetLoop(ctx context.Context) {
+	sizer, ok := g.directScaler.(TargetSizer)
+	if !ok {
+		return
+	}
+	ticker := time.NewTicker(migTargetPollInterval)
+	defer ticker.Stop()
+	for {
+		g.refreshMIGTarget(ctx, sizer)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (g *Gateway) refreshMIGTarget(ctx context.Context, sizer TargetSizer) {
+	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	size, err := sizer.TargetSize(pollCtx)
+	if err != nil {
+		// Keep the last known value: a transient provider error must not drop
+		// the ceiling and hand the autoscaler a scale-in it shouldn't make.
+		return
+	}
+	g.migTarget.Store(int64(size))
+	g.migTargetKnown.Store(true)
 }
 
 func ceilDiv(n, d int) int {

@@ -1150,3 +1150,84 @@ func TestFailedDirectScaleOutIsCountedAndRetriable(t *testing.T) {
 		t.Fatal("started direct scale-out was not counted")
 	}
 }
+
+// gatewayMetrics renders the gateway's own /metrics exposition.
+func gatewayMetrics(g *Gateway) string {
+	rr := httptest.NewRecorder()
+	g.handleMetrics(rr, httptest.NewRequest("GET", "/metrics", nil))
+	return rr.Body.String()
+}
+
+// sizingScaler reports a provider target size, so the gateway can export the
+// authority the autoscaler's scale-in ceiling is built from.
+type sizingScaler struct {
+	countingDirectScaler
+	size atomic.Int64
+	err  error
+}
+
+func (s *sizingScaler) TargetSize(context.Context) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	return int(s.size.Load()), nil
+}
+
+// A heartbeat-derived count is not a valid ceiling: it also counts resumed
+// standby workers outside the MIG target, which let the autoscaler scale out
+// past its cap (from=5 to=6) on 2026-07-28. The gateway must therefore export
+// the provider's own target size.
+func TestExportsProviderTargetSizeForScaleInCeiling(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 4, slotsUsed: 0, slotsFree: 4})
+	scaler := &sizingScaler{}
+	scaler.size.Store(5)
+	if err := g.ConfigureDirectScaleOut(scaler, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(gatewayMetrics(g), "sandbox_mig_target_size") {
+		t.Fatal("target size must not be exported before a successful poll")
+	}
+
+	g.refreshMIGTarget(context.Background(), scaler)
+	body := gatewayMetrics(g)
+	if !strings.Contains(body, "sandbox_mig_target_size 5") {
+		t.Fatalf("provider target size not exported:\n%s", body)
+	}
+}
+
+// A transient provider error must keep the last known target. Publishing 0
+// would collapse the ceiling and hand the autoscaler a spurious scale-in.
+func TestProviderTargetSizeErrorKeepsLastKnownValue(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 4, slotsUsed: 0, slotsFree: 4})
+	scaler := &sizingScaler{}
+	scaler.size.Store(6)
+	if err := g.ConfigureDirectScaleOut(scaler, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+	g.refreshMIGTarget(context.Background(), scaler)
+
+	scaler.err = errors.New("provider unavailable")
+	g.refreshMIGTarget(context.Background(), scaler)
+
+	body := gatewayMetrics(g)
+	if !strings.Contains(body, "sandbox_mig_target_size 6") {
+		t.Fatalf("provider error must not drop the last known target:\n%s", body)
+	}
+	if strings.Contains(body, "sandbox_mig_target_size 0") {
+		t.Fatal("provider error published a zero target")
+	}
+}
+
+// A scaler with no TargetSize capability must stay silent, not export a zero.
+func TestScalerWithoutTargetSizeExportsNothing(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 4, slotsUsed: 0, slotsFree: 4})
+	if err := g.ConfigureDirectScaleOut(&countingDirectScaler{}, 4, 0); err != nil {
+		t.Fatal(err)
+	}
+	// migTargetLoop returns immediately when the scaler cannot report a size.
+	g.migTargetLoop(context.Background())
+	if strings.Contains(gatewayMetrics(g), "sandbox_mig_target_size") {
+		t.Fatal("scaler without TargetSize must export no target series")
+	}
+}

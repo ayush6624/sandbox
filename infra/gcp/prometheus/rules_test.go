@@ -102,10 +102,20 @@ func TestScaleInCeilingIncludesGatewayWatermark(t *testing.T) {
 	if expr == "" {
 		t.Fatal("scale-in ceiling expression not found")
 	}
+	// The ceiling's authority must be the PROVIDER target size. Deriving it from
+	// heartbeats let the autoscaler scale out past the cap (from=5 to=6) on
+	// 2026-07-28, because hosts_live also counts resumed standby workers that
+	// sit outside the MIG target.
+	if !strings.HasPrefix(strings.TrimPrefix(expr, "expr: "),
+		`sum(sandbox_mig_target_size{job="sandbox-gateway"})`) {
+		t.Errorf("scale-in ceiling must prefer the provider target size:\n%s", expr)
+	}
 	for _, want := range []string{
+		`sum(sandbox_mig_target_size{job="sandbox-gateway"})`,
+		// Fallback for a gateway predating the metric, or before a poll succeeds.
 		`sum(sandbox_hosts_live{job="sandbox-gateway"})`,
 		`sum(sandbox_scale_out_requested{job="sandbox-gateway"})`,
-		// Keeps scale-in alive against a gateway predating the watermark metric.
+		// Keeps scale-in alive rather than emitting an empty expression.
 		"or vector(0)",
 	} {
 		if !strings.Contains(expr, want) {

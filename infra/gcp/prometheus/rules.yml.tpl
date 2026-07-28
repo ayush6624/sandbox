@@ -70,20 +70,24 @@ groups:
       # Ceiling for the autoscaler's SCALE-IN-ONLY policy. The gateway owns
       # scale-out (its direct path reacts in ~1s vs this loop's ~10s, and ~189s
       # if the request lands in the gce-mig confirmation blackout), so the
-      # autoscaler must never request MORE nodes than the fleet already has —
-      # two writers that both grow can ratchet the group above demand.
+      # autoscaler must never request MORE nodes than the group is already
+      # targeting — two writers that both grow can ratchet it above demand.
       #
-      # max(hosts_live, scale_out_requested), NOT hosts_live alone: for ~13s
-      # after the gateway resizes, the new workers exist but have not
-      # heartbeated, so hosts_live reads low and an uncapped policy would scale
-      # the fleet back down in the middle of the burst it was just sized for.
-      # sandbox_scale_out_requested is the gateway's grow-only watermark, which
-      # re-baselines to the live host count once the create queue drains, so
-      # scale-in still works — just never against an in-flight scale-out.
+      # The ceiling is the PROVIDER's target size, which the gateway polls and
+      # exports. It must NOT be derived from heartbeats: sandbox_hosts_live also
+      # counts resumed standby workers that sit outside the MIG target, and
+      # capping on it let the autoscaler scale out past this cap anyway
+      # (measured 2026-07-28: hosts_live=8 vs targetSize=5 admitted a latched
+      # max_over_time peak of 6, logged `from=5 to=6 scaling up because metric
+      # is 6`). targetSize is the same number the gce-mig target compares
+      # against, so min(desired, targetSize) can only ever hold or shrink.
       #
-      # `(A > B) or B` is PromQL element-wise max. `or vector(0)` keeps the rule
-      # alive against a gateway that predates sandbox_scale_out_requested;
-      # without it the series is absent, the whole expression is empty, and
-      # scale-in would silently stop.
+      # Fallback when sandbox_mig_target_size is absent (a gateway predating it,
+      # or no successful provider poll yet): max(hosts_live, the gateway's
+      # grow-only watermark). That is the previous, looser behaviour — it can
+      # still admit a scale-out, but it never blocks scale-in, which is the
+      # safer failure direction. `(A > B) or B` is PromQL element-wise max, and
+      # `or vector(0)` keeps the expression non-empty so scale-in cannot
+      # silently stop.
       - record: sandbox:workers_scale_in_ceiling
-        expr: (sum(sandbox_hosts_live{job="sandbox-gateway"}) > (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))) or (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))
+        expr: sum(sandbox_mig_target_size{job="sandbox-gateway"}) or ((sum(sandbox_hosts_live{job="sandbox-gateway"}) > (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))) or (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0)))

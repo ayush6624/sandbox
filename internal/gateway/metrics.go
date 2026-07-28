@@ -89,17 +89,21 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_total Queue-triggered direct scale-out requests submitted to the scaler.\n# TYPE sandbox_direct_scale_out_total counter\nsandbox_direct_scale_out_total %d\n", g.directScaleStarted.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_failed_total Queue-triggered direct scale-out requests that failed.\n# TYPE sandbox_direct_scale_out_failed_total counter\nsandbox_direct_scale_out_failed_total %d\n", g.directScaleFailed.Load())
 	// The grow-only watermark the gateway has already asked the MIG to reach.
-	// The autoscaler's scale-IN policy caps its target with this, so it cannot
-	// undercut an in-flight scale-out: for ~13s after a resize the new workers
-	// exist but have not heartbeated, so sandbox_hosts_live alone would read as
-	// "too many nodes" and scale the fleet straight back down mid-burst.
-	//
-	// NB that cap is max(hosts_live, this) and is NOT yet a tight bound —
-	// hosts_live counts resumed standby workers outside the MIG targetSize, so
-	// the autoscaler can still scale out. Capping on the real targetSize (which
-	// this gateway could read and export) is the fix; see
-	// docs/autoscaling-latency.md "Known gap".
+	// Diagnostic only — it is NOT the scale-in ceiling. It re-baselines to the
+	// live host count whenever the queue empties, so it can read lower than the
+	// fleet actually is.
 	gauge("sandbox_scale_out_requested", "Largest worker count the gateway has requested (grow-only watermark).", int(g.directRequested.Load()))
+	// The provider's OWN target worker count, and the authority the autoscaler's
+	// scale-in ceiling is built from. Capping on sandbox_hosts_live instead let
+	// the autoscaler scale out past its cap (from=5 to=6, measured 2026-07-28):
+	// heartbeats also count resumed standby workers that sit outside the target,
+	// so hosts_live read 8 against a target of 5 and a latched max_over_time
+	// peak of 6 was a legal scale-up. Emitted only once a poll has succeeded, so
+	// a provider error publishes nothing rather than a zero that would collapse
+	// the ceiling and trigger a spurious scale-in.
+	if g.migTargetKnown.Load() {
+		gauge("sandbox_mig_target_size", "Provider target worker count (authority for the autoscaler scale-in ceiling).", int(g.migTarget.Load()))
+	}
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))

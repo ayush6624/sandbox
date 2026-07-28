@@ -14,12 +14,12 @@ set -euo pipefail
 # the target far above demand, which is what the previous version of this script
 # guarded against by forbidding the gateway's flags outright.
 #
-# KNOWN GAP: the cap is not yet airtight. It uses sandbox_hosts_live, which
-# counts resumed standby workers that heartbeat to the gateway but are not part
-# of the MIG targetSize the autoscaler compares against, so the autoscaler was
-# still observed scaling out (from=5 to=6) after a burst drained on 2026-07-28.
-# These checks therefore assert the intended wiring is present, NOT that the
-# invariant holds. See docs/autoscaling-latency.md "Known gap".
+# The cap's authority is the PROVIDER's target size (sandbox_mig_target_size,
+# polled and exported by the gateway) — the same number the gce-mig target
+# compares against, so min(desired, targetSize) can only hold or shrink.
+# An earlier version capped on sandbox_hosts_live, which also counts resumed
+# standby workers outside that target; the autoscaler was then observed scaling
+# out anyway (from=5 to=6) after a burst drained on 2026-07-28.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -44,13 +44,18 @@ grep -q 'target "gce-mig"' "$POLICY" ||
 grep -q 'sandbox:workers_scale_in_ceiling' "$POLICY" ||
   fail "Nomad Autoscaler policy is not capped to scale-in only (missing sandbox:workers_scale_in_ceiling)"
 
-# 4. The cap must exist as a recording rule and must include the gateway's
-#    grow-only watermark. Capping on sandbox_hosts_live alone would scale the
-#    fleet back down during the ~13s in which resized workers have not yet
-#    heartbeated.
+# 4. The cap must exist as a recording rule, and its FIRST term must be the
+#    provider target size. A heartbeat-derived ceiling is not equivalent: it
+#    counts resumed standby workers outside the MIG target and admitted a real
+#    scale-out past the cap on 2026-07-28.
 grep -q 'record: sandbox:workers_scale_in_ceiling' "$RULES" ||
   fail "sandbox:workers_scale_in_ceiling recording rule is missing"
-grep -q 'sandbox_scale_out_requested' "$RULES" ||
-  fail "scale-in ceiling ignores the gateway watermark sandbox_scale_out_requested"
+grep -qE 'expr: *sum\(sandbox_mig_target_size\{job="sandbox-gateway"\}\)' "$RULES" ||
+  fail "scale-in ceiling must lead with the provider target size sandbox_mig_target_size"
 
-echo "PASS: gateway scale-out wiring present; autoscaler cap configured (see KNOWN GAP above)"
+# 5. ...and the gateway must actually export that series, or the ceiling
+#    silently falls back to the looser heartbeat form forever.
+grep -q 'sandbox_mig_target_size' "$DIR/../../internal/gateway/metrics.go" ||
+  fail "gateway does not export sandbox_mig_target_size"
+
+echo "PASS: gateway owns scale-out; autoscaler capped to scale-in on the provider target size"
