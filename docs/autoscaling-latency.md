@@ -79,10 +79,22 @@ start; requests issued ≈15.5 s, queue depth 64 observed at 17.5 s):
 
 | Span | Time | Note |
 | --- | ---: | --- |
-| Demand → MIG resize issued (`mig_target` 2→5) | ~10.2 s | autoscaler decision latency |
+| Demand → MIG resize issued (`mig_target` 2→5) | ≤~10.2 s | autoscaler decision latency; **upper bound, see below** |
 | Resize → new worker advertises free slots | ~13.0 s | resume + serve + golden adopt + heartbeat |
 | **Demand → usable new capacity** | **~23.2 s** | matches the 24.328 s slow-mode floor |
 | Drain of the queued 64 across new workers | up to 14.1 s | `create_concurrency=24`, 2 waves |
+
+**Trust the end-to-end span, not the resize timestamp.** `mig_target` is emitted
+only when a poll observes a change, and a MIG poll pass costs several seconds
+(two `gcloud` calls plus per-instance work), so the resize time is an upper
+bound on when it actually happened. The lag is large: in the `af3833a` run below
+the gateway *logged* its resize ~25 s into the run, but the MIG observer did not
+report `mig_target size=5` until **56.1 s** — roughly 31 s late. So treat the
+decision-latency row as "no worse than ~10.2 s", and rely on the demand →
+usable-capacity span, which comes from `gateway_queue_depth` and
+`gateway_host_state` on the gateway observer (alive for the whole run in both
+cases), and on the create percentiles, which come from the benchmark's own
+timers in `burst.json`.
 
 Two observations follow.
 
@@ -122,9 +134,14 @@ recording rule. Same canonical workload, same floor, same worker release
 | Queued (slow-mode) creates | 64 | 39 | −25 |
 
 160/160 succeeded with zero errors and verified cleanup in both runs. The
-improvement matches the predicted ~10 s of autoscaler decision latency almost
-exactly, and the distribution is no longer bimodal — capacity now arrives fast
-enough that queued creates blend into the placed ones.
+distribution is no longer bimodal — capacity now arrives fast enough that queued
+creates blend into the placed ones.
+
+Measured against demand rather than run start (the two runs issued demand at
+different offsets), demand → usable new capacity went **24.7 s → 16.5 s**, an
+8.2 s gain that accounts for most of the 10.088 s p95 improvement. Both numbers
+come from the gateway observer, which was alive throughout; the rest is drain
+shortening as the burst spreads over more workers sooner.
 
 Exactly one resize was issued for the whole burst
 (`sandbox_direct_scale_out_total 1`, `..._failed_total 0`), logged as

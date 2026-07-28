@@ -140,13 +140,13 @@ The `ea0f707` run passed correctness and the create-max ≤60 s limit but missed
 the create-p95 ≤30 s SLO by 6.162 s. Its latency was cleanly bimodal — 96 fast
 creates (4.411–17.664 s) placed on the ready workers, and 64 queued creates
 (24.328–38.422 s) waiting on scale-out, separated by a 6.664 s empty gap — so
-p95 was determined entirely by the queued group. Roughly 10.2 s of the queued
-path was autoscaler decision latency, ~13.0 s worker resume to advertised
-capacity, and up to 14.1 s per-worker create drain.
+p95 was determined entirely by the queued group. No more than ~10.2 s of the queued path
+was autoscaler decision latency (the MIG poll lags, so that is an upper bound),
+~13.0 s worker resume to advertised capacity, and up to 14.1 s per-worker create
+drain.
 
 `af3833a` moves scale-out to the gateway (level-triggered, grow-only) and caps
-the Nomad autoscaler to scale-in, removing that decision latency. The result
-matches the prediction almost exactly: **p95 26.074 s, a 10.088 s
+the Nomad autoscaler to scale-in, removing that decision latency. The result is **p95 26.074 s, a 10.088 s
 improvement**, max 26.995 s (−11.427 s), wall 48.2 s (−11.5 s), still
 160/160 with zero errors and verified cleanup. One resize was issued for the
 whole burst (`sandbox_direct_scale_out_total 1`, zero failures), logged as
@@ -155,9 +155,10 @@ whole burst (`sandbox_direct_scale_out_total 1`, zero failures), logged as
 The distribution is no longer bimodal: the largest gap between adjacent
 samples fell from 6.664 s to 1.297 s, and the queued group shrank from 64
 samples to 39 — new capacity now arrives fast enough that queued creates blend
-into the placed ones. Demand → usable new capacity fell from ~23.2 s to
-~13.0 s, which is now essentially pure worker resume time and the hard floor
-for anything exceeding ready capacity.
+into the placed ones. Measured from demand, usable new capacity arrived
+24.7 s → 16.5 s sooner, which accounts for most of the p95 gain; that span is
+now essentially pure worker resume time and the hard floor for anything
+exceeding ready capacity.
 
 Evidence bundle `tests/results/autoscale-20260728-gateway-scaleout/`
 (`SHA256SUMS` verified). Full decomposition of both runs in
