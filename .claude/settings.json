@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go vet *)",
+      "Bash(gofmt -l *)",
+      "Bash(bash -n *)",
+      "Bash(npm run typecheck)",
+      "Bash(nomad alloc logs *)",
+      "Bash(nomad alloc status *)",
+      "Bash(nomad job status *)",
+      "Bash(nomad job allocs *)",
+      "Bash(nomad job inspect *)",
+      "Bash(nomad node status *)",
+      "Bash(tailscale status *)",
+      "Bash(tailscale ip *)",
+      "Bash(gsutil ls *)",
+      "Bash(gcloud auth list *)",
+      "Bash(gcloud config get-value *)",
+      "Bash(gcloud projects get-iam-policy *)",
+      "Bash(gcloud iam service-accounts list *)",
+      "Bash(gcloud storage buckets list *)",
+      "Bash(gcloud storage ls *)",
+      "Bash(gcloud compute instances list *)",
+      "Bash(gcloud compute instances describe *)",
+      "Bash(gcloud compute instances get-serial-port-output *)",
+      "Bash(gcloud compute instance-groups managed describe *)",
+      "Bash(gcloud compute instance-groups managed list-instances *)",
+      "Bash(gcloud compute images list *)",
+      "Bash(gcloud compute images describe-from-family *)",
+      "Bash(gcloud compute operations list *)",
+      "Bash(gcloud compute firewall-rules list *)",
+      "Bash(gcloud compute addresses list *)"
+    ]
+  }
+}

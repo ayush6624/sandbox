@@ -5,3 +5,10 @@ bin/sandbox.sandbox-token
 graphify-out
 *.tgz
 .DS_Store
+
+# Claude Code: share settings.json, keep machine-local state out. An untracked
+# file here is enough to stamp vcs.modified=true into release binaries.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+.worktrees/
