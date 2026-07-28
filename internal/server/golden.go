@@ -34,6 +34,7 @@ func (s *Server) ensureGolden(ctx context.Context) {
 	defer func() {
 		s.phases.mark(phaseGoldenSettled)
 		close(s.warmed)
+		s.startWarmPool(ctx)
 	}()
 
 	snap, err := s.reg.GoldenSnapshot(ctx)
@@ -263,7 +264,7 @@ func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot,
 	}
 
 	t0 := time.Now()
-	c := s.bringUpClone(snap, name, expiresAt, hibernateAfterSec)
+	c := s.bringUpClone(snap, name, expiresAt, hibernateAfterSec, false)
 	stage.Unlock()
 	if c.err != nil {
 		return registry.Sandbox{}, c.err

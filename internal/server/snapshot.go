@@ -480,7 +480,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			clones[i] = s.bringUpClone(snap, "", expiresAt, body.HibernateAfterSec)
+			clones[i] = s.bringUpClone(snap, "", expiresAt, body.HibernateAfterSec, false)
 		}(i)
 	}
 	wg.Wait()
@@ -542,7 +542,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 
 // bringUpClone allocates resources for one clone and resumes it on an unbridged
 // tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
-func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) *clone {
+func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int, warming bool) *clone {
 	startedAt := time.Now()
 	id := uuid.NewString()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
@@ -553,7 +553,13 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 		baseID = snap.ID
 	}
 	// Clones run with the snapshot's baked vcpus/mem; the row records them.
-	sb, err := s.reg.Create(s.vmCtx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
+	var sb registry.Sandbox
+	var err error
+	if warming {
+		sb, err = s.reg.CreateWarm(s.vmCtx, id, rootfsPath, baseID, snap.Vcpus, snap.MemMIB)
+	} else {
+		sb, err = s.reg.Create(s.vmCtx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
+	}
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
 	}

@@ -84,6 +84,9 @@ type Config struct {
 	// boot-storm the host into agent timeouts. 0 = server default
 	// (min(2×NumCPU, 16)).
 	CreateConcurrency int `json:"create_concurrency"`
+	// WarmPoolSize keeps this many fully isolated golden clones ready to claim.
+	// They consume normal VM capacity; 0 disables prewarming.
+	WarmPoolSize int `json:"warm_pool_size"`
 	// PlacementDelaySec keeps a freshly booted worker routable but advertises
 	// zero create capacity until Linux boot age reaches this threshold. Fleet
 	// deployments set it beyond the MIG standby initial delay so refill VMs

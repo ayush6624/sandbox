@@ -211,6 +211,45 @@ func TestFreeSlotsIgnoresExplicitPorts(t *testing.T) {
 	}
 }
 
+func TestWarmSandboxConsumesCapacityButStaysUnroutedUntilClaimed(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	warm, err := r.CreateWarm(ctx, "warm-1", "/tmp/warm.ext4", "golden", 0, 0)
+	if err != nil {
+		t.Fatalf("create warm: %v", err)
+	}
+	if warm.Status != StatusWarming {
+		t.Fatalf("warm status = %q", warm.Status)
+	}
+	if got, _ := r.FreeSlots(ctx); got != 2 {
+		t.Fatalf("warm VM must consume capacity: free=%d, want 2", got)
+	}
+	if routed, _ := r.ListRouted(ctx); len(routed) != 0 {
+		t.Fatalf("warm VM leaked into routed inventory: %+v", routed)
+	}
+	if routed, free, err := r.RoutedCapacity(ctx); err != nil {
+		t.Fatalf("routed capacity: %v", err)
+	} else if len(routed) != 0 || free != 2 {
+		t.Fatalf("routed=%+v free=%d, want hidden warm and free=2", routed, free)
+	}
+
+	expiry := time.Now().Add(time.Minute)
+	claimed, err := r.ClaimWarm(ctx, "claimed", &expiry, 42)
+	if err != nil {
+		t.Fatalf("claim warm: %v", err)
+	}
+	if claimed.ID != warm.ID || claimed.Status != StatusRunning ||
+		claimed.Name != "claimed" || claimed.HibernateAfterSec != 42 {
+		t.Fatalf("bad claimed row: %+v", claimed)
+	}
+	if routed, _ := r.ListRouted(ctx); len(routed) != 1 || routed[0].ID != warm.ID {
+		t.Fatalf("claimed VM missing from routes: %+v", routed)
+	}
+	if _, err := r.ClaimWarm(ctx, "", nil, 0); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("empty warm pool error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestCreateReturnsErrPoolExhausted(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 

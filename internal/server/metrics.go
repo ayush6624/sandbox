@@ -39,6 +39,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_uptime_seconds", "Seconds since this server process started.", int64(time.Since(s.startedAt).Seconds()))
 
 	gauge("sandbox_running", "Sandboxes running on this host (hold a tap, IP, port, and guest memory).", int64(st.Running))
+	gauge("sandbox_warming", "Hidden ready sandboxes reserved for low-latency creates.", int64(st.Warming))
 	gauge("sandbox_hibernated", "Sandboxes frozen to disk on this host (hold only their host port).", int64(st.Hibernated))
 	gauge("sandbox_slots_free", "Allocatable slots right now: smallest per-pool availability, memory-bounded.", int64(st.SlotsFree))
 

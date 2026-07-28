@@ -56,6 +56,9 @@ type Config struct {
 	// CreateConcurrency bounds concurrent sandbox bring-ups (cold boots and
 	// golden clones); excess creates queue. <=0 = default: min(2×NumCPU, 16).
 	CreateConcurrency int
+	// WarmPoolSize keeps fully started, independently identified golden clones
+	// off the routed inventory until a create atomically claims one.
+	WarmPoolSize int
 	// PlacementDelay suppresses advertised create capacity until Linux boot
 	// age reaches this duration. Routing and heartbeat registration are not
 	// delayed. See config.PlacementDelaySec.
@@ -163,6 +166,8 @@ type Server struct {
 	// the 60 s agent gate only starts ticking once a slot is acquired. Fanout
 	// keeps its own separate budget.
 	createSem chan struct{}
+	warmOnce  sync.Once
+	warmKick  chan struct{}
 	// warmed is closed once ensureGolden has settled (adopted, built, or
 	// failed). Until then the heartbeat advertises SlotsFree=0 so the gateway
 	// doesn't route a burst of guaranteed-cold creates at a host that's still
@@ -219,6 +224,7 @@ func New(cfg Config, reg *registry.Registry) *Server {
 		}
 	}
 	s.createSem = make(chan struct{}, sem)
+	s.warmKick = make(chan struct{}, 1)
 	s.warmed = make(chan struct{})
 	if !cfg.HotCreate {
 		close(s.warmed) // nothing to warm up: cold creates are the steady state
@@ -539,6 +545,12 @@ func (s *Server) shutdownAll() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if sb, err := s.reg.Get(ctx, id); err == nil && sb.Status == registry.StatusWarming {
+				if err := s.destroy(context.Background(), id); err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] shutdown destroy warm sandbox: %v\n", id, err)
+				}
+				return
+			}
 			// force=true: open connections are dying with the server anyway —
 			// a busy pin must not condemn the sandbox to destruction.
 			if err := s.hibernate(ctx, id, true); err != nil {
@@ -611,12 +623,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// template's vcpus/mem at snapshot time, so a clone can't change them.
 	var sb registry.Sandbox
 	hot := false
+	if body.Vcpus == 0 && body.MemMIB == 0 {
+		if ready, ok := s.claimWarm(ctx, body.Name, expiresAt, body.HibernateAfterSec); ok {
+			sb, hot = ready, true
+		}
+	}
 	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
-		s2, err := s.createFromSnapshot(ctx, *snap, body.Name, expiresAt, body.HibernateAfterSec)
-		if err == nil {
-			sb, hot = s2, true
-		} else {
-			fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
+		if !hot {
+			s2, err := s.createFromSnapshot(ctx, *snap, body.Name, expiresAt, body.HibernateAfterSec)
+			if err == nil {
+				sb, hot = s2, true
+			} else {
+				fmt.Fprintf(os.Stderr, "hot create from golden snapshot %s failed, cold-booting instead: %v\n", snap.ID, err)
+			}
 		}
 	}
 	if !hot {

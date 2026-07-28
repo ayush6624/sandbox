@@ -18,9 +18,12 @@ import (
 const (
 	StatusRunning  = "running"
 	StatusStopping = "stopping"
+	// StatusWarming is a fully started, independently identified VM reserved
+	// for a future create. It consumes capacity but is not routed or listed.
+	StatusWarming = "warming"
 	// StatusHibernated marks an idle sandbox frozen to disk: its VM is gone and
 	// its tap/IP are released back to the pools (their partial unique indexes
-	// only bind status='running'). Explicit port mappings stay reserved and
+	// bind capacity-holding running/warming rows). Explicit port mappings stay reserved and
 	// their userspace listeners remain bound so a connection can wake it. The
 	// row, rootfs file, and hibernation snapshot survive server restarts.
 	StatusHibernated = "hibernated"
@@ -177,10 +180,10 @@ func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
 	var committedMem int64
 	err := r.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM sandboxes WHERE status = ?1),
-			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?2 ELSE mem_mib END + ?3), 0)
-			   FROM sandboxes WHERE status = ?1)`,
-		StatusRunning, r.mem.TemplateMemMIB, r.mem.OverheadMIB,
+			(SELECT COUNT(*) FROM sandboxes WHERE status IN (?1, ?2)),
+			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?3 ELSE mem_mib END + ?4), 0)
+			   FROM sandboxes WHERE status IN (?1, ?2))`,
+		StatusRunning, StatusWarming, r.mem.TemplateMemMIB, r.mem.OverheadMIB,
 	).Scan(&running, &committedMem)
 	if err != nil {
 		return 0, err
@@ -210,6 +213,7 @@ func (r *Registry) freeSlotsFor(running int, committedMem int64) int {
 // see WHICH pool is the binding constraint, not just the free-slot minimum.
 type Stats struct {
 	Running    int // status=running: holds a tap, IP, and guest memory
+	Warming    int // status=warming: hidden ready VM that also holds capacity
 	Hibernated int // status=hibernated: holds no VM slot or memory
 	SlotsFree  int // == FreeSlots: smallest per-pool availability, mem-bounded
 
@@ -232,20 +236,22 @@ func (r *Registry) Stats(ctx context.Context) (Stats, error) {
 		SELECT
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?1),
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?2),
+			(SELECT COUNT(*) FROM sandboxes WHERE status = ?5),
 			(SELECT COUNT(*) FROM sandbox_ports),
 			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?3 ELSE mem_mib END + ?4), 0)
-			   FROM sandboxes WHERE status = ?1)`,
-		StatusRunning, StatusHibernated, r.mem.TemplateMemMIB, r.mem.OverheadMIB,
-	).Scan(&s.Running, &s.Hibernated, &s.PortUsed, &s.CommittedMemMIB)
+			   FROM sandboxes WHERE status IN (?1, ?5))`,
+		StatusRunning, StatusHibernated, r.mem.TemplateMemMIB, r.mem.OverheadMIB, StatusWarming,
+	).Scan(&s.Running, &s.Hibernated, &s.Warming, &s.PortUsed, &s.CommittedMemMIB)
 	if err != nil {
 		return Stats{}, err
 	}
 	// Derive free capacity from the same aggregate query. Calling FreeSlots
 	// here would take a second SQLite snapshot and can pair an older Running
 	// count with newer capacity while deletes are committing.
-	s.SlotsFree = r.freeSlotsFor(s.Running, s.CommittedMemMIB)
-	s.TapUsed, s.TapTotal = s.Running, r.pools.TapMax
-	s.IPUsed, s.IPTotal = s.Running, r.pools.ipPoolSize()
+	occupied := s.Running + s.Warming
+	s.SlotsFree = r.freeSlotsFor(occupied, s.CommittedMemMIB)
+	s.TapUsed, s.TapTotal = occupied, r.pools.TapMax
+	s.IPUsed, s.IPTotal = occupied, r.pools.ipPoolSize()
 	s.PortTotal = r.pools.PortMax - r.pools.PortMin + 1
 	s.MemBudgetMIB = r.mem.BudgetMIB
 	return s, nil
@@ -333,8 +339,8 @@ func (r *Registry) migrate() error {
 		, source_type TEXT NOT NULL DEFAULT 'default'
 		, source_id TEXT NOT NULL DEFAULT ''
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status = 'running';
-	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status = 'running';
+	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status IN ('running', 'warming');
+	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status IN ('running', 'warming');
 	CREATE TABLE IF NOT EXISTS sandbox_ports (
 		sandbox_id TEXT NOT NULL,
 		guest_port INTEGER NOT NULL,
@@ -365,6 +371,16 @@ func (r *Registry) migrate() error {
 	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
+		return err
+	}
+	// Warm-pool VMs hold real taps/IPs just like routed VMs. Rebuild the old
+	// running-only partial indexes on upgraded registries.
+	if _, err := r.db.Exec(`
+		DROP INDEX IF EXISTS uniq_tap_running;
+		DROP INDEX IF EXISTS uniq_ip_running;
+		CREATE UNIQUE INDEX uniq_tap_running ON sandboxes(tap_device) WHERE status IN ('running', 'warming');
+		CREATE UNIQUE INDEX uniq_ip_running ON sandboxes(guest_ip) WHERE status IN ('running', 'warming');
+	`); err != nil {
 		return err
 	}
 	// source_rootfs_path was added after the snapshots table first shipped.
@@ -499,6 +515,15 @@ func (r *Registry) dropLegacyHostPortColumn() error {
 // vcpus/memMIB are per-sandbox resource overrides (0 = template default).
 // name is the free-form display label ("" = unnamed).
 func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
+	return r.create(ctx, StatusRunning, id, name, rootfsPath, expiresAt, baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
+}
+
+// CreateWarm allocates a hidden, capacity-holding row for a pre-started VM.
+func (r *Registry) CreateWarm(ctx context.Context, id, rootfsPath, baseSnapshotID string, vcpus, memMIB int64) (Sandbox, error) {
+	return r.create(ctx, StatusWarming, id, "", rootfsPath, nil, baseSnapshotID, -1, vcpus, memMIB)
+}
+
+func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -525,7 +550,7 @@ func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expi
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sandboxes (id, name, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib)
 		 VALUES (?, ?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, name, tap, ip, rootfsPath, StatusRunning, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
+		id, name, tap, ip, rootfsPath, status, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
 	}
@@ -538,7 +563,7 @@ func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expi
 		TapDevice:         tap,
 		GuestIP:           ip,
 		RootfsPath:        rootfsPath,
-		Status:            StatusRunning,
+		Status:            status,
 		CreatedAt:         now,
 		ExpiresAt:         expiresAt,
 		BaseSnapshotID:    baseSnapshotID,
@@ -765,31 +790,39 @@ func (r *Registry) ListRouted(ctx context.Context) ([]Sandbox, error) {
 // slots, an impossible 53/48 accounting state.
 func (r *Registry) RoutedCapacity(ctx context.Context) ([]Sandbox, int, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?) ORDER BY created_at DESC`,
-		StatusRunning, StatusHibernated)
+		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?, ?) ORDER BY created_at DESC`,
+		StatusRunning, StatusHibernated, StatusWarming)
 	if err != nil {
 		return nil, 0, err
 	}
-	routed, err := collectSandboxes(rows)
+	all, err := collectSandboxes(rows)
 	rows.Close()
 	if err != nil {
 		return nil, 0, err
 	}
 
-	running := 0
+	occupied := 0
 	var committedMem int64
-	for _, sb := range routed {
-		if sb.Status != StatusRunning {
+	routed := make([]Sandbox, 0, len(all))
+	for _, sb := range all {
+		if sb.Status == StatusWarming {
+			occupied++
+		} else {
+			routed = append(routed, sb)
+		}
+		if sb.Status != StatusRunning && sb.Status != StatusWarming {
 			continue
 		}
-		running++
+		if sb.Status == StatusRunning {
+			occupied++
+		}
 		mem := sb.MemMIB
 		if mem == 0 {
 			mem = r.mem.TemplateMemMIB
 		}
 		committedMem += mem + r.mem.OverheadMIB
 	}
-	return routed, r.freeSlotsFor(running, committedMem), nil
+	return routed, r.freeSlotsFor(occupied, committedMem), nil
 }
 
 // Destroy removes a sandbox row outright, along with its port mappings.
@@ -1140,6 +1173,47 @@ func (r *Registry) UpdatePublicFields(ctx context.Context, id, name string, meta
 	return r.Get(ctx, id)
 }
 
+// ClaimWarm atomically promotes the oldest hidden ready VM into a routed
+// sandbox and applies the request's mutable fields.
+func (r *Registry) ClaimWarm(ctx context.Context, name string, expiresAt *time.Time, idleTimeout int) (Sandbox, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	defer tx.Rollback()
+
+	sb, err := scanSandbox(tx.QueryRowContext(ctx,
+		`SELECT `+sandboxCols+` FROM sandboxes WHERE status=? ORDER BY created_at LIMIT 1`,
+		StatusWarming))
+	if err != nil {
+		return Sandbox{}, err
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE sandboxes SET status=?, name=?, expires_at=?, hibernate_after_sec=? WHERE id=? AND status=?`,
+		StatusRunning, name, unixOrNil(expiresAt), idleTimeout, sb.ID, StatusWarming)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return Sandbox{}, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return Sandbox{}, err
+	}
+	sb.Status = StatusRunning
+	sb.Name = name
+	sb.ExpiresAt = expiresAt
+	sb.HibernateAfterSec = idleTimeout
+	return sb, nil
+}
+
+// WarmCount reports hidden ready VMs, used by the background replenisher.
+func (r *Registry) WarmCount(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sandboxes WHERE status=?`, StatusWarming).Scan(&n)
+	return n, err
+}
+
 func collectSandboxes(rows *sql.Rows) ([]Sandbox, error) {
 	var out []Sandbox
 	for rows.Next() {
@@ -1182,8 +1256,8 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 		softIPs:  map[string]bool{},
 	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT tap_device, guest_ip, status FROM sandboxes WHERE status IN (?, ?)`,
-		StatusRunning, StatusHibernated)
+		`SELECT tap_device, guest_ip, status FROM sandboxes WHERE status IN (?, ?, ?)`,
+		StatusRunning, StatusWarming, StatusHibernated)
 	if err != nil {
 		return u, err
 	}
@@ -1251,8 +1325,8 @@ func (r *Registry) checkMemBudget(ctx context.Context, tx *sql.Tx, memMIB int64)
 	var committed int64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ? ELSE mem_mib END + ?), 0)
-		   FROM sandboxes WHERE status = ?`,
-		r.mem.TemplateMemMIB, r.mem.OverheadMIB, StatusRunning,
+		   FROM sandboxes WHERE status IN (?, ?)`,
+		r.mem.TemplateMemMIB, r.mem.OverheadMIB, StatusRunning, StatusWarming,
 	).Scan(&committed); err != nil {
 		return err
 	}
