@@ -54,6 +54,14 @@ POLL_MS="${POLL_MS:-250}"
 EXPECTED_RUNNING="${EXPECTED_RUNNING:-2}"
 EXPECTED_SUSPENDED_MIN="${EXPECTED_SUSPENDED_MIN:-2}"
 EXPECTED_FREE_PER_HOST="${EXPECTED_FREE_PER_HOST:-48}"
+# Per-call ceiling for the observers' gcloud invocations. The observer loop is
+# sequential, so one stalled call stops that timeline permanently and every
+# scenario that reads it draws a false conclusion. Generous enough that gcloud
+# startup on the small control VM is never mistaken for a stall.
+OBSERVE_GCLOUD_TIMEOUT="${OBSERVE_GCLOUD_TIMEOUT:-30s}"
+# Emit a heartbeat this often even when nothing changed, so a stalled observer is
+# distinguishable from a quiet fleet. Set 0 to disable.
+OBSERVE_HEARTBEAT_SEC="${OBSERVE_HEARTBEAT_SEC:-30}"
 TRACE_DIR="${TRACE_DIR:-$REPO/tests/results/autoscale-$(date -u +%Y%m%dT%H%M%SZ)}"
 case "$TRACE_DIR" in
   /*) ;;
@@ -271,7 +279,15 @@ LAST_QUEUE=""
 
 observe_mig() {
   local group target rows instance name state ip snapshot_tmp
-  group="$(gcloud compute instance-groups managed describe "$MIG_NAME" \
+  # Every gcloud call here is wrapped in `timeout`. Without it a single stalled
+  # API call blocks this observer FOREVER: the loop is sequential, so the MIG
+  # timeline simply stops with no error anywhere. That silently invalidated the
+  # 2026-07-28 standby-refill-boundary run — MIG events ceased 68s into a 543s
+  # scenario (the scale-in back to the floor was never recorded), and the
+  # scenario reads this timeline to decide whether refills reached SUSPENDED, so
+  # it reported a fleet failure that had not happened. A dropped poll is
+  # recoverable; a hung one is not.
+  group="$(timeout "$OBSERVE_GCLOUD_TIMEOUT" gcloud compute instance-groups managed describe "$MIG_NAME" \
     --project="$PROJECT" --zone="$ZONE" --format=json 2>/dev/null)" || return
   target="$(jq -c '{target_size:.targetSize,target_suspended_size:(.targetSuspendedSize // 0),target_stopped_size:(.targetStoppedSize // 0)}' <<<"$group")"
   if [ "$target" != "$LAST_TARGET" ]; then
@@ -279,7 +295,7 @@ observe_mig() {
     emit "mig_target" "$target"
   fi
 
-  rows="$(gcloud compute instance-groups managed list-instances "$MIG_NAME" \
+  rows="$(timeout "$OBSERVE_GCLOUD_TIMEOUT" gcloud compute instance-groups managed list-instances "$MIG_NAME" \
     --project="$PROJECT" --zone="$ZONE" --format=json 2>/dev/null)" || return
   snapshot_tmp="$MIG_SNAPSHOT.tmp.$$"
   if ! jq -cn --argjson ts "$(now_ms)" --argjson group "$group" --argjson rows "$rows" '{
@@ -306,7 +322,12 @@ observe_mig() {
     case "$(jq -r '.instanceStatus // ""' <<<"$instance")" in
       RUNNING|STAGING)
         if [ -z "${MIG_IP[$name]-}" ]; then
-          ip="$(gcloud compute instances describe "$name" --project="$PROJECT" --zone="$ZONE" \
+          # This is the likeliest stall: it fires the moment an instance first
+          # reports RUNNING/STAGING, which is exactly when the 2026-07-28 MIG
+          # timeline stopped. `|| true` swallows the failure so a timed-out
+          # lookup just retries on the next pass.
+          ip="$(timeout "$OBSERVE_GCLOUD_TIMEOUT" gcloud compute instances describe "$name" \
+            --project="$PROJECT" --zone="$ZONE" \
             --format='value(networkInterfaces[0].networkIP)' 2>/dev/null || true)"
           [ -n "$ip" ] && MIG_IP[$name]="$ip"
         fi
@@ -399,13 +420,26 @@ observe_gateway() {
 }
 
 observe_loop() {
-  local source="$1" ready="$READY_PREFIX.$1" sleep_s
+  local source="$1" ready="$READY_PREFIX.$1" sleep_s last_beat now
   sleep_s="$(awk -v ms="$POLL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')"
+  last_beat=0
   while true; do
     if "observe_$source" && [ ! -e "$ready" ]; then
       : >"$ready"
       emit "observer_ready" "$(jq -cn --arg source "$source" --argjson poll_ms "$POLL_MS" \
         '{source:$source,target_poll_ms:$poll_ms}')"
+    fi
+    # Liveness heartbeat. The state events above are emitted only on CHANGE, so
+    # without this an observer that has stalled looks exactly like a fleet that
+    # is idle — which is how a hung MIG poll went unnoticed for 475s on
+    # 2026-07-28 and produced a false scenario failure. Analysis can now check
+    # that observer_alive spans the whole run before trusting any gap.
+    if [ "$OBSERVE_HEARTBEAT_SEC" != "0" ]; then
+      now="$(date -u +%s)"
+      if [ "$(( now - last_beat ))" -ge "$OBSERVE_HEARTBEAT_SEC" ]; then
+        last_beat="$now"
+        emit "observer_alive" "$(jq -cn --arg source "$source" '{source:$source}')"
+      fi
     fi
     sleep "$sleep_s"
   done
