@@ -52,6 +52,11 @@ var errInvalidSandboxIdentity = errors.New("invalid sandbox identity")
 // independently created sandbox. Its durable marker makes retries for the same
 // sandbox idempotent, while a rootfs copied from an image or snapshot always
 // carries a different marker and therefore rotates before create returns.
+//
+// Only an Ed25519 host key is generated: `ssh-keygen -A` also builds RSA-3072,
+// which measured ~1.2 s inside a 2-vCPU guest and was almost the entire cost of
+// this call (Ed25519 is ~7 ms). sshd is pinned to that key by the baked
+// sshd_config.d/sandbox.conf, so the absent RSA/ECDSA keys are not missed.
 func initializeGuestIdentity(sandboxID string) error {
 	if !validSandboxIdentity(sandboxID) {
 		return fmt.Errorf("%w: sandbox_id must be 1-128 letters, digits, dots, underscores, or hyphens", errInvalidSandboxIdentity)
@@ -78,11 +83,14 @@ func initializeGuestIdentity(sandboxID string) error {
 	if err := os.Remove(authorizedKeysPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove inherited authorized_keys: %w", err)
 	}
-	if err := runIdentityCommand("ssh-keygen", "-A"); err != nil {
-		return fmt.Errorf("generate ssh host keys: %w", err)
+	// Every /etc/ssh/ssh_host_* file was just removed, so ssh-keygen has nothing
+	// to overwrite and cannot prompt; runIdentityCommand also leaves Stdin nil,
+	// which exec wires to /dev/null, so it can never block on input either.
+	if err := runIdentityCommand("ssh-keygen", "-q", "-t", "ed25519", "-f", sshHostKeyPath("ed25519"), "-N", ""); err != nil {
+		return fmt.Errorf("generate ssh host key: %w", err)
 	}
 	if !sshHostKeysPresent() {
-		return errors.New("generate ssh host keys: ssh-keygen produced no private host keys")
+		return errors.New("generate ssh host key: ssh-keygen produced no private host key")
 	}
 	if err := restartSSHService(); err != nil {
 		return fmt.Errorf("restart ssh service: %w", err)
@@ -113,6 +121,13 @@ func restartSSHService() error {
 		}
 	}
 	return lastErr
+}
+
+// sshHostKeyPath names a host key beside the ones sshHostKeyPattern matches, so
+// generation and the glob-based checks always agree (including under tests that
+// repoint the pattern at a temp dir).
+func sshHostKeyPath(keyType string) string {
+	return filepath.Join(filepath.Dir(sshHostKeyPattern), "ssh_host_"+keyType+"_key")
 }
 
 func sshHostKeysPresent() bool {

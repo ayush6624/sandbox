@@ -4,10 +4,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
+// setupIdentityEnv repoints the guest identity paths at a temp dir and restores
+// them (plus the command hook and restart delay) when the test ends.
+func setupIdentityEnv(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	oldMarker, oldPattern := guestIdentityMarker, sshHostKeyPattern
 	oldSSHDir, oldAuthorized := sshDir, authorizedKeysPath
@@ -31,6 +35,41 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	return dir
+}
+
+// keygenTarget returns the -f path ssh-keygen was told to write, and fails the
+// test if the invocation asks for anything but a single Ed25519 key.
+func keygenTarget(t *testing.T, args []string) string {
+	t.Helper()
+	target, keyType := "", ""
+	for i, arg := range args {
+		if arg == "-A" {
+			t.Fatalf("ssh-keygen -A also builds RSA-3072 (~1.2s per create in a 2-vCPU guest): %v", args)
+		}
+		if i+1 >= len(args) {
+			continue
+		}
+		switch arg {
+		case "-f":
+			target = args[i+1]
+		case "-t":
+			keyType = args[i+1]
+		}
+	}
+	// Anything but ed25519 here — rsa above all — is the regression this pins.
+	if keyType != "ed25519" {
+		t.Fatalf("ssh-keygen key type = %q, want ed25519: %v", keyType, args)
+	}
+	if target == "" {
+		t.Fatalf("ssh-keygen has no -f target: %v", args)
+	}
+	return target
+}
+
+func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
+	dir := setupIdentityEnv(t)
+
 	oldKey := filepath.Join(dir, "ssh", "ssh_host_ed25519_key")
 	if err := os.WriteFile(oldKey, []byte("inherited"), 0o600); err != nil {
 		t.Fatal(err)
@@ -44,7 +83,7 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 		switch name {
 		case "ssh-keygen":
 			generations++
-			return os.WriteFile(oldKey, []byte("unique"), 0o600)
+			return os.WriteFile(keygenTarget(t, args), []byte("unique"), 0o600)
 		case "systemctl":
 			if len(args) > 0 && args[0] == "restart" {
 				restarts++
@@ -75,6 +114,35 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	}
 	if generations != 2 || restarts != 2 {
 		t.Fatalf("clone identity did not rotate: generations %d, restarts %d", generations, restarts)
+	}
+}
+
+func TestInitializeGuestIdentityGeneratesEd25519HostKeyOnly(t *testing.T) {
+	dir := setupIdentityEnv(t)
+
+	var got []string
+	runIdentityCommand = func(name string, args ...string) error {
+		if name != "ssh-keygen" {
+			return nil
+		}
+		got = append([]string{name}, args...)
+		return os.WriteFile(keygenTarget(t, args), []byte("unique"), 0o600)
+	}
+
+	if err := initializeGuestIdentity("sandbox-ed25519"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"ssh-keygen", "-q", "-t", "ed25519",
+		"-f", filepath.Join(dir, "ssh", "ssh_host_ed25519_key"),
+		"-N", "",
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("keygen invocation = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ssh", "ssh_host_rsa_key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an RSA host key was generated: %v", err)
 	}
 }
 

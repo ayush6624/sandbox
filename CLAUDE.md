@@ -311,11 +311,19 @@ scripts/              Host setup shell scripts
   backstop. Don't "fix" the MTU by setting the tap/bridge instead — virtio-net won't
   propagate it to the guest.
 - **SSH into a sandbox rides the existing port proxy.** The base rootfs bakes
-  `openssh-server` (key-only root login: `PermitRootLogin prohibit-password`,
-  `PasswordAuthentication no`, in `sshd_config.d/sandbox.conf`; host keys via
-  `ssh-keygen -A`, so all golden clones share host keys — fine since each is a
-  distinct host:port), and `ssh.service` is enabled (socket activation disabled)
-  so :22 listens the instant the guest boots. `POST /sandboxes` takes an optional
+  `openssh-server` (key-only login: `PasswordAuthentication no`, in
+  `sshd_config.d/sandbox.conf`), and `ssh.service` is enabled (socket activation
+  disabled) so :22 listens the instant the guest boots. **Host keys are unique
+  per sandbox and never baked into the image**: the base rootfs ships with none
+  and sandboxd's `POST /identity` (`initializeGuestIdentity`,
+  cmd/sandboxd/identity.go) removes any inherited ones and generates a fresh key
+  on every independent create — so no two sandboxes, golden clones included, can
+  impersonate each other. **Ed25519 only** (~7 ms), and `sandbox.conf` pins
+  `HostKey /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
+  RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
+  2-vCPU guest and was essentially the entire `/identity` call. That config is
+  written by both `build-devbox-rootfs.sh` and `install-agent` (the latter
+  repairs an older base image) — keep the two in sync. `POST /sandboxes` takes an optional
   `ssh_pubkey` (one OpenSSH key line, `validateSSHPubkey` in server.go — rejects
   multi-line/unknown-type); after the create readiness gate (both cold and hot
   paths), `installSSHKey` (proxy.go) posts it to sandboxd's `POST /ssh-key`, which

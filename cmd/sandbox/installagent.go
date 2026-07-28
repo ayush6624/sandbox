@@ -29,12 +29,19 @@ WantedBy=multi-user.target
 
 const guestIdentityImageVersion = "2"
 
+// sandboxSSHDConfig must stay in sync with the same heredoc in
+// scripts/build-devbox-rootfs.sh: a rootfs prepared by either route has to end
+// up with the same host-key configuration. install-agent is what repairs an
+// older base image, so the HostKey pin lives here too. sandboxd's POST
+// /identity generates only an Ed25519 host key, so pinning it keeps sshd from
+// warning about the absent RSA/ECDSA keys on every start.
 const sandboxSSHDConfig = `# Managed by sandbox install-agent — key-only user access.
 PermitRootLogin no
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowUsers sandbox
+HostKey /etc/ssh/ssh_host_ed25519_key
 `
 
 // User-facing commands and shells run as the sandbox account, so these are the

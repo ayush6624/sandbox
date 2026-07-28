@@ -138,8 +138,12 @@ APT
 
   # --- SSH server ---
   # Key-only login as the normal sandbox user. Host keys are deliberately not
-  # baked into the image: sandboxd generates them when the host initializes a
+  # baked into the image: sandboxd generates one when the host initializes a
   # newly created sandbox, so snapshot-derived sandboxes never share identity.
+  # It generates Ed25519 only (RSA-3072 keygen cost ~1.2 s per create in a
+  # 2-vCPU guest), so pin sshd to that key — otherwise it warns about the
+  # missing RSA/ECDSA keys on every start. Keep this in sync with
+  # sandboxSSHDConfig in cmd/sandbox/installagent.go, which rewrites this file.
   sudo tee "$BUILD_DIR/etc/ssh/sshd_config.d/sandbox.conf" > /dev/null <<'SSHD'
 # Managed by build-devbox-rootfs.sh — sandbox SSH access.
 PermitRootLogin no
@@ -147,6 +151,7 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowUsers sandbox
+HostKey /etc/ssh/ssh_host_ed25519_key
 SSHD
   sudo chroot "$BUILD_DIR" bash -c '
     export DEBIAN_FRONTEND=noninteractive
