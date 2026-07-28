@@ -1,8 +1,9 @@
 # Benchmarks
 
-**Updated 2026-07-27.** The current hardened-release matrix and its remaining
-autoscaling latency gap are recorded in
-[2026-07-27 hardened-release validation](#2026-07-27-hardened-release-validation).
+**Updated 2026-07-28.** The current hardened-release matrix is recorded in
+[2026-07-27 hardened-release validation](#2026-07-27-hardened-release-validation);
+its autoscaling latency gap was closed on 2026-07-28 by moving scale-out to the
+gateway (see the held-burst table in that section).
 The older instrumented headline/detail numbers were measured 2026-07-01 →
 2026-07-12 (server release `b801d6d`+); a full end-to-end SDK re-run on that
 fleet (commit `06f5c16`) is in
