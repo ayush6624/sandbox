@@ -1,6 +1,8 @@
 # Benchmarks
 
-**Updated 2026-07-28.** The current hardened-release matrix is recorded in
+**Updated 2026-07-29.** The current low-latency production result is recorded in
+[2026-07-29 ready-pool production validation](#2026-07-29-ready-pool-production-validation-release-9b6a9fc).
+The broader hardened-release matrix is recorded in
 [2026-07-27 hardened-release validation](#2026-07-27-hardened-release-validation);
 its autoscaling latency gap was closed on 2026-07-28 by moving scale-out to the
 gateway (see the held-burst table in that section).
@@ -18,13 +20,14 @@ Interactive version: [`benchmark-report.html`](./benchmark-report.html)
 
 ## Headline
 
-Only the burst-churn and autoscaling-held-burst rows below are current
-2026-07-27 hardened-release results. The other rows are historical headlines
-retained for comparison.
+The ready-pool create row is the current `9b6a9fc` production result. The
+burst-churn and autoscaling-held-burst rows are the broader 2026-07-27
+hardened-release results. Other rows are historical headlines retained for
+comparison.
 
 | Metric | Result | Clock |
 |---|---|---|
-| Hot create (golden-snapshot clone) | **199–271 ms** server-side, ~0.55 s end-to-end via gateway | create request → in-guest agent answers |
+| Ready-pool create | **200 ms p50 / 304 ms p95** end-to-end through the production gateway; **82 / 118 ms** VPC-local | create request → fully initialized jailed VM returned |
 | Hibernation wake, same identity | **49 ms** server-side | wake start → agent answers |
 | Wake-on-connect (forwarded port) | **133 ms** | TCP connect to host port → guest responds, incl. wake |
 | Snapshot-source create (legacy 1:1 route) | **212 ms p50** (VMM resume ~14 ms; rest is rootfs reflink) | create request → agent answers |
@@ -35,10 +38,57 @@ retained for comparison.
 | Autoscaling held burst | **160/160**, 0 errors; p50 16.004 s / **p95 26.074 s** / max 26.995 s | correctness, 60 s maximum, and the 30 s p95 SLO all pass |
 | Autoscaling traffic validation | **896/896 creates**, **31,256/31,256 connect+identity-exec probes**, 0 failures | standby-boundary, second-wave, long-lived reconciliation, and churn traffic |
 
-Historical headline environment: GCP `n2-standard-8` hosts (8 vCPU / 32 GB,
+Current ready-pool environment: two active GCP `n2-standard-16` workers,
+8 ready VMs per worker, 48 total slots per worker, guests 2 vCPU / 1 GiB,
+Firecracker v1.15.0, XFS reflink storage. Historical headline environment:
+GCP `n2-standard-8` hosts (8 vCPU / 32 GB,
 nested KVM), guests 2 vCPU / 1 GB, Firecracker v1.15.0, XFS reflink storage;
 client on the same tailnet. "Usable" always means the in-guest agent answers —
 never "the create call returned".
+
+## 2026-07-29 ready-pool production validation (release `9b6a9fc`)
+
+This is the current create-latency acceptance result. The fleet had two active
+workers with `warm_pool_size: 8`, for 16 immediately claimable VMs. Every ready
+VM had already completed the normal jailed launch, UID/GID isolation, cgroup
+leaf, PID namespace, seccomp policy, tap/IP allocation, network
+re-identification, clock sync, agent health gate, and fresh Ed25519 SSH host-key
+rotation. Claiming a VM does not bypass any security gate.
+
+The committed lifecycle run exercised 25 independent
+create → pause → resume-to-command-ready → terminate cycles through the
+production gateway:
+
+| Phase | Mean | p50 | p90 | p95 | Min | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| Create | 215 ms | **200 ms** | 237 ms | **304 ms** | 197 ms | 404 ms |
+| Pause | 395 ms | 375 ms | 434 ms | 490 ms | 356 ms | 583 ms |
+| Resume + `echo ready` | 1,113 ms | 1,090 ms | 1,218 ms | 1,222 ms | 1,060 ms | 1,269 ms |
+| Terminate | 1,077 ms | 1,074 ms | 1,216 ms | 1,226 ms | 924 ms | 1,269 ms |
+
+The committed 16-way held burst consumed the entire fleet-wide ready pool at
+once. It completed **16/16** creates, command probes, and terminations with zero
+capacity, tap/IP/port, agent-readiness, workload, or cleanup errors:
+
+| Clock / client position | Create p50 | Create p95 | Max | Result |
+|---|---:|---:|---:|---|
+| Greece → India via SSH/Tailscale gateway tunnel (committed run) | **426 ms** | 600 ms | 600 ms | 16/16, zero errors |
+| Control VM in the worker VPC (confirmation probe) | 82 ms | **118 ms** | 118 ms | 16/16, zero errors |
+
+Worker counters proved the remote burst was still entirely ready-pool hits:
+zero warm misses and zero ready-VM build failures. The 10-fast/6-slower remote
+shape therefore belongs to the long-RTT access path, not Firecracker creation.
+After both suites, the gateway returned to zero sandboxes/routes and the pool
+replenished to 16 ready VMs.
+
+Committed raw evidence:
+
+- [`production_lifecycle_9b6a9fc_20260729.json`](../sdk/typescript/benchmarks/results/production_lifecycle_9b6a9fc_20260729.json)
+- [`production_burst_9b6a9fc_20260729.json`](../sdk/typescript/benchmarks/results/production_burst_9b6a9fc_20260729.json)
+
+An exhausted ready pool deliberately falls back to the ordinary secure clone
+path (~734 ms in the production probe). The sub-500 ms objective is therefore
+an explicitly capacity-bounded SLO, not a claim of unlimited burst capacity.
 
 ## 2026-07-27 hardened-release validation
 

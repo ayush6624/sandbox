@@ -1,3 +1,5 @@
+<!doctype html>
+<meta charset="utf-8">
 <title>Sandbox benchmarks — self-hosted Firecracker vs hosted providers</title>
 <style>
   :root {
@@ -145,20 +147,20 @@
   <p class="dek">Create, wake, restore, and fork latencies for our e2b-style microVM
   sandbox — with an honest comparison against e2b, Modal, Daytona, Vercel, Fly,
   Morph, CodeSandbox/Together, and Cloudflare.</p>
-  <p class="stamp">updated 2026-07-25 · headline measurements 2026-07-01 → 07-12 (release b801d6d+) · latest fleet validation 2026-07-25 (releasegate-20260725-1, commit 0b049db, 160-create autoscaling burst) · guests 2 vCPU / 1 GB · Firecracker v1.15.0 · XFS reflink</p>
+  <p class="stamp">updated 2026-07-29 · current ready-pool release 9b6a9fc · two active n2-standard-16 workers × 8 ready VMs · guests 2 vCPU / 1 GiB · Firecracker v1.15.0 · XFS reflink</p>
 
   <div class="tiles">
-    <div class="tile ours" data-tip="<b>Hot create</b>199–271 ms server-side (golden-snapshot clone + GARP readiness). ~0.55 s end-to-end via gateway from a tailnet client. Clock: create request → in-guest agent answers.">
-      <div class="v">~250 <small>ms</small></div>
-      <div class="k">hot create, server-side</div>
+    <div class="tile ours" data-tip="<b>Ready-pool create</b>Fresh 25-iteration production lifecycle run through the gateway: 200 ms p50, 304 ms p95, 404 ms max. The VM has already passed every jailed launch, identity, network, clock, and agent-readiness gate.">
+      <div class="v">200 <small>ms p50</small></div>
+      <div class="k">ready create, gateway e2e</div>
     </div>
     <div class="tile ours" data-tip="<b>Hibernation wake</b>49 ms server-side, same-identity restore (the common case). Frozen processes survive. Caveat: a 2026-07-24 stress run found an intermittent post-wake clock re-step regression; see fleet validation below.">
       <div class="v">49 <small>ms</small></div>
       <div class="k">wake from hibernation</div>
     </div>
-    <div class="tile ours" data-tip="<b>Fan-out</b>32 identity-neutral clones from one snapshot in 2.68 s — 84 ms per clone amortized. 64/64 usable at N=64.">
-      <div class="v">84 <small>ms</small></div>
-      <div class="k">per clone, fan-out ×32</div>
+    <div class="tile ours" data-tip="<b>Fleet-ready burst</b>16 concurrent creates consumed both active workers' complete ready pools: 16/16 successful, zero warm misses, zero build failures, and full cleanup.">
+      <div class="v">16/16</div>
+      <div class="k">ready burst, zero errors</div>
     </div>
     <div class="tile ours" data-tip="<b>Snapshot restore</b>p50 over 25 iterations. The Firecracker resume itself is ~14 ms; the rest is the rootfs reflink copy.">
       <div class="v">212 <small>ms p50</small></div>
@@ -167,6 +169,60 @@
   </div>
   <p class="note">"Usable" always means the in-guest agent answers a request —
   never "the create call returned". Every number here states its clock.</p>
+
+  <h2>Current production validation <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-29 · release 9b6a9fc</small></h2>
+  <p>Two active workers each held eight fully initialized ready VMs. Every VM
+  had already completed the normal jailer exec, UID/GID isolation, cgroup leaf,
+  PID namespace, seccomp policy, tap/IP allocation, guest network identity,
+  clock synchronization, agent health gate, and fresh Ed25519 SSH host-key
+  rotation. Claiming one changes ownership and request metadata; it does not
+  bypass a security step.</p>
+
+  <div class="chart">
+    <h3>Ready-pool create latency through the production gateway</h3>
+    <p class="sub">25 independent lifecycle iterations · milliseconds · lower is better</p>
+    <div class="row" data-tip="<b>p50 — 200 ms</b>Half of complete production create calls returned a fully usable sandbox in 200 ms or less.">
+      <span class="lab">p50</span>
+      <span class="track"><span class="bar ours" style="width:40%"></span></span>
+      <span class="val">200 ms</span>
+    </div>
+    <div class="row" data-tip="<b>p90 — 237 ms</b>The steady distribution stays tightly grouped around one remote round trip.">
+      <span class="lab">p90</span>
+      <span class="track"><span class="bar ours" style="width:47.4%"></span></span>
+      <span class="val">237 ms</span>
+    </div>
+    <div class="row" data-tip="<b>p95 — 304 ms</b>The production acceptance percentile is comfortably below the 500 ms target.">
+      <span class="lab">p95</span>
+      <span class="track"><span class="bar ours" style="width:60.8%"></span></span>
+      <span class="val">304 ms</span>
+    </div>
+    <div class="row" data-tip="<b>max — 404 ms</b>The slowest of all 25 iterations still met the 500 ms target.">
+      <span class="lab">max</span>
+      <span class="track"><span class="bar ours" style="width:80.8%"></span></span>
+      <span class="val">404 ms</span>
+    </div>
+    <div class="axis"><span>0</span><span>250</span><span>500 ms target</span></div>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Validation</th><th>Create p50</th><th>Create p95</th><th>Max</th><th>Outcome</th></tr>
+      </thead>
+      <tbody>
+        <tr class="us"><td>25× lifecycle, production gateway</td><td class="num">200 ms</td><td class="num">304 ms</td><td class="num">404 ms</td><td>25/25 + lifecycle cleanup</td></tr>
+        <tr class="us"><td>16× burst, control VM in VPC</td><td class="num">82 ms</td><td class="num">118 ms</td><td class="num">118 ms</td><td>16/16, zero errors</td></tr>
+        <tr><td>16× burst, Greece → India tunnel</td><td class="num">426 ms</td><td class="num">600 ms</td><td class="num">600 ms</td><td>16/16; transport tail</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">The remote held burst recorded zero ready-pool misses and
+  zero build failures, then returned to zero sandboxes/routes and 16 ready VMs.
+  Its p95 is the long-RTT SSH/Tailscale access path, not VM launch. Raw evidence:
+  <a href="../sdk/typescript/benchmarks/results/production_lifecycle_9b6a9fc_20260729.json">lifecycle JSON</a>
+  and <a href="../sdk/typescript/benchmarks/results/production_burst_9b6a9fc_20260729.json">burst JSON</a>.
+  Pool exhaustion intentionally falls back to the ordinary secure clone path
+  (~734 ms), so the sub-500 ms SLO is capacity-bounded.</p>
 
   <h2>The system at a glance</h2>
   <p>One sandbox, five ways to get it running. Cold boot is the fallback path;
@@ -447,7 +503,7 @@
         <tr><th>Provider</th><th>Create (measured median)</th><th>Create (claim)</th><th>Resume / wake</th><th>Fork / clone</th></tr>
       </thead>
       <tbody>
-        <tr class="us"><td>This project (self-hosted)</td><td class="num">0.55 s e2e · 0.25 s server</td><td class="num">—</td><td class="num">49–133 ms <span class="cav">measured</span></td><td class="num">84 ms/clone ×32 <span class="cav">measured</span></td></tr>
+        <tr class="us"><td>This project (self-hosted)</td><td class="num">0.20 s p50 · 0.304 s p95</td><td class="num">—</td><td class="num">49–133 ms <span class="cav">measured</span></td><td class="num">84 ms/clone ×32 <span class="cav">measured</span></td></tr>
         <tr><td>Vercel Sandbox</td><td class="num">0.40 s</td><td class="num">—</td><td class="num">p75 &lt;1 s, p95 &lt;10 s <span class="cav">published</span></td><td>via base snapshots, no number</td></tr>
         <tr><td>e2b</td><td class="num">0.48 s</td><td class="num">80–200 ms <span class="cav">same-region</span></td><td class="num">~1 s <span class="cav">docs; pause 4 s/GiB</span></td><td>—</td></tr>
         <tr><td>Daytona</td><td class="num">0.58 s</td><td class="num">&lt;90 ms <span class="cav">warm images</span></td><td>not published</td><td>—</td></tr>
@@ -462,7 +518,13 @@
   </div>
 
   <h2>Burst behavior</h2>
-  <p><strong>Latest (2026-07-25):</strong> a 160-create held burst starting at
+  <p><strong>Latest (2026-07-29):</strong> a 16-create held burst consumed the
+  entire ready capacity of two active workers. It completed 16/16 with zero
+  errors or warm misses. A VPC-local confirmation measured p50 82 ms / p95
+  118 ms / max 118 ms; the committed Greece → India run measured p50 426 ms /
+  p95 600 ms / max 600 ms, isolating the remaining tail to network position.
+  Cleanup returned the fleet to zero routes and 16 ready VMs.</p>
+  <p><strong>Autoscaling validation (2026-07-25):</strong> a 160-create held burst starting at
   the 2×48-slot floor plus suspended standby completed <strong>160/160 with
   zero failures in 18.653 s</strong>. Demand reached the MIG resize request
   within 1.095 s, resumed workers registered current-release capacity in
@@ -510,7 +572,8 @@
   </ul>
 
   <footer>
-    Reproduce: <code>npm run bench:restore</code> · <code>npm run bench:fanout</code> ·
+    Reproduce: <code>npm run bench:lifecycle</code> · <code>npm run bench:burst</code> ·
+    <code>npm run bench:restore</code> · <code>npm run bench:fanout</code> ·
     <code>bash scripts/bench-extensive.sh</code> — methodology in
     <span class="mono">docs/benchmarks.md</span>. Hover any bar or tile for the
     exact number, clock, and source.
