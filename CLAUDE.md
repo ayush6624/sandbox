@@ -356,15 +356,16 @@ scripts/              Host setup shell scripts
   Measured from the control VM (removing the Greece→India SSH/Tailscale path),
   two runs were p50 **71/82 ms**, p95 **130/118 ms**, max **130/118 ms**.
   A create that also installed a fresh Ed25519 client public key completed in
-  **92 ms**. The same 16-way workload from Greece was p50 **414 ms**, p95
-  **589 ms**: all 16 were still confirmed ready hits, so that tail is transport
-  RTT/tunneling rather than VM creation. The earlier 25-create sequential
-  gateway run remains p50 **198 ms**, p95 **204 ms** (direct worker p50
-  **196 ms**, p95 **201 ms**). Its results are in
+  **92 ms**. Repeated 16-way workloads from Greece were p50 **414–426 ms**,
+  p95 **589–600 ms**: all creates were still confirmed ready hits, so that tail
+  is transport RTT/tunneling rather than VM creation. A fresh 25-iteration
+  production lifecycle run on `9b6a9fc` measured create p50 **200 ms**, p95
+  **304 ms**, max **404 ms**. The earlier run was p50 **198 ms**, p95 **204
+  ms** (direct worker p50 **196 ms**, p95 **201 ms**). Historical results are in
   `sdk/typescript/benchmarks/results/lifecycle_c990555_gateway_20260729.json`
-  and `lifecycle_c990555_20260729.json`; the current remote burst artifacts are
-  `burst_9b6a9fc_warmaware16_20260729.json` and
-  `burst_9b6a9fc_warmaware16_repeat_20260729.json` (results are gitignored).
+  and `lifecycle_c990555_20260729.json` (gitignored). Curated, committed release
+  evidence is in `production_lifecycle_9b6a9fc_20260729.json` and
+  `production_burst_9b6a9fc_20260729.json`.
   A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
   leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
   clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and

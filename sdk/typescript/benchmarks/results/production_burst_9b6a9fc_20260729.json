@@ -1,0 +1,113 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "burst-create-exec-terminate",
+    "workload": {
+      "count": 16,
+      "concurrency": 16,
+      "mode": "hold",
+      "retry_ms": 0,
+      "disable_idle_pause": true,
+      "math_terms": 2000000,
+      "modulus": 1000000007
+    },
+    "run_id": "commit-burst-9b6a9fc-20260729",
+    "started_at": "2026-07-29T05:11:38.604Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "1.0.0"
+    },
+    "release": "9b6a9fc",
+    "target": "http://127.0.0.1:19090"
+  },
+  "args": {
+    "count": 16,
+    "concurrency": 16,
+    "hold": true,
+    "disableIdlePause": true,
+    "retryMs": 0,
+    "output": "benchmarks/results/production_burst_9b6a9fc_20260729.json"
+  },
+  "wallMs": 5926,
+  "counts": {
+    "ok": 16,
+    "capacity": 0,
+    "tap_pool": 0,
+    "agent_timeout": 0,
+    "other": 0
+  },
+  "createMs": [
+    427,
+    404,
+    411,
+    406,
+    426,
+    425,
+    425,
+    409,
+    597,
+    599,
+    425,
+    407,
+    598,
+    599,
+    595,
+    600
+  ],
+  "execMs": [
+    3993,
+    4048,
+    4012,
+    4008,
+    4094,
+    4187,
+    4042,
+    4801,
+    4753,
+    4644,
+    4066,
+    4715,
+    4724,
+    4746,
+    4737,
+    4853
+  ],
+  "terminateMs": [
+    459,
+    458,
+    398,
+    269,
+    392,
+    457,
+    380,
+    407,
+    379,
+    396,
+    361,
+    289,
+    345,
+    455,
+    266,
+    454
+  ],
+  "killMs": [
+    459,
+    458,
+    398,
+    269,
+    392,
+    457,
+    380,
+    407,
+    379,
+    396,
+    361,
+    289,
+    345,
+    455,
+    266,
+    454
+  ],
+  "peak": 16
+}

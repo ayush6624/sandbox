@@ -2,3 +2,4 @@ node_modules/
 dist/
 benchmarks/results/*
 !benchmarks/results/README.md
+!benchmarks/results/production_*.json

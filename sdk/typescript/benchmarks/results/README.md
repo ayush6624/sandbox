@@ -1,14 +1,17 @@
 # Benchmark results
 
-Raw per-run JSON from the suites in [`../`](../). Everything here except this
-README is **gitignored** — results are machine- and date-specific, so they're
-regenerated rather than versioned. The curated, human-readable numbers live in
+Raw per-run JSON from the suites in [`../`](../). Ad-hoc results are
+**gitignored** because they are machine- and date-specific. Files prefixed
+`production_` are deliberately versioned release evidence; they must identify
+the deployed release and run ID in metadata and contain no credentials. The
+curated, human-readable numbers live in
 [`docs/benchmarks.md`](../../../../docs/benchmarks.md).
 
 ## File naming
 
 | Pattern | Producer | Shape |
 | --- | --- | --- |
+| `production_*.json` | Any suite below | Curated, committed production-release evidence |
 | `snapshot_source_<ts>.json` | `npm run bench:snapshot-source` | default-source vs snapshot-source create latency; retains deprecated `cold_boot` and `restore` keys |
 | `snapshot_batch_<ts>.json` | `npm run bench:snapshot-batch` | snapshot-source batch operation/readiness scaling with per-item diagnostics and cleanup errors; retains deprecated `perCloneMs` and `fanout` aliases |
 | `lifecycle_<ts>.json` | `npm run bench:lifecycle` | create/pause/resume-to-usable/terminate latency; retains deprecated lifecycle aliases |
@@ -28,6 +31,9 @@ workload, run, API/SDK, deployed release, and redacted target. Set
   2.68 s (84 ms/sandbox), 64/64 usable at N=64 (`extensive/fanout.json`)
 - **Memory density @ N=64:** 925 MB PSS fan-out vs 10.1 GB cold-boot (`extensive/mem.json`)
 - **Hot create:** 199–271 ms server-side (measured live, not a suite output)
+- **Production ready-pool create (`9b6a9fc`, 2026-07-29):** lifecycle p50
+  200 ms / p95 304 ms over 25 iterations; 16-way held burst completed 16/16
+  with create p50 426 ms / p95 600 ms from the remote benchmark client
 
 Full context, comparison against hosted providers, and caveats:
 [`docs/benchmarks.md`](../../../../docs/benchmarks.md).
@@ -42,6 +48,10 @@ npm run bench:snapshot-batch
 npm run bench:burst -- --count 500 --concurrency 96 --retry-ms 250 --output results/burst.json
 HOST_IP=<ip> SSH_HOST=<ip> HOST_TOKEN=... GATEWAY_TOKEN=... bash ../../scripts/bench-extensive.sh
 ```
+
+Only promote a result into the tracked `production_` namespace after verifying
+all benchmark resources were cleaned up and the ready pool returned to its
+pre-run capacity.
 
 `bench:restore` and `bench:fanout` remain deprecated aliases for existing
 automation.
