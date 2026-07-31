@@ -10,7 +10,7 @@ REMOTE      := $(REMOTE_USER)@$(REMOTE_HOST)
 REMOTE_BASE := ssh -o BatchMode=yes $(REMOTE)
 REMOTE_CD   := cd /home/$(REMOTE_USER)/$(REMOTE_DIR)
 
-.PHONY: build build-linux validate-infra sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status gcs-release
+.PHONY: build build-linux validate-infra sync sync-all remote-shell remote-setup remote-setup-devbox remote-install-agent remote-serve remote-up remote-down remote-list remote-doctor gcp-fleet-deploy gcp-fleet-status gcs-release fleet-rollout fleet-status
 
 build:
 	go build ./...
@@ -100,3 +100,14 @@ gcs-release: build-linux
 	@test -n "$(RELEASE_BUCKET)" || (echo "set RELEASE_BUCKET (infra/gcp/config.env)"; exit 1)
 	gsutil -m cp bin/sandbox bin/sandboxd gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/
 	@echo ">> published gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/ — deploy with: infra/gcp/deploy-job.sh $(RELEASE_SHA)"
+
+# --- One-command production rollout (prefer this over the three steps above) ---
+# Builds+uploads, deploys only the components whose RUNNING release is stale
+# (gateway first, then workers), waits for the gateway inventory to show every
+# alive host on the target with capacity, then smoke-tests REST + the WebSocket
+# pty. Idempotent. `make fleet-rollout SHA=<sha>` rolls a published release.
+fleet-rollout:
+	bash infra/gcp/rollout.sh $(SHA) $(ROLLOUT_ARGS)
+
+fleet-status:
+	bash infra/gcp/rollout.sh --status

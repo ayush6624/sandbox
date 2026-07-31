@@ -63,7 +63,26 @@ SANDBOX_API_URL=http://<control-tailnet-ip>:9090 SANDBOX_API_KEY=<gateway-token>
   tsx ../../sdk/typescript/benchmarks/fleet-bench.ts --count 20
 ```
 
-**Iterate on the Go binaries** without re-baking the image:
+**Iterate on the Go binaries** without re-baking the image — use the one-command
+rollout, which does all of the below in the right order and verifies it landed:
+
+```bash
+./rollout.sh                 # roll HEAD: build, upload, deploy what's stale, wait, smoke-test
+./rollout.sh --dry-run       # print the plan (what's stale) and exit
+./rollout.sh --status        # where the fleet is right now, no changes
+./rollout.sh <sha>           # roll a previously published release (rollback)
+```
+
+It derives what to deploy by comparing each component's **running** release
+against the target, so it's idempotent, and it waits on the gateway's host
+inventory (release + `release_compatible` + capacity) rather than `nomad alloc
+status` — an unwarmed host advertises `slots_free=0` and can't take a create
+yet. The smoke test covers REST *and* the WebSocket pty, because those
+authenticate and proxy differently; a REST-only check has passed while the
+interactive shell was broken fleet-wide. Also `make fleet-rollout` /
+`make fleet-status` from the repo root.
+
+The underlying steps, if you need them individually:
 
 ```bash
 make -C ../.. gcs-release && ./deploy-job.sh   # new sha rolls the system job fleet-wide
@@ -82,7 +101,16 @@ The gateway/worker control URL remains the VPC-internal
 That rolls the WORKERS only. If the change touches the gateway — including
 adding fields to `client.CreateOpts` (the gateway re-encodes create bodies
 through it, so an old gateway silently drops new fields) — also run
-`./control.sh deploy` to update the control plane.
+`./control.sh deploy` to update the control plane. Since `sandbox` is a single
+binary holding both `serve` and `gateway`, that's effectively **any Go change**;
+forgetting it leaves a half-deployed fleet. `rollout.sh` exists because this
+step is easy to miss — it deploys the gateway first (a new gateway in front of
+old workers is the benign direction; the reverse loses fields).
+
+Note `control.sh deploy` compiles the **working tree** and labels it with HEAD's
+sha, so it cannot install some other release. Workers can roll to any published
+sha; rolling the gateway back means checking that commit out first. `rollout.sh`
+refuses up front instead of half-deploying.
 
 **Observe it** in Grafana at the URL printed by `./control.sh status`. The
 provisioned **Sandbox Fleet** dashboard separates live operational telemetry
