@@ -263,22 +263,35 @@ fi
 # copies it server-side from the release the workers are already running:
 # in-region, effectively instant, and zero egress from here. Falling back to a
 # local build+upload keeps the path working if no donor is available.
+#
+# sandbox-edge is in the prefix for the same reason: startup-edge.sh downloads
+# releases/<sha>/sandbox-edge unconditionally, so an edge VM created or healed
+# against a prefix missing it 404s, never passes its health check, and silently
+# leaves the load balancer with no backends. Neither auxiliary binary is ever
+# executed by a gateway-only fast roll — they are here so the prefix stays a
+# complete, deployable release.
 UPLOAD_PID=""
 if [ "$BUILD" = 1 ] && [ "$FAST" = 1 ]; then
   step "Upload + gateway (concurrent)"
   ( set -e
     gsutil -q -m cp "$BUILT_BIN" "${RELEASE_URI}/sandbox"
-    if gsutil -q stat "${RELEASE_URI}/sandboxd" 2>/dev/null; then
-      :
-    elif [ -n "$WORKER_REL" ] && \
-         gsutil -q cp "gs://${RELEASE_BUCKET}/releases/${WORKER_REL}/sandboxd" \
-                      "${RELEASE_URI}/sandboxd" 2>/dev/null; then
-      :
-    else
+    # $1 = object name, $2 = go package to build if no donor release has it.
+    ensure_aux() {
+      local obj="$1" pkg="$2"
+      if gsutil -q stat "${RELEASE_URI}/${obj}" 2>/dev/null; then
+        return 0
+      fi
+      if [ -n "$WORKER_REL" ] && \
+         gsutil -q cp "gs://${RELEASE_BUCKET}/releases/${WORKER_REL}/${obj}" \
+                      "${RELEASE_URI}/${obj}" 2>/dev/null; then
+        return 0
+      fi
       ( cd "$REPO" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-          go build -ldflags="-s -w" -o bin/sandboxd ./cmd/sandboxd )
-      gsutil -q -m cp "$REPO/bin/sandboxd" "${RELEASE_URI}/sandboxd"
-    fi
+          go build -ldflags="-s -w" -o "bin/${obj}" "$pkg" )
+      gsutil -q -m cp "$REPO/bin/${obj}" "${RELEASE_URI}/${obj}"
+    }
+    ensure_aux sandboxd ./cmd/sandboxd
+    ensure_aux sandbox-edge ./services/sandbox-edge/cmd/sandbox-edge
   ) & UPLOAD_PID=$!
 fi
 
