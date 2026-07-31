@@ -76,7 +76,14 @@ cmd_init() {
   fleet_secrets="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
   if [ -f "$fleet_secrets" ]; then
     source "$fleet_secrets"
-    printf '%s' "${GATEWAY_TOKEN:?}" | "${GC[@]}" secrets versions add "$TOKEN_SECRET" --data-file=-
+    # The edge gets the EDGE credential, not the client one. GET /route and
+    # GET /raw-route return a worker's control token, and GATEWAY_TOKEN is the
+    # same token users hold as SANDBOX_API_KEY — shipping it here is what let any
+    # API-key holder reach every sandbox on a worker directly. Falls back to
+    # GATEWAY_TOKEN only for a fleet whose control.sh predates GATEWAY_EDGE_TOKEN
+    # (the gateway then still accepts it, and warns at startup).
+    printf '%s' "${GATEWAY_EDGE_TOKEN:-${GATEWAY_TOKEN:?}}" \
+      | "${GC[@]}" secrets versions add "$TOKEN_SECRET" --data-file=-
   fi
   [ -n "${EDGE_CERT_FILE:-}" ] && "${GC[@]}" secrets versions add "$CERT_SECRET" --data-file="$EDGE_CERT_FILE"
   [ -n "${EDGE_KEY_FILE:-}" ] && "${GC[@]}" secrets versions add "$KEY_SECRET" --data-file="$EDGE_KEY_FILE"

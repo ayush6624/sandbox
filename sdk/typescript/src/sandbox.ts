@@ -192,7 +192,14 @@ export class Sandbox {
    *
    * Gateway-only: a single host has no fleet view of itself and answers 404.
    *
+   * Operator-only: the fleet inventory discloses per-host addresses and
+   * capacity, so the gateway authenticates it with the **worker-control**
+   * credential, not the tenant API key. Pass it explicitly —
+   * `Sandbox.hosts({ apiKey: gatewayControlToken })`. An ordinary API key gets
+   * an {@link AuthenticationError}.
+   *
    * @throws {NotFoundError} when the API URL points at a host, not a gateway.
+   * @throws {AuthenticationError} when called with a tenant API key.
    */
   static async hosts(opts: SandboxOpts = {}): Promise<FleetHostInfo[]> {
     const client = new ApiClient(opts)

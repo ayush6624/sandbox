@@ -20,8 +20,10 @@ test('fleet benchmark documents safe arguments without requiring credentials', (
   assert.match(result.stdout, /--cleanup-timeout-ms 10000/)
 })
 
-test('fleet inventory uses the client-authenticated public hosts endpoint', () => {
-  assert.equal(gatewayHostsEndpoint('https://gateway.example/'), 'https://gateway.example/hosts')
+// Host inventory is operator-gated (worker-control credential), so the benchmark
+// must use the canonical /internal/v1 path — the tenant API key cannot read it.
+test('fleet inventory uses the operator-gated hosts endpoint', () => {
+  assert.equal(gatewayHostsEndpoint('https://gateway.example/'), 'https://gateway.example/internal/v1/hosts')
 })
 
 for (const [name, args, expected] of [

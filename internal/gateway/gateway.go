@@ -116,8 +116,19 @@ type Gateway struct {
 	token             string // retained for compatibility with in-package tests
 	clientCredentials *management.Credentials
 	workerCredentials *management.Credentials
-	transport         management.Transport
-	ttl               time.Duration // a host not seen within ttl is considered dead
+	// edgeCredentials is a THIRD trust domain, for the public ingress edge.
+	// GET /route/{id} and GET /raw-route/{port} hand the caller a worker's
+	// control token verbatim, so authenticating them with the client credential
+	// (which is the same token users hold as SANDBOX_API_KEY) let any API-key
+	// holder reach every sandbox on that worker plus its /internal/v1/ control
+	// routes — the credential separation the rest of this file pays for,
+	// undone. Nil means "not configured": those two routes then fall back to
+	// the client credential, because the deployed edge authenticates with it
+	// and a hard requirement would break public ingress fleet-wide on the next
+	// rollout. Serve() warns loudly in that state.
+	edgeCredentials *management.Credentials
+	transport       management.Transport
+	ttl             time.Duration // a host not seen within ttl is considered dead
 
 	// queueWait/queueMax bound the create wait queue: a create that finds no
 	// free slot waits up to queueWait for capacity (a destroy, a failed create,
@@ -281,6 +292,42 @@ func (g *Gateway) ConfigureSecurity(clientTokens []string, clientFile string, wo
 	g.clientCredentials = clientCreds
 	g.workerCredentials = workerCreds
 	g.transport = transport
+	return g.validateCredentialDomains()
+}
+
+// ConfigureEdgeCredentials gives the public ingress edge its own credential for
+// GET /route/{id} and GET /raw-route/{port} — the two routes that disclose a
+// worker's control token. Call it AFTER ConfigureSecurity: the disjointness
+// check needs the client/worker sets and the transport mode. Leaving it
+// unconfigured keeps the pre-existing behavior (those routes accept the client
+// credential) so an already-deployed edge is not locked out mid-rollout.
+func (g *Gateway) ConfigureEdgeCredentials(tokens []string, file string) error {
+	edgeCreds, err := management.NewCredentials(tokens, file)
+	if err != nil {
+		return fmt.Errorf("gateway edge credentials: %w", err)
+	}
+	g.edgeCredentials = edgeCreds
+	if err := g.validateCredentialDomains(); err != nil {
+		g.edgeCredentials = nil
+		return err
+	}
+	return nil
+}
+
+// validateCredentialDomains keeps the three management trust domains disjoint.
+// It runs from both configure methods so the check cannot be dodged by calling
+// them in either order, and it tolerates overlap-rotation files (Overlaps
+// compares every active token, not just the preferred outbound one).
+func (g *Gateway) validateCredentialDomains() error {
+	if g.transport.Mode == management.TransportDevelopment || g.edgeCredentials == nil {
+		return nil
+	}
+	if g.edgeCredentials.Overlaps(g.clientCredentials) {
+		return errors.New("gateway edge and client credentials must differ outside development mode")
+	}
+	if g.edgeCredentials.Overlaps(g.workerCredentials) {
+		return errors.New("gateway edge and worker-control credentials must differ outside development mode")
+	}
 	return nil
 }
 
@@ -341,6 +388,11 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /register", g.handleRegister)
 	mux.HandleFunc("POST /internal/v1/hosts:register", g.handleRegister)
 	mux.HandleFunc("GET /info", g.handleInfo)
+	// The legacy (non-/internal/v1) aliases below are kept for existing tooling
+	// but are classified into the WORKER domain by routeDomain: /hosts discloses
+	// fleet topology and per-host addresses, and PUT /worker-release can force
+	// slotsFree=0 on every host — a persisted, fleet-wide create outage — so
+	// neither belongs on the credential end users hold.
 	mux.HandleFunc("GET /hosts", g.handleHosts)
 	mux.HandleFunc("GET /internal/v1/hosts", g.handleHosts)
 	mux.HandleFunc("GET /worker-release", g.handleWorkerRelease)
@@ -348,8 +400,13 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /internal/v1/worker-release", g.handleWorkerRelease)
 	mux.HandleFunc("PUT /internal/v1/worker-release", g.handleWorkerRelease)
 	// Edge-only route resolution. The gateway remains the sole authority for
-	// sandbox ownership and worker credentials; bulk bytes bypass it.
+	// sandbox ownership and worker credentials; bulk bytes bypass it. Both
+	// responses embed a worker control token, so they live in their own EDGE
+	// credential domain (see routeDomain / edgeCredentials).
 	mux.HandleFunc("GET /route/{id}", g.handleRoute)
+	// Allocating a raw public port is an ordinary tenant operation on a sandbox
+	// the caller already owns, and it returns no worker credential — it stays in
+	// the CLIENT domain.
 	mux.HandleFunc("POST /sandboxes/{id}/raw-ports", g.handleAllocateRawPort)
 	mux.HandleFunc("GET /raw-route/{port}", g.handleRawRoute)
 	mux.HandleFunc("DELETE /sandboxes/{id}/ports/{port}", g.handleGatewayDeletePort)
@@ -401,6 +458,9 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	fmt.Fprintf(os.Stderr, "gateway listening on %s (transport=%s, separated bearer auth)\n", addr, g.transport.Mode)
+	if g.edgeCredentials == nil {
+		fmt.Fprintf(os.Stderr, "WARNING: no edge credential configured: GET /route/{id} and GET /raw-route/{port} disclose worker control tokens to any holder of the CLIENT credential; set --edge-token/--edge-token-file and point the edge at it\n")
+	}
 
 	select {
 	case <-ctx.Done():
@@ -1623,26 +1683,80 @@ func (g *Gateway) dropHostLocked(id string) {
 
 // --- helpers (mirrors internal/server) ---
 
+// authDomain is which management trust domain a gateway route authenticates
+// against. Classification is by PATH, before the mux dispatches, so it must be
+// prefix-safe: a route that only *sometimes* lands in the privileged domain is
+// an escalation waiting to happen.
+type authDomain int
+
+const (
+	// domainClient is the public tenant API — everything not named below.
+	domainClient authDomain = iota
+	// domainWorker is worker registration and fleet control.
+	domainWorker
+	// domainEdge is the public ingress edge's route lookups, which return a
+	// worker control token to the caller.
+	domainEdge
+)
+
+func routeDomain(path string) authDomain {
+	switch {
+	case path == "/register",
+		strings.HasPrefix(path, "/internal/v1/"),
+		// Legacy aliases of internal control routes. They predate the
+		// /internal/v1 namespace and are still called by infra tooling, so they
+		// are reclassified rather than deleted. /hosts covers both the exact
+		// inventory path and /hosts/{host}/drain.
+		path == "/worker-release",
+		path == "/hosts",
+		strings.HasPrefix(path, "/hosts/"):
+		return domainWorker
+	case strings.HasPrefix(path, "/route/"), strings.HasPrefix(path, "/raw-route/"):
+		return domainEdge
+	default:
+		return domainClient
+	}
+}
+
 func (g *Gateway) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		workerOnly := r.URL.Path == "/register" || strings.HasPrefix(r.URL.Path, "/internal/v1/")
+		domain := routeDomain(r.URL.Path)
 		// Upgrade requests may carry the client credential as a WebSocket
 		// subprotocol: browsers cannot set headers on a WebSocket, and query
-		// credentials are not accepted. Internal control routes are excluded
-		// structurally rather than by assuming they're never upgrades — the
-		// caller chooses the upgrade headers, so "no worker route is a
-		// WebSocket" is not a property this side can enforce.
-		if auth == "" && !workerOnly {
+		// credentials are not accepted. Only the client domain gets that
+		// fallback, and it is excluded structurally rather than by assuming the
+		// other domains are never upgrades — the caller chooses the upgrade
+		// headers, so "no worker route is a WebSocket" is not a property this
+		// side can enforce. The edge is a server that sets headers, so it never
+		// needs the subprotocol channel either.
+		if auth == "" && domain == domainClient {
 			auth = wsutil.UpgradeAuthorization(r)
 		}
 		workerMatch := g.workerCredentials != nil && g.workerCredentials.MatchAuthorization(auth)
 		clientMatch := g.clientCredentials != nil && g.clientCredentials.MatchAuthorization(auth)
-		// Fail closed if independently rotated files ever acquire an
-		// overlapping token after startup.
-		ok := workerOnly && workerMatch && !clientMatch
-		if !workerOnly && g.clientCredentials != nil {
-			ok = clientMatch && !workerMatch
+		edgeMatch := g.edgeCredentials != nil && g.edgeCredentials.MatchAuthorization(auth)
+		// Every arm additionally requires that the presented credential match
+		// NO other domain, so independently rotated credential files that
+		// acquire an overlapping token after startup fail closed instead of
+		// quietly merging two trust domains.
+		var ok bool
+		switch domain {
+		case domainWorker:
+			ok = workerMatch && !clientMatch && !edgeMatch
+		case domainEdge:
+			if g.edgeCredentials != nil {
+				ok = edgeMatch && !clientMatch && !workerMatch
+			} else {
+				// Backward compatibility: the deployed edge presents the client
+				// credential. Accepting it here is exactly the disclosure this
+				// domain exists to close, so Serve() warns at startup — but
+				// failing closed with no edge credential configured would take
+				// public ingress down fleet-wide on the rollout that ships this.
+				ok = clientMatch && !workerMatch
+			}
+		default:
+			ok = clientMatch && !workerMatch && !edgeMatch
 		}
 		if !ok {
 			err := errors.New("missing or invalid bearer token")

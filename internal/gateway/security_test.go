@@ -27,6 +27,16 @@ func secureTestGateway(t *testing.T) *Gateway {
 	return g
 }
 
+// edgeTestGateway is secureTestGateway plus the third (edge) credential domain.
+func edgeTestGateway(t *testing.T) *Gateway {
+	t.Helper()
+	g := secureTestGateway(t)
+	if err := g.ConfigureEdgeCredentials([]string{"edge-token"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
 func TestConfigureSecurityRejectsSharedProductionCredential(t *testing.T) {
 	g := New("legacy", 20*time.Second, 0, 0)
 	err := g.ConfigureSecurity(
@@ -80,6 +90,126 @@ func TestGatewayAuthSeparatesClientAndWorkerDomains(t *testing.T) {
 			if tt.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tt.token)
 			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.status {
+				t.Fatalf("status = %d, want %d", w.Code, tt.status)
+			}
+		})
+	}
+}
+
+// TestConfigureEdgeCredentialsRejectsOverlap keeps the third domain disjoint
+// from the other two: an edge token equal to the client token would re-open the
+// exact disclosure the domain exists to close, and one equal to the worker token
+// would hand the edge fleet-control authority it never needs.
+func TestConfigureEdgeCredentialsRejectsOverlap(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"edge equals client", "client-token"},
+		{"edge equals worker", "worker-token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := secureTestGateway(t)
+			if err := g.ConfigureEdgeCredentials([]string{tt.token}, ""); err == nil {
+				t.Fatal("overlapping edge credential accepted")
+			}
+			// A rejected configuration must not half-apply, or the gateway would
+			// run with an edge domain nobody validated.
+			if g.edgeCredentials != nil {
+				t.Fatal("rejected edge credential was retained")
+			}
+		})
+	}
+}
+
+// TestGatewayAuthEdgeAndControlDomains is the S1/S2 regression: the routes that
+// hand out a worker control token, and the routes that can take the fleet down,
+// must not be reachable with the credential end users hold as SANDBOX_API_KEY.
+func TestGatewayAuthEdgeAndControlDomains(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		token  string
+		status int
+	}{
+		// (a) the client credential no longer buys a worker control token.
+		{"client on route denied", "/route/sb-1", "client-token", http.StatusUnauthorized},
+		{"client on raw-route denied", "/raw-route/20001", "client-token", http.StatusUnauthorized},
+		// (b) the edge credential is what opens those two.
+		{"edge on route", "/route/sb-1", "edge-token", http.StatusNoContent},
+		{"edge on raw-route", "/raw-route/20001", "edge-token", http.StatusNoContent},
+		// The edge is scoped to route lookup only — it is not an operator and
+		// not a tenant.
+		{"edge on client route denied", "/sandboxes", "edge-token", http.StatusUnauthorized},
+		{"edge on worker route denied", "/internal/v1/hosts", "edge-token", http.StatusUnauthorized},
+		{"worker on route denied", "/route/sb-1", "worker-token", http.StatusUnauthorized},
+		// (c) legacy fleet-control aliases moved to the worker domain.
+		{"client on worker-release denied", "/worker-release", "client-token", http.StatusUnauthorized},
+		{"client on hosts denied", "/hosts", "client-token", http.StatusUnauthorized},
+		{"client on drain denied", "/hosts/worker-1/drain", "client-token", http.StatusUnauthorized},
+		{"worker on worker-release", "/worker-release", "worker-token", http.StatusNoContent},
+		{"worker on hosts", "/hosts", "worker-token", http.StatusNoContent},
+		{"worker on drain", "/hosts/worker-1/drain", "worker-token", http.StatusNoContent},
+		// Allocating a raw public port stays a tenant operation: it returns no
+		// worker credential, so moving it would break the SDK for no gain.
+		{"client on raw-ports", "/sandboxes/sb-1/raw-ports", "client-token", http.StatusNoContent},
+		{"worker on raw-ports denied", "/sandboxes/sb-1/raw-ports", "worker-token", http.StatusUnauthorized},
+		// /metrics/hosts is federation, not the fleet inventory — the /hosts
+		// classification must not swallow it.
+		{"client on metrics hosts", "/metrics/hosts", "client-token", http.StatusNoContent},
+	}
+	g := edgeTestGateway(t)
+	handler := g.bearerAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+tt.token)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.status {
+				t.Fatalf("status = %d, want %d", w.Code, tt.status)
+			}
+		})
+	}
+}
+
+// TestGatewayAuthEdgeFallbackWithoutEdgeCredential pins the compatibility path.
+// The edge deployed today authenticates with the client credential, so a gateway
+// with no edge credential configured MUST keep accepting it — otherwise the
+// rollout that ships this change breaks public ingress fleet-wide. The
+// disclosure is instead surfaced as a startup WARNING.
+func TestGatewayAuthEdgeFallbackWithoutEdgeCredential(t *testing.T) {
+	g := secureTestGateway(t)
+	if g.edgeCredentials != nil {
+		t.Fatal("edge credentials unexpectedly configured")
+	}
+	handler := g.bearerAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	tests := []struct {
+		name   string
+		path   string
+		token  string
+		status int
+	}{
+		{"client on route", "/route/sb-1", "client-token", http.StatusNoContent},
+		{"client on raw-route", "/raw-route/20001", "client-token", http.StatusNoContent},
+		{"bad token on route", "/route/sb-1", "nope", http.StatusUnauthorized},
+		// The fallback is only for the edge domain; fleet control never loosens.
+		{"client on hosts still denied", "/hosts", "client-token", http.StatusUnauthorized},
+		{"worker on route denied", "/route/sb-1", "worker-token", http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+tt.token)
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 			if w.Code != tt.status {

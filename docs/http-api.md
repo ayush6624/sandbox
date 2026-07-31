@@ -467,8 +467,8 @@ The gateway fronts N hosts with the same API, plus:
 | | |
 | --- | --- |
 | `GET /info` | Forwarded to one live host (fleet hosts share a template config); `503` when none is live |
-| `GET /hosts` | Fleet state: `[{"id","addr","slots_total","slots_used","hibernated","free","alive","last_seen_ms_ago"}]` |
-| `GET /route/{id}` | Edge route contract: owning worker `host_addr`, worker bearer `token`, and cache `ttl`; gateway-token authenticated |
+| `GET /hosts` | Fleet state: `[{"id","addr","slots_total","slots_used","hibernated","free","alive","last_seen_ms_ago"}]`. **Operator route** — authenticated with the worker-control credential, not the client API key (it discloses per-host addresses and capacity). Canonical path: `GET /internal/v1/hosts` |
+| `GET /route/{id}` | Edge route contract: owning worker `host_addr`, worker bearer `token`, and cache `ttl`. **Edge route** — authenticated with the gateway's *edge* credential (`--edge-token`), because the response hands out host-wide worker authority. With no edge credential configured it falls back to the client credential and the gateway warns at startup |
 | `GET /metrics` | Prometheus text format: `sandbox_hosts_live`, `sandbox_slots_total/used/free`, `sandbox_create_queue_depth`, per-host gauges |
 | `GET /metrics/hosts` | Federated per-host metrics: the gateway scrapes each live host's `/metrics` (using the addr+token from its heartbeat) and re-exports every series with a `host="<id>"` label, grouped into valid exposition. `sandbox_host_scrape_ok{host}` flags any host it couldn't reach. Lets Prometheus collect per-host detail while scraping only the gateway — no worker service discovery |
 | `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |

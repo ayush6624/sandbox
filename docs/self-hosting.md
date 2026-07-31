@@ -99,7 +99,9 @@ sudo ./sandbox serve --config configs/devbox.json \
   --advertise http://<host-ip>:8080
 ```
 
-Hosts heartbeat every 5 s; `GET /hosts` on the gateway shows who's alive.
+Hosts heartbeat every 5 s; `GET /hosts` on the gateway shows who's alive — with
+the worker-control credential, not the client one (it discloses per-host
+addresses and capacity). See [management-security.md](management-security.md).
 Clients point at the gateway and never think about hosts again
 (`SANDBOX_API_URL=http://<gw-ip>:9090`).
 

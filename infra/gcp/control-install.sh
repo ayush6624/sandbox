@@ -2,6 +2,9 @@
 # Runs as root ON the control VM (piped in by control.sh deploy). Installs and
 # starts the four control-plane services from the rsync'd assets under
 # $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN GATEWAY_CONTROL_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
+# GATEWAY_EDGE_TOKEN (optional: gates /route + /raw-route for the ingress edge)
+# GW_TOKEN_PREV / GATEWAY_EDGE_TOKEN_PREV (optional: written as a second line of
+#   the matching token file so an overlap rotation survives a deploy)
 # PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
 # HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
 # QUEUE_WAIT QUEUE_MAX INGRESS_BUCKET RAW_PUBLIC_HOST RAW_PORT_MIN RAW_PORT_MAX
@@ -60,9 +63,39 @@ fi
 # --- 2. sandbox gateway --- (always: this is the only part a code deploy changes)
 install -m 0755 "${REMOTE_DIR}/sandbox" /usr/local/bin/sandbox
 install -d -m 0700 /etc/sandbox-gateway
-printf '%s\n' "$GW_TOKEN" > /etc/sandbox-gateway/client.tokens
-printf '%s\n' "$GATEWAY_CONTROL_TOKEN" > /etc/sandbox-gateway/worker-control.tokens
-chmod 0600 /etc/sandbox-gateway/client.tokens /etc/sandbox-gateway/worker-control.tokens
+# write_tokens <file> <primary> [predecessor]
+# A token file holds one credential per line: the first is used for outbound
+# calls, every line is accepted inbound. The optional second line is what makes
+# an overlap rotation survive a deploy — WITHOUT it, every rollout resets the
+# file to a single token and 401s whichever side has already moved, which is why
+# a rotation must be expressible through these scripts and not only by hand.
+write_tokens() {
+  local file="$1" primary="$2" prev="${3:-}" content="$2"
+  if [ -n "$prev" ] && [ "$prev" != "$primary" ]; then
+    content="$primary
+$prev"
+  fi
+  # umask in a subshell: the gateway REFUSES a group/world-readable credential
+  # file, and leaking global umask into the rest of this script would silently
+  # re-mode the prometheus/grafana assets written further down.
+  ( umask 077; printf '%s\n' "$content" > "$file" )
+  chmod 0600 "$file"
+}
+write_tokens /etc/sandbox-gateway/client.tokens "$GW_TOKEN" "${GW_TOKEN_PREV:-}"
+write_tokens /etc/sandbox-gateway/worker-control.tokens "$GATEWAY_CONTROL_TOKEN"
+# Third trust domain: the public ingress edge. GET /route and GET /raw-route
+# return a worker's control token, so they must not be reachable with the client
+# credential (which IS the users' SANDBOX_API_KEY). Optional so an older
+# control.sh that doesn't export it still installs a working gateway — the
+# gateway then falls back to the client credential there and warns at startup.
+# GATEWAY_EDGE_TOKEN_PREV holds the outgoing edge credential while the edge MIG
+# rolls onto the new one; the gateway accepts both, so the roll costs no ingress.
+EDGE_ARGS=""
+if [ -n "${GATEWAY_EDGE_TOKEN:-}" ]; then
+  write_tokens /etc/sandbox-gateway/edge.tokens \
+    "$GATEWAY_EDGE_TOKEN" "${GATEWAY_EDGE_TOKEN_PREV:-}"
+  EDGE_ARGS="--edge-token-file /etc/sandbox-gateway/edge.tokens"
+fi
 # Durable raw TCP allocation (E4) is opt-in: no INGRESS_BUCKET, no raw flags.
 RAW_ARGS=""
 if [ -n "${INGRESS_BUCKET:-}" ]; then
@@ -79,7 +112,7 @@ Environment=SANDBOX_RELEASE=${SANDBOX_RELEASE:-unknown}
 ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --management-transport private_proxy \
   --token-file /etc/sandbox-gateway/client.tokens \
-  --worker-token-file /etc/sandbox-gateway/worker-control.tokens \
+  --worker-token-file /etc/sandbox-gateway/worker-control.tokens ${EDGE_ARGS} \
   --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
   --worker-release-file /var/lib/sandbox-gateway/worker-release \
   --direct-scale-project ${PROJECT} \

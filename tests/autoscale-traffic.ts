@@ -18,6 +18,9 @@ import { Sandbox } from '../sdk/typescript/src/index.js'
 const LIVE_ACK = 'I_UNDERSTAND_THIS_CREATES_REAL_VMS'
 const API_URL = required('SANDBOX_API_URL')
 const API_KEY = required('SANDBOX_API_KEY')
+// Worker-control credential (GATEWAY_CONTROL_TOKEN). Only the host-inventory
+// probe needs it; every sandbox operation uses the ordinary client key.
+const CONTROL_KEY = required('SANDBOX_CONTROL_KEY')
 const EXPECTED_RELEASE = required('EXPECTED_WORKER_RELEASE')
 const RUN_ID = (process.env.BENCH_RUN_ID ?? `standalone-${process.pid}-${stamp()}`)
   .replace(/[^a-zA-Z0-9-]/g, '-')
@@ -798,17 +801,20 @@ async function assertCleanGateway(): Promise<void> {
   assertHostInvariants(hosts)
 }
 
+// Host inventory is fleet control, not a tenant API: it discloses per-host
+// addresses and capacity, so the gateway gates it on the worker-control
+// credential. Use the /internal/v1 path, which has always been gated that way.
 async function getHosts(): Promise<RawHost[]> {
-  return apiJson<RawHost[]>('/hosts')
+  return apiJson<RawHost[]>('/internal/v1/hosts', CONTROL_KEY)
 }
 
 async function getSandboxes(): Promise<RawSandbox[]> {
   return apiJson<RawSandbox[]>('/sandboxes')
 }
 
-async function apiJson<T>(path: string): Promise<T> {
+async function apiJson<T>(path: string, key: string = API_KEY): Promise<T> {
   const response = await fetch(`${API_URL.replace(/\/$/, '')}${path}`, {
-    headers: { Authorization: `Bearer ${API_KEY}` },
+    headers: { Authorization: `Bearer ${key}` },
     signal: AbortSignal.timeout(15_000),
   })
   if (!response.ok) throw new Error(`GET ${path}: HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`)

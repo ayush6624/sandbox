@@ -145,11 +145,16 @@ echo ">> nomad job run sandbox-serve (release=$RELEASE)"
 # remain usable, but the gateway must expose zero free slots until the
 # allocation carrying this release starts.
 echo ">> set gateway expected worker release=$RELEASE"
+# Fleet control, so it presents the WORKER-CONTROL credential, not the client
+# one: this request can force slots_free=0 on every host, and the setting is
+# persisted across gateway restarts. Use the /internal/v1 path — it has always
+# been worker-gated, so this call works against both an old and a new gateway
+# (the legacy /worker-release alias moved to the worker domain).
 sshc "curl -fsS -X PUT \
-        -H 'Authorization: Bearer $GATEWAY_TOKEN' \
+        -H 'Authorization: Bearer $GATEWAY_CONTROL_TOKEN' \
         -H 'Content-Type: application/json' \
         --data '{\"release\":\"$RELEASE\"}' \
-        http://${CONTROL_IP}:${GW_PORT:-9090}/worker-release >/dev/null"
+        http://${CONTROL_IP}:${GW_PORT:-9090}/internal/v1/worker-release >/dev/null"
 # Values are expanded locally into single-quoted -var args (tokens are hex, the
 # URL/paths have no quotes) — NOT passed via a remote env prefix, which wouldn't
 # be visible to the remote shell's own $VAR expansion on the same command line.

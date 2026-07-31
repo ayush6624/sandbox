@@ -142,7 +142,11 @@ beyond that, run a **gateway** in front of N hosts:
 - Clients use the **same API** against the gateway — same SDK, same token
   pattern. You generally shouldn't care which host a sandbox landed on.
 
-`GET /hosts` on the gateway shows fleet state (per-host slots, liveness).
+`GET /hosts` on the gateway shows fleet state (per-host slots, liveness). It is
+an **operator** call, not a tenant one: it discloses per-host addresses and
+capacity, so it authenticates with the worker-control credential
+(`GATEWAY_CONTROL_TOKEN`), not the client API key. `GET /internal/v1/hosts` is
+the same handler under its canonical path.
 
 ## Performance reference
 

@@ -7,8 +7,13 @@
  * multi-host gateway: SANDBOX_API_URL points at the gateway, which places each
  * create on the least-loaded host, so N sandboxes spread across the fleet.
  *
+ * SANDBOX_CONTROL_KEY is the gateway's worker-control credential
+ * (GATEWAY_CONTROL_TOKEN); it is needed only for the host-inventory sample,
+ * which is operator-gated because it discloses per-host addresses and capacity.
+ *
  * Usage:
  *   SANDBOX_API_URL=http://<gateway>:9090 SANDBOX_API_KEY=<tok> \
+ *     SANDBOX_CONTROL_KEY=<control-tok> \
  *     tsx benchmarks/fleet-bench.ts [--count 64] [--mode default|fsync|large]
  *       [--iterations 1] [--create-concurrency 8] [--run-concurrency 64] [--output file.json]
  */
@@ -140,14 +145,18 @@ const stats = (xs: number[]) => {
 }
 const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : 'n/a')
 
+// Fleet inventory is an operator route: it discloses per-host addresses and
+// capacity, so the gateway gates it on the worker-control credential
+// (SANDBOX_CONTROL_KEY / GATEWAY_CONTROL_TOKEN) rather than the tenant API key.
+// The /internal/v1 path is the canonical one and has always been gated.
 export function gatewayHostsEndpoint(baseURL: string): string {
-  return baseURL.replace(/\/+$/, '') + '/hosts'
+  return baseURL.replace(/\/+$/, '') + '/internal/v1/hosts'
 }
 
 async function gatewayHosts(): Promise<unknown> {
   const url = gatewayHostsEndpoint(process.env.SANDBOX_API_URL ?? '')
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${process.env.SANDBOX_API_KEY ?? ''}` },
+    headers: { Authorization: `Bearer ${process.env.SANDBOX_CONTROL_KEY ?? ''}` },
     signal: AbortSignal.timeout(10_000),
   })
   if (!res.ok) throw new Error(`host inventory returned HTTP ${res.status}`)

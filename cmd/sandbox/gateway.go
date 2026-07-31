@@ -20,6 +20,8 @@ var (
 	gwTokenFile       string
 	gwWorkerToken     string
 	gwWorkerTokenFile string
+	gwEdgeToken       string
+	gwEdgeTokenFile   string
 	gwTransportMode   string
 	gwTLSCertFile     string
 	gwTLSKeyFile      string
@@ -48,7 +50,11 @@ func gatewayCmd() *cobra.Command {
 Hosts register with separate worker-control and callback credentials:
 'serve --gateway <url> --gateway-token <worker-control-token> --listen <addr> --worker-token <callback-token>'.
 The gateway exposes the same API as a single server; point the CLI at it with
-'--gateway https://<addr> --gateway-token <client-token>'.`,
+'--gateway https://<addr> --gateway-token <client-token>'.
+
+The public ingress edge is a third trust domain: '--edge-token' gates
+'GET /route/{id}' and 'GET /raw-route/{port}', which return a worker's control
+token to the caller and must therefore never be reachable with a client key.`,
 		RunE: runGateway,
 	}
 	cmd.Flags().StringVar(&gwListen, "listen", "", "TCP address to listen on, e.g. 100.64.0.1:9090 (required)")
@@ -56,6 +62,13 @@ The gateway exposes the same API as a single server; point the CLI at it with
 	cmd.Flags().StringVar(&gwTokenFile, "token-file", "", "reloadable newline-delimited client API credentials")
 	cmd.Flags().StringVar(&gwWorkerToken, "worker-token", "", "worker registration/control credential (required outside development)")
 	cmd.Flags().StringVar(&gwWorkerTokenFile, "worker-token-file", "", "reloadable newline-delimited worker-control credentials")
+	// The edge domain is a distinct third credential because /route and
+	// /raw-route return a worker's control token to whoever asks. Unset keeps
+	// the legacy behavior (client credential accepted there) so shipping this
+	// binary cannot take public ingress down before the edge has its own token;
+	// the gateway prints a startup WARNING in that state.
+	cmd.Flags().StringVar(&gwEdgeToken, "edge-token", "", "public-ingress edge credential for /route and /raw-route (unset: legacy client-credential fallback + startup warning)")
+	cmd.Flags().StringVar(&gwEdgeTokenFile, "edge-token-file", "", "reloadable newline-delimited edge credentials")
 	cmd.Flags().StringVar(&gwTransportMode, "management-transport", "", "TCP security mode: tls, private_proxy, or explicit development")
 	cmd.Flags().StringVar(&gwTLSCertFile, "tls-cert", "", "TLS certificate file (atomically replace to rotate)")
 	cmd.Flags().StringVar(&gwTLSKeyFile, "tls-key", "", "TLS private-key file (atomically replace to rotate)")
@@ -119,6 +132,23 @@ func runGateway(cmd *cobra.Command, args []string) error {
 		},
 	); err != nil {
 		return err
+	}
+	// Must follow ConfigureSecurity: the edge/client and edge/worker
+	// disjointness checks need the other two sets and the transport mode.
+	//
+	// Keyed on whether the flags were PASSED, not on whether they hold a value:
+	// `--edge-token=` (an unset shell variable expanded into the unit file) would
+	// otherwise fall through to the legacy client-credential fallback with only a
+	// log line to show for it — silently reinstating the exact disclosure the
+	// edge domain exists to close. Fail closed and make the operator fix it.
+	edgeRequested := cmd.Flags().Changed("edge-token") || cmd.Flags().Changed("edge-token-file")
+	if edgeRequested && gwEdgeToken == "" && gwEdgeTokenFile == "" {
+		return errors.New("--edge-token/--edge-token-file was passed empty: supply a credential, or omit both flags to accept the legacy client-credential fallback on /route and /raw-route")
+	}
+	if gwEdgeToken != "" || gwEdgeTokenFile != "" {
+		if err := g.ConfigureEdgeCredentials([]string{gwEdgeToken}, gwEdgeTokenFile); err != nil {
+			return err
+		}
 	}
 	if gwReleaseFile != "" {
 		if err := g.ConfigureWorkerReleaseFile(gwReleaseFile); err != nil {

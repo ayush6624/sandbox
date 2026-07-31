@@ -2,8 +2,8 @@
 # Trace a held autoscaling burst from the control VM on one wall clock.
 #
 # Required environment:
-#   PROJECT, ZONE, MIG_NAME, GATEWAY_TOKEN, WORKER_SSH_USER,
-#   EXPECTED_WORKER_RELEASE,
+#   PROJECT, ZONE, MIG_NAME, GATEWAY_TOKEN, GATEWAY_CONTROL_TOKEN,
+#   WORKER_SSH_USER, EXPECTED_WORKER_RELEASE,
 #   LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
 #
 # Optional:
@@ -36,6 +36,10 @@ SDK_DIR="$REPO/sdk/typescript"
 : "${ZONE:?set ZONE}"
 : "${MIG_NAME:?set MIG_NAME}"
 : "${GATEWAY_TOKEN:?set GATEWAY_TOKEN}"
+# Host inventory is fleet control, not a tenant API: it moved to the
+# worker-control credential domain because it discloses per-host addresses and
+# capacity. Both tokens are in infra/gcp/fleet-secrets.env.
+: "${GATEWAY_CONTROL_TOKEN:?set GATEWAY_CONTROL_TOKEN (host inventory is worker-gated)}"
 : "${WORKER_SSH_USER:?set WORKER_SSH_USER for the worker SSH readiness probe}"
 : "${EXPECTED_WORKER_RELEASE:?set EXPECTED_WORKER_RELEASE to the deployed release}"
 
@@ -137,6 +141,12 @@ gateway_get() {
   curl -fsS -H "Authorization: Bearer $GATEWAY_TOKEN" "$GATEWAY_URL$1"
 }
 
+# Host inventory only. Separate helper because it authenticates with the
+# worker-control credential and uses the always-gated /internal/v1 path.
+gateway_hosts() {
+  curl -fsS -H "Authorization: Bearer $GATEWAY_CONTROL_TOKEN" "$GATEWAY_URL/internal/v1/hosts"
+}
+
 owned_sandbox_ids() {
   jq -r --arg run "$BENCH_RUN_ID" '
     .[] | select(
@@ -184,7 +194,7 @@ on_exit() {
     cleanup_sandboxes || cleanup_rc=$?
   fi
   final_sandboxes="$(gateway_get /sandboxes 2>/dev/null)" || final_sandboxes='null'
-  final_hosts="$(gateway_get /hosts 2>/dev/null)" || final_hosts='null'
+  final_hosts="$(gateway_hosts 2>/dev/null)" || final_hosts='null'
   final_mig="$(gcloud compute instance-groups managed list-instances "$MIG_NAME" \
     --project="$PROJECT" --zone="$ZONE" --format=json 2>/dev/null)" || final_mig='null'
   if [ "$cleanup_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=70; fi
@@ -247,7 +257,7 @@ if [ "$initial_running" -ne "$EXPECTED_RUNNING" ] || [ "$initial_suspended" -lt 
   exit 1
 fi
 
-initial_hosts="$(gateway_get /hosts)"
+initial_hosts="$(gateway_hosts)"
 bad_hosts="$(jq --argjson free "$EXPECTED_FREE_PER_HOST" \
   --arg release "$EXPECTED_WORKER_RELEASE" \
   '[.[] | select(.alive and (
@@ -387,7 +397,7 @@ observe_nomad() {
 observe_gateway() {
   local hosts host id state metrics queue
   local -A seen=()
-  hosts="$(gateway_get /hosts 2>/dev/null)" || return
+  hosts="$(gateway_hosts 2>/dev/null)" || return
   jq -e 'type == "array"' <<<"$hosts" >/dev/null || return
   while IFS= read -r host; do
     id="$(jq -r '.id' <<<"$host")"
@@ -476,6 +486,7 @@ if [ -n "$TRAFFIC_SCENARIOS" ]; then
   (
     cd "$REPO/tests"
     SANDBOX_API_URL="$GATEWAY_URL" SANDBOX_API_KEY="$GATEWAY_TOKEN" \
+      SANDBOX_CONTROL_KEY="$GATEWAY_CONTROL_TOKEN" \
       BENCH_RUN_ID="$BENCH_RUN_ID" AUTOSCALE_MIG_SNAPSHOT="$MIG_SNAPSHOT" \
       AUTOSCALE_TIMELINE="$TRACE" \
       AUTOSCALE_OUTPUT="$RESULT" timeout --signal=TERM --kill-after=30s \
@@ -500,7 +511,7 @@ if [ ! -f "$RESULT" ]; then
 fi
 
 emit "benchmark_result" "$(jq -c . "$RESULT")"
-emit "postflight_gateway_hosts" "$(gateway_get /hosts | jq -c \
+emit "postflight_gateway_hosts" "$(gateway_hosts | jq -c \
   '[.[] | {host_id:.id,release:(.release // ""),release_compatible:.release_compatible,
            slots_total:.slots_total,slots_used:.slots_used,free:.free,alive:.alive}]')"
 if [ "$benchmark_rc" -ne 0 ]; then
