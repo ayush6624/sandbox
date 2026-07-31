@@ -113,22 +113,21 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	}
 	m := v.(*vm.Machine)
 
-	format, baseID := registry.FormatFull, ""
+	format, baseID, parentDiffPath := registry.FormatFull, "", ""
 	var baseOp *sync.Mutex
-	// Diff only while Server.diffBase still vouches for the machine's bitmap:
-	// the entry is dropped after any snapshot (Firecracker resets the bitmap
-	// at snapshot creation) and never exists for hibernation-woken machines
-	// (loaded from hib artifacts, not the recorded base). Trusting the row's
-	// BaseSnapshotID here would diff against the wrong base in both cases.
+	// Diff only while Server.diffBase vouches for the machine's bitmap. After
+	// every successful Firecracker snapshot the bitmap resets, so the new
+	// snapshot becomes the next parent. User-snapshot parents are cumulative
+	// diffs over the immutable golden: after capture we merge the new layer
+	// into that cumulative diff, keeping every public snapshot one level deep
+	// (golden <- user snapshot) rather than creating distributed dependency
+	// chains that make deletion and cross-host restore fragile.
 	if v, ok := s.diffBase.Load(id); ok && !golden && vm.DiffCapable(m) {
 		candidateID := v.(string)
 		candidateOp := s.snapshotLock(candidateID)
 		candidateOp.Lock()
-		// The base must still exist locally — it anchors the diff (and the
-		// upload path reads its artifacts). A rebuilt/deleted golden falls
-		// back to a full snapshot.
-		if base, err := s.reg.GetSnapshot(ctx, candidateID); err == nil && base.Golden {
-			format, baseID = registry.FormatDiff, base.ID
+		if plan, ok := s.snapshotDiffPlan(ctx, candidateID); ok {
+			format, baseID, parentDiffPath = registry.FormatDiff, plan.goldenID, plan.parentDiffPath
 			baseOp = candidateOp
 		} else {
 			candidateOp.Unlock()
@@ -181,13 +180,18 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 
 	t0 := time.Now()
 	err = vm.Snapshot(ctx, m, memPath, statePath, snapType)
-	// The attempt reset (or left indeterminate) the dirty-page bitmap: no
-	// future diff against the machine's original base is valid now.
-	s.diffBase.Delete(id)
 	if err != nil {
+		// Firecracker documents a failed snapshot as side-effect free, but the
+		// wrapper can also fail while publishing jailed outputs or restoring
+		// cgroup policy after Firecracker succeeded. Drop the lineage rather
+		// than risk treating an indeterminate bitmap as a valid delta.
+		s.diffBase.Delete(id)
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, 500, fmt.Errorf("create snapshot: %w", err)
 	}
+	// Firecracker reset the bitmap to the state represented by snapID. Until
+	// the row and all artifacts commit below, no valid next parent exists.
+	s.diffBase.Delete(id)
 	// Copy the rootfs while the VM is paused so the disk matches the snapshot's
 	// view of it. The source keeps writing to its own rootfs after resume.
 	if err := s.cfg.Provisioner.CopyFileSparse(sb.RootfsPath, rootfsPath); err != nil {
@@ -195,6 +199,16 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		return registry.Snapshot{}, 500, fmt.Errorf("freeze rootfs: %w", err)
 	}
 	resume()
+	// A clone of a user snapshot dirties pages relative to that user's
+	// cumulative delta, not directly relative to the golden. Compose the two
+	// sparse layers after resuming the guest so this host-side work does not
+	// extend pause time. The result remains a single delta over baseID.
+	if parentDiffPath != "" {
+		if err := s.flattenSnapshotDiff(parentDiffPath, memPath); err != nil {
+			_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
+			return registry.Snapshot{}, 500, fmt.Errorf("flatten snapshot diff: %w", err)
+		}
+	}
 	fmt.Fprintf(os.Stderr, "[%s] snapshot %s written in %s\n", id, snapID, time.Since(t0).Round(time.Millisecond))
 
 	// Stamp the base rootfs so a rebuilt base (e.g. install-agent) invalidates
@@ -230,12 +244,82 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, 500, fmt.Errorf("record snapshot: %w", err)
 	}
+	if format == registry.FormatDiff {
+		// The current Firecracker bitmap now tracks writes since this exact
+		// snapshot. Keeping the lineage is what makes repeated snapshots of the
+		// same sandbox differential too.
+		s.diffBase.Store(id, snap.ID)
+	}
 	// Durability: ship the snapshot to GCS in the background. The caller gets
 	// its 201 now; until meta.json lands the snapshot is host-local only.
 	if !golden && s.blob != nil {
 		s.startSnapshotUpload(snap)
 	}
 	return snap, 201, nil
+}
+
+type snapshotDiffPlan struct {
+	goldenID       string
+	parentDiffPath string
+}
+
+// snapshotDiffPlan resolves the snapshot represented by Firecracker's current
+// dirty bitmap into a one-level delta plan. A golden parent needs no
+// composition. A user parent is accepted only when it is itself a one-level
+// delta over an available immutable golden; its cumulative memory delta is
+// merged with the new Firecracker layer after capture.
+func (s *Server) snapshotDiffPlan(ctx context.Context, candidateID string) (snapshotDiffPlan, bool) {
+	candidate, err := s.reg.GetSnapshot(ctx, candidateID)
+	if err != nil {
+		return snapshotDiffPlan{}, false
+	}
+	if candidate.Golden {
+		return snapshotDiffPlan{goldenID: candidate.ID}, true
+	}
+	if candidate.Format != registry.FormatDiff || candidate.BaseID == "" {
+		return snapshotDiffPlan{}, false
+	}
+	if _, err := os.Stat(candidate.MemPath); err != nil {
+		return snapshotDiffPlan{}, false
+	}
+
+	// A local row lets us prove the root is actually golden. On a host that
+	// pulled the user snapshot, the golden has no registry row; ensureBaseLocal
+	// verifies the immutable bases/<id>/complete object and cache instead.
+	if root, err := s.reg.GetSnapshot(ctx, candidate.BaseID); err == nil {
+		if !root.Golden {
+			return snapshotDiffPlan{}, false
+		}
+		if _, _, err := s.ensureBaseLocal(ctx, root.ID); err != nil {
+			return snapshotDiffPlan{}, false
+		}
+	} else if _, _, err := s.ensureBaseLocal(ctx, candidate.BaseID); err != nil {
+		return snapshotDiffPlan{}, false
+	}
+	return snapshotDiffPlan{
+		goldenID:       candidate.BaseID,
+		parentDiffPath: candidate.MemPath,
+	}, true
+}
+
+// flattenSnapshotDiff replaces layerPath with parent cumulative delta + layer,
+// preserving sparse holes. Latest writes win, including a page changed back to
+// the same bytes as the golden (it remains present but is still correct).
+func (s *Server) flattenSnapshotDiff(parentDiffPath, layerPath string) error {
+	tmp := layerPath + ".cumulative"
+	_ = os.Remove(tmp)
+	if err := provisioner.CloneFile(parentDiffPath, tmp); err != nil {
+		return fmt.Errorf("clone parent delta: %w", err)
+	}
+	if err := s.cfg.Provisioner.OverlaySparse(layerPath, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("overlay new layer: %w", err)
+	}
+	if err := os.Rename(tmp, layerPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("publish cumulative delta: %w", err)
+	}
+	return nil
 }
 
 // handleRestore boots a brand-new sandbox from a snapshot by loading its memory
@@ -384,6 +468,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.machines.Store(id, m)
+	if vm.DiffCapable(m) {
+		// The restored machine's freshly reset bitmap tracks this snapshot.
+		// snapshotDiffPlan will either flatten it to the snapshot's golden
+		// ancestor or safely fall back to full when no such ancestry exists.
+		s.diffBase.Store(id, snap.ID)
+	}
 	s.act.touch(id)
 	s.watchMachine(id, m, "restored VM")
 

@@ -337,6 +337,9 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		fcsdk.WithLogger(silentLog()),
 		fcsdk.WithSnapshot(prepared.Paths.SnapshotMem, prepared.Paths.SnapshotState, func(c *fcsdk.SnapshotConfig) {
 			c.ResumeVM = true
+			// A restored sandbox is commonly mutated and snapshotted again.
+			// Track writes from load so that capture can remain differential.
+			c.EnableDiffSnapshots = true
 		}),
 	)
 	if err != nil {
@@ -355,6 +358,7 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		prepareOutput:      prepared.PrepareOutput,
 		beginSnapshotWrite: prepared.BeginSnapshotWrite,
 		waitDone:           make(chan struct{}),
+		diffCapable:        true,
 	}, rt, nil
 }
 
@@ -607,8 +611,19 @@ func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType stri
 	if m.Machine == nil {
 		return fmt.Errorf("nil machine")
 	}
-	// SDK machines (cold boots, 1:1 restores) are never diffCapable, so this
-	// is always a Full snapshot — CreateSnapshot's default.
+	// Cold-booted SDK machines use the SDK's full-snapshot default. A 1:1
+	// restore enables dirty tracking, so request Diff explicitly through the
+	// same API socket (the SDK helper does not expose snapshot_type).
+	if snapType == SnapshotDiff {
+		if err := fcAPI(ctx, unixClient(m.Machine.Cfg.SocketPath), "PUT", "/snapshot/create", map[string]any{
+			"snapshot_type": snapType,
+			"snapshot_path": guestState,
+			"mem_file_path": guestMem,
+		}); err != nil {
+			return err
+		}
+		return finalizeSnapshotOutputs(finalizeMem, finalizeState)
+	}
 	if err := m.Machine.CreateSnapshot(ctx, guestMem, guestState); err != nil {
 		return err
 	}
