@@ -81,6 +81,49 @@ ayush ALL=(ALL) NOPASSWD: /home/ayush/sandbox/sandbox
 
 in `/etc/sudoers.d/sandbox` with mode `0440`.
 
+## Deploying to the production GCP fleet
+
+**Use the one command. Do not hand-run the individual steps.**
+
+```bash
+make fleet-rollout                     # roll HEAD onto the fleet, then verify it landed
+make fleet-status                      # where the fleet is right now (read-only)
+infra/gcp/rollout.sh --dry-run         # what's stale + what would happen
+infra/gcp/rollout.sh <sha>             # roll a previously published release (rollback)
+make fleet-rollout SHA=<sha> ROLLOUT_ARGS=--skip-smoke
+```
+
+`rollout.sh` builds + uploads, deploys **only** the components whose *running*
+release is stale, waits for convergence, and smoke-tests REST + the WebSocket
+pty. It is idempotent — re-running on a converged fleet deploys nothing and
+just re-verifies. Read its final summary; don't wrap it in extra polling.
+
+Why this exists rather than the three steps it wraps: the previously documented
+path (`make gcs-release && infra/gcp/deploy-job.sh`) rolls the **workers only**,
+and `sandbox` is a *single binary* holding both `serve` and `gateway`, so
+essentially every Go change ALSO needs `infra/gcp/control.sh deploy`. Forgetting
+it half-deploys the fleet and fails silently: an old gateway re-encodes create
+bodies through `client.CreateOpts` and drops fields new workers expect. The
+gateway is therefore deployed FIRST (new gateway in front of old workers is the
+benign direction). Convergence is judged on the gateway's own host inventory
+(`release`, `release_compatible`, free capacity) — NOT `nomad alloc status` —
+because an unwarmed host deliberately advertises `slots_free=0` and cannot take
+a create yet; that wait is what keeps the smoke test from being racy. The smoke
+covers REST *and* the pty because they authenticate and proxy differently, and a
+REST-only check passed for a full release while the interactive shell was broken
+fleet-wide.
+
+Two mislabeling guards it will refuse on, both inherent to the older scripts:
+`make gcs-release` compiles the **working tree** but labels it with HEAD's sha,
+so a target that isn't HEAD is only ever rolled from an already-published
+artifact, never rebuilt; and `control.sh deploy` has the same property with no
+sha override, so rolling the **gateway** to anything but HEAD is refused up
+front — `git checkout <sha>` first.
+
+A change to `cmd/sandboxd` is NOT covered by this: the agent is image-pinned, so
+it needs `infra/gcp/bake-image.sh bake && golden` and a MIG roll (see the golden
+snapshot notes below). `rollout.sh` ships the `sandbox` server binary only.
+
 ## One-time host setup
 
 ```bash
@@ -629,8 +672,20 @@ scripts/              Host setup shell scripts
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
 - Commits: short imperative subject lines (see `git log`). No co-author trailer.
+  Land on `main` directly; don't open PRs or auto-branch.
 - Use `modernc.org/sqlite` (pure-Go) NOT `github.com/mattn/go-sqlite3` — we need
   `CGO_ENABLED=0` to cross-compile from macOS.
+- **Releasing the TS SDK** (from `sdk/typescript`) is five things, and the repo
+  version being bumped does NOT mean a release happened — 1.0.0 sat bumped and
+  unreleased for five days while consumers installed 0.4.0. Bump `version` in
+  `package.json`, add a `CHANGELOG.md` entry, repoint the **pinned install URL**
+  in `README.md` (it names an exact tarball, so a stale one keeps serving the old
+  release), then `npm pack` (builds via `prepack`) and
+  `gh release create sdk-v<version> sandbox-<version>.tgz`. Verify with
+  `npm run typecheck`, `npm test`, and `npm run check:api` (regenerates
+  `src/generated/api-v1.ts` from `api/openapi.yaml` and fails on drift). The
+  install path is a GitHub Releases tarball, not a registry — there are no semver
+  ranges, so "upgrading" means handing users a new URL.
 
 ## Not done yet
 
