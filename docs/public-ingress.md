@@ -2,11 +2,12 @@
 
 Status: **implemented and running on the production GCP fleet.** URL and raw
 TCP ingress, revoke/reuse, wake-on-connect, gateway-restart recovery, and edge
-load-balancer health were verified end to end on 2026-07-31. The edge still
-serves its bootstrap self-signed wildcard certificate until the Cloudflare
-DNS-01 token is installed. The design below is what shipped; §Implemented
-surface records the concrete contracts, and [the E4/E5
-plan](public-ingress-e4-e5-plan.md) carries the remaining HA-edge and
+load-balancer health were verified end to end on 2026-07-31. The edge serves a
+publicly trusted Let's Encrypt certificate for `sbx.getaion.ai` and
+`*.sbx.getaion.ai`, issued with a manual Cloudflare DNS-01 challenge. Renewal
+remains manual because no Cloudflare API token is installed. The design below
+is what shipped; §Implemented surface records the concrete contracts, and [the
+E4/E5 plan](public-ingress-e4-e5-plan.md) carries the remaining HA-edge and
 durable-raw-port work. Prereqs, all shipped: the userspace port proxy
 (`internal/server/portproxy.go`), gateway routing from heartbeats
 (`internal/gateway/gateway.go`), and cross-host wake (B4,
