@@ -431,7 +431,7 @@ scripts/              Host setup shell scripts
   then `sandbox ssh <id>` (forwards :22 on first use) or
   `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
   `--jump <bastion>`.
-- **Current jailed production create result (2026-07-29, release `9b6a9fc`;
+- **Current jailed production benchmark result (2026-07-29, release `9b6a9fc`;
   pool hardening landed in `f12c004`):** the production pool is **8 ready VMs per active worker**
   (`warm_pool_size: 8`). A 16-way hold burst across two active workers was
   **16/16 ready-pool hits**, zero misses/errors, and zero pool-build failures.
@@ -445,9 +445,37 @@ scripts/              Host setup shell scripts
   **304 ms**, max **404 ms**. The earlier run was p50 **198 ms**, p95 **204
   ms** (direct worker p50 **196 ms**, p95 **201 ms**). Historical results are in
   `sdk/typescript/benchmarks/results/lifecycle_c990555_gateway_20260729.json`
-  and `lifecycle_c990555_20260729.json` (gitignored). Curated, committed release
-  evidence is in `production_lifecycle_9b6a9fc_20260729.json` and
-  `production_burst_9b6a9fc_20260729.json`.
+  and `lifecycle_c990555_20260729.json` (gitignored). The latest extensive
+  campaign is in `production_extensive_9b6a9fc_20260729/`: 22/25 direct
+  default-source creates were ready-pool hits in **8–15 ms**, while three
+  refill-bound creates took **1.756–2.132 s**; snapshot-source create p50 was
+  **1.897 s**. Fleet default passed at **32/32** and **64/64**, but the 128-way
+  run created **80/128** because one placement-eligible worker's jailer
+  `io.max` referenced a block device absent on that host. The 64-way fsync run
+  created 64/64 but one workload hit SQLite `database is locked`; the 64-way
+  large run passed 64/64. Snapshot source saved **452 MiB PSS (15.5%)** across
+  32 VMs versus default source. All created resources were verified deleted and
+  the final gateway sandbox count was zero. Treat sub-500 ms as a
+  ready-capacity objective, not an unconditional create guarantee; validate
+  jailer I/O devices before a worker becomes placement-eligible. Root cause on
+  the failing worker: `/etc/fstab` had accumulated stale data-disk UUID entries,
+  `/dev/sdb` was XFS but unmounted, and `/mnt/sandbox-data` silently fell back
+  to boot-disk `/dev/sda1`. `startup-worker.sh` ignored the resulting
+  `xfs_growfs` failure, stamped `data_disk_ready`, and started Nomad anyway.
+  **Post-benchmark fix:** `startup-worker.sh` now replaces every existing
+  fstab row for the mountpoint, mounts the named disk explicitly, validates the
+  backing major:minor, XFS type, and read-write options before and after a
+  non-optional `xfs_growfs`, and keeps Nomad disabled/stopped until those
+  checks pass. `infra/gcp/startup-worker_test.sh` covers stale rows, the exact
+  boot-disk fallback, wrong filesystem/options, and the Nomad admission gate;
+  `make validate-infra` runs it. The fix was deployed in instance template
+  `sandbox-workers-tpl-20260729-093155`: both active workers reported XFS
+  `8:16` read-write and startup exit 0, all six standby workers registered with
+  Nomad before suspending, and the restored MIG reached 2 running + 6
+  suspended on the new template. A production create/delete smoke completed
+  create-to-ready in **30 ms**, returned delete 204 then get 404, and left zero
+  sandboxes. Release `9b6a9fc` predates the startup-script fix; repeat the
+  128-way benchmark before declaring the measured fleet result healthy.
   A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
   leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
   clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and

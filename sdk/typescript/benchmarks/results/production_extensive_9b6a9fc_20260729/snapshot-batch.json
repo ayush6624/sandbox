@@ -1,0 +1,1118 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "snapshot-source-batch-create",
+    "workload": {
+      "counts": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "baseline": true,
+      "max_parallelism": 32,
+      "readiness_timeout_ms": 30000,
+      "readiness_poll_ms": 250
+    },
+    "run_id": "production-extensive-9b6a9fc-20260729T063158Z",
+    "started_at": "2026-07-29T06:33:17.366Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "1.0.0"
+    },
+    "release": "9b6a9fc",
+    "target": "http://10.160.0.34:8080"
+  },
+  "passed": true,
+  "rows": [
+    {
+      "n": 1,
+      "maxParallelism": 1,
+      "operationWallMs": 2536,
+      "readinessWallMs": 46,
+      "wallMs": 2583,
+      "perSandboxMs": 2583,
+      "ok": 1,
+      "failed": 0,
+      "operationId": "7aebb0cb-c14f-40a4-8ff4-f152f3ed672e",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "675da01a-3d49-45a4-ae63-f6636e0f8791",
+          "usable": true,
+          "readinessMs": 46,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 2583
+    },
+    {
+      "n": 2,
+      "maxParallelism": 2,
+      "operationWallMs": 1015,
+      "readinessWallMs": 52,
+      "wallMs": 1067,
+      "perSandboxMs": 533.5,
+      "ok": 2,
+      "failed": 0,
+      "operationId": "ee045296-47f7-44c8-839a-eb001e6f191b",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "26d33ad0-bfdc-4f66-963c-4d0a0758661f",
+          "usable": true,
+          "readinessMs": 52,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "074c6ee3-eec4-4317-8f03-63f4a0252722",
+          "usable": true,
+          "readinessMs": 52,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 533.5
+    },
+    {
+      "n": 4,
+      "maxParallelism": 4,
+      "operationWallMs": 3027,
+      "readinessWallMs": 51,
+      "wallMs": 3078,
+      "perSandboxMs": 769.5,
+      "ok": 4,
+      "failed": 0,
+      "operationId": "92ad3017-400f-47ea-b8b6-5430db010172",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "4ca7b613-3819-4a72-a777-dcdf73b7129f",
+          "usable": true,
+          "readinessMs": 47,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "d73a8014-5826-4a0e-bd0e-1de3de5d3e5f",
+          "usable": true,
+          "readinessMs": 50,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "59056e24-7981-4807-a6b1-ce59840fe4bc",
+          "usable": true,
+          "readinessMs": 46,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "f834f977-cdb1-4f0e-97f1-143d2e097294",
+          "usable": true,
+          "readinessMs": 48,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 769.5
+    },
+    {
+      "n": 8,
+      "maxParallelism": 8,
+      "operationWallMs": 4040,
+      "readinessWallMs": 67,
+      "wallMs": 4107,
+      "perSandboxMs": 513.375,
+      "ok": 8,
+      "failed": 0,
+      "operationId": "2f446748-978c-4acd-806e-c62c7fc51b5e",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "49d4ff25-4169-409a-9ce0-bbd54fa922c7",
+          "usable": true,
+          "readinessMs": 63,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "bb92a9d5-2f00-4ebf-8e8d-b3e85bdf9dd4",
+          "usable": true,
+          "readinessMs": 60,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "b809f4df-280f-4b23-9a4d-04271bba1e66",
+          "usable": true,
+          "readinessMs": 45,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "eb03cd15-f0da-4d40-ab12-4096e2c8e40f",
+          "usable": true,
+          "readinessMs": 60,
+          "attempts": 1
+        },
+        {
+          "index": 4,
+          "sandboxId": "6217fb2f-521a-4486-9e1f-cd3fdaa2315f",
+          "usable": true,
+          "readinessMs": 47,
+          "attempts": 1
+        },
+        {
+          "index": 5,
+          "sandboxId": "c30f9797-9c09-408a-817a-f50d9e92018a",
+          "usable": true,
+          "readinessMs": 61,
+          "attempts": 1
+        },
+        {
+          "index": 6,
+          "sandboxId": "62c7d51c-1854-4858-8a25-f2f05759903c",
+          "usable": true,
+          "readinessMs": 57,
+          "attempts": 1
+        },
+        {
+          "index": 7,
+          "sandboxId": "51d26ddb-064f-4197-a36d-263d1d646bec",
+          "usable": true,
+          "readinessMs": 65,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 513.375
+    },
+    {
+      "n": 16,
+      "maxParallelism": 16,
+      "operationWallMs": 6051,
+      "readinessWallMs": 124,
+      "wallMs": 6175,
+      "perSandboxMs": 385.9375,
+      "ok": 16,
+      "failed": 0,
+      "operationId": "0dbb6d7d-defb-497f-bef6-df15fc240e0f",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "8c8d2196-dd4b-4865-8566-959d77e4b401",
+          "usable": true,
+          "readinessMs": 119,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "b1178326-9cfe-4ada-a700-cd2e18bc78a0",
+          "usable": true,
+          "readinessMs": 121,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "63c23edf-cc04-489c-b0e2-9052f8ccc532",
+          "usable": true,
+          "readinessMs": 112,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "629f3194-d433-4a45-8399-bfba5eef4718",
+          "usable": true,
+          "readinessMs": 100,
+          "attempts": 1
+        },
+        {
+          "index": 4,
+          "sandboxId": "85e87043-a194-4310-a461-61dfce2f12ba",
+          "usable": true,
+          "readinessMs": 105,
+          "attempts": 1
+        },
+        {
+          "index": 5,
+          "sandboxId": "5a3d336c-0e70-4906-be04-887fab988885",
+          "usable": true,
+          "readinessMs": 80,
+          "attempts": 1
+        },
+        {
+          "index": 6,
+          "sandboxId": "61e76f29-269e-4b5d-ad07-d02c9eac0170",
+          "usable": true,
+          "readinessMs": 119,
+          "attempts": 1
+        },
+        {
+          "index": 7,
+          "sandboxId": "edc81e97-d1c4-4778-98aa-11d180d5f9b7",
+          "usable": true,
+          "readinessMs": 113,
+          "attempts": 1
+        },
+        {
+          "index": 8,
+          "sandboxId": "70854f54-42db-401e-b0f0-339a50876cea",
+          "usable": true,
+          "readinessMs": 114,
+          "attempts": 1
+        },
+        {
+          "index": 9,
+          "sandboxId": "709c7548-75da-48d2-959b-b70d62547b1a",
+          "usable": true,
+          "readinessMs": 114,
+          "attempts": 1
+        },
+        {
+          "index": 10,
+          "sandboxId": "e55d41d6-8bf5-4bc0-87e9-2c184b07fd0a",
+          "usable": true,
+          "readinessMs": 115,
+          "attempts": 1
+        },
+        {
+          "index": 11,
+          "sandboxId": "d68f33d8-70a5-4332-b18b-baa37ae79b31",
+          "usable": true,
+          "readinessMs": 114,
+          "attempts": 1
+        },
+        {
+          "index": 12,
+          "sandboxId": "f1a1d8e7-3149-4ebb-861b-a81674e9b96a",
+          "usable": true,
+          "readinessMs": 110,
+          "attempts": 1
+        },
+        {
+          "index": 13,
+          "sandboxId": "77dca474-c16a-475d-83db-27e79bb92b6b",
+          "usable": true,
+          "readinessMs": 112,
+          "attempts": 1
+        },
+        {
+          "index": 14,
+          "sandboxId": "d5cd76d6-6c96-44c2-8d14-e8a2da6ab728",
+          "usable": true,
+          "readinessMs": 111,
+          "attempts": 1
+        },
+        {
+          "index": 15,
+          "sandboxId": "d5799f55-eb10-40c2-91b5-f0d98827c1fe",
+          "usable": true,
+          "readinessMs": 117,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 385.9375
+    },
+    {
+      "n": 32,
+      "maxParallelism": 32,
+      "operationWallMs": 14633,
+      "readinessWallMs": 265,
+      "wallMs": 14898,
+      "perSandboxMs": 465.5625,
+      "ok": 32,
+      "failed": 0,
+      "operationId": "41d3c2c6-2c7a-4a6e-9e8a-4e46d397c650",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "12b63992-f959-4a79-bcb4-d949b5c452cc",
+          "usable": true,
+          "readinessMs": 215,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "b38d7460-b0c7-40c6-a81c-93a99cafcd46",
+          "usable": true,
+          "readinessMs": 230,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "766b6bc3-ce4a-443b-a447-00b74b42d8aa",
+          "usable": true,
+          "readinessMs": 206,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "c55fdafc-6912-468c-9a36-6999312a438b",
+          "usable": true,
+          "readinessMs": 212,
+          "attempts": 1
+        },
+        {
+          "index": 4,
+          "sandboxId": "ef332a4f-4255-410f-a84a-d0d03d05c654",
+          "usable": true,
+          "readinessMs": 250,
+          "attempts": 1
+        },
+        {
+          "index": 5,
+          "sandboxId": "5b2996f8-a31f-4b2d-ae61-7046b08b7cba",
+          "usable": true,
+          "readinessMs": 142,
+          "attempts": 1
+        },
+        {
+          "index": 6,
+          "sandboxId": "9028ec68-b552-4795-a53e-80bd08756757",
+          "usable": true,
+          "readinessMs": 154,
+          "attempts": 1
+        },
+        {
+          "index": 7,
+          "sandboxId": "0f93eb0c-cd9a-4867-8d0b-26874d8b3655",
+          "usable": true,
+          "readinessMs": 241,
+          "attempts": 1
+        },
+        {
+          "index": 8,
+          "sandboxId": "0cdff93b-44cc-4a99-b677-e8b98a6cf810",
+          "usable": true,
+          "readinessMs": 221,
+          "attempts": 1
+        },
+        {
+          "index": 9,
+          "sandboxId": "9e1364e0-3f20-4a41-a414-18be2da04b44",
+          "usable": true,
+          "readinessMs": 231,
+          "attempts": 1
+        },
+        {
+          "index": 10,
+          "sandboxId": "c54402f9-532c-4576-864a-6e123d199b4d",
+          "usable": true,
+          "readinessMs": 237,
+          "attempts": 1
+        },
+        {
+          "index": 11,
+          "sandboxId": "3d247684-6a16-45fe-876a-e45bde54dd12",
+          "usable": true,
+          "readinessMs": 173,
+          "attempts": 1
+        },
+        {
+          "index": 12,
+          "sandboxId": "19656605-4fbe-4bfb-bcf6-287ca7462641",
+          "usable": true,
+          "readinessMs": 247,
+          "attempts": 1
+        },
+        {
+          "index": 13,
+          "sandboxId": "ef3e5365-f9f7-4b5c-bdec-b231936d8f6e",
+          "usable": true,
+          "readinessMs": 241,
+          "attempts": 1
+        },
+        {
+          "index": 14,
+          "sandboxId": "760904ee-af15-4cd9-82c2-da7056822f12",
+          "usable": true,
+          "readinessMs": 249,
+          "attempts": 1
+        },
+        {
+          "index": 15,
+          "sandboxId": "bb64e17c-50a7-4b42-a51b-6ca67a2b2de9",
+          "usable": true,
+          "readinessMs": 224,
+          "attempts": 1
+        },
+        {
+          "index": 16,
+          "sandboxId": "de860ff4-a983-452a-826b-7d33f8b0b309",
+          "usable": true,
+          "readinessMs": 250,
+          "attempts": 1
+        },
+        {
+          "index": 17,
+          "sandboxId": "02cf8dc2-1075-484d-9663-329d63ad6aaa",
+          "usable": true,
+          "readinessMs": 245,
+          "attempts": 1
+        },
+        {
+          "index": 18,
+          "sandboxId": "bfed6415-a17c-4fa9-baf1-827dd1dd40d4",
+          "usable": true,
+          "readinessMs": 256,
+          "attempts": 1
+        },
+        {
+          "index": 19,
+          "sandboxId": "d3926b71-b88d-47d1-9dd4-b4f56c6a395e",
+          "usable": true,
+          "readinessMs": 261,
+          "attempts": 1
+        },
+        {
+          "index": 20,
+          "sandboxId": "cd8bc4a9-4dc7-46bd-bd0c-1cf222753417",
+          "usable": true,
+          "readinessMs": 222,
+          "attempts": 1
+        },
+        {
+          "index": 21,
+          "sandboxId": "af8500f7-2bff-416d-b0d1-aa5588498dfb",
+          "usable": true,
+          "readinessMs": 213,
+          "attempts": 1
+        },
+        {
+          "index": 22,
+          "sandboxId": "0a6b7850-c013-4866-92df-2fad782d0ef6",
+          "usable": true,
+          "readinessMs": 189,
+          "attempts": 1
+        },
+        {
+          "index": 23,
+          "sandboxId": "36d24632-0166-47b2-a82b-d501d65275ec",
+          "usable": true,
+          "readinessMs": 187,
+          "attempts": 1
+        },
+        {
+          "index": 24,
+          "sandboxId": "52be3cf0-4332-4bef-b3f9-de70ddd6d10b",
+          "usable": true,
+          "readinessMs": 238,
+          "attempts": 1
+        },
+        {
+          "index": 25,
+          "sandboxId": "c719dee0-f4ea-470d-b377-19a5420a3163",
+          "usable": true,
+          "readinessMs": 233,
+          "attempts": 1
+        },
+        {
+          "index": 26,
+          "sandboxId": "586aa112-c4b1-47c8-8843-844f58ce031b",
+          "usable": true,
+          "readinessMs": 230,
+          "attempts": 1
+        },
+        {
+          "index": 27,
+          "sandboxId": "f72908da-6ea9-46ae-8469-e0e92defdaea",
+          "usable": true,
+          "readinessMs": 222,
+          "attempts": 1
+        },
+        {
+          "index": 28,
+          "sandboxId": "52d1e9cb-4aa3-4d73-a9f6-cb3b6d60551e",
+          "usable": true,
+          "readinessMs": 238,
+          "attempts": 1
+        },
+        {
+          "index": 29,
+          "sandboxId": "587b8f5c-5c05-4a26-9eab-876c5cc0fff1",
+          "usable": true,
+          "readinessMs": 253,
+          "attempts": 1
+        },
+        {
+          "index": 30,
+          "sandboxId": "088efafd-1dff-4366-8471-24d93d46450b",
+          "usable": true,
+          "readinessMs": 239,
+          "attempts": 1
+        },
+        {
+          "index": 31,
+          "sandboxId": "0e4d7f2a-2245-4ad0-952c-7d94ea927c90",
+          "usable": true,
+          "readinessMs": 254,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 465.5625
+    }
+  ],
+  "baseline": {
+    "n": 32,
+    "wallMs": 6486,
+    "perSandboxMs": 202.6875,
+    "created": 32,
+    "failed": 0,
+    "errors": [],
+    "cleanupErrors": [],
+    "perCloneMs": 202.6875
+  },
+  "fanout": [
+    {
+      "n": 1,
+      "maxParallelism": 1,
+      "operationWallMs": 2536,
+      "readinessWallMs": 46,
+      "wallMs": 2583,
+      "perSandboxMs": 2583,
+      "ok": 1,
+      "failed": 0,
+      "operationId": "7aebb0cb-c14f-40a4-8ff4-f152f3ed672e",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "675da01a-3d49-45a4-ae63-f6636e0f8791",
+          "usable": true,
+          "readinessMs": 46,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 2583
+    },
+    {
+      "n": 2,
+      "maxParallelism": 2,
+      "operationWallMs": 1015,
+      "readinessWallMs": 52,
+      "wallMs": 1067,
+      "perSandboxMs": 533.5,
+      "ok": 2,
+      "failed": 0,
+      "operationId": "ee045296-47f7-44c8-839a-eb001e6f191b",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "26d33ad0-bfdc-4f66-963c-4d0a0758661f",
+          "usable": true,
+          "readinessMs": 52,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "074c6ee3-eec4-4317-8f03-63f4a0252722",
+          "usable": true,
+          "readinessMs": 52,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 533.5
+    },
+    {
+      "n": 4,
+      "maxParallelism": 4,
+      "operationWallMs": 3027,
+      "readinessWallMs": 51,
+      "wallMs": 3078,
+      "perSandboxMs": 769.5,
+      "ok": 4,
+      "failed": 0,
+      "operationId": "92ad3017-400f-47ea-b8b6-5430db010172",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "4ca7b613-3819-4a72-a777-dcdf73b7129f",
+          "usable": true,
+          "readinessMs": 47,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "d73a8014-5826-4a0e-bd0e-1de3de5d3e5f",
+          "usable": true,
+          "readinessMs": 50,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "59056e24-7981-4807-a6b1-ce59840fe4bc",
+          "usable": true,
+          "readinessMs": 46,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "f834f977-cdb1-4f0e-97f1-143d2e097294",
+          "usable": true,
+          "readinessMs": 48,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 769.5
+    },
+    {
+      "n": 8,
+      "maxParallelism": 8,
+      "operationWallMs": 4040,
+      "readinessWallMs": 67,
+      "wallMs": 4107,
+      "perSandboxMs": 513.375,
+      "ok": 8,
+      "failed": 0,
+      "operationId": "2f446748-978c-4acd-806e-c62c7fc51b5e",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "49d4ff25-4169-409a-9ce0-bbd54fa922c7",
+          "usable": true,
+          "readinessMs": 63,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "bb92a9d5-2f00-4ebf-8e8d-b3e85bdf9dd4",
+          "usable": true,
+          "readinessMs": 60,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "b809f4df-280f-4b23-9a4d-04271bba1e66",
+          "usable": true,
+          "readinessMs": 45,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "eb03cd15-f0da-4d40-ab12-4096e2c8e40f",
+          "usable": true,
+          "readinessMs": 60,
+          "attempts": 1
+        },
+        {
+          "index": 4,
+          "sandboxId": "6217fb2f-521a-4486-9e1f-cd3fdaa2315f",
+          "usable": true,
+          "readinessMs": 47,
+          "attempts": 1
+        },
+        {
+          "index": 5,
+          "sandboxId": "c30f9797-9c09-408a-817a-f50d9e92018a",
+          "usable": true,
+          "readinessMs": 61,
+          "attempts": 1
+        },
+        {
+          "index": 6,
+          "sandboxId": "62c7d51c-1854-4858-8a25-f2f05759903c",
+          "usable": true,
+          "readinessMs": 57,
+          "attempts": 1
+        },
+        {
+          "index": 7,
+          "sandboxId": "51d26ddb-064f-4197-a36d-263d1d646bec",
+          "usable": true,
+          "readinessMs": 65,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 513.375
+    },
+    {
+      "n": 16,
+      "maxParallelism": 16,
+      "operationWallMs": 6051,
+      "readinessWallMs": 124,
+      "wallMs": 6175,
+      "perSandboxMs": 385.9375,
+      "ok": 16,
+      "failed": 0,
+      "operationId": "0dbb6d7d-defb-497f-bef6-df15fc240e0f",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "8c8d2196-dd4b-4865-8566-959d77e4b401",
+          "usable": true,
+          "readinessMs": 119,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "b1178326-9cfe-4ada-a700-cd2e18bc78a0",
+          "usable": true,
+          "readinessMs": 121,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "63c23edf-cc04-489c-b0e2-9052f8ccc532",
+          "usable": true,
+          "readinessMs": 112,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "629f3194-d433-4a45-8399-bfba5eef4718",
+          "usable": true,
+          "readinessMs": 100,
+          "attempts": 1
+        },
+        {
+          "index": 4,
+          "sandboxId": "85e87043-a194-4310-a461-61dfce2f12ba",
+          "usable": true,
+          "readinessMs": 105,
+          "attempts": 1
+        },
+        {
+          "index": 5,
+          "sandboxId": "5a3d336c-0e70-4906-be04-887fab988885",
+          "usable": true,
+          "readinessMs": 80,
+          "attempts": 1
+        },
+        {
+          "index": 6,
+          "sandboxId": "61e76f29-269e-4b5d-ad07-d02c9eac0170",
+          "usable": true,
+          "readinessMs": 119,
+          "attempts": 1
+        },
+        {
+          "index": 7,
+          "sandboxId": "edc81e97-d1c4-4778-98aa-11d180d5f9b7",
+          "usable": true,
+          "readinessMs": 113,
+          "attempts": 1
+        },
+        {
+          "index": 8,
+          "sandboxId": "70854f54-42db-401e-b0f0-339a50876cea",
+          "usable": true,
+          "readinessMs": 114,
+          "attempts": 1
+        },
+        {
+          "index": 9,
+          "sandboxId": "709c7548-75da-48d2-959b-b70d62547b1a",
+          "usable": true,
+          "readinessMs": 114,
+          "attempts": 1
+        },
+        {
+          "index": 10,
+          "sandboxId": "e55d41d6-8bf5-4bc0-87e9-2c184b07fd0a",
+          "usable": true,
+          "readinessMs": 115,
+          "attempts": 1
+        },
+        {
+          "index": 11,
+          "sandboxId": "d68f33d8-70a5-4332-b18b-baa37ae79b31",
+          "usable": true,
+          "readinessMs": 114,
+          "attempts": 1
+        },
+        {
+          "index": 12,
+          "sandboxId": "f1a1d8e7-3149-4ebb-861b-a81674e9b96a",
+          "usable": true,
+          "readinessMs": 110,
+          "attempts": 1
+        },
+        {
+          "index": 13,
+          "sandboxId": "77dca474-c16a-475d-83db-27e79bb92b6b",
+          "usable": true,
+          "readinessMs": 112,
+          "attempts": 1
+        },
+        {
+          "index": 14,
+          "sandboxId": "d5cd76d6-6c96-44c2-8d14-e8a2da6ab728",
+          "usable": true,
+          "readinessMs": 111,
+          "attempts": 1
+        },
+        {
+          "index": 15,
+          "sandboxId": "d5799f55-eb10-40c2-91b5-f0d98827c1fe",
+          "usable": true,
+          "readinessMs": 117,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 385.9375
+    },
+    {
+      "n": 32,
+      "maxParallelism": 32,
+      "operationWallMs": 14633,
+      "readinessWallMs": 265,
+      "wallMs": 14898,
+      "perSandboxMs": 465.5625,
+      "ok": 32,
+      "failed": 0,
+      "operationId": "41d3c2c6-2c7a-4a6e-9e8a-4e46d397c650",
+      "operationStatus": "succeeded",
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "12b63992-f959-4a79-bcb4-d949b5c452cc",
+          "usable": true,
+          "readinessMs": 215,
+          "attempts": 1
+        },
+        {
+          "index": 1,
+          "sandboxId": "b38d7460-b0c7-40c6-a81c-93a99cafcd46",
+          "usable": true,
+          "readinessMs": 230,
+          "attempts": 1
+        },
+        {
+          "index": 2,
+          "sandboxId": "766b6bc3-ce4a-443b-a447-00b74b42d8aa",
+          "usable": true,
+          "readinessMs": 206,
+          "attempts": 1
+        },
+        {
+          "index": 3,
+          "sandboxId": "c55fdafc-6912-468c-9a36-6999312a438b",
+          "usable": true,
+          "readinessMs": 212,
+          "attempts": 1
+        },
+        {
+          "index": 4,
+          "sandboxId": "ef332a4f-4255-410f-a84a-d0d03d05c654",
+          "usable": true,
+          "readinessMs": 250,
+          "attempts": 1
+        },
+        {
+          "index": 5,
+          "sandboxId": "5b2996f8-a31f-4b2d-ae61-7046b08b7cba",
+          "usable": true,
+          "readinessMs": 142,
+          "attempts": 1
+        },
+        {
+          "index": 6,
+          "sandboxId": "9028ec68-b552-4795-a53e-80bd08756757",
+          "usable": true,
+          "readinessMs": 154,
+          "attempts": 1
+        },
+        {
+          "index": 7,
+          "sandboxId": "0f93eb0c-cd9a-4867-8d0b-26874d8b3655",
+          "usable": true,
+          "readinessMs": 241,
+          "attempts": 1
+        },
+        {
+          "index": 8,
+          "sandboxId": "0cdff93b-44cc-4a99-b677-e8b98a6cf810",
+          "usable": true,
+          "readinessMs": 221,
+          "attempts": 1
+        },
+        {
+          "index": 9,
+          "sandboxId": "9e1364e0-3f20-4a41-a414-18be2da04b44",
+          "usable": true,
+          "readinessMs": 231,
+          "attempts": 1
+        },
+        {
+          "index": 10,
+          "sandboxId": "c54402f9-532c-4576-864a-6e123d199b4d",
+          "usable": true,
+          "readinessMs": 237,
+          "attempts": 1
+        },
+        {
+          "index": 11,
+          "sandboxId": "3d247684-6a16-45fe-876a-e45bde54dd12",
+          "usable": true,
+          "readinessMs": 173,
+          "attempts": 1
+        },
+        {
+          "index": 12,
+          "sandboxId": "19656605-4fbe-4bfb-bcf6-287ca7462641",
+          "usable": true,
+          "readinessMs": 247,
+          "attempts": 1
+        },
+        {
+          "index": 13,
+          "sandboxId": "ef3e5365-f9f7-4b5c-bdec-b231936d8f6e",
+          "usable": true,
+          "readinessMs": 241,
+          "attempts": 1
+        },
+        {
+          "index": 14,
+          "sandboxId": "760904ee-af15-4cd9-82c2-da7056822f12",
+          "usable": true,
+          "readinessMs": 249,
+          "attempts": 1
+        },
+        {
+          "index": 15,
+          "sandboxId": "bb64e17c-50a7-4b42-a51b-6ca67a2b2de9",
+          "usable": true,
+          "readinessMs": 224,
+          "attempts": 1
+        },
+        {
+          "index": 16,
+          "sandboxId": "de860ff4-a983-452a-826b-7d33f8b0b309",
+          "usable": true,
+          "readinessMs": 250,
+          "attempts": 1
+        },
+        {
+          "index": 17,
+          "sandboxId": "02cf8dc2-1075-484d-9663-329d63ad6aaa",
+          "usable": true,
+          "readinessMs": 245,
+          "attempts": 1
+        },
+        {
+          "index": 18,
+          "sandboxId": "bfed6415-a17c-4fa9-baf1-827dd1dd40d4",
+          "usable": true,
+          "readinessMs": 256,
+          "attempts": 1
+        },
+        {
+          "index": 19,
+          "sandboxId": "d3926b71-b88d-47d1-9dd4-b4f56c6a395e",
+          "usable": true,
+          "readinessMs": 261,
+          "attempts": 1
+        },
+        {
+          "index": 20,
+          "sandboxId": "cd8bc4a9-4dc7-46bd-bd0c-1cf222753417",
+          "usable": true,
+          "readinessMs": 222,
+          "attempts": 1
+        },
+        {
+          "index": 21,
+          "sandboxId": "af8500f7-2bff-416d-b0d1-aa5588498dfb",
+          "usable": true,
+          "readinessMs": 213,
+          "attempts": 1
+        },
+        {
+          "index": 22,
+          "sandboxId": "0a6b7850-c013-4866-92df-2fad782d0ef6",
+          "usable": true,
+          "readinessMs": 189,
+          "attempts": 1
+        },
+        {
+          "index": 23,
+          "sandboxId": "36d24632-0166-47b2-a82b-d501d65275ec",
+          "usable": true,
+          "readinessMs": 187,
+          "attempts": 1
+        },
+        {
+          "index": 24,
+          "sandboxId": "52be3cf0-4332-4bef-b3f9-de70ddd6d10b",
+          "usable": true,
+          "readinessMs": 238,
+          "attempts": 1
+        },
+        {
+          "index": 25,
+          "sandboxId": "c719dee0-f4ea-470d-b377-19a5420a3163",
+          "usable": true,
+          "readinessMs": 233,
+          "attempts": 1
+        },
+        {
+          "index": 26,
+          "sandboxId": "586aa112-c4b1-47c8-8843-844f58ce031b",
+          "usable": true,
+          "readinessMs": 230,
+          "attempts": 1
+        },
+        {
+          "index": 27,
+          "sandboxId": "f72908da-6ea9-46ae-8469-e0e92defdaea",
+          "usable": true,
+          "readinessMs": 222,
+          "attempts": 1
+        },
+        {
+          "index": 28,
+          "sandboxId": "52d1e9cb-4aa3-4d73-a9f6-cb3b6d60551e",
+          "usable": true,
+          "readinessMs": 238,
+          "attempts": 1
+        },
+        {
+          "index": 29,
+          "sandboxId": "587b8f5c-5c05-4a26-9eab-876c5cc0fff1",
+          "usable": true,
+          "readinessMs": 253,
+          "attempts": 1
+        },
+        {
+          "index": 30,
+          "sandboxId": "088efafd-1dff-4366-8471-24d93d46450b",
+          "usable": true,
+          "readinessMs": 239,
+          "attempts": 1
+        },
+        {
+          "index": 31,
+          "sandboxId": "0e4d7f2a-2245-4ad0-952c-7d94ea927c90",
+          "usable": true,
+          "readinessMs": 254,
+          "attempts": 1
+        }
+      ],
+      "cleanupErrors": [],
+      "perCloneMs": 465.5625
+    }
+  ]
+}

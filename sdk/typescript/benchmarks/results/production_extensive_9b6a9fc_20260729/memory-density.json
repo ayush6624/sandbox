@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "schema_version": 3,
+    "benchmark": "memory-density-warm-pool-adjusted",
+    "run_id": "production-extensive-9b6a9fc-memory-20260729T0700Z",
+    "release": "9b6a9fc",
+    "api_version": "v1"
+  },
+  "requested": 32,
+  "baseline": {
+    "procs": 9,
+    "rss_mb": 894,
+    "pss_mb": 894
+  },
+  "snapshot_source": {
+    "procs": 41,
+    "rss_mb": 3355,
+    "pss_mb": 3354,
+    "delta_rss_mb": 2460,
+    "delta_pss_mb": 2460
+  },
+  "default_source": {
+    "procs": 41,
+    "rss_mb": 3807,
+    "pss_mb": 3807,
+    "delta_rss_mb": 2913,
+    "delta_pss_mb": 2912
+  },
+  "cleanup": {
+    "end_procs": 9
+  }
+}

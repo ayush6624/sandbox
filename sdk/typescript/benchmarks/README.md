@@ -92,16 +92,21 @@ time. For a cross-provider comparison you'd run the same binding everywhere.
 Prints `benchmark.ts`'s per-iteration breakdown, then a comparison table and
 ranking, and writes a one-element array (one provider) to `results/` — the same
 per-provider shape as upstream `results/*.json`. The `results/` directory is
-gitignored.
+gitignored except for curated files and directories prefixed `production_`.
 
 All host-side suites use the resource-oriented v1 `SandboxClient` and attach a
 `metadata` object containing schema version, workload parameters, run ID,
 API/SDK versions, target, and deployed release. For fleet runs, set:
 
 ```bash
-export BENCH_RUN_ID=gcp-20260726-extensive
-export SANDBOX_RELEASE=p1-api-20260726-2
+export BENCH_RUN_ID=production-9b6a9fc-<date>
+export SANDBOX_RELEASE=9b6a9fc
 ```
+
+For the release-wide matrix, use `scripts/bench-extensive.sh`. It runs direct
+source latency, snapshot batch scaling, gateway fleet workloads, and host
+memory density sequentially. Set `SINGLE_HOST_COUNT` below the worker's free
+slot count when a production warm pool is enabled.
 
 Historic JSON fields such as `restore`, `fanout`, `perCloneMs`, and `killMs`
 remain as deprecated aliases so dashboards can compare new runs with old ones.

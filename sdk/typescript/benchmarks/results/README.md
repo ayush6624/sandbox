@@ -1,57 +1,61 @@
 # Benchmark results
 
 Raw per-run JSON from the suites in [`../`](../). Ad-hoc results are
-**gitignored** because they are machine- and date-specific. Files prefixed
-`production_` are deliberately versioned release evidence; they must identify
-the deployed release and run ID in metadata and contain no credentials. The
-curated, human-readable numbers live in
+**gitignored** because they are machine- and date-specific. Files or directories
+prefixed `production_` are deliberately versioned release evidence; they must
+identify the deployed release and run ID in metadata and contain no
+credentials. Curated numbers live in
 [`docs/benchmarks.md`](../../../../docs/benchmarks.md).
 
 ## File naming
 
 | Pattern | Producer | Shape |
 | --- | --- | --- |
-| `production_*.json` | Any suite below | Curated, committed production-release evidence |
-| `snapshot_source_<ts>.json` | `npm run bench:snapshot-source` | default-source vs snapshot-source create latency; retains deprecated `cold_boot` and `restore` keys |
-| `snapshot_batch_<ts>.json` | `npm run bench:snapshot-batch` | snapshot-source batch operation/readiness scaling with per-item diagnostics and cleanup errors; retains deprecated `perCloneMs` and `fanout` aliases |
-| `lifecycle_<ts>.json` | `npm run bench:lifecycle` | create/pause/resume-to-usable/terminate latency; retains deprecated lifecycle aliases |
-| `fleet_<mode>_<n>_<ts>.json` | `benchmarks/fleet-bench.ts` | N sandboxes via the gateway: compatible create/workload percentiles plus per-resource cleanup proof and failure diagnostics |
-| `burst_*.json` | `npm run bench:burst -- --output ...` | create/exec/terminate churn or held-burst results; retains deprecated `killMs` |
-| `<mode>_<ts>.json` | `npm run bench` (`run-bench.ts`) | in-guest SQLite+fs workload (upstream `sandbox-sqlite-bench` shape) |
-| `extensive/` | `scripts/bench-extensive.sh` | one full sweep: `latency.json`, `fanout.json`, `fleet_*.json`, `mem.json` (PSS/RSS density) |
+| `production_*.json` | Any suite | Curated single-run production evidence |
+| `production_*/` | `scripts/bench-extensive.sh` | Curated multi-file production campaign |
+| `snapshot_source_<ts>.json` | `npm run bench:snapshot-source` | Default-source versus snapshot-source create latency |
+| `snapshot_batch_<ts>.json` | `npm run bench:snapshot-batch` | Snapshot-source batch operation/readiness scaling |
+| `lifecycle_<ts>.json` | `npm run bench:lifecycle` | Create, pause, resume-to-usable, and terminate latency |
+| `fleet_<mode>_<n>_<ts>.json` | `benchmarks/fleet-bench.ts` | Gateway create/workload timing, host observations, diagnostics, and cleanup proof |
+| `burst_*.json` | `npm run bench:burst` | Create/exec/terminate churn or held-burst results |
+| `<mode>_<ts>.json` | `npm run bench` | In-guest SQLite and filesystem workload |
 
-Every new host-side result includes a `metadata` object identifying its schema,
-workload, run, API/SDK, deployed release, and redacted target. Set
-`SANDBOX_RELEASE` (or `BENCH_RELEASE`) and `BENCH_RUN_ID` for attributable runs.
+## Current production result
 
-## Headline results (July 2026, GCP n2-standard-8, guests 2 vCPU / 1 GB)
+The latest campaign is
+[`production_extensive_9b6a9fc_20260729/`](./production_extensive_9b6a9fc_20260729/)
+for release `9b6a9fc`:
 
-- **Restore vs cold boot:** p50 212 ms vs 3463 ms — 16.3× (`extensive/latency.json`)
-- **Snapshot-source batch create:** historically called fan-out; 32 sandboxes in
-  2.68 s (84 ms/sandbox), 64/64 usable at N=64 (`extensive/fanout.json`)
-- **Memory density @ N=64:** 925 MB PSS fan-out vs 10.1 GB cold-boot (`extensive/mem.json`)
-- **Hot create:** 199–271 ms server-side (measured live, not a suite output)
-- **Production ready-pool create (`9b6a9fc`, 2026-07-29):** lifecycle p50
-  200 ms / p95 304 ms over 25 iterations; 16-way held burst completed 16/16
-  with create p50 426 ms / p95 600 ms from the remote benchmark client
+- Default source: 22/25 ready-pool hits in 8–15 ms; three refill-bound
+  creates in 1.756–2.132 s.
+- Snapshot batch N=32: 32/32 usable in 14.898 s, versus 6.486 s for the
+  default-source baseline.
+- Fleet default: 32/32 and 64/64 passed; the 128-way run created 80/128 because
+  one worker's jailer `io.max` referenced an absent device.
+- Fsync: 64/64 created, 63/64 workloads passed; large: 64/64 passed.
+- Snapshot-source density used 452 MiB (15.5%) less PSS than default source
+  across 32 additional VMs.
+- Every created resource was verified deleted; the final fleet count was zero.
 
-Full context, comparison against hosted providers, and caveats:
+Environment, methodology, security gates, and failure attribution:
 [`docs/benchmarks.md`](../../../../docs/benchmarks.md).
 
 ## Regenerate
 
 ```bash
-cd sdk/typescript
-export SANDBOX_API_URL=http://<host>:8080 SANDBOX_API_KEY=<token>
-npm run bench:snapshot-source
-npm run bench:snapshot-batch
-npm run bench:burst -- --count 500 --concurrency 96 --retry-ms 250 --output results/burst.json
-HOST_IP=<ip> SSH_HOST=<ip> HOST_TOKEN=... GATEWAY_TOKEN=... bash ../../scripts/bench-extensive.sh
+export HOST_URL=http://<direct-worker>:8080
+export GATEWAY_URL=http://<gateway>:9090
+export SANDBOX_HOST_KEY=<worker-client-token>
+export SANDBOX_API_KEY=<gateway-client-token>
+export SSH_HOST=<direct-worker>
+export SANDBOX_RELEASE=<release>
+export BENCH_RUN_ID=<unique-run-id>
+export SINGLE_HOST_COUNT=32
+
+bash scripts/bench-extensive.sh
 ```
 
-Only promote a result into the tracked `production_` namespace after verifying
-all benchmark resources were cleaned up and the ready pool returned to its
-pre-run capacity.
-
-`bench:restore` and `bench:fanout` remain deprecated aliases for existing
-automation.
+Only promote results after verifying all benchmark resources were cleaned up
+and no credentials are present. Deprecated aliases remain for existing
+automation: `restore`, `fanout`, `perCloneMs`, `killMs`,
+`bench:restore`, and `bench:fanout`.

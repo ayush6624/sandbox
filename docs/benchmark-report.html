@@ -1,617 +1,596 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>Sandbox benchmarks — self-hosted Firecracker vs hosted providers</title>
-<style>
-  :root {
-    --page: #f7f7f4;
-    --surface: #fcfcfb;
-    --ink: #16150f;
-    --ink-2: #52514e;
-    --muted: #898781;
-    --grid: #e1e0d9;
-    --hairline: rgba(11,11,11,0.10);
-    --ours: #eb6834;
-    --ours-text: #b04a17;
-    --peer: #2a78d6;
-    --peer-text: #1c5cab;
-    --good: #006300;
-  }
-  @media (prefers-color-scheme: dark) {
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox production benchmarks — release 9b6a9fc</title>
+  <style>
     :root {
-      --page: #111110;
-      --surface: #1a1a19;
-      --ink: #f4f3ee;
-      --ink-2: #c3c2b7;
+      color-scheme: light dark;
+      --page: #f7f7f4;
+      --surface: #fcfcfb;
+      --ink: #16150f;
+      --ink-2: #52514e;
       --muted: #898781;
-      --grid: #2c2c2a;
-      --hairline: rgba(255,255,255,0.10);
-      --ours: #d95926;
-      --ours-text: #ef8352;
-      --peer: #3987e5;
-      --peer-text: #6da7ec;
-      --good: #0ca30c;
+      --grid: #e1e0d9;
+      --hairline: rgba(11,11,11,0.10);
+      --ours: #eb6834;
+      --ours-text: #b04a17;
+      --peer: #2a78d6;
+      --peer-text: #1c5cab;
+      --good: #006300;
+      --bad: #a53c25;
     }
-  }
-  :root[data-theme="light"] {
-    --page: #f7f7f4; --surface: #fcfcfb; --ink: #16150f; --ink-2: #52514e;
-    --muted: #898781; --grid: #e1e0d9; --hairline: rgba(11,11,11,0.10);
-    --ours: #eb6834; --ours-text: #b04a17; --peer: #2a78d6; --peer-text: #1c5cab;
-    --good: #006300;
-  }
-  :root[data-theme="dark"] {
-    --page: #111110; --surface: #1a1a19; --ink: #f4f3ee; --ink-2: #c3c2b7;
-    --muted: #898781; --grid: #2c2c2a; --hairline: rgba(255,255,255,0.10);
-    --ours: #d95926; --ours-text: #ef8352; --peer: #3987e5; --peer-text: #6da7ec;
-    --good: #0ca30c;
-  }
-
-  body {
-    background: var(--page);
-    color: var(--ink);
-    font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
-    margin: 0;
-  }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
-  a { color: var(--peer-text); text-decoration-thickness: 1px; text-underline-offset: 2px; }
-  a:focus-visible { outline: 2px solid var(--ours); outline-offset: 2px; border-radius: 2px; }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  code { font-size: 0.86em; background: var(--surface); border: 1px solid var(--hairline); border-radius: 4px; padding: 1px 5px; }
-
-  .eyebrow {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
-    color: var(--ours-text); margin: 0 0 12px;
-  }
-  h1 {
-    font-size: clamp(26px, 4.5vw, 38px); line-height: 1.15; letter-spacing: -0.015em;
-    margin: 0 0 10px; text-wrap: balance; font-weight: 700;
-  }
-  .dek { color: var(--ink-2); max-width: 62ch; margin: 0 0 8px; }
-  .stamp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); margin: 0 0 40px; }
-
-  h2 {
-    font-size: 19px; letter-spacing: -0.01em; margin: 56px 0 6px; font-weight: 650;
-    padding-top: 24px; border-top: 1px solid var(--grid);
-  }
-  h2 + p { margin-top: 6px; }
-  p { max-width: 68ch; }
-  .note { color: var(--ink-2); font-size: 14px; max-width: 68ch; }
-
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 28px 0 8px; }
-  .tile {
-    background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px;
-    padding: 14px 16px 12px;
-  }
-  .tile .v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
-  .tile .v small { font-size: 15px; font-weight: 500; color: var(--ink-2); }
-  .tile .k { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
-  .tile.ours .v { color: var(--ours-text); }
-
-  .chart {
-    background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px;
-    padding: 18px 18px 14px; margin: 18px 0 6px;
-  }
-  .chart h3 { font-size: 14px; margin: 0 0 2px; font-weight: 650; }
-  .chart .sub { font-size: 12.5px; color: var(--ink-2); margin: 0 0 14px; }
-  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2); margin: 0 0 12px; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .sw { width: 14px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
-  .sw.ours { background: var(--ours); }
-  .sw.peer { background: var(--peer); }
-  .sw.claim { background: transparent; border: 1.5px solid var(--peer); }
-  .sw.tick { width: 2px; height: 12px; border-radius: 0; background: var(--muted); }
-
-  .row { display: grid; grid-template-columns: 168px 1fr 82px; gap: 10px; align-items: center; padding: 3px 0; }
-  .row .lab { font-size: 13px; color: var(--ink); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .lab small { color: var(--muted); font-size: 11px; }
-  .row .val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--ink-2); }
-  .track { position: relative; height: 16px; border-left: 1px solid var(--grid); }
-  .bar { position: absolute; inset: 2px auto 2px 0; min-width: 2px; border-radius: 0 4px 4px 0; background: var(--peer); }
-  .bar.ours { background: var(--ours); }
-  .bar.claim { background: transparent; border: 1.5px solid var(--peer); }
-  .tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--muted); }
-  .row:hover .track { background: color-mix(in srgb, var(--grid) 35%, transparent); }
-
-  .axis { display: flex; justify-content: space-between; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--muted); margin: 6px 0 0 178px; padding-right: 92px; }
-
-  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
-  .tablewrap { overflow-x: auto; margin: 16px 0; }
-  th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--grid); white-space: nowrap; }
-  td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
-  td.num { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  tr.us td { color: var(--ours-text); font-weight: 600; }
-  td .cav { color: var(--muted); font-weight: 400; font-size: 12.5px; }
-
-  ul { padding-left: 20px; max-width: 70ch; }
-  li { margin: 4px 0; }
-  .sources { font-size: 13px; color: var(--ink-2); columns: 2; column-gap: 32px; }
-  .sources li { break-inside: avoid; }
-  @media (max-width: 640px) {
-    .sources { columns: 1; }
-    .row { grid-template-columns: 110px 1fr 74px; }
-    .axis { margin-left: 120px; padding-right: 84px; }
-  }
-
-  #tip {
-    position: fixed; z-index: 10; pointer-events: none; display: none;
-    max-width: 320px; background: var(--ink); color: var(--page);
-    font-size: 12px; line-height: 1.45; padding: 8px 10px; border-radius: 6px;
-  }
-  #tip b { display: block; }
-  footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--grid); font-size: 12.5px; color: var(--muted); }
-</style>
-
-<div class="wrap">
-  <p class="eyebrow">Sandbox · Benchmark report</p>
-  <h1>Self-hosted Firecracker sandboxes, measured against the hosted providers</h1>
-  <p class="dek">Create, wake, restore, and fork latencies for our e2b-style microVM
-  sandbox — with an honest comparison against e2b, Modal, Daytona, Vercel, Fly,
-  Morph, CodeSandbox/Together, and Cloudflare.</p>
-  <p class="stamp">updated 2026-07-29 · current ready-pool release 9b6a9fc · two active n2-standard-16 workers × 8 ready VMs · guests 2 vCPU / 1 GiB · Firecracker v1.15.0 · XFS reflink</p>
-
-  <div class="tiles">
-    <div class="tile ours" data-tip="<b>Ready-pool create</b>Fresh 25-iteration production lifecycle run through the gateway: 200 ms p50, 304 ms p95, 404 ms max. The VM has already passed every jailed launch, identity, network, clock, and agent-readiness gate.">
-      <div class="v">200 <small>ms p50</small></div>
-      <div class="k">ready create, gateway e2e</div>
-    </div>
-    <div class="tile ours" data-tip="<b>Hibernation wake</b>49 ms server-side, same-identity restore (the common case). Frozen processes survive. Caveat: a 2026-07-24 stress run found an intermittent post-wake clock re-step regression; see fleet validation below.">
-      <div class="v">49 <small>ms</small></div>
-      <div class="k">wake from hibernation</div>
-    </div>
-    <div class="tile ours" data-tip="<b>Fleet-ready burst</b>16 concurrent creates consumed both active workers' complete ready pools: 16/16 successful, zero warm misses, zero build failures, and full cleanup.">
-      <div class="v">16/16</div>
-      <div class="k">ready burst, zero errors</div>
-    </div>
-    <div class="tile ours" data-tip="<b>Snapshot restore</b>p50 over 25 iterations. The Firecracker resume itself is ~14 ms; the rest is the rootfs reflink copy.">
-      <div class="v">212 <small>ms p50</small></div>
-      <div class="k">snapshot restore</div>
-    </div>
-  </div>
-  <p class="note">"Usable" always means the in-guest agent answers a request —
-  never "the create call returned". Every number here states its clock.</p>
-
-  <h2>Current production validation <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-29 · release 9b6a9fc</small></h2>
-  <p>Two active workers each held eight fully initialized ready VMs. Every VM
-  had already completed the normal jailer exec, UID/GID isolation, cgroup leaf,
-  PID namespace, seccomp policy, tap/IP allocation, guest network identity,
-  clock synchronization, agent health gate, and fresh Ed25519 SSH host-key
-  rotation. Claiming one changes ownership and request metadata; it does not
-  bypass a security step.</p>
-
-  <div class="chart">
-    <h3>Ready-pool create latency through the production gateway</h3>
-    <p class="sub">25 independent lifecycle iterations · milliseconds · lower is better</p>
-    <div class="row" data-tip="<b>p50 — 200 ms</b>Half of complete production create calls returned a fully usable sandbox in 200 ms or less.">
-      <span class="lab">p50</span>
-      <span class="track"><span class="bar ours" style="width:40%"></span></span>
-      <span class="val">200 ms</span>
-    </div>
-    <div class="row" data-tip="<b>p90 — 237 ms</b>The steady distribution stays tightly grouped around one remote round trip.">
-      <span class="lab">p90</span>
-      <span class="track"><span class="bar ours" style="width:47.4%"></span></span>
-      <span class="val">237 ms</span>
-    </div>
-    <div class="row" data-tip="<b>p95 — 304 ms</b>The production acceptance percentile is comfortably below the 500 ms target.">
-      <span class="lab">p95</span>
-      <span class="track"><span class="bar ours" style="width:60.8%"></span></span>
-      <span class="val">304 ms</span>
-    </div>
-    <div class="row" data-tip="<b>max — 404 ms</b>The slowest of all 25 iterations still met the 500 ms target.">
-      <span class="lab">max</span>
-      <span class="track"><span class="bar ours" style="width:80.8%"></span></span>
-      <span class="val">404 ms</span>
-    </div>
-    <div class="axis"><span>0</span><span>250</span><span>500 ms target</span></div>
-  </div>
-
-  <div class="tablewrap">
-    <table>
-      <thead>
-        <tr><th>Validation</th><th>Create p50</th><th>Create p95</th><th>Max</th><th>Outcome</th></tr>
-      </thead>
-      <tbody>
-        <tr class="us"><td>25× lifecycle, production gateway</td><td class="num">200 ms</td><td class="num">304 ms</td><td class="num">404 ms</td><td>25/25 + lifecycle cleanup</td></tr>
-        <tr class="us"><td>16× burst, control VM in VPC</td><td class="num">82 ms</td><td class="num">118 ms</td><td class="num">118 ms</td><td>16/16, zero errors</td></tr>
-        <tr><td>16× burst, Greece → India tunnel</td><td class="num">426 ms</td><td class="num">600 ms</td><td class="num">600 ms</td><td>16/16; transport tail</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <p class="note">The remote held burst recorded zero ready-pool misses and
-  zero build failures, then returned to zero sandboxes/routes and 16 ready VMs.
-  Its p95 is the long-RTT SSH/Tailscale access path, not VM launch. Raw evidence:
-  <a href="../sdk/typescript/benchmarks/results/production_lifecycle_9b6a9fc_20260729.json">lifecycle JSON</a>
-  and <a href="../sdk/typescript/benchmarks/results/production_burst_9b6a9fc_20260729.json">burst JSON</a>.
-  Pool exhaustion intentionally falls back to the ordinary secure clone path
-  (~734 ms), so the sub-500 ms SLO is capacity-bounded.</p>
-
-  <h2>The system at a glance</h2>
-  <p>One sandbox, five ways to get it running. Cold boot is the fallback path;
-  everything else rides snapshots.</p>
-  <div class="chart">
-    <h3>Time to a usable sandbox, by path</h3>
-    <p class="sub">milliseconds, server-side · lower is better</p>
-    <div class="row" data-tip="<b>Cold boot — 3463 ms p50</b>Full kernel boot + init + agent start. Also the fallback when no golden snapshot exists, and the path taken by vcpus/mem overrides (~3.7 s).">
-      <span class="lab">cold boot <small>(baseline)</small></span>
-      <span class="track"><span class="bar" style="width:96.2%"></span></span>
-      <span class="val">3463 p50</span>
-    </div>
-    <div class="row" data-tip="<b>Hot create — 199–271 ms</b>POST /sandboxes clones the golden snapshot; GARP readiness signal replaces the old fixed 1.5 s wait. 8 concurrent creates in 1.1 s.">
-      <span class="lab">hot create</span>
-      <span class="track"><span class="bar ours" style="width:6.9%"></span></span>
-      <span class="val">199–271</span>
-    </div>
-    <div class="row" data-tip="<b>Snapshot restore — 212 ms p50</b>1:1 restore of a user snapshot. Pure Firecracker load+resume is 12 ms + 2 ms agent; the rest is the rootfs reflink cp. Cross-host from GCS: ~180 ms once the base is cached.">
-      <span class="lab">snapshot restore</span>
-      <span class="track"><span class="bar ours" style="width:5.9%"></span></span>
-      <span class="val">212 p50</span>
-    </div>
-    <div class="row" data-tip="<b>Wake-on-connect — 133 ms</b>TCP connect to a forwarded host port → userspace proxy wakes the hibernated sandbox → dials the guest. Measured connect-to-response, in-guest processes intact.">
-      <span class="lab">wake on port connect</span>
-      <span class="track"><span class="bar ours" style="width:3.7%"></span></span>
-      <span class="val">133</span>
-    </div>
-    <div class="row" data-tip="<b>Hibernation wake — 49 ms</b>Same-identity restore on any API request: old tap/IP still free (pool pickers soft-avoid them), so no re-identification needed.">
-      <span class="lab">wake, same identity</span>
-      <span class="track"><span class="bar ours" style="width:1.4%"></span></span>
-      <span class="val">49</span>
-    </div>
-    <div class="row" data-tip="<b>Pure resume — ~14 ms</b>Firecracker LoadSnapshot + resume (12 ms) + agent answering from restored memory (2 ms). What restore costs once storage is out of the way.">
-      <span class="lab">pure FC resume <small>(component)</small></span>
-      <span class="track"><span class="bar ours" style="width:0.4%"></span></span>
-      <span class="val">~14</span>
-    </div>
-    <div class="axis"><span>0</span><span>1800</span><span>3600 ms</span></div>
-  </div>
-
-  <h2>Latest fleet re-run <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-23 · commit 06f5c16</small></h2>
-  <p>A full SDK re-run on the current autoscaling fleet — <strong>2 workers ×
-  48 slots</strong>, guests 2 vCPU / 1 GB. The client ran on the control VM, in
-  the same VPC as the workers, so these are <strong>end-to-end</strong>
-  wall-times — time until you can <code>exec</code> — with the WAN / tailnet hop
-  removed. They complement the instrumented server-side numbers above, not
-  replace them.</p>
-  <div class="chart">
-    <h3>End-to-end latency, VPC-local client</h3>
-    <p class="sub">milliseconds · lower is better · SDK wall-time to a usable sandbox</p>
-    <div class="row" data-tip="<b>Hot create — 478 ms p50</b>Sandbox.create() end-to-end (golden-snapshot clone), client in the same VPC. 20 iterations: mean 479, p90 509, max 518. Server-side is still ~250 ms; the tailnet end-to-end was ~0.55 s.">
-      <span class="lab">hot create</span>
-      <span class="track"><span class="bar ours" style="width:79.7%"></span></span>
-      <span class="val">478 p50</span>
-    </div>
-    <div class="row" data-tip="<b>Snapshot restore — 84 ms p50</b>Sandbox.restore() end-to-end. 20 iterations: mean 95, p90 88, max 305. 5.7× faster than a hot create — warm page cache plus near-instant XFS reflink on the current fleet.">
-      <span class="lab">snapshot restore</span>
-      <span class="track"><span class="bar ours" style="width:14.0%"></span></span>
-      <span class="val">84 p50</span>
-    </div>
-    <div class="row" data-tip="<b>Fan-out — 83 ms/clone at N=32</b>32 identity-neutral clones from one snapshot in 2.66 s, 32/32 usable. 1.8× a 32-way cold boot (147 ms/boot), and matches the historical 84 ms — no regression.">
-      <span class="lab">fan-out <small>(per clone, ×32)</small></span>
-      <span class="track"><span class="bar ours" style="width:13.8%"></span></span>
-      <span class="val">83</span>
-    </div>
-    <div class="axis"><span>0</span><span>300</span><span>600 ms</span></div>
-  </div>
-  <p class="note"><strong>Throughput, via the gateway across both hosts.</strong>
-  64 concurrent creates → 64/64 usable, create p50 1.28 s / p95 2.0 s, zero
-  failures. A 200-sandbox churn burst at concurrency 96 → 200/200 ok, 7.9
-  creates/s sustained, with zero capacity, pool-exhaustion, or agent-timeout
-  errors; create p50 rises to 5.2 s under saturation — the per-host create
-  semaphore queueing the flood instead of boot-storming — and kill p50 is
-  186 ms. A single-sandbox SQLite + filesystem workload: create 0.52 s, full
-  suite 4.10 s.</p>
-
-  <h2>Fast-scale validation <small style="font-weight:400;font-size:.6em;color:var(--muted);letter-spacing:0">2026-07-25 · releasegate-20260725-1 · commit 0b049db</small></h2>
-  <p>An independent post-deploy run issued <strong>160 simultaneous
-  creates</strong> against the 2-worker floor (96 immediately available slots)
-  with suspended standby behind it. Direct queue-triggered scale-out, immediate
-  warm heartbeats, higher create concurrency, and worker-release gating
-  completed all creates successfully in <strong>18.653 s</strong>. The full
-  harness took 29.697 s including its in-guest workload and deletion.</p>
-  <div class="tablewrap">
-    <table>
-      <thead>
-        <tr><th>Measurement</th><th>Result</th></tr>
-      </thead>
-      <tbody>
-        <tr class="us"><td>Creates</td><td class="num">160/160 · 0 failures</td></tr>
-        <tr><td>Create latency</td><td class="num">p50 8.159 s · p90 17.419 s · p99 18.569 s · max 18.653 s</td></tr>
-        <tr><td>Demand → resize request</td><td class="num">≤1.095 s, including client startup</td></tr>
-        <tr><td>Resumed worker → capacity</td><td class="num">8.037–9.161 s</td></tr>
-        <tr><td>Registration → ready</td><td class="num">27–28 ms</td></tr>
-        <tr><td>Queue</td><td class="num">64 → 16 on first host · zero after second (observed ≤0.73 s)</td></tr>
-        <tr><td>Release gate</td><td class="num">previous-release allocations served 0 creates</td></tr>
-        <tr><td>Cleanup</td><td class="num">0 used slots · 0 routes · 0 queued · 0 mismatches</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <p class="note"><strong>Improvement.</strong> The comparable stopped-worker
-  run took 50.020 s; suspended standby reduced that to 31.106 s; the latest
-  event-driven path reduced it again to 18.653 s — <strong>40.0% faster</strong>
-  than suspended standby alone. Its p90 fell from 28.906 s to 17.419 s
-  (39.7%). The trace loop was configured for 100 ms, but SSH-backed sampling
-  made its effective cadence about 0.73 s.</p>
-  <p class="note"><strong>Release-gate verification.</strong> Resumed
-  previous-release allocations were replaced before serving creates. A
-  controlled stale heartbeat then verified that production exposed the host as
-  <code>release_compatible: false</code> with <code>free: 0</code>; it expired
-  normally after the 20-second heartbeat TTL.</p>
-  <p class="note"><strong>Earlier stress-suite caveat (2026-07-24).</strong> The suite
-  passed 30/31 checks in 138.5 s. Ports, concurrency, churn, load, snapshots,
-  fan-out, hibernation state preservation, and hot-create clock correctness
-  passed. The sole failure was the hibernation-wake clock re-step: the guest
-  remained approximately 11 s stale after a 10 s freeze, reproducing 3/5 times
-  afterward on the same worker. This wake-only timing regression is reported
-  separately and is not hidden inside the successful create/exec burst.</p>
-
-  <h2>Create → command running, across providers</h2>
-  <p>The only independent cross-provider dataset is the
-  <a href="https://www.computesdk.com/benchmarks/sandboxes/">ComputeSDK leaderboard</a>
-  (2026-07-17, 100 iterations each), which measures <code>create()</code> →
-  first successful command. Vendor marketing claims are shown as ticks —
-  where an independent measurement exists, it disagrees with the claim in every
-  case except Modal's.</p>
-  <div class="chart">
-    <h3>Median create-to-usable, seconds</h3>
-    <p class="sub">lower is better · hosted numbers include WAN + provider API edge; ours rides a tailnet to our own gateway</p>
-    <div class="legend">
-      <span><span class="sw ours"></span>this project, measured on our fleet</span>
-      <span><span class="sw peer"></span>independent measurement</span>
-      <span><span class="sw tick"></span>vendor claim</span>
-    </div>
-    <div class="row" data-tip="<b>Vercel Sandbox — 0.40 s median, 0.59 s p95</b>ComputeSDK, 2026-07-17. No official create-latency claim published. Fastest hosted provider on the board after their Apr 2026 snapshot optimizations.">
-      <span class="lab">Vercel Sandbox</span>
-      <span class="track"><span class="bar" style="width:6.1%"></span></span>
-      <span class="val">0.40 s</span>
-    </div>
-    <div class="row" data-tip="<b>e2b — 0.48 s median, 0.81 s p95</b>ComputeSDK, 2026-07-17. The homepage claims 80–200 ms 'in the same region as the client' (tick) — it does not survive an end-to-end create-to-exec measurement.">
-      <span class="lab">e2b</span>
-      <span class="track"><span class="bar" style="width:7.3%"></span><span class="tick" style="left:1.2%"></span></span>
-      <span class="val">0.48 s</span>
-    </div>
-    <div class="row" data-tip="<b>This project — ~0.55 s end-to-end</b>Create via gateway from a tailnet client until the in-guest agent answers. Server-side: 199–271 ms. Self-hosted, so there is no WAN hop to a provider API — an advantage of position, not implementation.">
-      <span class="lab">this project <small>(0.25 s server-side)</small></span>
-      <span class="track"><span class="bar ours" style="width:8.3%"></span></span>
-      <span class="val">0.55 s</span>
-    </div>
-    <div class="row" data-tip="<b>Daytona — 0.58 s median, 1.12 s p95</b>ComputeSDK, 2026-07-17. Homepage claims 'sub-90 ms creation' (tick) — corroborated by one third-party test only with images pre-pulled and warm.">
-      <span class="lab">Daytona</span>
-      <span class="track"><span class="bar" style="width:8.8%"></span><span class="tick" style="left:1.4%"></span></span>
-      <span class="val">0.58 s</span>
-    </div>
-    <div class="row" data-tip="<b>Modal — 0.62 s median, 0.77 s p95</b>ComputeSDK, 2026-07-17. Their own July 2026 claim — 'less than half a second at the median', defined client → code running — is the one vendor claim consistent with independent measurement (tick).">
-      <span class="lab">Modal</span>
-      <span class="track"><span class="bar" style="width:9.4%"></span><span class="tick" style="left:7.6%"></span></span>
-      <span class="val">0.62 s</span>
-    </div>
-    <div class="row" data-tip="<b>Cloudflare Sandboxes — 4.26 s median, 5.10 s p95</b>ComputeSDK, 2026-07-17. The 'milliseconds' marketing refers to the V8-isolate layer; their own container docs say 1–3 s. An independent 700-boot study found p95 up to 24 s.">
-      <span class="lab">Cloudflare Sandboxes</span>
-      <span class="track"><span class="bar" style="width:64.5%"></span></span>
-      <span class="val">4.26 s</span>
-    </div>
-    <div class="row" data-tip="<b>CodeSandbox / Together — 6.37 s median, 8.60 s p95</b>ComputeSDK, 2026-07-17. Vendor claims 2.7 s p95 cold start (tick); the leaderboard likely hits the non-hibernated path. Their resume-from-hibernation path is much faster (next chart).">
-      <span class="lab">CodeSandbox / Together</span>
-      <span class="track"><span class="bar" style="width:96.5%"></span><span class="tick" style="left:40.9%"></span></span>
-      <span class="val">6.37 s</span>
-    </div>
-    <div class="axis"><span>0</span><span>3.3</span><span>6.6 s</span></div>
-  </div>
-  <p class="note">Not charted: Fly Machines (start of an existing stopped machine
-  ~300 ms server-side, but <em>creating</em> one runs ~5–20 s — a different product
-  shape) and raw Firecracker (~125 ms kernel-to-init — the floor everyone here
-  builds on, not a product).</p>
-
-  <h2>Resume / wake from pause</h2>
-  <p>Nobody else publishes an independently measured wake number, so everything
-  below ours is a vendor claim or vendor-published percentile — outlined bars.</p>
-  <div class="chart">
-    <h3>Wake a paused/hibernated sandbox, seconds</h3>
-    <p class="sub">lower is better</p>
-    <div class="legend">
-      <span><span class="sw ours"></span>this project, measured</span>
-      <span><span class="sw claim"></span>vendor claim / vendor-published</span>
-    </div>
-    <div class="row" data-tip="<b>This project — 49 ms</b>Same-identity wake on an API request, server-side. The common case: pool pickers soft-avoid a hibernated sandbox's tap/IP, so wake is a plain restore.">
-      <span class="lab">this project <small>same identity</small></span>
-      <span class="track"><span class="bar ours" style="width:4.7%"></span></span>
-      <span class="val">0.049 s</span>
-    </div>
-    <div class="row" data-tip="<b>This project — 133 ms</b>Wake-on-connect: TCP connect to a forwarded host port, userspace proxy wakes the sandbox and dials the guest. Measured connect-to-response, processes intact.">
-      <span class="lab">this project <small>wake-on-connect</small></span>
-      <span class="track"><span class="bar ours" style="width:12.7%"></span></span>
-      <span class="val">0.133 s</span>
-    </div>
-    <div class="row" data-tip="<b>Morph Cloud — <250 ms</b>Vendor claim, and a combined one: 'snapshot, branch, and restore in under 250 ms'. No percentiles, no clock definition, no independent measurement found.">
-      <span class="lab">Morph Cloud <small>claim</small></span>
-      <span class="track"><span class="bar claim" style="width:23.8%"></span></span>
-      <span class="val">&lt;0.25 s</span>
-    </div>
-    <div class="row" data-tip="<b>Fly Machines — 'a few hundred ms'</b>Official suspend/resume docs. Caveats: ≤2 GB RAM recommended (suspend time grows with memory), snapshots not guaranteed to persist — a lost snapshot means a cold start.">
-      <span class="lab">Fly Machines <small>docs</small></span>
-      <span class="track"><span class="bar claim" style="width:28.6%"></span></span>
-      <span class="val">~0.3 s</span>
-    </div>
-    <div class="row" data-tip="<b>CodeSandbox / Together — 500 ms p95</b>Vendor claim on the Together AI product page; their 2024 engineering blog says 'within a second' via lazy-loaded compressed memory snapshots.">
-      <span class="lab">CodeSandbox / Together <small>claim, p95</small></span>
-      <span class="track"><span class="bar claim" style="width:47.6%"></span></span>
-      <span class="val">0.5 s</span>
-    </div>
-    <div class="row" data-tip="<b>Vercel Sandbox — p75 <1 s</b>Self-published percentiles (Apr 2026): p75 under 1 s, p95 under 10 s, ~6 s penalty when the snapshot isn't cached on the target host (95% cache hit rate).">
-      <span class="lab">Vercel Sandbox <small>published p75</small></span>
-      <span class="track"><span class="bar claim" style="width:95.2%"></span></span>
-      <span class="val">&lt;1 s</span>
-    </div>
-    <div class="row" data-tip="<b>e2b — ~1 s</b>Official docs: 'resuming a sandbox takes approximately 1 second'. Pausing is the expensive side at ~4 s per GiB of RAM.">
-      <span class="lab">e2b <small>docs</small></span>
-      <span class="track"><span class="bar claim" style="width:95.2%"></span></span>
-      <span class="val">~1 s</span>
-    </div>
-    <div class="axis"><span>0</span><span>0.5</span><span>1.0 s</span></div>
-  </div>
-  <p class="note">Not published: Modal sandbox-snapshot restore (their Functions
-  memory-snapshot restore runs 0.69–1.05 s), Daytona, Cloudflare.</p>
-
-  <h2>Fork: N sandboxes from one snapshot</h2>
-  <p>Fan-out resumes N identity-neutral clones from a single snapshot — each with
-  a fresh IP/tap/port and a copy-on-write rootfs, sharing snapshot memory via the
-  page cache. The fixed batch overhead amortizes: per-clone cost collapses from
-  1.7 s at N=1 to ~72 ms at N=48. (Post-GARP, a single clone ≈ hot create ≈ 250 ms.)</p>
-  <div class="chart">
-    <h3>Amortized cost per clone, by batch size</h3>
-    <p class="sub">milliseconds per clone · measured 2026-07-01, single host · all clones usable at every N</p>
-    <div class="row" data-tip="<b>N=1 — 1695 ms</b>The whole batch overhead lands on one clone. Measured before the GARP readiness signal shipped; a single clone now matches hot create (~250 ms).">
-      <span class="lab">N = 1</span>
-      <span class="track"><span class="bar ours" style="width:96.9%"></span></span>
-      <span class="val">1695</span>
-    </div>
-    <div class="row" data-tip="<b>N=8 — 225 ms/clone</b>Batch total 1797 ms, 8/8 usable.">
-      <span class="lab">N = 8</span>
-      <span class="track"><span class="bar ours" style="width:12.9%"></span></span>
-      <span class="val">225</span>
-    </div>
-    <div class="row" data-tip="<b>N=16 — 125 ms/clone</b>Batch total 1994 ms, 16/16 usable.">
-      <span class="lab">N = 16</span>
-      <span class="track"><span class="bar ours" style="width:7.1%"></span></span>
-      <span class="val">125</span>
-    </div>
-    <div class="row" data-tip="<b>N=32 — 84 ms/clone</b>Batch total 2675 ms, 32/32 usable. 12.1× faster than 32 concurrent cold boots.">
-      <span class="lab">N = 32</span>
-      <span class="track"><span class="bar ours" style="width:4.8%"></span></span>
-      <span class="val">84</span>
-    </div>
-    <div class="row" data-tip="<b>N=48 — 72 ms/clone</b>Batch total 3435 ms, 48/48 usable — the sweet spot before the 64/host pool ceiling.">
-      <span class="lab">N = 48</span>
-      <span class="track"><span class="bar ours" style="width:4.1%"></span></span>
-      <span class="val">72</span>
-    </div>
-    <div class="row" data-tip="<b>N=64 — 89 ms/clone</b>Batch total 5719 ms, 64/64 usable; rises as the per-host pool ceiling is approached. vs cold boots: 5.7 s vs 72.8 s (12.7×), and 925 MB PSS vs 10.1 GB (10.9× denser).">
-      <span class="lab">N = 64</span>
-      <span class="track"><span class="bar ours" style="width:5.1%"></span></span>
-      <span class="val">89</span>
-    </div>
-    <div class="axis"><span>0</span><span>875</span><span>1750 ms/clone</span></div>
-  </div>
-  <p class="note">Context: CodeSandbox/Together documents ~0.5 s fork overhead
-  (2 s in their 2022 engineering post); Morph claims &lt;250 ms combined
-  snapshot/branch/restore. Modal supports N restores from one snapshot but
-  publishes no latency. e2b, Daytona, Vercel, Fly, and Cloudflare have no
-  memory-fork primitive or no number — Fly's <code>clone</code> copies
-  config+volume, not memory.</p>
-
-  <h2>The full comparison</h2>
-  <div class="tablewrap">
-    <table>
-      <thead>
-        <tr><th>Provider</th><th>Create (measured median)</th><th>Create (claim)</th><th>Resume / wake</th><th>Fork / clone</th></tr>
-      </thead>
-      <tbody>
-        <tr class="us"><td>This project (self-hosted)</td><td class="num">0.20 s p50 · 0.304 s p95</td><td class="num">—</td><td class="num">49–133 ms <span class="cav">measured</span></td><td class="num">84 ms/clone ×32 <span class="cav">measured</span></td></tr>
-        <tr><td>Vercel Sandbox</td><td class="num">0.40 s</td><td class="num">—</td><td class="num">p75 &lt;1 s, p95 &lt;10 s <span class="cav">published</span></td><td>via base snapshots, no number</td></tr>
-        <tr><td>e2b</td><td class="num">0.48 s</td><td class="num">80–200 ms <span class="cav">same-region</span></td><td class="num">~1 s <span class="cav">docs; pause 4 s/GiB</span></td><td>—</td></tr>
-        <tr><td>Daytona</td><td class="num">0.58 s</td><td class="num">&lt;90 ms <span class="cav">warm images</span></td><td>not published</td><td>—</td></tr>
-        <tr><td>Modal</td><td class="num">0.62 s</td><td class="num">&lt;0.5 s <span class="cav">self-defined, honest</span></td><td>not published <span class="cav">(Functions: 0.69–1.05 s)</span></td><td>supported, no number</td></tr>
-        <tr><td>Morph Cloud</td><td>—</td><td class="num">&lt;250 ms <span class="cav">combined claim</span></td><td class="num">&lt;250 ms <span class="cav">same claim</span></td><td class="num">&lt;250 ms <span class="cav">same claim</span></td></tr>
-        <tr><td>Fly Machines</td><td class="num">create 5–20 s <span class="cav">community</span></td><td class="num">start ~300 ms <span class="cav">stopped machine</span></td><td class="num">~0.3 s <span class="cav">≤2 GB RAM</span></td><td>config+volume only</td></tr>
-        <tr><td>CodeSandbox / Together</td><td class="num">6.37 s</td><td class="num">2.7 s p95</td><td class="num">0.5 s p95 <span class="cav">claim</span></td><td class="num">~0.5–2 s <span class="cav">docs / eng blog</span></td></tr>
-        <tr><td>Cloudflare Sandboxes</td><td class="num">4.26 s</td><td>"milliseconds" <span class="cav">isolate layer</span></td><td>not published</td><td>—</td></tr>
-        <tr><td>Firecracker (raw VMM)</td><td>—</td><td class="num">~125 ms <span class="cav">kernel→init</span></td><td>—</td><td>—</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <h2>Burst behavior</h2>
-  <p><strong>Latest (2026-07-29):</strong> a 16-create held burst consumed the
-  entire ready capacity of two active workers. It completed 16/16 with zero
-  errors or warm misses. A VPC-local confirmation measured p50 82 ms / p95
-  118 ms / max 118 ms; the committed Greece → India run measured p50 426 ms /
-  p95 600 ms / max 600 ms, isolating the remaining tail to network position.
-  Cleanup returned the fleet to zero routes and 16 ready VMs.</p>
-  <p><strong>Autoscaling validation (2026-07-25):</strong> a 160-create held burst starting at
-  the 2×48-slot floor plus suspended standby completed <strong>160/160 with
-  zero failures in 18.653 s</strong>. Demand reached the MIG resize request
-  within 1.095 s, resumed workers registered current-release capacity in
-  8.037–9.161 s, and the 64-request queue drained completely. Create latency
-  was p50 8.159 s / p90 17.419 s / p99 18.569 s; cleanup returned the gateway
-  to zero used slots, routes, queued creates, and release mismatches. The
-  historical stopped-worker run took 50.020 s, and suspended standby without
-  event-driven scale-out took 31.106 s.</p>
-  <p>500-sandbox churn (create → exec → kill, concurrency 96) against 3 workers
-  × 24 slots: <strong>499/500 succeeded</strong> in 72 s — 6.9 creates/s sustained —
-  with client retry+backoff; zero pool-exhaustion errors after the gateway's
-  reserve-at-pick fix, clean 503s under overload. Sustained overload (500 held
-  alive) ramped the autoscaler 3→8 hosts over ~450 s. Full write-up:
-  <a href="https://claude.ai/code/artifact/0cfd2df8-177f-4793-b415-0f4260b51b8b">500-sandbox burst benchmark</a>.</p>
-
-  <h2>Honest caveats</h2>
-  <ul>
-    <li><strong>Network position.</strong> Our end-to-end numbers ride a tailnet to
-    our own gateway; hosted numbers include WAN + the provider's API edge.
-    Self-hosting earns that advantage, but it's an advantage of position, not
-    implementation.</li>
-    <li><strong>Hardware.</strong> Our fleet is nested-KVM GCP VMs; bare metal
-    measured <em>faster</em> (cold boot ~2.2 s vs 3.5 s). These aren't
-    best-case numbers.</li>
-    <li><strong>Warm strategies everywhere.</strong> Hosted providers keep warm
-    pools; our hot path is a per-host golden snapshot built at startup. Only the
-    cold-boot rows are cold-metal numbers.</li>
-    <li><strong>Claims vs measurements.</strong> Anything labeled <em>claim</em> is
-    vendor marketing or docs without published methodology. Where an independent
-    measurement exists, it disagrees with the claim in every case except Modal's.</li>
-  </ul>
-
-  <h2>Sources</h2>
-  <ul class="sources">
-    <li><a href="https://www.computesdk.com/benchmarks/sandboxes/">ComputeSDK sandbox leaderboard</a> — independent TTI, 2026-07-17</li>
-    <li><a href="https://e2b.dev/">e2b</a> · <a href="https://e2b.dev/docs/sandbox/persistence">persistence docs</a></li>
-    <li><a href="https://modal.com/blog/scaling-to-1-million-concurrent-sandboxes-in-seconds">Modal: 1M concurrent sandboxes</a> (2026-07-16) · <a href="https://modal.com/blog/mem-snapshots">memory snapshots</a></li>
-    <li><a href="https://www.daytona.io/">Daytona</a> · <a href="https://pixeljets.com/blog/ai-sandboxes-daytona-vs-microsandbox/">third-party test</a></li>
-    <li><a href="https://cloud.morph.so/docs/developers">Morph Cloud docs</a></li>
-    <li><a href="https://fly.io/blog/fly-machines/">Fly Machines launch</a> · <a href="https://fly.io/docs/reference/suspend-resume/">suspend/resume docs</a></li>
-    <li><a href="https://vercel.com/blog/optimizing-vercel-sandbox-snapshots">Vercel: optimizing sandbox snapshots</a> (2026-04-02)</li>
-    <li><a href="https://www.together.ai/sandbox">Together Code Sandbox</a> · <a href="https://codesandbox.io/blog/how-we-clone-a-running-vm-in-2-seconds">VM cloning</a> · <a href="https://codesandbox.io/blog/how-we-scale-our-microvm-infrastructure-using-low-latency-memory-decompression">memory decompression</a></li>
-    <li><a href="https://www.cloudflare.com/products/sandboxes/">Cloudflare Sandboxes</a> · <a href="https://alchemy.run/blog/2026-07-01-microvm-cold-starts/">Alchemy cold-boot study</a> (2026-07-01)</li>
-    <li><a href="https://firecracker-microvm.github.io/">Firecracker</a></li>
-  </ul>
-
-  <footer>
-    Reproduce: <code>npm run bench:lifecycle</code> · <code>npm run bench:burst</code> ·
-    <code>npm run bench:restore</code> · <code>npm run bench:fanout</code> ·
-    <code>bash scripts/bench-extensive.sh</code> — methodology in
-    <span class="mono">docs/benchmarks.md</span>. Hover any bar or tile for the
-    exact number, clock, and source.
-  </footer>
-</div>
-
-<div id="tip" role="tooltip"></div>
-<script>
-  (function () {
-    var tip = document.getElementById('tip');
-    var targets = document.querySelectorAll('[data-tip]');
-    function show(e) {
-      tip.innerHTML = this.getAttribute('data-tip');
-      tip.style.display = 'block';
-      move.call(this, e);
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #111110;
+        --surface: #1a1a19;
+        --ink: #f4f3ee;
+        --ink-2: #c3c2b7;
+        --muted: #898781;
+        --grid: #2c2c2a;
+        --hairline: rgba(255,255,255,0.10);
+        --ours: #d95926;
+        --ours-text: #ef8352;
+        --peer: #3987e5;
+        --peer-text: #6da7ec;
+        --good: #0ca30c;
+        --bad: #ff9270;
+      }
     }
-    function move(e) {
-      var pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
-      var x = e.clientX + pad, y = e.clientY + pad;
-      if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
-      if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
-      tip.style.left = x + 'px';
-      tip.style.top = y + 'px';
+    :root[data-theme="light"] {
+      --page: #f7f7f4; --surface: #fcfcfb; --ink: #16150f; --ink-2: #52514e;
+      --muted: #898781; --grid: #e1e0d9; --hairline: rgba(11,11,11,0.10);
+      --ours: #eb6834; --ours-text: #b04a17; --peer: #2a78d6; --peer-text: #1c5cab;
+      --good: #006300; --bad: #a53c25;
     }
-    function hide() { tip.style.display = 'none'; }
-    targets.forEach(function (el) {
-      el.addEventListener('mouseenter', show);
-      el.addEventListener('mousemove', move);
-      el.addEventListener('mouseleave', hide);
-      el.addEventListener('focus', function () {
+    :root[data-theme="dark"] {
+      --page: #111110; --surface: #1a1a19; --ink: #f4f3ee; --ink-2: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --hairline: rgba(255,255,255,0.10);
+      --ours: #d95926; --ours-text: #ef8352; --peer: #3987e5; --peer-text: #6da7ec;
+      --good: #0ca30c; --bad: #ff9270;
+    }
+    * { box-sizing: border-box; }
+    body {
+      background: var(--page);
+      color: var(--ink);
+      font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+      margin: 0;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+    a { color: var(--peer-text); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+    a:focus-visible { outline: 2px solid var(--ours); outline-offset: 2px; border-radius: 2px; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code {
+      font-size: .86em; background: var(--surface); border: 1px solid var(--hairline);
+      border-radius: 4px; padding: 1px 5px;
+    }
+    .eyebrow {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+      color: var(--ours-text); margin: 0 0 12px;
+    }
+    h1 {
+      font-size: clamp(26px, 4.5vw, 38px); line-height: 1.15; letter-spacing: -.015em;
+      margin: 0 0 10px; text-wrap: balance; font-weight: 700;
+    }
+    .dek { color: var(--ink-2); max-width: 62ch; margin: 0 0 8px; }
+    .stamp {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; color: var(--muted); margin: 0 0 40px;
+    }
+    h2 {
+      font-size: 19px; letter-spacing: -.01em; margin: 56px 0 6px; font-weight: 650;
+      padding-top: 24px; border-top: 1px solid var(--grid);
+    }
+    h2 + p { margin-top: 6px; }
+    p { max-width: 68ch; }
+    .note { color: var(--ink-2); font-size: 14px; max-width: 68ch; }
+    .bad-note { color: var(--bad); }
+    .tiles {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px; margin: 28px 0 8px;
+    }
+    .tile {
+      background: var(--surface); border: 1px solid var(--hairline);
+      border-radius: 6px; padding: 14px 16px 12px;
+    }
+    .tile .v {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 26px; font-weight: 600; letter-spacing: -.02em;
+    }
+    .tile .v small { font-size: 15px; font-weight: 500; color: var(--ink-2); }
+    .tile .k { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+    .tile.ours .v { color: var(--ours-text); }
+    .chart {
+      background: var(--surface); border: 1px solid var(--hairline);
+      border-radius: 6px; padding: 18px 18px 14px; margin: 18px 0 6px;
+    }
+    .chart h3 { font-size: 14px; margin: 0 0 2px; font-weight: 650; }
+    .chart .sub { font-size: 12.5px; color: var(--ink-2); margin: 0 0 14px; }
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px;
+      color: var(--ink-2); margin: 0 0 12px;
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .sw { width: 14px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+    .sw.ours { background: var(--ours); }
+    .sw.peer { background: var(--peer); }
+    .row {
+      display: grid; grid-template-columns: 168px 1fr 82px;
+      gap: 10px; align-items: center; padding: 3px 0;
+    }
+    .row .lab {
+      font-size: 13px; color: var(--ink); text-align: right;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .row .lab small { color: var(--muted); font-size: 11px; }
+    .row .val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--ink-2);
+    }
+    .track { position: relative; height: 16px; border-left: 1px solid var(--grid); }
+    .bar {
+      position: absolute; inset: 2px auto 2px 0; min-width: 2px;
+      border-radius: 0 4px 4px 0; background: var(--peer);
+    }
+    .bar.ours { background: var(--ours); }
+    .row:hover .track { background: color-mix(in srgb, var(--grid) 35%, transparent); }
+    .axis {
+      display: flex; justify-content: space-between;
+      font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+      color: var(--muted); margin: 6px 0 0 178px; padding-right: 92px;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+    .tablewrap { overflow-x: auto; margin: 16px 0; }
+    th {
+      text-align: left; font-size: 11.5px; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--muted); font-weight: 600;
+      padding: 6px 12px 6px 0; border-bottom: 1px solid var(--grid); white-space: nowrap;
+    }
+    td {
+      padding: 7px 12px 7px 0; border-bottom: 1px solid var(--grid);
+      vertical-align: top;
+    }
+    td.num {
+      font-family: ui-monospace, Menlo, monospace;
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    tr.us td { color: var(--ours-text); font-weight: 600; }
+    tr.fail td:first-child { color: var(--bad); font-weight: 650; }
+    td .cav { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+    ul { padding-left: 20px; max-width: 70ch; }
+    li { margin: 4px 0; }
+    .sources { font-size: 13px; color: var(--ink-2); columns: 2; column-gap: 32px; }
+    .sources li { break-inside: avoid; }
+    @media (max-width: 640px) {
+      .sources { columns: 1; }
+      .row { grid-template-columns: 110px 1fr 74px; }
+      .axis { margin-left: 120px; padding-right: 84px; }
+    }
+    #tip {
+      position: fixed; z-index: 10; pointer-events: none; display: none;
+      max-width: 320px; background: var(--ink); color: var(--page);
+      font-size: 12px; line-height: 1.45; padding: 8px 10px; border-radius: 6px;
+    }
+    #tip b { display: block; }
+    footer {
+      margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--grid);
+      font-size: 12.5px; color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Sandbox · Benchmark report</p>
+    <h1>Production validation for the jailed Firecracker fleet</h1>
+    <p class="dek">Lifecycle latency, ready-capacity bursts, launch-path
+      timing, direct source creates, snapshot batches, 32/64/128-way gateway
+      workloads, memory density, failure attribution, and verified cleanup.</p>
+    <p class="stamp">updated 2026-07-29 · release 9b6a9fc · GCP
+      n2-standard-16 · 48 slots/worker · 2 vCPU / 1 GiB guests · Firecracker
+      v1.15.0 · XFS reflink</p>
+
+    <div class="tiles">
+      <div class="tile ours" data-tip="<b>Lifecycle create p50</b>Across 25 full gateway lifecycle cycles, create completed at 200 ms p50 and 304 ms p95.">
+        <div class="v">200 ms</div>
+        <div class="k">gateway create p50</div>
+      </div>
+      <div class="tile ours" data-tip="<b>Control-VM burst p95</b>The latest 16-way ready-capacity burst measured from the control VM completed at 118 ms p95, with 16/16 ready hits and no errors.">
+        <div class="v">118 ms</div>
+        <div class="k">VPC-local burst p95</div>
+      </div>
+      <div class="tile ours" data-tip="<b>Ready-pool claims</b>22 of 25 direct default-source creates completed in 8–15 ms. The other three exhausted ready capacity and paid the secure refill path.">
+        <div class="v">22/25</div>
+        <div class="k">direct claims in 8–15 ms</div>
+      </div>
+      <div class="tile ours" data-tip="<b>Memory density</b>Across 32 additional VMs, snapshot source added 2,460 MiB PSS versus 2,912 MiB for default source: 452 MiB, or 15.5%, less.">
+        <div class="v">−15.5%</div>
+        <div class="k">snapshot-source PSS at N=32</div>
+      </div>
+    </div>
+    <p class="note">Current production release only. Historical and provider
+      comparisons are excluded. “Created” means the in-guest agent answered;
+      cleanup means each created resource was verified absent afterward.</p>
+
+    <h2>Verdict</h2>
+    <p>The original ready-pool latency improvement still works. This campaign
+      found a <strong>different startup/admission bug</strong> when a larger
+      burst forced placement onto a misconfigured worker.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Area</th><th>Outcome</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr class="us"><td>Ready-pool create</td><td>22/25 samples in 8–15 ms</td><td>fast path works</td></tr>
+          <tr class="us"><td>32- and 64-way default</td><td>96/96 workloads passed</td><td>pass</td></tr>
+          <tr class="fail"><td>128-way default</td><td>80/128 created</td><td>48 host-specific cgroup failures</td></tr>
+          <tr class="fail"><td>64-way fsync</td><td>64 created, 63 workloads passed</td><td>one SQLite lock failure</td></tr>
+          <tr class="us"><td>64-way large</td><td>64/64 workloads passed</td><td>pass</td></tr>
+          <tr class="us"><td>Cleanup</td><td>final gateway sandbox count 0</td><td>pass</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note bad-note"><strong>Not an unconditional production pass.</strong>
+      The post-campaign fix is deployed, but the 128-way benchmark must be
+      repeated before this measured result becomes a pass.</p>
+
+    <h2>Full lifecycle stays below 500 ms for create</h2>
+    <p>Twenty-five sequential gateway cycles exercised create, pause, resume,
+      and terminate. Resume includes an in-guest <code>echo ready</code>
+      probe.</p>
+    <div class="chart">
+      <h3>Lifecycle latency</h3>
+      <p class="sub">milliseconds · p50 and p95 · lower is better · 25 samples per operation</p>
+      <div class="legend">
+        <span><span class="sw ours"></span>p50</span>
+        <span><span class="sw peer"></span>p95</span>
+      </div>
+      <div class="row" data-tip="<b>Create</b>Mean 215 ms · p50 200 ms · p90 237 ms · p95 304 ms · min 197 ms · max 404 ms.">
+        <span class="lab">create p50</span>
+        <span class="track"><span class="bar ours" style="width:15.4%"></span></span>
+        <span class="val">200 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Create p95 — 304 ms</b>The request-to-ready path remained below the 500 ms objective at p95.">
+        <span class="lab">create p95</span>
+        <span class="track"><span class="bar" style="width:23.4%"></span></span>
+        <span class="val">304 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Pause</b>Mean 395 ms · p50 375 ms · p90 434 ms · p95 490 ms · min 356 ms · max 583 ms.">
+        <span class="lab">pause p50</span>
+        <span class="track"><span class="bar ours" style="width:28.8%"></span></span>
+        <span class="val">375 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Resume + ready probe</b>Mean 1,113 ms · p50 1,090 ms · p90 1,218 ms · p95 1,222 ms · min 1,060 ms · max 1,269 ms.">
+        <span class="lab">resume p50</span>
+        <span class="track"><span class="bar ours" style="width:83.8%"></span></span>
+        <span class="val">1,090 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Terminate</b>Mean 1,077 ms · p50 1,074 ms · p90 1,216 ms · p95 1,226 ms · min 924 ms · max 1,269 ms.">
+        <span class="lab">terminate p50</span>
+        <span class="track"><span class="bar ours" style="width:82.6%"></span></span>
+        <span class="val">1,074 ms</span>
+      </div>
+      <div class="axis"><span>0</span><span>650</span><span>1,300 ms</span></div>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Operation</th><th>Mean</th><th>p50</th><th>p90</th><th>p95</th><th>Min</th><th>Max</th></tr>
+        </thead>
+        <tbody>
+          <tr class="us"><td>Create</td><td class="num">215 ms</td><td class="num">200 ms</td><td class="num">237 ms</td><td class="num">304 ms</td><td class="num">197 ms</td><td class="num">404 ms</td></tr>
+          <tr><td>Pause</td><td class="num">395 ms</td><td class="num">375 ms</td><td class="num">434 ms</td><td class="num">490 ms</td><td class="num">356 ms</td><td class="num">583 ms</td></tr>
+          <tr><td>Resume + ready</td><td class="num">1,113 ms</td><td class="num">1,090 ms</td><td class="num">1,218 ms</td><td class="num">1,222 ms</td><td class="num">1,060 ms</td><td class="num">1,269 ms</td></tr>
+          <tr><td>Terminate</td><td class="num">1,077 ms</td><td class="num">1,074 ms</td><td class="num">1,216 ms</td><td class="num">1,226 ms</td><td class="num">924 ms</td><td class="num">1,269 ms</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">This is an end-to-end gateway clock. The sub-500 ms result
+      depends on ready capacity; it does not describe an exhausted pool.</p>
+
+    <h2>Ready-capacity burst and locality</h2>
+    <p>The 16-way hold burst was <strong>16/16 ready-pool hits</strong>, with
+      zero misses, capacity errors, tap-pool errors, agent timeouts, other
+      errors, or pool-build failures.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Clock and location</th><th>Create p50</th><th>Create p95</th><th>Max</th><th>Outcome</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Client · Greece → India gateway</td><td class="num">426 ms</td><td class="num">600 ms</td><td class="num">600 ms</td><td class="num">16/16</td></tr>
+          <tr class="us"><td>Control VM → gateway · run 1</td><td class="num">71 ms</td><td class="num">130 ms</td><td class="num">130 ms</td><td class="num">16/16</td></tr>
+          <tr class="us"><td>Control VM → gateway · run 2</td><td class="num">82 ms</td><td class="num">118 ms</td><td class="num">118 ms</td><td class="num">16/16</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The committed client-side burst's in-guest workload measured mean
+      <strong>4,401 ms</strong>, p50 <strong>4,644 ms</strong>, and p95
+      <strong>4,853 ms</strong>. Termination measured mean
+      <strong>385 ms</strong>, p50 <strong>396 ms</strong>, and p95
+      <strong>459 ms</strong>. The full burst wall time was
+      <strong>5.926 s (5,926 ms)</strong> at peak concurrency 16.</p>
+    <p class="note">The client/control-VM delta is transport RTT and tunneling,
+      not extra VM work. Installing a fresh Ed25519 client public key completed
+      in <strong>92 ms</strong> from the control VM.</p>
+
+    <h2>Where exhausted-pool time actually goes</h2>
+    <p>Internal phase clocks explain the launch path. They are narrower than
+      the lifecycle and burst clocks, so the rows must not be summed into an
+      end-to-end percentile.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Measured segment</th><th>Current-release observation</th></tr>
+        </thead>
+        <tbody>
+          <tr class="us"><td>Direct ready-row claim at worker API</td><td class="num">8–15 ms · 22/25 samples</td></tr>
+          <tr class="us"><td>Hot jailed launch · prepare + process-to-API</td><td class="num">24–47 ms</td></tr>
+          <tr><td>Cold first staging pass</td><td class="num">about 123 ms</td></tr>
+          <tr><td>Resumed guest network re-identification</td><td class="num">333–399 ms</td></tr>
+          <tr><td>SSH identity readiness</td><td class="num">125–136 ms</td></tr>
+          <tr class="fail"><td>Ordinary secure clone after pool exhaustion</td><td class="num">about 734 ms end-to-end</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The jailer itself is not a 390 ms tax. Guest resume,
+      network re-identification, and SSH readiness dominate the exhausted
+      path. Ready capacity meets the latency goal without weakening isolation.</p>
+
+    <h2>Default source is fast until the pool refills</h2>
+    <p>Twenty-five default-source creates and 25 snapshot-source creates ran
+      directly against a warm production worker.</p>
+    <div class="chart">
+      <h3>Direct source-create latency</h3>
+      <p class="sub">milliseconds · lower is better · bars scaled to 2,200 ms</p>
+      <div class="legend">
+        <span><span class="sw ours"></span>default source</span>
+        <span><span class="sw peer"></span>snapshot source</span>
+      </div>
+      <div class="row" data-tip="<b>Default p50 — 10 ms</b>22 of 25 samples were ready-pool claims between 8 and 15 ms.">
+        <span class="lab">default p50</span>
+        <span class="track"><span class="bar ours" style="width:.45%"></span></span>
+        <span class="val">10 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Default mean — 237 ms</b>The mean includes three secure refill launches at 1.756, 1.812, and 2.132 seconds.">
+        <span class="lab">default mean</span>
+        <span class="track"><span class="bar ours" style="width:10.8%"></span></span>
+        <span class="val">237 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Default max — 2,132 ms</b>Pool exhaustion exposes the ordinary secure launch and readiness path.">
+        <span class="lab">default max</span>
+        <span class="track"><span class="bar ours" style="width:96.9%"></span></span>
+        <span class="val">2,132 ms</span>
+      </div>
+      <div class="row" data-tip="<b>Snapshot p50 — 1,897 ms</b>Snapshot-source creation did not use the ready-pool claim path and was slower at every reported percentile.">
+        <span class="lab">snapshot p50</span>
+        <span class="track"><span class="bar" style="width:86.2%"></span></span>
+        <span class="val">1,897 ms</span>
+      </div>
+      <div class="axis"><span>0</span><span>1,100</span><span>2,200 ms</span></div>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Source</th><th>Mean</th><th>p50</th><th>p90</th><th>Min</th><th>Max</th><th>Outcome</th></tr>
+        </thead>
+        <tbody>
+          <tr class="us"><td>Default</td><td class="num">237 ms</td><td class="num">10 ms</td><td class="num">1,756 ms</td><td class="num">8 ms</td><td class="num">2,132 ms</td><td class="num">25/25</td></tr>
+          <tr><td>Snapshot</td><td class="num">1,878 ms</td><td class="num">1,897 ms</td><td class="num">2,049 ms</td><td class="num">955 ms</td><td class="num">2,138 ms</td><td class="num">25/25</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The sub-500 ms objective is a ready-capacity objective.
+      Refill-bound creates remain above one second.</p>
+
+    <h2>Snapshot batch scaling</h2>
+    <p>Each batch used one immutable snapshot and waited until every returned
+      sandbox could execute <code>echo benchmark-ready</code>.</p>
+    <div class="chart">
+      <h3>Command-ready wall time</h3>
+      <p class="sub">seconds · lower is better · all 63 batch-created sandboxes usable</p>
+      <div class="row" data-tip="<b>N=1 — 2.583 s</b>One operation result, one successful readiness probe, and verified cleanup.">
+        <span class="lab">N=1</span>
+        <span class="track"><span class="bar" style="width:17.3%"></span></span>
+        <span class="val">2.583 s</span>
+      </div>
+      <div class="row" data-tip="<b>N=2 — 1.067 s</b>Both sandboxes usable; 534 ms amortized per sandbox.">
+        <span class="lab">N=2</span>
+        <span class="track"><span class="bar" style="width:7.2%"></span></span>
+        <span class="val">1.067 s</span>
+      </div>
+      <div class="row" data-tip="<b>N=4 — 3.078 s</b>Four of four usable; 770 ms amortized per sandbox.">
+        <span class="lab">N=4</span>
+        <span class="track"><span class="bar" style="width:20.7%"></span></span>
+        <span class="val">3.078 s</span>
+      </div>
+      <div class="row" data-tip="<b>N=8 — 4.107 s</b>Eight of eight usable; 513 ms amortized per sandbox.">
+        <span class="lab">N=8</span>
+        <span class="track"><span class="bar" style="width:27.6%"></span></span>
+        <span class="val">4.107 s</span>
+      </div>
+      <div class="row" data-tip="<b>N=16 — 6.175 s</b>Sixteen of sixteen usable; 386 ms amortized per sandbox.">
+        <span class="lab">N=16</span>
+        <span class="track"><span class="bar" style="width:41.4%"></span></span>
+        <span class="val">6.175 s</span>
+      </div>
+      <div class="row" data-tip="<b>N=32 — 14.898 s</b>Thirty-two of thirty-two usable; 466 ms amortized per sandbox.">
+        <span class="lab">N=32</span>
+        <span class="track"><span class="bar" style="width:100%"></span></span>
+        <span class="val">14.898 s</span>
+      </div>
+      <div class="axis"><span>0</span><span>7.5</span><span>15 s</span></div>
+    </div>
+    <p class="note">The N=32 default-source baseline completed in
+      <strong>6.486 s</strong> (203 ms per sandbox), versus 14.898 s for
+      snapshot source. Snapshot source is not currently a latency optimization.</p>
+
+    <h2>Fleet workload matrix</h2>
+    <p>The gateway created with concurrency 12, staged the TypeScript
+      SQLite/filesystem workload, ran all successful VMs concurrently, and
+      verified each deletion.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Run</th><th>Created</th><th>Workload</th><th>Fleet wall</th><th>Create p50</th><th>Create p95</th><th>Cleanup</th></tr>
+        </thead>
+        <tbody>
+          <tr class="us"><td>32 default</td><td class="num">32/32</td><td class="num">32/32</td><td class="num">40.299 s</td><td class="num">97 ms</td><td class="num">5.020 s</td><td class="num">32/32</td></tr>
+          <tr class="us"><td>64 default</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">67.085 s</td><td class="num">2.221 s</td><td class="num">4.719 s</td><td class="num">64/64</td></tr>
+          <tr class="fail"><td>128 default</td><td class="num">80/128</td><td class="num">80/80</td><td class="num">144.447 s</td><td class="num">80 ms</td><td class="num">5.150 s</td><td class="num">80/80</td></tr>
+          <tr class="fail"><td>64 fsync</td><td class="num">64/64</td><td class="num">63/64</td><td class="num">45.403 s</td><td class="num">95 ms</td><td class="num">4.699 s</td><td class="num">64/64</td></tr>
+          <tr class="us"><td>64 large</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">165.596 s</td><td class="num">133 ms</td><td class="num">5.477 s</td><td class="num">64/64</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Create percentiles mix ready-pool claims with secure refill
+      launches, so a low p50 can coexist with a multi-second p95.</p>
+
+    <h2>The 128-way failure, fully attributed</h2>
+    <p>All 48 failed creates landed on worker <code>10.160.0.7</code> and
+      reported the same error:</p>
+    <p><code>configure VM cgroup io.max: .../io.max: no such device</code></p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Check</th><th>Failing worker</th><th>Healthy worker</th></tr>
+        </thead>
+        <tbody>
+          <tr class="fail"><td>Data disk</td><td><code>/dev/sdb</code> XFS, unmounted</td><td><code>/dev/sdb</code> XFS, mounted</td></tr>
+          <tr><td><code>/mnt/sandbox-data</code></td><td>boot partition <code>/dev/sda1</code> · <code>8:1</code></td><td>data disk <code>/dev/sdb</code> · <code>8:16</code></td></tr>
+          <tr class="fail"><td>fstab entries for mountpoint</td><td class="num">5 stale UUIDs</td><td class="num">1 current UUID</td></tr>
+          <tr class="fail"><td>Startup result</td><td><code>xfs_growfs</code> failed, ignored</td><td>mount and grow succeeded</td></tr>
+          <tr class="fail"><td>Admission</td><td>Nomad started; 48 slots advertised</td><td>Nomad started after valid mount</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>This is a startup/admission bug, not the original create-latency bug.
+      The worker script accumulated stale UUID lines, failed to establish the
+      mount, suppressed the only explicit failure with <code>|| true</code>,
+      stamped <code>data_disk_ready</code>, and admitted the worker.</p>
+    <p class="note"><strong>Post-campaign fix implemented:</strong> startup now
+      replaces all fstab rows for this mountpoint, mounts the named disk
+      explicitly, validates mountpoint + filesystem + backing major:minor +
+      read-write options before and after mandatory XFS growth, and keeps Nomad
+      disabled and stopped until every admission check passes. Template
+      <code>sandbox-workers-tpl-20260729-093155</code> is deployed and stable
+      at two running plus six suspended workers; both active workers passed
+      direct disk validation and a create/delete smoke left zero sandboxes.
+      Release <code>9b6a9fc</code> predates the fix, so the 128-way
+      rebenchmark still remains.</p>
+
+    <h2>Fsync and large-file modes</h2>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Mode</th><th>Created</th><th>Workload</th><th>Workload p50</th><th>Workload p95</th><th>Failure</th></tr>
+        </thead>
+        <tbody>
+          <tr class="fail"><td>fsync</td><td class="num">64/64</td><td class="num">63/64</td><td class="num">32.557 s</td><td class="num">34.828 s</td><td>one <code>database is locked</code></td></tr>
+          <tr class="us"><td>large</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">138.647 s</td><td class="num">153.696 s</td><td>none</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The fsync failure was inside the guest benchmark.
+      Creation and cleanup both passed 64/64.</p>
+
+    <h2>Memory density</h2>
+    <p>Thirty-two additional VMs were measured after subtracting a baseline of
+      eight warm VMs plus one anchor VM.</p>
+    <div class="chart">
+      <h3>Added proportional set size for 32 VMs</h3>
+      <p class="sub">MiB PSS · lower is better</p>
+      <div class="legend">
+        <span><span class="sw ours"></span>snapshot source</span>
+        <span><span class="sw peer"></span>default source</span>
+      </div>
+      <div class="row" data-tip="<b>Snapshot source — 2,460 MiB PSS</b>76.9 MiB per additional VM after subtracting the nine-process baseline.">
+        <span class="lab">snapshot source</span>
+        <span class="track"><span class="bar ours" style="width:84.5%"></span></span>
+        <span class="val">2,460 MiB</span>
+      </div>
+      <div class="row" data-tip="<b>Default source — 2,912 MiB PSS</b>91.0 MiB per additional VM after subtracting the same baseline.">
+        <span class="lab">default source</span>
+        <span class="track"><span class="bar" style="width:100%"></span></span>
+        <span class="val">2,912 MiB</span>
+      </div>
+      <div class="axis"><span>0</span><span>1,500</span><span>3,000 MiB</span></div>
+    </div>
+    <p class="note">Snapshot source saved <strong>452 MiB PSS
+      (15.5%)</strong>. PSS remained essentially equal to RSS in both arms;
+      this production configuration had <code>uffd_restore</code> disabled.</p>
+
+    <h2>Security and cleanup</h2>
+    <p>No benchmark bypassed production security. Every created VM used jailer
+      exec and chroot, dedicated UID/GID, a PID namespace, a cgroup leaf,
+      seccomp, independent tap/IP/rootfs, guest network re-identification,
+      agent readiness checks, and fresh Ed25519 host-key rotation.</p>
+    <ul>
+      <li>All source and batch resources were deleted.</li>
+      <li>Fleet cleanup verified 32/32, 64/64, 80/80, 64/64, and 64/64.</li>
+      <li>The density worker returned from 41 Firecracker processes to its
+        nine-process baseline before the anchor was deleted.</li>
+      <li>Final gateway-wide sandbox count: <strong>0</strong>.</li>
+    </ul>
+
+    <h2>Raw evidence</h2>
+    <ul class="sources">
+      <li><a href="../sdk/typescript/benchmarks/results/production_lifecycle_9b6a9fc_20260729.json">25-cycle lifecycle JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_burst_9b6a9fc_20260729.json">16-way create/exec/terminate burst JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/snapshot-source.json">Source latency JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/snapshot-batch.json">Snapshot batch JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_32_default.json">32-way default JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_64_default.json">64-way default JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_128_default.json">128-way default JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_64_fsync.json">64-way fsync JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_64_large.json">64-way large JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/memory-density.json">Memory-density JSON</a></li>
+    </ul>
+
+    <footer>
+      Current production release only; historical and provider comparisons are
+      excluded. Methodology and reproduction commands:
+      <span class="mono">docs/benchmarks.md</span>. Hover any chart row or
+      headline tile for the exact clock and interpretation.
+    </footer>
+  </div>
+
+  <div id="tip" role="tooltip"></div>
+  <script>
+    (function () {
+      var tip = document.getElementById('tip');
+      var targets = document.querySelectorAll('[data-tip]');
+      function show(e) {
         tip.innerHTML = this.getAttribute('data-tip');
         tip.style.display = 'block';
-        var r = this.getBoundingClientRect();
-        tip.style.left = Math.min(r.left, window.innerWidth - tip.offsetWidth - 8) + 'px';
-        tip.style.top = (r.bottom + 8) + 'px';
+        move.call(this, e);
+      }
+      function move(e) {
+        var pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+        var x = e.clientX + pad, y = e.clientY + pad;
+        if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+        if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+        tip.style.left = x + 'px';
+        tip.style.top = y + 'px';
+      }
+      function hide() { tip.style.display = 'none'; }
+      targets.forEach(function (el) {
+        el.addEventListener('mouseenter', show);
+        el.addEventListener('mousemove', move);
+        el.addEventListener('mouseleave', hide);
+        el.addEventListener('focus', function () {
+          tip.innerHTML = this.getAttribute('data-tip');
+          tip.style.display = 'block';
+          var r = this.getBoundingClientRect();
+          tip.style.left = Math.min(r.left, window.innerWidth - tip.offsetWidth - 8) + 'px';
+          tip.style.top = (r.bottom + 8) + 'px';
+        });
+        el.addEventListener('blur', hide);
+        el.setAttribute('tabindex', '0');
       });
-      el.addEventListener('blur', hide);
-      el.setAttribute('tabindex', '0');
-    });
-  })();
-</script>
+    })();
+  </script>
+</body>
+</html>
