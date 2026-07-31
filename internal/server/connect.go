@@ -3,7 +3,6 @@ package server
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -52,13 +51,13 @@ func (s *Server) handleConnectPort(w http.ResponseWriter, r *http.Request) {
 	}
 	defer backend.Close()
 
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		httpError(w, http.StatusInternalServerError, errors.New("HTTP server does not support connection hijacking"))
-		return
-	}
-	client, rw, err := hj.Hijack()
+	// Hijack via ResponseController, NOT a w.(http.Hijacker) assertion:
+	// httpapi.Middleware wraps the writer in a statusWriter that embeds the
+	// ResponseWriter interface and exposes only Unwrap, so the direct assertion
+	// always fails on the real listeners and every tunnel 500s.
+	client, rw, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		httpError(w, http.StatusInternalServerError, fmt.Errorf("hijack tunnel connection: %w", err))
 		return
 	}
 	defer client.Close()
