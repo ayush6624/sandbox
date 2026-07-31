@@ -151,10 +151,36 @@ cmd_down() {
   echo ">> Deleted $NAME (reserved IP $NAME and SA $SA_EMAIL kept; remove manually if done)."
 }
 
+# cmd_gateway ships ONLY a new `sandbox` binary + gateway unit. That is all a
+# code rollout changes on the control plane; `deploy` additionally reinstalls
+# and restarts nomad-server, prometheus, the autoscaler and grafana, which are
+# version-pinned and unaffected. Set SANDBOX_BIN to reuse a binary that was
+# already built (rollout.sh does this so a rollout compiles exactly once).
+cmd_gateway() {
+  load_tokens
+  local release="${SANDBOX_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD)}"
+  local bin="${SANDBOX_BIN:-$REPO/bin/sandbox}"
+  [ -x "$bin" ] || { ( cd "$REPO" && make build-linux ); bin="$REPO/bin/sandbox"; }
+  echo ">> gateway -> ${release} ($(du -h "$bin" | cut -f1))"
+  rsync -az -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+    "$bin" "${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/sandbox"
+  sshx "$NAME" \
+    "sudo SECTIONS=gateway GW_TOKEN='$GATEWAY_TOKEN' \
+       GATEWAY_CONTROL_TOKEN='$GATEWAY_CONTROL_TOKEN' HOST_TOKEN='$HOST_TOKEN' \
+       SANDBOX_RELEASE='$release' \
+       CONTROL_IP='$IP' GW_PORT='$GW_PORT' \
+       QUEUE_WAIT='${QUEUE_WAIT:-240s}' QUEUE_MAX='${QUEUE_MAX:-4096}' \
+       PROJECT='$PROJECT' ZONE='$ZONE' MIG_NAME='${MIG_NAME:-sandbox-workers}' \
+       MIG_MAX='${MIG_MAX:-8}' SLOTS_PER_HOST='${SLOTS_PER_HOST:-24}' \
+       HEADROOM_SLOTS='${HEADROOM_SLOTS:-12}' \
+       REMOTE_DIR='$REMOTE_DIR' bash -s" < "$DIR/control-install.sh"
+}
+
 case "${1:-}" in
-  up)     cmd_up ;;
-  deploy) cmd_deploy ;;
-  status) cmd_status ;;
-  down)   cmd_down ;;
-  *) echo "usage: $0 {up|deploy|status|down}" >&2; exit 1 ;;
+  up)      cmd_up ;;
+  deploy)  cmd_deploy ;;
+  gateway) cmd_gateway ;;
+  status)  cmd_status ;;
+  down)    cmd_down ;;
+  *) echo "usage: $0 {up|deploy|gateway|status|down}" >&2; exit 1 ;;
 esac

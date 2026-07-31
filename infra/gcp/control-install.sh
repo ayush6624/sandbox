@@ -6,11 +6,22 @@
 # HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
 # QUEUE_WAIT QUEUE_MAX REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
 # GRAFANA_ADMIN_PASSWORD
+#
+# SECTIONS=gateway installs ONLY the gateway (binary + tokens + unit + restart)
+# and exits. That is the whole cost of shipping a new `sandbox` build to the
+# control plane; the rest — nomad server, prometheus, autoscaler, grafana — is
+# pinned by version and unchanged by a code deploy, so reinstalling and
+# restarting it on every rollout is pure latency. Used by `control.sh gateway`
+# and `rollout.sh --fast`. Default (unset/all) installs everything.
 set -euo pipefail
 
+SECTIONS="${SECTIONS:-all}"
+
 need() { command -v "$1" >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$1"; }
-apt-get update -qq || true
-need unzip; need curl; need gettext-base   # gettext-base provides envsubst
+if [ "$SECTIONS" = all ]; then
+  apt-get update -qq || true
+  need unzip; need curl; need gettext-base   # gettext-base provides envsubst
+fi
 
 fetch_unzip() { # url dest-binary
   local url="$1" dst="$2" tmp; tmp="$(mktemp -d)"
@@ -19,6 +30,7 @@ fetch_unzip() { # url dest-binary
 }
 
 # --- 1. Nomad server ---
+if [ "$SECTIONS" = all ]; then
 command -v nomad >/dev/null || \
   fetch_unzip "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip" /usr/local/bin/nomad
 mkdir -p /etc/nomad.d /opt/nomad/data
@@ -42,8 +54,9 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 UNIT
+fi
 
-# --- 2. sandbox gateway ---
+# --- 2. sandbox gateway --- (always: this is the only part a code deploy changes)
 install -m 0755 "${REMOTE_DIR}/sandbox" /usr/local/bin/sandbox
 install -d -m 0700 /etc/sandbox-gateway
 printf '%s\n' "$GW_TOKEN" > /etc/sandbox-gateway/client.tokens
@@ -84,6 +97,18 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+# Gateway-only deploy stops here: sections 3-5 are version-pinned services that
+# a code rollout cannot change. The gateway holds no durable state (it rebuilds
+# its routing table from host heartbeats), so restarting it costs one heartbeat
+# interval of routing, not correctness.
+if [ "$SECTIONS" = gateway ]; then
+  systemctl daemon-reload
+  systemctl enable --now sandbox-gateway >/dev/null 2>&1 || true
+  systemctl restart sandbox-gateway
+  echo ">> gateway-only install done (release ${SANDBOX_RELEASE:-unknown})"
+  exit 0
+fi
 
 # --- 3. Prometheus ---
 if [ ! -x /usr/local/bin/prometheus ]; then

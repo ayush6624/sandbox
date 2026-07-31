@@ -90,7 +90,11 @@ try {
 // This is a real regression class: wsutil.Reject silently lost the ability to
 // hijack behind the request-instrumentation middleware, and every WS error on
 // the fleet degraded to 1006 with no signal anywhere else.
-if (sbx) {
+//
+// Skipped in fast mode: it has to wait out a heartbeat interval for the gateway
+// to drop the dead id, which alone is ~8s — most of a fast rollout's budget. The
+// checks above already exercise the same auth and upgrade path end to end.
+if (sbx && process.env.SMOKE_MODE !== 'fast') {
   await new Promise((r) => setTimeout(r, 8000)) // let routing drop the dead id
   const classify = (err: unknown) => {
     const e = err as Error

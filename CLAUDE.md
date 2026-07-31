@@ -87,6 +87,7 @@ in `/etc/sudoers.d/sandbox` with mode `0440`.
 
 ```bash
 make fleet-rollout                     # roll HEAD onto the fleet, then verify it landed
+infra/gcp/rollout.sh --fast            # rapid dev iteration (~15 MiB egress, gateway-only)
 make fleet-status                      # where the fleet is right now (read-only)
 infra/gcp/rollout.sh --dry-run         # what's stale + what would happen
 infra/gcp/rollout.sh <sha>             # roll a previously published release (rollback)
@@ -123,6 +124,24 @@ front — `git checkout <sha>` first.
 A change to `cmd/sandboxd` is NOT covered by this: the agent is image-pinned, so
 it needs `infra/gcp/bake-image.sh bake && golden` and a MIG roll (see the golden
 snapshot notes below). `rollout.sh` ships the `sandbox` server binary only.
+
+**`--fast` is the dev-iteration path, and rollout latency is NOT on the fleet.**
+Measured: golden is *adopted* (ms), the ready pool refills at ~1.5 s per VM in
+parallel, and `shutdownAll` freezes at ~178 ms per VM 8-way parallel — so a
+worker is serving again seconds after its task restarts. **Don't try to speed
+rollouts up by discarding snapshots or sandbox data; that isn't where the time
+goes.** The cost is egress from your machine plus control-plane work a code
+change can't affect, so `--fast` strips and builds only `cmd/sandbox`
+(30.5 MiB → 15 MiB), overlaps the GCS upload with the gateway push, restarts
+only the gateway (`control.sh gateway` / `SECTIONS=gateway` in
+`control-install.sh`) instead of reinstalling the four version-pinned services,
+compiles once instead of twice, and polls every 2 s. It publishes as
+`<sha>-dev` and always rebuilds, so a stripped dev artifact can never satisfy a
+real `<sha>` release. NB the release prefix must contain **both** `sandbox` and
+`sandboxd`: `serve.nomad.hcl` has a mandatory artifact stanza for each and
+`run.sh` chmods both, so `--fast` copies `sandboxd` server-side from the
+release the workers are already running (the pulled agent is never executed —
+it's image-pinned — but a prefix missing it fails the roll).
 
 ## One-time host setup
 

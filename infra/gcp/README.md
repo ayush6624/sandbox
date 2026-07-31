@@ -68,10 +68,38 @@ rollout, which does all of the below in the right order and verifies it landed:
 
 ```bash
 ./rollout.sh                 # roll HEAD: build, upload, deploy what's stale, wait, smoke-test
+./rollout.sh --fast          # rapid dev iteration (see below)
 ./rollout.sh --dry-run       # print the plan (what's stale) and exit
 ./rollout.sh --status        # where the fleet is right now, no changes
 ./rollout.sh <sha>           # roll a previously published release (rollback)
 ```
+
+**`--fast` for rapid dev iteration.** Measured, the fleet side of a rollout is
+already quick — the golden snapshot is *adopted*, not rebuilt, and the ready pool
+refills at ~1.5 s per VM in parallel, so a worker is serving again seconds after
+its task restarts. The cost is bytes leaving your machine plus control-plane work
+a code change cannot affect. So `--fast`:
+
+- builds only `cmd/sandbox`, stripped (`-s -w`): **30.5 MiB → 15 MiB** of egress.
+  Go panic tracebacks come from `pclntab`, so stripping costs `delve`, not stack
+  traces;
+- runs the GCS upload and the gateway push **concurrently** — they don't depend
+  on each other, and previously the binary crossed the network twice in series;
+- restarts **only the gateway** (`control.sh gateway`, `SECTIONS=gateway`)
+  instead of reinstalling nomad-server/prometheus/autoscaler/grafana, which are
+  version-pinned and unaffected by a code deploy;
+- compiles **once** (the old path ran `build-linux` twice);
+- polls convergence every 2 s instead of 10 s, and skips the smoke check that has
+  to wait out a heartbeat interval.
+
+It publishes as **`<sha>-dev`** so a stripped dev artifact can never be mistaken
+for — or silently satisfy — a real `<sha>` release, and it always rebuilds (the
+same `-dev` label is reused across iterations, so trusting a previous upload
+would ship stale bytes). Promote to a real release with a plain `./rollout.sh`.
+
+Note it does **not** need to sacrifice snapshots or sandbox data to be fast:
+`shutdownAll` hibernates rather than destroys, and freezing the ready pool is
+~178 ms per VM, 8-way parallel — not the bottleneck.
 
 It derives what to deploy by comparing each component's **running** release
 against the target, so it's idempotent, and it waits on the gateway's host
@@ -257,6 +285,13 @@ Phase order (adjacent gaps are the per-stage costs):
 | `golden_settled` | serve | golden **adopt** (fast) vs **cold build** (slow) |
 | `first_heartbeat_ok` | serve | gateway can route here |
 | `capacity_advertised` | serve | golden + placement quarantine passed; gateway can **place** here ← the real "capacity online" |
+
+`startup-worker.sh` is also the storage admission gate. It leaves Nomad
+disabled across reboots, removes stale `/mnt/sandbox-data` fstab rows, mounts
+the current `google-sandbox-xfs` device explicitly, and verifies the backing
+major:minor, XFS filesystem, and read-write options before and after growing
+the filesystem. Any failure stops startup before Nomad can advertise worker
+capacity. Run `make validate-infra` to exercise the regression tests.
 
 Because these are absolute timestamps rather than rates, **the normal 10 s scrape
 already yields millisecond-accurate boundaries** — no special scrape interval is
