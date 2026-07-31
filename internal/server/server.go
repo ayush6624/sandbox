@@ -127,6 +127,12 @@ type Server struct {
 
 	// blob is the GCS client for snapshot durability; nil when disabled.
 	blob *gcsblob.Client
+	// deleteObject overrides the durability store's object delete. Kept
+	// injectable because blob is a concrete client, and the behaviour of the
+	// hibernation invalidation paths when the object store is UNAVAILABLE is the
+	// part that must be tested (see hib_durable.go: it must never gate a freeze,
+	// a wake, or a destroy). nil in production.
+	deleteObject func(ctx context.Context, object string) error
 	// baseUpMu/basesUploaded gate the once-per-base template upload.
 	baseUpMu      sync.Mutex
 	basesUploaded map[string]bool
@@ -1144,15 +1150,21 @@ func (s *Server) destroyLocked(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("get sandbox: %w", err)
 	}
-	// A durable generation must not outlive an explicit destroy. Stop its
-	// writer first, then synchronously remove the commit marker before local
-	// state becomes unrecoverable.
+	// Stop the durability writer before anything else: it must not publish a
+	// commit marker for a sandbox that is being torn down.
 	s.cancelHibernationUpload(id)
-	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
-		return err
-	}
+	// Un-route the sandbox BEFORE invalidating its durable generation. The
+	// reverse order cost us the recovery path on every failure: MarkStopping can
+	// legitimately fail (a status a sandbox can't stop from, a registry error),
+	// and having already deleted record.json left a local-only sandbox that the
+	// caller was then told it could not delete.
 	if err := s.reg.MarkStopping(ctx, id); err != nil {
 		return fmt.Errorf("mark stopping: %w", err)
+	}
+	// A durable generation must not outlive an explicit destroy. Best-effort in
+	// the object store, authoritative locally — see invalidateHibernationRecord.
+	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
+		return err
 	}
 
 	// Read port mappings before reg.Destroy deletes their rows.
@@ -1172,13 +1184,20 @@ func (s *Server) destroyLocked(ctx context.Context, id string) error {
 	s.pf.CloseSandbox(id)
 	// Legacy DNAT cleanup: port forwarding is a userspace proxy now, but hosts
 	// upgrading from the DNAT scheme may still carry rules for this sandbox.
-	// Removing a nonexistent rule is harmless.
-	for _, pm := range ports {
-		if pm.HostPort != 0 {
-			s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+	// Removing a nonexistent rule is harmless. A hibernated row holds no
+	// identity, so there is nothing to clean up — and nothing to get wrong:
+	// deleting the tap named by a hibernated row USED to mean deleting whichever
+	// running sandbox had since been handed that tap.
+	if sb.GuestIP != "" {
+		for _, pm := range ports {
+			if pm.HostPort != 0 {
+				s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+			}
 		}
 	}
-	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
+	if sb.TapDevice != "" {
+		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
+	}
 	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 	if err := s.reg.Destroy(ctx, id); err != nil {

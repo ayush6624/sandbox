@@ -1060,3 +1060,216 @@ func TestStoppingSandboxIsUnroutedButKeepsCapacity(t *testing.T) {
 		t.Fatalf("free slots after destroy = %d, %v", free, err)
 	}
 }
+
+// A hibernated sandbox must stay destroyable after its old tap/IP have been
+// handed to a running sandbox — the state a busy host reaches whenever the
+// pickers' soft-avoid pass finds nothing free. The identity columns of a frozen
+// row are therefore cleared (the pair lives on in last_tap/last_ip), so
+// MarkStopping — the first thing destroy does — cannot collide with
+// uniq_tap_running/uniq_ip_running against whoever took the identity over.
+// Regressing this makes the sandbox permanently undeletable and, once it has a
+// TTL, makes the reaper retry it every 10 s forever.
+func TestDestroyHibernatedSandboxWhoseIdentityWasReused(t *testing.T) {
+	// One tap / one IP: guarantees the reuse the soft-avoid pass normally dodges.
+	r := testRegistryWithPools(t, Pools{TapPrefix: "fc", TapMax: 1,
+		GuestIPMin: "172.16.0.10", GuestIPMax: "172.16.0.10", PortMin: 5200, PortMax: 5200})
+	ctx := context.Background()
+
+	frozen, err := r.Create(ctx, "A", "", "/tmp/a.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	if err := r.Hibernate(ctx, "A"); err != nil {
+		t.Fatalf("hibernate A: %v", err)
+	}
+	// The frozen row must no longer claim an identity it doesn't hold, but it
+	// must still remember it so a wake can reclaim it cheaply.
+	hib, err := r.Get(ctx, "A")
+	if err != nil {
+		t.Fatalf("get A: %v", err)
+	}
+	if hib.TapDevice != "" || hib.GuestIP != "" {
+		t.Fatalf("hibernated row still claims an identity: tap=%q ip=%q", hib.TapDevice, hib.GuestIP)
+	}
+	if hib.LastTap != frozen.TapDevice || hib.LastIP != frozen.GuestIP {
+		t.Fatalf("hibernated row forgot its frozen identity: last=%q/%q want %q/%q",
+			hib.LastTap, hib.LastIP, frozen.TapDevice, frozen.GuestIP)
+	}
+
+	b, err := r.Create(ctx, "B", "", "/tmp/b.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create B after hibernating A: %v", err)
+	}
+	if b.TapDevice != frozen.TapDevice || b.GuestIP != frozen.GuestIP {
+		t.Fatalf("test precondition: B should have been forced onto A's identity, got %s/%s", b.TapDevice, b.GuestIP)
+	}
+
+	// This is what destroy() (and the TTL reaper) does first.
+	if err := r.MarkStopping(ctx, "A"); err != nil {
+		t.Fatalf("mark hibernated A stopping while B holds its old identity: %v", err)
+	}
+	if err := r.Destroy(ctx, "A"); err != nil {
+		t.Fatalf("destroy A: %v", err)
+	}
+	// B is untouched and still holds the identity.
+	stillThere, err := r.Get(ctx, "B")
+	if err != nil || stillThere.TapDevice != b.TapDevice || stillThere.GuestIP != b.GuestIP {
+		t.Fatalf("destroying A disturbed B: %+v, %v", stillThere, err)
+	}
+}
+
+// Two frozen rows both hold an empty identity, so the partial unique indexes
+// must exempt the empty string: otherwise the second concurrent destroy of a
+// hibernated sandbox collides with the first on tap_device=”.
+func TestConcurrentHibernatedDestroysDoNotCollideOnEmptyIdentity(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	for _, id := range []string{"h1", "h2"} {
+		if _, err := r.Create(ctx, id, "", "/tmp/"+id+".ext4", nil, "", 0, 0, 0); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+		if err := r.Hibernate(ctx, id); err != nil {
+			t.Fatalf("hibernate %s: %v", id, err)
+		}
+	}
+	if err := r.MarkStopping(ctx, "h1"); err != nil {
+		t.Fatalf("stop h1: %v", err)
+	}
+	if err := r.MarkStopping(ctx, "h2"); err != nil {
+		t.Fatalf("stop h2 while h1 is also identity-less and stopping: %v", err)
+	}
+}
+
+// A failed clone-path wake must put the FROZEN identity back, not the fresh pair
+// Wake allocated. The frozen memory image has the old tap/IP baked in, so a row
+// left naming the new one makes the next wake take the same-identity path,
+// restore the snapshot on its old baked IP, and then poll the new one until the
+// agent gate times out — permanently unwakeable.
+func TestFailedWakeRestoresFrozenIdentity(t *testing.T) {
+	r := testRegistryWithPools(t, Pools{TapPrefix: "fc", TapMax: 2,
+		GuestIPMin: "172.16.0.10", GuestIPMax: "172.16.0.11", PortMin: 5200, PortMax: 5201})
+	ctx := context.Background()
+
+	frozen, err := r.Create(ctx, "A", "", "/tmp/a.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	if err := r.Hibernate(ctx, "A"); err != nil {
+		t.Fatalf("hibernate A: %v", err)
+	}
+	// Something takes A's identity while it sleeps, forcing the clone path.
+	if _, err := r.CreateRestore(ctx, "B", "", "/tmp/b.ext4", frozen.TapDevice, frozen.GuestIP, nil, 0, 0, 0); err != nil {
+		t.Fatalf("squat A's identity: %v", err)
+	}
+
+	woken, same, err := r.Wake(ctx, "A")
+	if err != nil {
+		t.Fatalf("wake A: %v", err)
+	}
+	if same {
+		t.Fatal("expected the clone path (same=false) with A's identity taken")
+	}
+	if woken.GuestIP == frozen.GuestIP {
+		t.Fatalf("clone-path wake reused the taken IP %s", woken.GuestIP)
+	}
+
+	// The wake fails (StartClone error, GARP/agent timeout, ...).
+	if err := r.RollbackWake(ctx, "A"); err != nil {
+		t.Fatalf("rollback wake: %v", err)
+	}
+	after, err := r.Get(ctx, "A")
+	if err != nil {
+		t.Fatalf("get A: %v", err)
+	}
+	if after.Status != StatusHibernated {
+		t.Fatalf("rollback left A in %s", after.Status)
+	}
+	if after.LastTap != frozen.TapDevice || after.LastIP != frozen.GuestIP {
+		t.Fatalf("rollback recorded the reallocated identity as frozen: last=%q/%q want %q/%q",
+			after.LastTap, after.LastIP, frozen.TapDevice, frozen.GuestIP)
+	}
+	if after.TapDevice != "" || after.GuestIP != "" {
+		t.Fatalf("rollback left a live identity on a frozen row: tap=%q ip=%q", after.TapDevice, after.GuestIP)
+	}
+
+	// Free the original identity: the retry must now recognize it as reclaimable
+	// and take the cheap same-identity restore, which is only correct because the
+	// rollback kept the truth.
+	if err := r.Destroy(ctx, "B"); err != nil {
+		t.Fatalf("destroy B: %v", err)
+	}
+	retry, same, err := r.Wake(ctx, "A")
+	if err != nil {
+		t.Fatalf("second wake: %v", err)
+	}
+	if !same || retry.TapDevice != frozen.TapDevice || retry.GuestIP != frozen.GuestIP {
+		t.Fatalf("second wake same=%v identity=%s/%s, want true %s/%s",
+			same, retry.TapDevice, retry.GuestIP, frozen.TapDevice, frozen.GuestIP)
+	}
+}
+
+// An existing database whose hibernated rows still carry their identity (frozen
+// by a binary predating last_tap/last_ip) must be normalized on open: the pair
+// moves to last_tap/last_ip so the row is destroyable, and the soft-avoid
+// heuristic keeps working off the remembered values.
+func TestMigrationMovesFrozenIdentityOffHibernatedRows(t *testing.T) {
+	dir := t.TempDir()
+	pools := Pools{TapPrefix: "fc", TapMax: 2, GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.11", PortMin: 5200, PortMax: 5201}
+	r, err := Open(filepath.Join(dir, "registry.db"), pools)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ctx := context.Background()
+	frozen, err := r.Create(ctx, "hib", "", "/tmp/hib.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := r.Hibernate(ctx, "hib"); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+	// Rewind the row (and the schema) to the pre-migration shape.
+	if _, err := r.db.Exec(`UPDATE sandboxes SET tap_device=?, guest_ip=? WHERE id='hib'`,
+		frozen.TapDevice, frozen.GuestIP); err != nil {
+		t.Fatalf("restore legacy identity: %v", err)
+	}
+	for _, col := range []string{"last_tap", "last_ip"} {
+		if _, err := r.db.Exec(`ALTER TABLE sandboxes DROP COLUMN ` + col); err != nil {
+			t.Fatalf("drop %s: %v", col, err)
+		}
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r2, err := Open(filepath.Join(dir, "registry.db"), pools)
+	if err != nil {
+		t.Fatalf("reopen legacy database: %v", err)
+	}
+	defer r2.Close()
+	migrated, err := r2.Get(ctx, "hib")
+	if err != nil {
+		t.Fatalf("get after migration: %v", err)
+	}
+	if migrated.TapDevice != "" || migrated.GuestIP != "" {
+		t.Fatalf("migration left a live identity on a frozen row: tap=%q ip=%q", migrated.TapDevice, migrated.GuestIP)
+	}
+	if migrated.LastTap != frozen.TapDevice || migrated.LastIP != frozen.GuestIP {
+		t.Fatalf("migration lost the frozen identity: last=%q/%q want %q/%q",
+			migrated.LastTap, migrated.LastIP, frozen.TapDevice, frozen.GuestIP)
+	}
+	// Soft avoidance still works off the migrated values...
+	other, err := r2.Create(ctx, "new", "", "/tmp/new.ext4", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("create after migration: %v", err)
+	}
+	if other.TapDevice == frozen.TapDevice || other.GuestIP == frozen.GuestIP {
+		t.Fatalf("migrated soft set ignored: new sandbox squatted %s/%s", other.TapDevice, other.GuestIP)
+	}
+	// ...and the migrated row is destroyable.
+	if err := r2.MarkStopping(ctx, "hib"); err != nil {
+		t.Fatalf("mark migrated row stopping: %v", err)
+	}
+	if err := r2.Destroy(ctx, "hib"); err != nil {
+		t.Fatalf("destroy migrated row: %v", err)
+	}
+}

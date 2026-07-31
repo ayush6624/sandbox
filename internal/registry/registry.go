@@ -33,7 +33,9 @@ const (
 	StatusWarming = "warming"
 	// StatusHibernated marks an idle sandbox frozen to disk: its VM is gone and
 	// its tap/IP are released back to the pools (their partial unique indexes
-	// bind capacity-holding running/warming rows). Explicit port mappings stay reserved and
+	// bind capacity-holding running/warming rows). The identity columns are
+	// CLEARED and the pair is remembered in last_tap/last_ip — see Hibernate.
+	// Explicit port mappings stay reserved and
 	// their userspace listeners remain bound so a connection can wake it. The
 	// row, rootfs file, and hibernation snapshot survive server restarts.
 	StatusHibernated = "hibernated"
@@ -53,11 +55,19 @@ type Sandbox struct {
 	SocketPath string            `json:"socket_path"`
 	TapDevice  string            `json:"tap_device"`
 	GuestIP    string            `json:"guest_ip"`
-	RootfsPath string            `json:"rootfs_path"`
-	Status     string            `json:"status"`
-	CreatedAt  time.Time         `json:"created_at"`
-	StoppedAt  *time.Time        `json:"stopped_at,omitempty"`
-	ExpiresAt  *time.Time        `json:"expires_at,omitempty"` // nil = no auto-destroy
+	// LastTap/LastIP are the tap and guest IP a hibernated sandbox's frozen
+	// memory image has baked in. A hibernated row's LIVE identity columns are
+	// empty (the frozen VM holds neither), so these are what the pool pickers
+	// soft-avoid and what Wake tries to reclaim for a cheap same-identity
+	// restore. Internal placement state, never serialized: an API client sees
+	// the live identity, which for a frozen sandbox is legitimately absent.
+	LastTap    string     `json:"-"`
+	LastIP     string     `json:"-"`
+	RootfsPath string     `json:"rootfs_path"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"created_at"`
+	StoppedAt  *time.Time `json:"stopped_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"` // nil = no auto-destroy
 	// HibernateAfterSec overrides the host's idle-hibernation window for this
 	// sandbox: >0 = seconds of idleness before freezing, -1 = never hibernate,
 	// 0 = inherit the host config.
@@ -374,9 +384,11 @@ func (r *Registry) migrate() error {
 		, metadata  TEXT NOT NULL DEFAULT '{}'
 		, source_type TEXT NOT NULL DEFAULT 'default'
 		, source_id TEXT NOT NULL DEFAULT ''
+		, last_tap  TEXT NOT NULL DEFAULT ''
+		, last_ip   TEXT NOT NULL DEFAULT ''
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming');
-	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming');
+	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming') AND tap_device <> '';
+	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming') AND guest_ip <> '';
 	CREATE TABLE IF NOT EXISTS sandbox_ports (
 		sandbox_id TEXT NOT NULL,
 		guest_port INTEGER NOT NULL,
@@ -412,12 +424,16 @@ func (r *Registry) migrate() error {
 		return err
 	}
 	// Warm-pool VMs hold real taps/IPs just like routed VMs. Rebuild the old
-	// running-only partial indexes on upgraded registries.
+	// running-only partial indexes on upgraded registries. The `<> ''` terms
+	// exempt rows that hold NO identity: a row can legitimately be
+	// identity-less while it holds capacity-bearing status (a hibernated row
+	// moving to 'stopping' for teardown), and two such rows must not collide
+	// with each other on the empty string.
 	if _, err := r.db.Exec(`
 		DROP INDEX IF EXISTS uniq_tap_running;
 		DROP INDEX IF EXISTS uniq_ip_running;
-		CREATE UNIQUE INDEX uniq_tap_running ON sandboxes(tap_device) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming');
-		CREATE UNIQUE INDEX uniq_ip_running ON sandboxes(guest_ip) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming');
+		CREATE UNIQUE INDEX uniq_tap_running ON sandboxes(tap_device) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming') AND tap_device <> '';
+		CREATE UNIQUE INDEX uniq_ip_running ON sandboxes(guest_ip) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming') AND guest_ip <> '';
 	`); err != nil {
 		return err
 	}
@@ -522,6 +538,32 @@ func (r *Registry) migrate() error {
 		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return err
 		}
+	}
+	// last_tap/last_ip split a hibernated sandbox's REMEMBERED identity from the
+	// live tap_device/guest_ip the partial unique indexes bind. Hibernated rows
+	// used to keep their identity populated, which is a lie (the frozen VM holds
+	// neither) with a sharp edge: once occupancy forced the pickers' second pass
+	// to hand that tap/IP to a running sandbox, MarkStopping — the first thing
+	// destroy does — moved the hibernated row into the index set and failed with
+	// UNIQUE constraint failed, permanently. The sandbox became undeletable and
+	// the TTL reaper retried it every 10 s forever.
+	for _, col := range []string{
+		`ALTER TABLE sandboxes ADD COLUMN last_tap TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sandboxes ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	// Normalize rows an older binary froze with their identity still attached:
+	// move it into last_tap/last_ip so the pickers keep soft-avoiding it (cheap
+	// same-identity wakes) while the row itself holds nothing the indexes bind.
+	// Runs on every open — cheap, idempotent, and it repairs rows left behind by
+	// a downgrade to a binary that predates this column pair.
+	if _, err := r.db.Exec(`
+		UPDATE sandboxes SET last_tap = tap_device, last_ip = guest_ip, tap_device = '', guest_ip = ''
+		 WHERE status = 'hibernated' AND (tap_device <> '' OR guest_ip <> '')`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -785,8 +827,12 @@ func (r *Registry) MarkRunning(ctx context.Context, id string) error {
 	return nil
 }
 
-// MarkStopping removes a capacity-holding sandbox from routing before
-// teardown. Hibernated rows are already non-running and need no transition.
+// MarkStopping removes a capacity-holding sandbox from routing before teardown.
+// Hibernated rows transition too (destroy must un-route them before it starts
+// deleting artifacts); that is safe only because a hibernated row holds no live
+// tap/IP — see Hibernate. Re-populating those columns while hibernated would
+// make this statement collide with uniq_tap_running/uniq_ip_running against
+// whichever running sandbox has since been handed that identity.
 func (r *Registry) MarkStopping(ctx context.Context, id string) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE sandboxes SET status=? WHERE id=? AND status IN (?, ?, ?, ?, ?)`,
@@ -862,13 +908,19 @@ func (r *Registry) Expired(ctx context.Context, now time.Time) ([]Sandbox, error
 }
 
 // Hibernate marks a running sandbox as hibernated. The caller has already
-// frozen the VM and released its host-side resources; from here the partial
-// unique indexes stop binding the row's tap/IP, so new sandboxes may take
-// them (Wake handles that with a fresh identity). Explicit port mappings and
+// frozen the VM and released its host-side resources, so the row must stop
+// claiming an identity it no longer holds: tap_device/guest_ip MOVE to
+// last_tap/last_ip. That is what lets a new sandbox take the pair (Wake handles
+// that with a fresh identity + the reidentifying clone path) while the pickers
+// still soft-avoid it, and it is what keeps a later status transition —
+// MarkStopping, on destroy — from colliding with the partial unique indexes
+// against the sandbox that took the identity over. Explicit port mappings and
 // their wake-on-connect listeners are stored separately and remain intact.
 func (r *Registry) Hibernate(ctx context.Context, id string) error {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE sandboxes SET status=?, stopped_at=?, pid=0, vm_id='', socket_path='' WHERE id=? AND status=?`,
+		`UPDATE sandboxes SET status=?, stopped_at=?, pid=0, vm_id='', socket_path='',
+		    last_tap=tap_device, last_ip=guest_ip, tap_device='', guest_ip=''
+		 WHERE id=? AND status=?`,
 		StatusHibernated, time.Now().Unix(), id, StatusRunning)
 	if err != nil {
 		return err
@@ -880,11 +932,35 @@ func (r *Registry) Hibernate(ctx context.Context, id string) error {
 	return nil
 }
 
-// Wake flips a hibernated sandbox back to running, reusing its old identity
-// when possible. Returns sameIdentity=true when the old tap AND guest IP were
-// still free (the caller can plain-restore the snapshot, whose memory has that
-// identity baked in); otherwise fresh ones are allocated and the caller must
-// go through the reidentifying clone path.
+// RollbackWake returns a sandbox whose wake FAILED to hibernated, keeping
+// last_tap/last_ip — the identity its frozen memory actually has — intact.
+// It exists because Hibernate would overwrite them with the row's current
+// identity, which after a clone-path Wake is a freshly allocated pair the
+// frozen memory image has never seen. Doing that corrupts the mapping
+// permanently: the next Wake finds the new pair free, reports sameIdentity,
+// plain-restores the snapshot on its OLD baked IP, and then polls the new one
+// until the agent gate times out — a sandbox that can never be woken again.
+func (r *Registry) RollbackWake(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE sandboxes SET status=?, stopped_at=?, pid=0, vm_id='', socket_path='',
+		    tap_device='', guest_ip=''
+		 WHERE id=? AND status=?`,
+		StatusHibernated, time.Now().Unix(), id, StatusRunning)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("sandbox %s not running", id)
+	}
+	return nil
+}
+
+// Wake flips a hibernated sandbox back to running, reusing its frozen identity
+// (last_tap/last_ip) when possible. Returns sameIdentity=true when that tap AND
+// guest IP were still free (the caller can plain-restore the snapshot, whose
+// memory has that identity baked in); otherwise fresh ones are allocated and the
+// caller must go through the reidentifying clone path. The frozen pair is
+// re-written on every wake so RollbackWake can restore it if the caller fails.
 func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -912,8 +988,19 @@ func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 	if err != nil {
 		return Sandbox{}, false, err
 	}
-	same := !used.taps[sb.TapDevice] && !used.ips[sb.GuestIP]
-	if !same {
+	// A hibernated row's live identity columns are empty; last_tap/last_ip name
+	// the pair baked into its memory image. Fall back to the live columns for a
+	// row frozen by a binary that predates them (migrate() normalizes those, so
+	// this only covers a downgrade/upgrade straddle) and persist what we resolved,
+	// so RollbackWake has the frozen identity to put back.
+	frozenTap, frozenIP := sb.LastTap, sb.LastIP
+	if frozenTap == "" && frozenIP == "" {
+		frozenTap, frozenIP = sb.TapDevice, sb.GuestIP
+	}
+	same := frozenTap != "" && frozenIP != "" && !used.taps[frozenTap] && !used.ips[frozenIP]
+	if same {
+		sb.TapDevice, sb.GuestIP = frozenTap, frozenIP
+	} else {
 		if sb.TapDevice, err = pickFreeTap(used, r.pools); err != nil {
 			return Sandbox{}, false, err
 		}
@@ -923,8 +1010,8 @@ func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE sandboxes SET status=?, stopped_at=NULL, tap_device=?, guest_ip=? WHERE id=?`,
-		StatusRunning, sb.TapDevice, sb.GuestIP, id); err != nil {
+		`UPDATE sandboxes SET status=?, stopped_at=NULL, tap_device=?, guest_ip=?, last_tap=?, last_ip=? WHERE id=?`,
+		StatusRunning, sb.TapDevice, sb.GuestIP, frozenTap, frozenIP, id); err != nil {
 		return Sandbox{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -932,6 +1019,7 @@ func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 	}
 	sb.Status = StatusRunning
 	sb.StoppedAt = nil
+	sb.LastTap, sb.LastIP = frozenTap, frozenIP
 	return sb, same, nil
 }
 
@@ -1328,7 +1416,7 @@ func snapshotDurability(value string) string {
 }
 
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
-const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name, metadata, source_type, source_id`
+const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name, metadata, source_type, source_id, last_tap, last_ip`
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -1369,7 +1457,7 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 	var createdAt int64
 	var stoppedAt, expiresAt sql.NullInt64
 	var metadata string
-	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name, &metadata, &sb.SourceType, &sb.SourceID)
+	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name, &metadata, &sb.SourceType, &sb.SourceID, &sb.LastTap, &sb.LastIP)
 	if err != nil {
 		return sb, err
 	}
@@ -1518,10 +1606,12 @@ type usedResources struct {
 	taps  map[string]bool
 	ips   map[string]bool
 	ports map[int]bool
-	// soft* hold the tap/IP of HIBERNATED sandboxes. They're free to take (the
-	// frozen VM isn't using them), but the pickers avoid them while other pool
-	// entries remain, so a wake almost always finds its old tap/IP unclaimed
-	// and can restore the same identity (skipping the reidentify dance).
+	// soft* hold the REMEMBERED tap/IP of HIBERNATED sandboxes (last_tap/
+	// last_ip — their live identity columns are empty). They're free to take
+	// (the frozen VM isn't using them), but the pickers avoid them while other
+	// pool entries remain, so a wake almost always finds its old tap/IP
+	// unclaimed and can restore the same identity (skipping the reidentify
+	// dance).
 	softTaps map[string]bool
 	softIPs  map[string]bool
 }
@@ -1536,24 +1626,37 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 		softIPs:  map[string]bool{},
 	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT tap_device, guest_ip, status FROM sandboxes WHERE status IN (?, ?, ?, ?, ?, ?)`,
+		`SELECT tap_device, guest_ip, last_tap, last_ip, status FROM sandboxes WHERE status IN (?, ?, ?, ?, ?, ?)`,
 		StatusRunning, StatusPreparing, StatusWarming, StatusHibernated, StatusStarting, StatusStopping)
 	if err != nil {
 		return u, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var tap, ip, status string
-		if err := rows.Scan(&tap, &ip, &status); err != nil {
+		var tap, ip, lastTap, lastIP, status string
+		if err := rows.Scan(&tap, &ip, &lastTap, &lastIP, &status); err != nil {
 			return u, err
 		}
 		if status == StatusHibernated {
-			u.softTaps[tap] = true
-			u.softIPs[ip] = true
+			// The remembered pair, not the live columns (which are empty for a
+			// frozen row — the tap fallback only matters for a row written by a
+			// binary that predates last_tap/last_ip).
+			if lastTap == "" && lastIP == "" {
+				lastTap, lastIP = tap, ip
+			}
+			u.softTaps[lastTap] = true
+			u.softIPs[lastIP] = true
 			continue
 		}
-		u.taps[tap] = true
-		u.ips[ip] = true
+		// A row can hold a capacity-bearing status with no identity: a
+		// hibernated sandbox moves to 'stopping' for teardown. Don't let the
+		// empty string reserve a pool entry.
+		if tap != "" {
+			u.taps[tap] = true
+		}
+		if ip != "" {
+			u.ips[ip] = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return u, err

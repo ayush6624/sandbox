@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/registry"
@@ -143,6 +144,18 @@ func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
 func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.Sandbox, memPath, statePath, rootfsPath, snapType, memDiffBaseID string, workingSet []uint64) {
 	t0 := time.Now()
 
+	// A superseded record must be gone before this generation's payloads land
+	// under the same (stable) object names, or a far host could pair the OLD
+	// record.json with NEW payloads. The freeze itself no longer waits on that
+	// delete, so retry it here — and if it still fails, publish nothing. That is
+	// this function's normal failure mode: the sandbox stays host-local-wakeable.
+	if s.hibNotAdoptable(id) {
+		if err := s.deleteDurableObject(ctx, hibRecordObj(id)); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: superseded record still present: %v\n", id, err)
+			return
+		}
+	}
+
 	// --- mem ---
 	var memForm, memBaseID string
 	if snapType == vm.SnapshotDiff {
@@ -156,6 +169,11 @@ func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.S
 		if err := s.uploadMemChunks(ctx, id, memPath, roundChunkSize(s.cfg.UFFDChunkBytes), workingSet); err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: %v\n", id, err)
 			return
+		}
+		// Stamp the manifest as belonging to THIS frozen generation, so the wake
+		// path may fault the guest's RAM in from it (hibChunkMarker).
+		if err := os.WriteFile(hibChunkMarker(memPath), nil, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] durable hibernate: stamp chunk generation: %v\n", id, err)
 		}
 	}
 
@@ -181,6 +199,12 @@ func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.S
 	rec := buildHibRecord(sb, ports, memForm, memBaseID, rootfsForm, rootfsBaseID)
 	meta, err := json.Marshal(rec)
 	if err == nil {
+		// Every payload for THIS generation is published, so the record about to
+		// be written is current. Clear any not-adoptable marker first: clearing
+		// after the write would leave a window where drainHibInvalidations could
+		// delete a perfectly valid record, while clearing before it only risks a
+		// no-op delete of an object that does not exist yet.
+		s.clearHibNotAdoptable(id)
 		err = s.blob.PutBytes(ctx, hibRecordObj(id), meta)
 	}
 	if err != nil {
@@ -258,13 +282,149 @@ func (s *Server) cancelHibernationUpload(id string) {
 	<-up.done
 }
 
+// --- deferred invalidation (local not-adoptable markers) ---
+//
+// A durable generation stops being adoptable the instant its sandbox becomes a
+// live mutable VM again (wake, adopt) or ceases to exist (destroy). The signal
+// for that is the absence of record.json — but making a VM lifecycle step WAIT
+// on an object-store delete is how a GCS blip during a Nomad task stop turned
+// "hibernate every sandbox" into "destroy every sandbox". So the delete is
+// best-effort, and the intent is recorded locally FIRST, in a marker file on the
+// same persistent disk the sandbox's artifacts live on:
+//
+//	<SnapshotDir>/hib-invalidate/<id>   this host's durable record for <id> is
+//	                                    stale; delete it when GCS is reachable
+//
+// The marker is authoritative for every decision THIS host makes (fetchHibRecord
+// refuses a marked record, so neither adopt nor release can act on one), and
+// drainHibInvalidations retries the delete until it lands — at startup too, so a
+// destroy that outlived the process still finishes. What the marker cannot do is
+// stop a DIFFERENT host from adopting a stale record in the window before the
+// retry succeeds; that residual window is the price of not gating VM lifecycle on
+// GCS, and it is bounded by object-store availability rather than unbounded.
+
+// hibInvalidateDir holds one marker file per pending record invalidation. It
+// lives beside the per-sandbox hibernation directories but is never a snapshot
+// id itself (those are UUIDs), and reconcile's snapshot-dir sweep only touches
+// hib-lineage-* entries. Empty when there is no snapshot directory to write in.
+func (s *Server) hibInvalidateDir() string {
+	if s.cfg.Provisioner == nil {
+		return ""
+	}
+	return filepath.Join(s.cfg.Provisioner.SnapshotDir, "hib-invalidate")
+}
+
+func (s *Server) hibInvalidatePath(id string) string {
+	dir := s.hibInvalidateDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, id)
+}
+
+// markHibNotAdoptable records that id's durable record must not be trusted. It
+// is written BEFORE the delete is attempted so a crash in between leaves the
+// safe answer ("stale") rather than the unsafe one.
+func (s *Server) markHibNotAdoptable(id string) error {
+	path := s.hibInvalidatePath(id)
+	if path == "" {
+		return fmt.Errorf("no snapshot directory to record the invalidation in")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, nil, 0o644)
+}
+
+// clearHibNotAdoptable drops the marker: either the record is gone, or a fresh
+// generation is about to become the current one.
+func (s *Server) clearHibNotAdoptable(id string) {
+	path := s.hibInvalidatePath(id)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "[%s] clear hibernation invalidation marker: %v\n", id, err)
+	}
+}
+
+// hibNotAdoptable reports whether a pending invalidation makes id's durable
+// record untrustworthy on this host.
+func (s *Server) hibNotAdoptable(id string) bool {
+	path := s.hibInvalidatePath(id)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// drainHibInvalidations retries the deletes that an unreachable object store
+// deferred. Ids with an upload in flight are skipped: that uploader clears the
+// marker just before it writes a NEW record.json, and deleting between those two
+// steps would strip the durability of a generation that is perfectly current.
+func (s *Server) drainHibInvalidations(ctx context.Context) {
+	dir := s.hibInvalidateDir()
+	if !s.durabilityEnabled() || dir == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "list pending hibernation invalidations: %v\n", err)
+		}
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		id := entry.Name()
+		s.hibUpMu.Lock()
+		uploading := s.hibUploads[id] != nil
+		s.hibUpMu.Unlock()
+		if uploading || !s.hibNotAdoptable(id) {
+			continue
+		}
+		if err := s.deleteDurableObject(ctx, hibRecordObj(id)); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] deferred durable record invalidation still failing: %v\n", id, err)
+			continue
+		}
+		s.clearHibNotAdoptable(id)
+		fmt.Fprintf(os.Stderr, "[%s] deferred durable hibernation record invalidation completed\n", id)
+	}
+}
+
+// durabilityEnabled reports whether this server has an object store at all.
+func (s *Server) durabilityEnabled() bool { return s.blob != nil || s.deleteObject != nil }
+
+// deleteDurableObject removes one object from the durability store. Indirected
+// through a field because s.blob is a concrete *gcsblob.Client rather than an
+// interface, and the object-store-outage behaviour of the invalidation paths is
+// exactly what needs test coverage (same idiom as Server.bootAge).
+func (s *Server) deleteDurableObject(ctx context.Context, object string) error {
+	if s.deleteObject != nil {
+		return s.deleteObject(ctx, object)
+	}
+	return s.blob.Delete(ctx, object)
+}
+
 // resetHibernationDurability removes a previous generation before a new freeze
-// is allowed to start. record.json goes first, so any partial cleanup is still
-// safely non-adoptable. Chunks are content-addressed and intentionally shared.
+// is allowed to start. The local not-adoptable marker goes first and record.json
+// next, so any partial cleanup is still safely non-adoptable. Chunks are
+// content-addressed and intentionally shared.
+//
+// It returns an error describing what could not be deleted, but only /release
+// treats that as fatal (hibernateMode.strictDurability): every other caller
+// freezes anyway. A VM's fate must not depend on the object store — shutdownAll
+// destroys anything it cannot freeze, so a transient GCS error here used to cost
+// every running sandbox on the host.
 func (s *Server) resetHibernationDurability(ctx context.Context, id string) error {
-	if s.blob == nil {
+	if !s.durabilityEnabled() {
 		return nil
 	}
+	markErr := s.markHibNotAdoptable(id)
+	var failed error
 	for _, object := range []string{
 		hibRecordObj(id),
 		hibManifestObj(id),
@@ -273,23 +433,49 @@ func (s *Server) resetHibernationDurability(ctx context.Context, id string) erro
 		hibStateObj(id),
 		hibRootfsObj(id),
 	} {
-		if err := s.blob.Delete(ctx, object); err != nil {
-			return fmt.Errorf("delete stale %s: %w", object, err)
+		if err := s.deleteDurableObject(ctx, object); err != nil && failed == nil {
+			failed = fmt.Errorf("delete stale %s: %w", object, err)
 		}
 	}
+	if failed != nil {
+		if markErr != nil {
+			return fmt.Errorf("%w (and the local not-adoptable marker could not be written: %v)", failed, markErr)
+		}
+		return failed
+	}
+	// Nothing stale remains; the marker would otherwise make the freeze's own
+	// upload look untrustworthy.
+	s.clearHibNotAdoptable(id)
 	return nil
 }
 
-// invalidateHibernationRecord removes only the cross-host commit marker. The
-// current manifest may still accelerate the imminent same-host UFFD wake.
+// invalidateHibernationRecord makes the cross-host commit marker non-adoptable.
+// The current manifest may still accelerate the imminent same-host UFFD wake, so
+// only record.json is targeted.
+//
+// Either mechanism alone is sufficient, so this fails ONLY when both are
+// impossible — at which point non-resurrection genuinely cannot be guaranteed and
+// aborting the caller is the safe answer. In particular an unreachable object
+// store no longer fails it: callers are wake, adopt, and destroy, and a
+// hibernated sandbox that cannot be deleted (or an expired one the TTL reaper
+// retries every 10 s forever) is a far worse outcome than a deferred delete that
+// drainHibInvalidations completes.
 func (s *Server) invalidateHibernationRecord(ctx context.Context, id string) error {
-	if s.blob == nil {
+	if !s.durabilityEnabled() {
 		return nil
 	}
-	if err := s.blob.Delete(ctx, hibRecordObj(id)); err != nil {
-		return fmt.Errorf("invalidate durable hibernation record: %w", err)
+	// Marker first: a crash between the two leaves the safe answer ("stale").
+	markErr := s.markHibNotAdoptable(id)
+	err := s.deleteDurableObject(ctx, hibRecordObj(id))
+	if err == nil {
+		s.clearHibNotAdoptable(id)
+		return nil
 	}
-	return nil
+	if markErr == nil {
+		fmt.Fprintf(os.Stderr, "[%s] durable hibernation record delete deferred (marked not adoptable locally): %v\n", id, err)
+		return nil
+	}
+	return fmt.Errorf("cannot make the durable record for %s non-adoptable (store: %w; local marker: %v)", id, err, markErr)
 }
 
 // deleteHibernationObjects is called only after the uploader has been joined.

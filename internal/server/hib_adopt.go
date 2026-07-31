@@ -40,6 +40,15 @@ const releaseDurableWait = 90 * time.Second
 // commit marker). Absent → the sandbox was never made durable (diff-only on an
 // old build, or an upload that never finished) and is not adoptable.
 func (s *Server) fetchHibRecord(ctx context.Context, id string) (*hibRecord, error) {
+	// A record this host has already invalidated is stale by construction: the
+	// sandbox was woken, adopted, or destroyed here and only the object-store
+	// delete is outstanding (drainHibInvalidations retries it). Refusing it is
+	// what keeps a deferred delete from resurrecting a dead generation — both on
+	// the adopt side and on the release side, which drops the local copy on the
+	// strength of a record it sees in GCS.
+	if s.hibNotAdoptable(id) {
+		return nil, fmt.Errorf("durable record for %s is marked stale on this host (invalidation pending)", id)
+	}
 	b, err := s.blob.GetBytes(ctx, hibRecordObj(id))
 	if err != nil {
 		return nil, err
@@ -323,8 +332,11 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Freeze first (hibernate takes the wake lock itself; don't hold it across).
+	// Strict durability: this is the one caller that goes on to DROP the local
+	// copy because it saw a record.json, so a stale one it failed to delete must
+	// abort the release rather than be frozen over.
 	if sb.Status == registry.StatusRunning {
-		if err := s.hibernate(ctx, id, false); err != nil {
+		if err := s.hibernateForRelease(ctx, id); err != nil {
 			httpError(w, http.StatusConflict, fmt.Errorf("freeze for release: %w", err))
 			return
 		}

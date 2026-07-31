@@ -84,6 +84,19 @@ func hibDiffMarker(memPath string) string {
 	return filepath.Join(filepath.Dir(memPath), "diff_base")
 }
 
+// hibChunkMarker records, beside a freeze's mem file, that THIS generation's mem
+// was successfully published to GCS as content-addressed chunks. It is the
+// generation identity of hib/<id>/manifest.json, and a wake must have it before
+// faulting RAM in from that manifest: the object name is stable across freezes,
+// so a manifest left behind by a superseded generation (a stale-payload delete
+// the object store refused — see resetHibernationDurability, which no longer
+// aborts the freeze) would otherwise page a DIFFERENT generation's memory into
+// the guest. The marker lives in the per-freeze hibernation directory, so it
+// cannot outlive the generation that wrote it.
+func hibChunkMarker(memPath string) string {
+	return filepath.Join(filepath.Dir(memPath), "chunks_uploaded")
+}
+
 // materializeHibMem rebases a diff hibernation mem onto its golden base,
 // returning a full, loadable mem file cached beside the diff. Reflink-fast on
 // XFS. Mirrors materializeMem, but for hibernation artifacts (which have no
@@ -277,11 +290,17 @@ func (s *Server) wakeLockLen() int { return s.wakes.len() }
 func (s *Server) hibernateLoop(ctx context.Context) {
 	ticker := time.NewTicker(hibernateTick)
 	defer ticker.Stop()
+	// Deferred durability invalidations are drained here rather than on their own
+	// timer: the first pass runs at startup, which is what finishes the job for a
+	// sandbox destroyed (or woken) while the object store was unreachable — and
+	// possibly by a previous process, since the markers live on the data disk.
+	s.drainHibInvalidations(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.drainHibInvalidations(ctx)
 			running, err := s.reg.List(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hibernate: list sandboxes: %v\n", err)
@@ -318,21 +337,43 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 	}
 }
 
+// hibernateMode selects the policy checks a freeze applies.
+type hibernateMode struct {
+	// force skips the busy check — server shutdown freezes even pinned
+	// sandboxes (their connections are dying with the server either way).
+	force bool
+	// automatic re-evaluates the whole idle policy under the lifecycle lock,
+	// and turns "no longer eligible" into success rather than an error.
+	automatic bool
+	// strictDurability aborts the freeze when the previous generation's durable
+	// record cannot be invalidated in the object store. Only /release sets it:
+	// that caller drops the LOCAL copy afterwards on the strength of a
+	// record.json it observes in GCS, so it must never be shown a stale one.
+	// Every other caller is best-effort — object-store availability must not
+	// decide whether a VM gets frozen or destroyed (see the comment on
+	// resetHibernationDurability).
+	strictDurability bool
+}
+
 // hibernate freezes one running sandbox to disk and releases its resources.
-// force skips the busy check — server shutdown freezes even pinned sandboxes
-// (their connections are dying with the server either way).
 func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
-	return s.hibernateWithMode(ctx, id, force, false)
+	return s.hibernateWithMode(ctx, id, hibernateMode{force: force})
+}
+
+// hibernateForRelease freezes a sandbox for a cross-host handoff, where the
+// durable generation must be provably the one we just wrote.
+func (s *Server) hibernateForRelease(ctx context.Context, id string) error {
+	return s.hibernateWithMode(ctx, id, hibernateMode{strictDurability: true})
 }
 
 // hibernateIfIdle repeats the entire idle-policy decision while holding the
 // sandbox lifecycle lock. The loop's earlier scan is only an optimization:
 // activity or policy may change before this method wins the lock.
 func (s *Server) hibernateIfIdle(ctx context.Context, id string) error {
-	return s.hibernateWithMode(ctx, id, false, true)
+	return s.hibernateWithMode(ctx, id, hibernateMode{automatic: true})
 }
 
-func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automatic bool) error {
+func (s *Server) hibernateWithMode(ctx context.Context, id string, mode hibernateMode) error {
 	mu := s.wakeLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -352,13 +393,13 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automa
 	// Re-check under the lock: a request or timeout update may have raced in
 	// since the reaper's scan decided this sandbox was eligible.
 	idle, busy, tracked := s.act.idleFor(id)
-	if !force && busy {
-		if automatic {
+	if !mode.force && busy {
+		if mode.automatic {
 			return nil
 		}
 		return fmt.Errorf("sandbox %s is busy", id)
 	}
-	if automatic {
+	if mode.automatic {
 		window := s.cfg.HibernateAfter
 		if sb.HibernateAfterSec > 0 {
 			window = time.Duration(sb.HibernateAfterSec) * time.Second
@@ -372,7 +413,16 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automa
 	// mistaking old payloads for this freeze.
 	s.cancelHibernationUpload(id)
 	if err := s.resetHibernationDurability(ctx, id); err != nil {
-		return fmt.Errorf("reset durable hibernation generation: %w", err)
+		if mode.strictDurability {
+			return fmt.Errorf("reset durable hibernation generation: %w", err)
+		}
+		// An unreachable object store must not stop a freeze: the caller is
+		// usually shutdownAll, which reads a hibernate failure as licence to
+		// DESTROY the sandbox — a GCS blip during a Nomad task stop or an
+		// autoscaler scale-in used to delete every running sandbox on the host.
+		// resetHibernationDurability has already recorded the generation as
+		// non-adoptable locally, and drainHibInvalidations retries the deletes.
+		fmt.Fprintf(os.Stderr, "[%s] hibernate: durable generation reset deferred (freezing anyway): %v\n", id, err)
 	}
 
 	t0 := time.Now()
@@ -380,6 +430,9 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automa
 	if err != nil {
 		return fmt.Errorf("hibernate dir: %w", err)
 	}
+	// This generation has published nothing yet; the marker is re-written only
+	// when its own chunk upload commits a manifest.
+	_ = os.Remove(hibChunkMarker(memPath))
 	// Freeze as a DIFF against the golden base when the machine's dirty-page
 	// bitmap still tracks it (see Server.diffBase): the mem file then holds
 	// only pages dirtied since clone, which is what lets a whole host's worth
@@ -542,10 +595,13 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 			return sb, fmt.Errorf("materialize hibernation memory for %s: %w", id, err)
 		}
 	}
-	// All local recovery prerequisites are present. Remove the durable commit
+	// All local recovery prerequisites are present. Invalidate the durable commit
 	// immediately before changing the row/resuming the guest, so a missing or
 	// unmaterializable local artifact never destroys the only viable recovery
 	// path, while a live mutable VM can never retain an adoptable stale record.
+	// This now fails only when the LOCAL not-adoptable marker can't be written —
+	// the GCS delete itself is deferred, because an object store outage must not
+	// make a sandbox unusable (see invalidateHibernationRecord).
 	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
 		return sb, err
 	}
@@ -600,12 +656,24 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 // removes whatever host-side resources were added, and flips the row back to
 // hibernated. Best-effort throughout — the artifacts on disk stay intact, and
 // the port listeners stay bound (the sandbox remains wakeable).
+//
+// It must go through registry.RollbackWake, NOT registry.Hibernate: on the
+// clone path the row now carries a freshly allocated tap/IP that the frozen
+// memory image has never seen, and Hibernate would record THAT as the frozen
+// identity. The next wake would then see the new pair free, take the
+// same-identity path, restore the snapshot on its old baked IP, and poll the new
+// one until the agent gate times out — leaving the sandbox permanently
+// unwakeable, 30 s at a time, on every exec and every forwarded connection.
 func (s *Server) rollbackWake(sb registry.Sandbox) {
 	if v, ok := s.machines.LoadAndDelete(sb.ID); ok {
 		_ = vm.StopForce(v.(*vm.Machine))
 	}
-	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
-	if err := s.reg.Hibernate(context.Background(), sb.ID); err != nil {
+	// sb.TapDevice is the tap this attempt created (fresh on the clone path,
+	// the frozen one on the same-identity path); either way it is ours to drop.
+	if sb.TapDevice != "" {
+		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
+	}
+	if err := s.reg.RollbackWake(context.Background(), sb.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] rollback to hibernated failed: %v\n", sb.ID, err)
 	}
 }
@@ -622,11 +690,16 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 	opts.RootfsPath = sb.RootfsPath
 	opts.SocketPath = ""
 	opts.UFFDChunkBytes = s.cfg.UFFDChunkBytes
-	// Prefer the GCS chunk source when enabled and a manifest exists: the guest
-	// faults its RAM in from local-cache → GCS, so wake I/O tracks the working set
-	// (and works off-host). Falls back to the local mem file otherwise.
+	// Prefer the GCS chunk source when enabled and a manifest THIS generation
+	// published exists: the guest faults its RAM in from local-cache → GCS, so
+	// wake I/O tracks the working set (and works off-host). Falls back to the
+	// local mem file otherwise. The hibChunkMarker check is what makes "exists"
+	// mean "belongs to the frozen image we are about to load" (see its comment);
+	// without it a superseded manifest could supply the guest's pages.
 	if s.cfg.UFFDRestore && s.cfg.UFFDChunkGCS {
-		if cs := s.gcsChunkSource(ctx, sb.ID); cs != nil {
+		if _, err := os.Stat(hibChunkMarker(memPath)); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] wake: this generation published no GCS chunks, using local mem\n", sb.ID)
+		} else if cs := s.gcsChunkSource(ctx, sb.ID); cs != nil {
 			opts.UFFDChunks = cs
 		} else {
 			fmt.Fprintf(os.Stderr, "[%s] wake: no GCS chunk manifest, using local mem\n", sb.ID)

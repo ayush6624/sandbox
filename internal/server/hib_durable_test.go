@@ -1,11 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -109,5 +113,136 @@ func TestBuildHibRecordFullColdBoot(t *testing.T) {
 	}
 	if string(b) != string(b2) {
 		t.Fatalf("round-trip mismatch:\n got %s\nwant %s", b2, b)
+	}
+}
+
+// --- deferred durability invalidation (object-store outage) ---
+
+// erroringStore builds a server whose durability store rejects every delete,
+// with a real on-disk snapshot directory for the not-adoptable markers.
+func erroringStore(t *testing.T, fail *bool) *Server {
+	t.Helper()
+	s := &Server{cfg: Config{Provisioner: &provisioner.Provisioner{SnapshotDir: t.TempDir()}}}
+	s.hibUploads = map[string]*backgroundUpload{}
+	s.deleteObject = func(context.Context, string) error {
+		if *fail {
+			return errors.New("gcs unavailable")
+		}
+		return nil
+	}
+	return s
+}
+
+// An unreachable object store must not fail a wake or a destroy. It used to:
+// invalidateHibernationRecord propagated the delete error, so a GCS blip made a
+// hibernated sandbox undeletable (and the TTL reaper retried it every 10 s), and
+// resetHibernationDurability's error reached shutdownAll, which reads a failed
+// hibernate as licence to DESTROY every running sandbox on the host.
+func TestDurabilityOutageDoesNotGateVMLifecycle(t *testing.T) {
+	failing := true
+	s := erroringStore(t, &failing)
+	ctx := context.Background()
+
+	if err := s.invalidateHibernationRecord(ctx, "sb-1"); err != nil {
+		t.Fatalf("record invalidation must not fail on an object-store error: %v", err)
+	}
+	// ...but the generation must be recorded as non-adoptable, or a stale record
+	// could be mistaken for a live one.
+	if !s.hibNotAdoptable("sb-1") {
+		t.Fatal("deferred invalidation left no local not-adoptable marker")
+	}
+	if _, err := s.fetchHibRecord(ctx, "sb-1"); err == nil {
+		t.Fatal("a marked-stale record must not be adoptable/releasable on this host")
+	}
+
+	// The freeze-time reset still reports the failure — that is what the strict
+	// /release path keys on — but it, too, marks the generation locally so the
+	// best-effort callers can safely ignore it.
+	if err := s.resetHibernationDurability(ctx, "sb-2"); err == nil {
+		t.Fatal("resetHibernationDurability must report an object-store failure")
+	}
+	if !s.hibNotAdoptable("sb-2") {
+		t.Fatal("failed durability reset left no local not-adoptable marker")
+	}
+}
+
+// The deferred deletes must actually happen once the store recovers: after a
+// destroy there is no local row left, so a surviving record.json would let some
+// other host adopt — resurrect — a sandbox the user deleted.
+func TestDrainHibInvalidationsCompletesOnceStoreRecovers(t *testing.T) {
+	failing := true
+	s := erroringStore(t, &failing)
+	ctx := context.Background()
+
+	if err := s.invalidateHibernationRecord(ctx, "sb-1"); err != nil {
+		t.Fatal(err)
+	}
+	s.drainHibInvalidations(ctx)
+	if !s.hibNotAdoptable("sb-1") {
+		t.Fatal("drain cleared the marker while the store was still failing")
+	}
+
+	failing = false
+	s.drainHibInvalidations(ctx)
+	if s.hibNotAdoptable("sb-1") {
+		t.Fatal("drain did not complete the deferred invalidation after recovery")
+	}
+}
+
+// A drain must never delete the commit marker of a generation currently being
+// published: uploadHibernation clears the marker immediately before writing
+// record.json, so a concurrent drain could otherwise strip the durability of a
+// perfectly current freeze.
+func TestDrainHibInvalidationsSkipsInFlightUpload(t *testing.T) {
+	failing := false
+	s := erroringStore(t, &failing)
+	deletes := 0
+	s.deleteObject = func(context.Context, string) error { deletes++; return nil }
+
+	if err := s.markHibNotAdoptable("sb-1"); err != nil {
+		t.Fatal(err)
+	}
+	s.hibUploads["sb-1"] = &backgroundUpload{cancel: func() {}, done: make(chan struct{})}
+	s.drainHibInvalidations(context.Background())
+	if deletes != 0 {
+		t.Fatalf("drain deleted a record with an upload in flight (%d deletes)", deletes)
+	}
+	if !s.hibNotAdoptable("sb-1") {
+		t.Fatal("drain cleared the marker of an in-flight upload")
+	}
+}
+
+// Without a durability store there is nothing to invalidate, and no marker may
+// be left lying around to make a future adopt refuse.
+func TestInvalidationIsANoOpWithoutADurabilityStore(t *testing.T) {
+	s := &Server{cfg: Config{Provisioner: &provisioner.Provisioner{SnapshotDir: t.TempDir()}}}
+	if err := s.invalidateHibernationRecord(context.Background(), "sb-1"); err != nil {
+		t.Fatalf("no-store invalidation: %v", err)
+	}
+	if s.hibNotAdoptable("sb-1") {
+		t.Fatal("marker written with no durability store configured")
+	}
+}
+
+// The chunk-generation stamp must live in the per-freeze hibernation directory
+// (so CleanupSnapshot takes it with the generation it describes) and must resolve
+// identically for a rebased diff mem, which materializeHibMem writes beside the
+// diff under a different file name. If it ever moved outside that directory, a
+// superseded hib/<id>/manifest.json — the object name is stable across freezes —
+// could supply a woken guest's pages.
+func TestHibChunkMarkerIsScopedToOneFreeze(t *testing.T) {
+	freeze := filepath.Join(t.TempDir(), "hib-sb-1")
+	mem := filepath.Join(freeze, "mem.bin")
+	rebasedDiff := filepath.Join(freeze, "mem.full.bin")
+
+	if got := filepath.Dir(hibChunkMarker(mem)); got != freeze {
+		t.Fatalf("chunk marker escaped the freeze directory: %s", got)
+	}
+	if hibChunkMarker(mem) != hibChunkMarker(rebasedDiff) {
+		t.Fatalf("rebased diff mem resolves to a different chunk marker: %s vs %s",
+			hibChunkMarker(rebasedDiff), hibChunkMarker(mem))
+	}
+	if hibChunkMarker(mem) == hibDiffMarker(mem) {
+		t.Fatal("chunk and diff-base markers must be distinct files")
 	}
 }
