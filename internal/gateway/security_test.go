@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/management"
+	"github.com/ayush6624/sandbox/internal/wsutil"
 )
 
 func secureTestGateway(t *testing.T) *Gateway {
@@ -84,6 +86,85 @@ func TestGatewayAuthSeparatesClientAndWorkerDomains(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, tt.status)
 			}
 		})
+	}
+}
+
+// TestGatewayAuthAcceptsSubprotocolCredentialOnUpgrades pins the only
+// browser-reachable credential channel for the shell WebSocket: browsers can't
+// set headers and query credentials stay rejected, so the token rides in
+// Sec-WebSocket-Protocol — but only on upgrades, and never onto worker routes.
+func TestGatewayAuthAcceptsSubprotocolCredentialOnUpgrades(t *testing.T) {
+	g := secureTestGateway(t)
+	handler := g.bearerAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	bearer := func(tok string) string {
+		return wsutil.SubprotocolBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte(tok))
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		token   string
+		upgrade bool
+		status  int
+	}{
+		{"client token on an upgrade", "/v1/sandboxes/x/shell", "client-token", true, http.StatusNoContent},
+		{"bad token on an upgrade", "/v1/sandboxes/x/shell", "nope", true, http.StatusUnauthorized},
+		{"worker token on a public upgrade denied", "/v1/sandboxes/x/shell", "worker-token", true, http.StatusUnauthorized},
+		{"client token on a non-upgrade denied", "/v1/sandboxes", "client-token", false, http.StatusUnauthorized},
+		{"worker route via subprotocol denied", "/internal/v1/hosts:register", "worker-token", true, http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.upgrade {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", "websocket")
+			}
+			req.Header.Add("Sec-WebSocket-Protocol", bearer(tt.token))
+			req.Header.Add("Sec-WebSocket-Protocol", wsutil.SubprotocolShell)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.status {
+				t.Fatalf("status = %d, want %d", w.Code, tt.status)
+			}
+		})
+	}
+}
+
+// TestHostProxyStripsSubprotocolCredential asserts the consumed credential
+// never rides to the worker while the negotiable offer is preserved so the
+// upgrade can still be completed.
+func TestHostProxyStripsSubprotocolCredential(t *testing.T) {
+	g := secureTestGateway(t)
+	proxy := g.buildHostProxy("host-1", "10.0.0.5:8080", "worker-token")
+
+	req := httptest.NewRequest(http.MethodGet, "http://gw/sandboxes/x/shell", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Add("Sec-WebSocket-Protocol",
+		wsutil.SubprotocolBearerPrefix+base64.RawURLEncoding.EncodeToString([]byte("client-token")))
+	req.Header.Add("Sec-WebSocket-Protocol", wsutil.SubprotocolShell)
+	proxy.Director(req)
+
+	if got := wsutil.BearerSubprotocol(req); got != "" {
+		t.Fatalf("credential forwarded to the worker: %q", got)
+	}
+	if got := wsutil.NegotiatedSubprotocol(req); got != wsutil.SubprotocolShell {
+		t.Fatalf("negotiable offer = %q, want %q", got, wsutil.SubprotocolShell)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer worker-token" {
+		t.Fatalf("Authorization = %q, want the injected worker token", got)
+	}
+
+	// The guest agent never negotiates, so the proxy must finish it.
+	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header), Request: req}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatalf("ModifyResponse: %v", err)
+	}
+	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != wsutil.SubprotocolShell {
+		t.Fatalf("echoed subprotocol = %q, want %q", got, wsutil.SubprotocolShell)
 	}
 }
 

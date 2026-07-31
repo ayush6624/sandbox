@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -177,6 +178,49 @@ func TestBearerAuthWebSocket(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		if w.Code != http.StatusOK {
 			t.Fatalf("got %d, want 200", w.Code)
+		}
+	})
+
+	subproto := func(tok string) string {
+		return wsutil.SubprotocolBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte(tok))
+	}
+
+	t.Run("subprotocol token accepted on upgrade", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/sandboxes/x/shell", nil)
+		r.Header.Set("Upgrade", "websocket")
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Add("Sec-WebSocket-Protocol", subproto(clientToken))
+		r.Header.Add("Sec-WebSocket-Protocol", wsutil.SubprotocolShell)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200", w.Code)
+		}
+	})
+
+	t.Run("subprotocol token rejected without an upgrade", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/sandboxes", nil)
+		r.Header.Add("Sec-WebSocket-Protocol", subproto(clientToken))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", w.Code)
+		}
+	})
+
+	// The subprotocol channel is browser-drivable, so it must not reach the
+	// internal control surface even with a valid worker credential.
+	t.Run("subprotocol token rejected on internal routes", func(t *testing.T) {
+		for _, path := range []string{"/internal/v1/hosts:register", "/snapshots/x/adopt", "/snapshots/x/release"} {
+			r := httptest.NewRequest("GET", path, nil)
+			r.Header.Set("Upgrade", "websocket")
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Add("Sec-WebSocket-Protocol", subproto(workerToken))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("%s: got %d, want 401", path, w.Code)
+			}
 		}
 	})
 

@@ -75,10 +75,10 @@ export class ApiClient {
   }
 
   /**
-   * Builds an authenticated WebSocket URL for an API path. The token rides
-   * as `?access_token=` because the WebSocket API (browsers, and Node's
-   * built-in client) cannot set request headers; the server accepts it on
-   * upgrade requests only.
+   * Builds a WebSocket URL for an API path. The URL carries no credential —
+   * the token rides in the subprotocol list from {@link wsSubprotocols},
+   * because the WebSocket API (browsers, and Node's built-in client) cannot
+   * set request headers and the server does not accept query credentials.
    */
   wsUrl(path: string, query: Record<string, string> = {}): string {
     const url = new URL(this.baseUrl + path)
@@ -86,8 +86,26 @@ export class ApiClient {
     for (const [k, v] of Object.entries(query)) {
       url.searchParams.set(k, v)
     }
-    url.searchParams.set('access_token', this.apiKey)
     return url.toString()
+  }
+
+  /**
+   * Subprotocols to offer on an authenticated WebSocket: the bearer credential
+   * followed by the negotiable protocol the server echoes back. Two entries,
+   * not one, so the handshake completes without the server reflecting the
+   * secret — and offering the second is required, since a client that offers
+   * subprotocols and is answered with none fails the connection.
+   *
+   * The token is base64url-encoded without padding because a subprotocol name
+   * must be an RFC 7230 token: standard base64's `/` and `=` are rejected by
+   * the WebSocket constructor itself, before any request goes out.
+   */
+  wsSubprotocols(): string[] {
+    const bytes = new TextEncoder().encode(this.apiKey)
+    let binary = ''
+    for (const b of bytes) binary += String.fromCharCode(b)
+    const b64url = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    return [`sandbox.bearer.${b64url}`, 'sandbox.shell.v1']
   }
 
   /**

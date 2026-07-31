@@ -169,7 +169,7 @@ Endpoints (both listeners):
 | `GET /sandboxes/{id}/files?path=` | Read a file (raw bytes) |
 | `PUT /sandboxes/{id}/files?path=` | Write request body to a file (creates parent dirs) |
 | `GET /sandboxes/{id}/dir?path=` | Directory listing (JSON) |
-| `GET /sandboxes/{id}/shell?cols=&rows=&cwd=` | WebSocket upgrade → interactive `bash -l` on a pty. Binary frames carry raw terminal bytes; text frames carry `{"type":"resize","cols":…,"rows":…}`. Closes with reason `exit:<code>`; errors close with code `4000+status` (browsers may auth via `?access_token=`) |
+| `GET /sandboxes/{id}/shell?cols=&rows=&cwd=` | WebSocket upgrade → interactive `bash -l` on a pty. Binary frames carry raw terminal bytes; text frames carry `{"type":"resize","cols":…,"rows":…}`. Closes with reason `exit:<code>`; errors close with code `4000+status`. Auth rides in the subprotocol list — `sandbox.bearer.<base64url(token)>` plus `sandbox.shell.v1`, which the server echoes — since browsers can't set headers and query credentials are rejected |
 | `POST /sandboxes/{id}/snapshot` | Capture the running sandbox (memory + processes + disk); it pauses ~1 s and keeps running |
 | `POST /snapshots/{id}/restore` | Boot a new sandbox resuming the snapshot 1:1 (source must be dead) |
 | `POST /snapshots/{id}/fanout` | `{"count": N}` → N identity-neutral clones, each with a fresh IP and CoW disk |

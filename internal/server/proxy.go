@@ -109,6 +109,17 @@ func (s *Server) handleShellProxy() http.HandlerFunc {
 				q.Del("access_token")
 				req.URL.RawQuery = q.Encode()
 			}
+			// bearerAuth already consumed the subprotocol credential; the guest
+			// must never see it.
+			wsutil.StripBearerSubprotocol(req)
+		}
+		// The guest agent doesn't negotiate subprotocols, so this hop completes
+		// the negotiation the client opened — omitting it makes the client fail
+		// the connection with an opaque 1006.
+		proto := wsutil.NegotiatedSubprotocol(r)
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			wsutil.EchoSubprotocol(resp, proto)
+			return nil
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			shellError(w, r, http.StatusBadGateway, fmt.Errorf("agent unreachable: %w", err))

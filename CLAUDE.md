@@ -239,13 +239,33 @@ scripts/              Host setup shell scripts
   0 (= template default) but every sandbox-returning handler runs `effectiveResources`,
   filling in the template's vcpus/mem — so clients never see an absent value. `GET /info`
   exposes the template defaults + override limits (gateway forwards it to a live host).
-- **The shell WebSocket is a supported client API.** Browsers can't set headers on a
-  WebSocket, so upgrade requests may auth via `?access_token=` (accepted by both bearerAuth
-  middlewares, upgrade requests only; the shell proxy strips it before the guest). Errors on
-  WS endpoints (bad token, unknown id, failed wake, agent unreachable) are delivered via
-  `internal/wsutil.Reject`: complete the 101 handshake, then close with code 4000+HTTPstatus
-  and the message as the close reason — a plain 401/404 would reach browsers as an opaque
-  1006. The SDK's `sandbox.pty` maps 4401/4404 back onto AuthenticationError/NotFoundError.
+- **The shell WebSocket is a supported client API, and it authenticates via the
+  SUBPROTOCOL — never the query string.** Browsers can't set headers on a WebSocket,
+  and `?access_token=` was removed in `6e4f1c0` (it leaks credentials into URLs, proxy
+  traces and access logs; both bearerAuth middlewares reject query credentials and both
+  proxies strip them). Clients instead offer two subprotocols:
+  `sandbox.bearer.<base64url(token)>` plus the negotiable `sandbox.shell.v1`
+  (`internal/wsutil`: `UpgradeAuthorization`, `StripBearerSubprotocol`,
+  `EchoSubprotocol`). Three constraints make this work and are easy to break:
+  **(1)** the token is base64url WITHOUT padding because a subprotocol name must be an
+  RFC 7230 token — standard base64's `/` and `=` make browsers throw at construction,
+  before any request is sent; **(2)** the server MUST echo a selected subprotocol, or a
+  client that offered one fails the connection — since the guest agent doesn't negotiate,
+  the hop that consumed the credential echoes `sandbox.shell.v1` via `ModifyResponse`
+  (this is why clients offer a second, credential-free entry: so the secret is never
+  reflected back); **(3)** subprotocol credentials are accepted on PUBLIC routes only —
+  the internal-control check runs BEFORE the fallback, because the caller picks the
+  upgrade headers, so "worker routes are never WebSockets" is not enforceable here.
+  Errors on WS endpoints (bad token, unknown id, failed wake, agent unreachable) are
+  delivered via `internal/wsutil.Reject`: complete the 101 handshake, then close with
+  code 4000+HTTPstatus and the message as the close reason — a plain 401/404 would reach
+  browsers as an opaque 1006. `Reject` must hijack via
+  `http.NewResponseController(w).Hijack()`, NOT a `w.(http.Hijacker)` assertion:
+  `httpapi.Middleware` wraps the writer in a `statusWriter` that embeds the
+  ResponseWriter *interface* and exposes only `Unwrap`, so the direct assertion fails and
+  every WS error silently degrades to the 1006 this whole mechanism exists to prevent
+  (that regression shipped, and made the SDK's pty unusable against the fleet). The SDK's
+  `sandbox.pty` maps 4401/4404 back onto AuthenticationError/NotFoundError.
 - **Clone reidentify is signaled by gratuitous ARP.** A fan-out/hot-create clone resumes on
   an UNBRIDGED tap still carrying the snapshot's baked IP; the in-guest thaw agent adopts the
   fresh identity from MMDS then broadcasts GARPs (`cmd/sandboxd/garp_linux.go`). The host

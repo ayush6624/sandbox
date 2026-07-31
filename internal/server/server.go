@@ -478,13 +478,20 @@ func (s *Server) handleInternalSandboxAction(w http.ResponseWriter, r *http.Requ
 // bearerAuth keeps client and worker trust domains separate. Internal control
 // routes require the worker credential. Public routes accept either a direct
 // client credential or the worker credential used by the gateway proxy.
-// WebSocket query credentials are deliberately not accepted.
+// WebSocket query credentials are deliberately not accepted; upgrade requests
+// authenticate via the Sec-WebSocket-Protocol bearer entry instead (see
+// wsutil.UpgradeAuthorization), which browsers can set and logs don't capture.
 func bearerAuth(clientCreds, workerCreds *management.Credentials, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		internal := strings.HasPrefix(r.URL.Path, "/internal/v1/") ||
 			strings.HasSuffix(r.URL.Path, "/adopt") ||
 			strings.HasSuffix(r.URL.Path, "/release")
+		// Subprotocol credentials reach public routes only; an internal control
+		// route must never be authenticable by a channel a browser can drive.
+		if auth == "" && !internal {
+			auth = wsutil.UpgradeAuthorization(r)
+		}
 		workerMatch := workerCreds != nil && workerCreds.MatchAuthorization(auth)
 		clientMatch := clientCreds != nil && clientCreds.MatchAuthorization(auth)
 		// A token present in both independently rotatable domains is never

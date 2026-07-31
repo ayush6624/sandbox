@@ -34,10 +34,12 @@ with a gateway require a callback credential distinct from their optional
 direct-client credential.
 
 WebSocket handshakes use `Authorization: Bearer ...`, exactly like HTTP.
-`access_token` query parameters are rejected and stripped before proxying.
-Browser applications should connect through a same-origin backend that injects
-the Authorization header; secrets must not be embedded in URLs. Request logs
-record `URL.Path`, never a raw query string or credential header.
+`access_token` query parameters are rejected and stripped before proxying;
+secrets must not be embedded in URLs. Clients that cannot set headers (browsers)
+authenticate with the `sandbox.bearer.<base64url(token)>` subprotocol instead —
+accepted on public routes only, and stripped by the hop that consumes it so it
+never reaches a worker or the guest. Request logs record `URL.Path`, never a raw
+query string, credential header, or subprotocol list.
 
 ## Rotation procedure
 

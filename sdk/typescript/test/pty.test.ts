@@ -32,14 +32,37 @@ const shellQueries: URLSearchParams[] = []
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
+/** Offered subprotocol names, in order. */
+function offeredProtocols(req: http.IncomingMessage): string[] {
+  return (req.headers['sec-websocket-protocol'] ?? '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+}
+
+/**
+ * The bearer token offered via the subprotocol list, mirroring
+ * internal/wsutil.BearerSubprotocol (base64url, unpadded).
+ */
+function bearerProtocol(req: http.IncomingMessage): string | null {
+  const entry = offeredProtocols(req).find((p) => p.startsWith('sandbox.bearer.'))
+  if (!entry) return null
+  return Buffer.from(entry.slice('sandbox.bearer.'.length), 'base64url').toString('utf8')
+}
+
 function handshake(req: http.IncomingMessage, socket: Duplex): void {
   const accept = crypto
     .createHash('sha1')
     .update(`${req.headers['sec-websocket-key']}${GUID}`)
     .digest('base64')
+  // Echo the negotiable protocol like the server does — a client that offered
+  // subprotocols and is answered with none fails the connection.
+  const selected = offeredProtocols(req).includes('sandbox.shell.v1')
+    ? 'Sec-WebSocket-Protocol: sandbox.shell.v1\r\n'
+    : ''
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n' +
-      `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`
+      `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n${selected}\r\n`
   )
 }
 
@@ -92,7 +115,9 @@ before(async () => {
 
     // The server rejects WS errors AFTER the handshake, as close frames —
     // mirror internal/wsutil so the SDK's mapping is exercised for real.
-    if (url.searchParams.get('access_token') !== API_KEY) {
+    // Credentials ride in the subprotocol list, never the query string.
+    assert.equal(url.searchParams.get('access_token'), null, 'no query credential is sent')
+    if (bearerProtocol(req) !== API_KEY) {
       socket.end(closeFrame(4401, 'missing or invalid bearer token'))
       return
     }

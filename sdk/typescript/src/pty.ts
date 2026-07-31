@@ -21,7 +21,7 @@ interface WsLike {
   addEventListener(type: string, listener: (event: never) => void): void
 }
 
-type WsCtor = new (url: string) => WsLike
+type WsCtor = new (url: string, protocols?: string[]) => WsLike
 
 /** Options for {@link Pty.create}. */
 export interface PtyCreateOpts {
@@ -161,7 +161,7 @@ export class Pty {
       rows: String(opts.rows ?? 24),
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
     })
-    const ws = new Ws(url)
+    const ws = new Ws(url, this.client.wsSubprotocols())
     ws.binaryType = 'arraybuffer'
 
     let settleExit: { resolve: (code: number) => void; reject: (err: Error) => void }

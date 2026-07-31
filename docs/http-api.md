@@ -27,9 +27,16 @@ Notes for browser frontends:
 - **No CORS headers are set.** A browser can't call the TCP/gateway API
   cross-origin directly — put your own backend (or a same-origin proxy) in
   front and inject the bearer token there.
-- **WebSocket auth**: use `Authorization: Bearer`, normally injected by a
-  same-origin backend for browser clients. Query-string credentials are
-  rejected. Auth and routing failures on `/shell` are
+- **WebSocket auth**: use `Authorization: Bearer` where you can set headers.
+  Query-string credentials are rejected. Where you can't — browsers, and any
+  spec-compliant `WebSocket` client — offer the credential as a subprotocol
+  instead: `sandbox.bearer.<base64url(token)>` together with `sandbox.shell.v1`,
+  which the server selects and echoes back. Base64url must be **unpadded**: a
+  subprotocol name is an RFC 7230 token, so standard base64's `/` and `=` make
+  the constructor throw. Offer `sandbox.shell.v1` too — a client that offers
+  subprotocols and gets none back fails the connection. Accepted on public
+  routes only, never on internal control routes. Auth and routing failures on
+  `/shell` are
   delivered as **post-handshake close frames** with code `4000 + HTTP status`
   (`4401` bad token, `4404` unknown sandbox, `4500` failed wake, `4502` agent
   unreachable) and the error message as the close reason — browsers surface

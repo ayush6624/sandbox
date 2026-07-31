@@ -12,7 +12,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v1.0.0/sandbox-1.0.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v1.0.1/sandbox-1.0.1.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -253,9 +253,14 @@ pty.sendInput('exit\n')
 console.log('exit code:', await pty.exited)       // or pty.kill() to end it
 ```
 
-Requires a global `WebSocket` (Node 22+, or any browser). Auth and routing
-failures reject with the same typed errors as the REST API — the server
-delivers them as WebSocket close codes (`4401` bad key →
+Requires a global `WebSocket` (Node 22+, or any browser). The API key is sent
+in the WebSocket subprotocol list, not the URL — nothing extra to configure,
+and it works unchanged in a browser, where request headers can't be set.
+Requires a server at or after the `6e4f1c0` management-security change; older
+hosts expect a query credential and will refuse the upgrade.
+
+Auth and routing failures reject with the same typed errors as the REST API —
+the server delivers them as WebSocket close codes (`4401` bad key →
 `AuthenticationError`, `4404` unknown sandbox → `NotFoundError`) instead of
 an opaque `1006`. Connecting to a hibernated sandbox wakes it transparently.
 

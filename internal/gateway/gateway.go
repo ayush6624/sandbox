@@ -1200,6 +1200,9 @@ func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReversePr
 			q.Del("access_token")
 			req.URL.RawQuery = q.Encode()
 		}
+		// The subprotocol credential was consumed by bearerAuth above; the
+		// worker is authenticated by the injected header, so don't forward it.
+		wsutil.StripBearerSubprotocol(req)
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		err = fmt.Errorf("host %s unreachable: %w", hostID, err)
@@ -1223,6 +1226,11 @@ func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReversePr
 		if req == nil {
 			return nil
 		}
+		// Finish subprotocol negotiation on a proxied upgrade: the guest agent
+		// doesn't select one, and a client that offered one and gets nothing
+		// back fails the connection. Reads the outbound request, whose bearer
+		// entry the director stripped but whose negotiable offer it kept.
+		wsutil.EchoSubprotocol(resp, wsutil.NegotiatedSubprotocol(req))
 		switch {
 		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/snapshot"):
 			if resp.StatusCode != http.StatusCreated {
@@ -1509,6 +1517,15 @@ func (g *Gateway) bearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		workerOnly := r.URL.Path == "/register" || strings.HasPrefix(r.URL.Path, "/internal/v1/")
+		// Upgrade requests may carry the client credential as a WebSocket
+		// subprotocol: browsers cannot set headers on a WebSocket, and query
+		// credentials are not accepted. Internal control routes are excluded
+		// structurally rather than by assuming they're never upgrades — the
+		// caller chooses the upgrade headers, so "no worker route is a
+		// WebSocket" is not a property this side can enforce.
+		if auth == "" && !workerOnly {
+			auth = wsutil.UpgradeAuthorization(r)
+		}
 		workerMatch := g.workerCredentials != nil && g.workerCredentials.MatchAuthorization(auth)
 		clientMatch := g.clientCredentials != nil && g.clientCredentials.MatchAuthorization(auth)
 		// Fail closed if independently rotated files ever acquire an
