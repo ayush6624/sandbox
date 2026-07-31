@@ -100,6 +100,10 @@ type Snapshot struct {
 	// TapDevice and GuestIP are reused on restore (baked into the snapshot).
 	TapDevice string `json:"tap_device"`
 	GuestIP   string `json:"guest_ip"`
+	// GuestMAC is the NIC identity baked into the snapshot. New snapshots
+	// record it so a same-identity restore can prime the recreated bridge path
+	// without waiting for ARP discovery. Empty on legacy snapshots.
+	GuestMAC  string `json:"guest_mac,omitempty"`
 	MemPath   string `json:"mem_path"`
 	StatePath string `json:"state_path"`
 	// RootfsPath is the frozen rootfs copy this snapshot restores FROM.
@@ -371,6 +375,7 @@ func (r *Registry) migrate() error {
 		source_id          TEXT NOT NULL,
 		tap_device         TEXT NOT NULL,
 		guest_ip           TEXT NOT NULL,
+		guest_mac          TEXT NOT NULL DEFAULT '',
 		mem_path           TEXT NOT NULL,
 		state_path         TEXT NOT NULL,
 		rootfs_path        TEXT NOT NULL,
@@ -403,6 +408,10 @@ func (r *Registry) migrate() error {
 	}
 	// source_rootfs_path was added after the snapshots table first shipped.
 	if _, err := r.db.Exec(`ALTER TABLE snapshots ADD COLUMN source_rootfs_path TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	if _, err := r.db.Exec(`ALTER TABLE snapshots ADD COLUMN guest_mac TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
@@ -997,7 +1006,7 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability`
+const snapshotCols = `id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
@@ -1011,9 +1020,9 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 		format = FormatFull
 	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name, unixOrNil(s.ExpiresAt), snapshotDurability(s.Durability))
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.GuestMAC, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name, unixOrNil(s.ExpiresAt), snapshotDurability(s.Durability))
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
@@ -1138,7 +1147,7 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var createdAt int64
 	var expiresAt sql.NullInt64
 	var golden int
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability)
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.GuestMAC, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability)
 	if err != nil {
 		return s, err
 	}

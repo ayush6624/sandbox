@@ -699,13 +699,14 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 	opts := s.cfg.VMTemplate
 	opts.SocketPath = ""
 	setupTime := time.Since(startedAt)
+	guestMAC := randomMAC()
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
 		MemPath:         memPath,
 		StatePath:       statePath,
 		CloneRootfsPath: sb.RootfsPath, // its own rootfs, exactly where the snapshot expects it
 		TapDevice:       sb.TapDevice,
 		GuestIP:         sb.GuestIP,
-		MacAddress:      randomMAC(),
+		MacAddress:      guestMAC,
 		GatewayIP:       s.cfg.GatewayIP,
 		Prefix:          s.guestSubnetBits(),
 		Gen:             uuid.NewString(),
@@ -721,6 +722,7 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 	}
 	c := &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
+		guestMAC:  guestMAC,
 		startedAt: startedAt, setupTime: setupTime, launchTime: rt.LaunchTimings,
 	}
 	return s.finishClone(ctx, c)

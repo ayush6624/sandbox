@@ -38,12 +38,18 @@ func ListenARP(tap string) (*ARPListener, error) {
 	return &ARPListener{fd: fd}, nil
 }
 
-// WaitForSenderIP blocks until an ARP frame whose sender protocol address is
-// ip arrives on the tap, or timeout passes.
-func (l *ARPListener) WaitForSenderIP(ip string, timeout time.Duration) error {
+// WaitForIdentity blocks until an ARP frame whose sender protocol address and
+// hardware address match the clone identity arrives on the tap, or timeout
+// passes. Checking both prevents a process restored in guest memory from
+// satisfying the bridge-safety gate with the baked snapshot MAC.
+func (l *ARPListener) WaitForIdentity(ip, mac string, timeout time.Duration) error {
 	want := net.ParseIP(ip).To4()
 	if want == nil {
 		return fmt.Errorf("bad IPv4 %q", ip)
+	}
+	wantMAC, err := net.ParseMAC(mac)
+	if err != nil || len(wantMAC) != 6 {
+		return fmt.Errorf("bad MAC %q", mac)
 	}
 	deadline := time.Now().Add(timeout)
 	buf := make([]byte, 128)
@@ -77,7 +83,9 @@ func (l *ARPListener) WaitForSenderIP(ip string, timeout time.Duration) error {
 		if buf[16] != 0x08 || buf[17] != 0x00 || buf[18] != 6 || buf[19] != 4 {
 			continue
 		}
-		if want[0] == buf[28] && want[1] == buf[29] && want[2] == buf[30] && want[3] == buf[31] {
+		if want[0] == buf[28] && want[1] == buf[29] && want[2] == buf[30] && want[3] == buf[31] &&
+			wantMAC[0] == buf[22] && wantMAC[1] == buf[23] && wantMAC[2] == buf[24] &&
+			wantMAC[3] == buf[25] && wantMAC[4] == buf[26] && wantMAC[5] == buf[27] {
 			return nil
 		}
 	}

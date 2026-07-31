@@ -70,8 +70,9 @@ case "$SMOKE" in full|http|none) ;; *) echo "--smoke must be full|http|none" >&2
 #   * touches only the gateway on the control plane (control.sh gateway) instead
 #     of reinstalling nomad/prometheus/autoscaler/grafana.
 #   * polls convergence every 2s instead of 10s, and runs a leaner smoke.
-# It publishes under "<sha>-dev" so a stripped, agent-less dev artifact can
-# never be mistaken for — or silently satisfy — a real "<sha>" release.
+# It publishes under a unique "<sha>-dev-<UTC timestamp>" label so a stripped,
+# agent-less dev artifact can never be mistaken for a real release, and a
+# second build can never appear converged while old same-labelled bytes run.
 if [ "$FAST" = 1 ]; then
   POLL=2
   [ "$SMOKE" = full ] && SMOKE=fast
@@ -159,7 +160,7 @@ if [ -n "$TARGET" ]; then
 else
   BUILDABLE=1
   TARGET="$HEAD_SHA"
-  [ "$FAST" = 0 ] || TARGET="${HEAD_SHA}-dev"
+  [ "$FAST" = 0 ] || TARGET="${HEAD_SHA}-dev-$(date -u +%Y%m%d%H%M%S)"
 fi
 case "$TARGET" in *[!A-Za-z0-9._-]*|'') fail "release must be letters, digits, dot, underscore, dash" ;; esac
 
@@ -175,9 +176,9 @@ info "published        $( [ "$PUBLISHED" = 1 ] && echo yes || echo no )"
 
 BUILD=0
 if [ "$BUILDABLE" = 1 ]; then
-  # A dev label is always rebuilt: the same "<sha>-dev" name is reused across
-  # many uncommitted iterations, so trusting a previous upload would ship stale
-  # bytes — the exact opposite of what a rapid-iteration flag is for.
+  # A dev label is unique and always rebuilt. Besides making the label honest
+  # about its bytes, uniqueness forces both Nomad and the gateway deploy path
+  # to restart instead of accepting a prior dev generation as converged.
   if [ "$PUBLISHED" = 1 ] && [ "$FORCE_BUILD" = 0 ] && [ "$FAST" = 0 ]; then
     info "build            skipped (already published; --force-build to rebuild)"
   else

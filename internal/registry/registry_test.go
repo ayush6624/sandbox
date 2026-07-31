@@ -592,7 +592,8 @@ func TestSnapshotRecordsSourceResources(t *testing.T) {
 	// Snapshot rows carry the source's baked resources...
 	snap := Snapshot{
 		ID: "snap1", SourceID: "sb1", TapDevice: "fc0", GuestIP: "172.16.0.10",
-		MemPath: "/tmp/mem", StatePath: "/tmp/state", RootfsPath: "/tmp/rootfs.ext4",
+		GuestMAC: "02:aa:bb:cc:dd:ee",
+		MemPath:  "/tmp/mem", StatePath: "/tmp/state", RootfsPath: "/tmp/rootfs.ext4",
 		CreatedAt: time.Now(), Vcpus: 4, MemMIB: 2048,
 	}
 	if err := r.CreateSnapshot(ctx, snap); err != nil {
@@ -604,6 +605,9 @@ func TestSnapshotRecordsSourceResources(t *testing.T) {
 	}
 	if got.Vcpus != 4 || got.MemMIB != 2048 {
 		t.Fatalf("snapshot must record source resources, got vcpus=%d mem_mib=%d", got.Vcpus, got.MemMIB)
+	}
+	if got.GuestMAC != snap.GuestMAC {
+		t.Fatalf("snapshot guest MAC = %q, want %q", got.GuestMAC, snap.GuestMAC)
 	}
 
 	// ...and a restore stamps them onto the new row.

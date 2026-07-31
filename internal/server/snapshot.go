@@ -113,6 +113,12 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		return registry.Snapshot{}, 409, fmt.Errorf("sandbox %s is not running in this server", id)
 	}
 	m := v.(*vm.Machine)
+	guestMAC, macErr := s.cfg.Provisioner.GuestMAC(sb.GuestIP)
+	if macErr != nil {
+		// Legacy/cold paths can lack a resolved neighbor. The snapshot remains
+		// correct; its later restore simply uses normal ARP discovery.
+		fmt.Fprintf(os.Stderr, "[%s] snapshot: record guest MAC: %v\n", id, macErr)
+	}
 
 	format, baseID := registry.FormatFull, ""
 	var parentFullPath, goldenMemPath string
@@ -268,6 +274,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		SourceID:         id,
 		TapDevice:        sb.TapDevice,
 		GuestIP:          sb.GuestIP,
+		GuestMAC:         guestMAC,
 		MemPath:          memPath,
 		StatePath:        statePath,
 		RootfsPath:       rootfsPath,
@@ -496,6 +503,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Errorf("create tap: %w", err))
 		return
 	}
+	if snap.GuestMAC != "" {
+		if err := s.cfg.Provisioner.PrimeGuestNetwork(sb.TapDevice, sb.GuestIP, snap.GuestMAC); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] restore: prime snapshot network (ARP fallback remains): %v\n", id, err)
+		}
+	}
 
 	opts := s.cfg.VMTemplate
 	opts.RootfsPath = rootfsPath
@@ -561,22 +573,26 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Errorf("restored but agent never became ready: %w", err))
 		return
 	}
+	agentMS := time.Since(tAgent).Milliseconds()
 	// Deterministic clock step before the sandbox is handed out (the MMDS
 	// push above is polled and can lag the readiness gate by a tick).
+	tClock := time.Now()
 	syncGuestClock(ctx, sb.GuestIP)
+	clockMS := time.Since(tClock).Milliseconds()
+	tIdentity := time.Now()
 	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
 		_ = s.destroyLocked(context.Background(), id)
 		httpError(w, 500, fmt.Errorf("restored but identity initialization failed: %w", err))
 		return
 	}
+	identityMS := time.Since(tIdentity).Milliseconds()
 	if err := s.reg.MarkRunning(ctx, id); err != nil {
 		_ = s.destroyLocked(context.Background(), id)
 		httpError(w, 500, fmt.Errorf("publish restored sandbox: %w", err))
 		return
 	}
-	agentMS := time.Since(tAgent).Milliseconds()
-	fmt.Fprintf(os.Stderr, "[%s] restored from %s: rootfs_cp=%dms load+resume=%dms agent_ready=%dms\n",
-		id, snapID, rootfsMS, loadMS, agentMS)
+	fmt.Fprintf(os.Stderr, "[%s] restored from %s: rootfs_cp=%dms load+resume=%dms agent=%dms clock=%dms identity=%dms\n",
+		id, snapID, rootfsMS, loadMS, agentMS, clockMS, identityMS)
 
 	sb.PID = pid
 	sb.VMID = rt.VMID
@@ -594,6 +610,7 @@ type clone struct {
 	setupTime  time.Duration
 	launchTime vm.LaunchTimings
 	arp        *provisioner.ARPListener // opened on the unbridged tap before resume; nil = fixed-sleep fallback
+	guestMAC   string
 	// baseSnap is the snapshot this machine was loaded from — the base its
 	// dirty-page bitmap tracks against (recorded into Server.diffBase by
 	// finishClone). Empty for machines whose load source is not a snapshot
@@ -820,13 +837,14 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 	opts := s.cfg.VMTemplate
 	opts.SocketPath = ""
 	setupTime := time.Since(startedAt)
+	guestMAC := randomMAC()
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
 		MemPath:         snap.MemPath,
 		StatePath:       snap.StatePath,
 		CloneRootfsPath: rootfsPath,
 		TapDevice:       sb.TapDevice,
 		GuestIP:         sb.GuestIP,
-		MacAddress:      randomMAC(),
+		MacAddress:      guestMAC,
 		GatewayIP:       s.cfg.GatewayIP,
 		Prefix:          s.guestSubnetBits(),
 		Gen:             id,
@@ -844,6 +862,7 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 	failed = false
 	return &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
+		guestMAC: guestMAC,
 		baseSnap: snap.ID, independent: true, startedAt: startedAt,
 		setupTime: setupTime, launchTime: rt.LaunchTimings, lifecycle: lifecycle,
 	}
@@ -859,21 +878,26 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	sb, m := c.sb, c.m
 
 	phaseStarted := time.Now()
+	reidentified := false
 	// The tap must stay off the bridge until the guest sheds the snapshot's
 	// baked IP. Normally the thaw agent's gratuitous ARP tells us the moment
 	// that happens (~200-400ms); the timeout covers agents that predate the
 	// announce, matching the old fixed sleep.
 	if c.arp != nil {
-		if err := c.arp.WaitForSenderIP(sb.GuestIP, reidentifyMargin); err != nil {
+		if err := c.arp.WaitForIdentity(sb.GuestIP, c.guestMAC, reidentifyMargin); err != nil {
 			// A listener was open but no announce arrived. Under a boot storm a
 			// CPU-starved guest can miss the margin while still being a modern,
 			// announcing agent — bridging now would put two guests with the same
 			// baked IP on the bridge. Give it one more margin before falling
 			// back to blind bridging (which stays, for pre-announce agents).
-			if err2 := c.arp.WaitForSenderIP(sb.GuestIP, reidentifyMargin); err2 != nil {
+			if err2 := c.arp.WaitForIdentity(sb.GuestIP, c.guestMAC, reidentifyMargin); err2 != nil {
 				fmt.Fprintf(os.Stderr, "[%s] no reidentify announce after %s (agent in snapshot predates GARP?): %v\n",
 					sb.ID, 2*reidentifyMargin, err2)
+			} else {
+				reidentified = true
 			}
+		} else {
+			reidentified = true
 		}
 		_ = c.arp.Close()
 		c.arp = nil
@@ -891,6 +915,11 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	if err := s.cfg.Provisioner.AttachTapToBridge(sb.TapDevice); err != nil {
 		_ = vm.StopForce(m)
 		return fmt.Errorf("attach tap: %w", err)
+	}
+	if reidentified {
+		if err := s.cfg.Provisioner.PrimeGuestNetwork(sb.TapDevice, sb.GuestIP, c.guestMAC); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] prime clone network (ARP fallback remains): %v\n", sb.ID, err)
+		}
 	}
 	if err := s.reg.FinishStart(ctx, sb.ID, pid, c.vmID, c.sock); err != nil {
 		_ = vm.StopForce(m)

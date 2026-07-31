@@ -391,6 +391,73 @@ func (p *Provisioner) AttachTapToBridge(tap string) error {
 	return nil
 }
 
+// PrimeGuestNetwork installs the L2/L3 knowledge learned while a clone's tap
+// was deliberately unbridged. The guest announces its fresh IP/MAC before we
+// attach the tap (to prevent its baked snapshot identity from colliding with
+// another VM), so the bridge cannot learn that GARP naturally. Without these
+// entries the first host→guest connection waits for Linux's ARP retry timer.
+//
+// Call this only after observing the guest's reidentify announcement and
+// attaching tap to the bridge. Failure is safe to treat as a performance-only
+// fallback: normal FDB flooding and ARP resolution still establish the path.
+func (p *Provisioner) PrimeGuestNetwork(tap, guestIP, guestMAC string) error {
+	commands, err := primeGuestNetworkCommands(p.Network.Bridge, tap, guestIP, guestMAC)
+	if err != nil {
+		return err
+	}
+	for _, args := range commands {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("prime guest network %v: %w: %s", args, err, out)
+		}
+	}
+	return nil
+}
+
+// GuestMAC returns the MAC currently associated with guestIP in the bridge
+// neighbor table. Snapshot creation calls this after an authenticated agent
+// request has refreshed the entry, then stores the result so a same-identity
+// restore can prime its newly recreated tap without an ARP discovery stall.
+func (p *Provisioner) GuestMAC(guestIP string) (string, error) {
+	if net.ParseIP(guestIP).To4() == nil {
+		return "", fmt.Errorf("guest MAC: invalid IPv4 %q", guestIP)
+	}
+	out, err := exec.Command(
+		"ip", "neigh", "show", "to", guestIP, "dev", p.Network.Bridge,
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("read neighbor %s on %s: %w: %s", guestIP, p.Network.Bridge, err, out)
+	}
+	return parseNeighborMAC(out)
+}
+
+func parseNeighborMAC(out []byte) (string, error) {
+	fields := strings.Fields(string(out))
+	for i, field := range fields {
+		if field != "lladdr" || i+1 >= len(fields) {
+			continue
+		}
+		mac, err := net.ParseMAC(fields[i+1])
+		if err == nil && len(mac) == 6 {
+			return mac.String(), nil
+		}
+	}
+	return "", fmt.Errorf("neighbor entry has no valid lladdr: %q", strings.TrimSpace(string(out)))
+}
+
+func primeGuestNetworkCommands(bridge, tap, guestIP, guestMAC string) ([][]string, error) {
+	if net.ParseIP(guestIP).To4() == nil {
+		return nil, fmt.Errorf("prime guest network: invalid IPv4 %q", guestIP)
+	}
+	mac, err := net.ParseMAC(guestMAC)
+	if err != nil || len(mac) != 6 {
+		return nil, fmt.Errorf("prime guest network: invalid MAC %q", guestMAC)
+	}
+	return [][]string{
+		{"bridge", "fdb", "replace", mac.String(), "dev", tap, "master", "static"},
+		{"ip", "neigh", "replace", guestIP, "lladdr", mac.String(), "nud", "reachable", "dev", bridge},
+	}, nil
+}
+
 // DeleteTap removes a tap device (best-effort).
 func (p *Provisioner) DeleteTap(tap string) error {
 	out, err := exec.Command("ip", "link", "delete", tap).CombinedOutput()

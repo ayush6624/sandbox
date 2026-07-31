@@ -285,7 +285,10 @@ func installSSHKey(ctx context.Context, guestIP, pubkey string) error {
 // network and sandboxd up.
 func waitForAgent(ctx context.Context, guestIP string, deadline time.Duration) error {
 	url := fmt.Sprintf("http://%s:%d/health", guestIP, agentapi.Port)
-	probe := &http.Client{Timeout: 1 * time.Second}
+	// A ready agent answers over the host bridge in well under a millisecond.
+	// Keep each attempt short so a missing neighbor/FDB entry or a booting NIC
+	// cannot pin the readiness path to Linux's one-second ARP retransmit timer.
+	probe := &http.Client{Timeout: 100 * time.Millisecond}
 	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	for {
@@ -300,7 +303,7 @@ func waitForAgent(ctx context.Context, guestIP string, deadline time.Duration) e
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("agent not ready after %s: %w", deadline, ctx.Err())
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(25 * time.Millisecond):
 		}
 	}
 }

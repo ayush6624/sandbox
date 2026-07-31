@@ -65,7 +65,7 @@ function parseArgs(argv: string[]): Args {
     iterations: 3,
     diffBudgetMs: 1_500,
     fullBudgetMs: 5_000,
-    restoreBudgetMs: 3_000,
+    restoreBudgetMs: 1_500,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -317,7 +317,7 @@ async function main(): Promise<void> {
           ...common,
           timeoutMs: 10 * 60_000,
           hibernateAfterMs: -1,
-          name: `snapshot-paths-${metadata.run_id}`,
+          name: `snapshot-paths-${metadata.run_id}`.slice(0, 64),
         }),
       )
       remember(source)

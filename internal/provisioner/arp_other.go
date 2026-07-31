@@ -15,7 +15,7 @@ func ListenARP(tap string) (*ARPListener, error) {
 	return nil, errors.New("arp listener: linux only")
 }
 
-func (l *ARPListener) WaitForSenderIP(ip string, timeout time.Duration) error {
+func (l *ARPListener) WaitForIdentity(ip, mac string, timeout time.Duration) error {
 	return errors.New("arp listener: linux only")
 }
 
