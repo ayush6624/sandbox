@@ -165,6 +165,122 @@ func TestExplicitPortStaysReservedWhileHibernated(t *testing.T) {
 	}
 }
 
+func TestURLOnlyPortConsumesNoHostPort(t *testing.T) {
+	r := testRegistryWithPools(t, Pools{
+		TapPrefix: "fc", TapMax: 2,
+		GuestIPMin: "172.16.0.10", GuestIPMax: "172.16.0.11",
+		PortMin: 5200, PortMax: 5200,
+	})
+	ctx := context.Background()
+	for _, id := range []string{"a", "b"} {
+		if _, err := r.Create(ctx, id, "", "/tmp/"+id, nil, "", 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pm, err := r.AddURLPort(ctx, "a", 3000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pm.HostPort != 0 || pm.Mode != "url" {
+		t.Fatalf("URL mapping = %+v", pm)
+	}
+	host, err := r.AddPort(ctx, "b", 8000)
+	if err != nil || host != 5200 {
+		t.Fatalf("host mapping after URL-only = %d, %v", host, err)
+	}
+	stats, err := r.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PortUsed != 1 {
+		t.Fatalf("PortUsed = %d, want only the host-port row", stats.PortUsed)
+	}
+}
+
+func TestAddPortUpgradesURLOnlyMapping(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	if _, err := r.Create(ctx, "a", "", "/tmp/a", nil, "", 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AddURLPort(ctx, "a", 3000); err != nil {
+		t.Fatal(err)
+	}
+	host, err := r.AddPort(ctx, "a", 3000)
+	if err != nil || host == 0 {
+		t.Fatalf("upgrade = %d, %v", host, err)
+	}
+	ports, err := r.Ports(ctx, "a")
+	if err != nil || len(ports) != 1 || ports[0].HostPort != host {
+		t.Fatalf("ports = %+v, %v", ports, err)
+	}
+}
+
+func TestPublicPortPersistsOnExposure(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	if _, err := r.Create(ctx, "a", "", "/tmp/a", nil, "", 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AddURLPort(ctx, "a", 22); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetPublicPort(ctx, "a", 22, 20000); err != nil {
+		t.Fatal(err)
+	}
+	ports, err := r.Ports(ctx, "a")
+	if err != nil || len(ports) != 1 {
+		t.Fatalf("ports=%+v err=%v", ports, err)
+	}
+	if ports[0].PublicPort != 20000 || ports[0].Mode != "raw" || ports[0].HostPort != 0 {
+		t.Fatalf("raw mapping=%+v", ports[0])
+	}
+}
+
+func TestLegacyPortSchemaMigratesToNullableHostAndPublicPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE sandbox_ports (
+		sandbox_id TEXT NOT NULL,
+		guest_port INTEGER NOT NULL,
+		host_port INTEGER NOT NULL,
+		PRIMARY KEY (sandbox_id, guest_port)
+	); CREATE UNIQUE INDEX uniq_host_port ON sandbox_ports(host_port)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path, Pools{TapPrefix: "fc", TapMax: 1, GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.10", PortMin: 5200, PortMax: 5200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	rows, err := r.db.Query(`PRAGMA table_info(sandbox_ports)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]int{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = notNull
+	}
+	if columns["host_port"] != 0 {
+		t.Fatalf("host_port remains NOT NULL: %v", columns)
+	}
+	if _, ok := columns["public_port"]; !ok {
+		t.Fatalf("public_port was not added: %v", columns)
+	}
+}
+
 func TestFreeSlotsIgnoresExplicitPorts(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 

@@ -45,6 +45,8 @@ type Config struct {
 	WorkerToken         string
 	WorkerTokens        []string
 	WorkerTokenFile     string
+	IngressDomain       string // public wildcard suffix; empty omits URL fields
+	DefaultURLOnly      bool   // omitted POST /ports host_port defaults to false when set
 	Provisioner         *provisioner.Provisioner
 	GatewayIP           string // bridge IP; used as the guest's default gateway
 	// GuestSubnetBits is the prefix length shared by the gateway and every
@@ -368,6 +370,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /sandboxes/{id}/rename", s.handleRename)
 	mux.HandleFunc("POST /sandboxes/{id}/ports", s.handleExposePort)
 	mux.HandleFunc("GET /sandboxes/{id}/ports", s.handleListPorts)
+	mux.HandleFunc("DELETE /sandboxes/{id}/ports/{port}", s.handleDeletePort)
+	mux.HandleFunc("PUT /sandboxes/{id}/ports/{port}/public", s.handleSetPublicPort)
+	mux.HandleFunc("CONNECT /sandboxes/{id}/connect/{port}", s.handleConnectPort)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.handleAgentProxy("exec"))
 	mux.HandleFunc("POST /sandboxes/{id}/exec/stream", s.handleAgentProxy("exec/stream"))
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.handleAgentProxy("files"))
@@ -883,7 +888,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		sandboxes = []registry.Sandbox{}
 	}
 	for i := range sandboxes {
-		sandboxes[i] = s.effectiveResources(sandboxes[i])
+		sandboxes[i] = s.withIngress(r.Context(), s.effectiveResources(sandboxes[i]))
 	}
 	writeJSON(w, 200, sandboxes)
 }
@@ -895,7 +900,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, err)
 		return
 	}
-	writeJSON(w, 200, s.effectiveResources(sb))
+	writeJSON(w, 200, s.withIngress(r.Context(), s.effectiveResources(sb)))
 }
 
 // Info is the GET /info payload: the host's template defaults and per-sandbox
@@ -942,6 +947,16 @@ func (s *Server) effectiveResources(sb registry.Sandbox) registry.Sandbox {
 	if sb.MemMIB == 0 {
 		sb.MemMIB = s.cfg.VMTemplate.MemMIB
 	}
+	return sb
+}
+
+func (s *Server) withIngress(ctx context.Context, sb registry.Sandbox) registry.Sandbox {
+	ports, err := s.reg.Ports(ctx, sb.ID)
+	if err != nil {
+		return sb
+	}
+	s.decoratePorts(sb.ID, ports)
+	sb.Ports = ports
 	return sb
 }
 
@@ -1165,7 +1180,9 @@ func (s *Server) destroyLocked(ctx context.Context, id string) error {
 	// upgrading from the DNAT scheme may still carry rules for this sandbox.
 	// Removing a nonexistent rule is harmless.
 	for _, pm := range ports {
-		s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+		if pm.HostPort != 0 {
+			s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+		}
 	}
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))

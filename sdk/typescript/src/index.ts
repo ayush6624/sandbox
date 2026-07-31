@@ -53,6 +53,8 @@ export type {
   CommandResult,
   CommandRunOpts,
   PortMapping,
+  PortExposeOpts,
+  RawPortMapping,
   EntryInfo,
   WriteInfo,
   ReadOpts,

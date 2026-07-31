@@ -60,5 +60,12 @@ type Heartbeat struct {
 	// (golden snapshots excluded — they're per-host internals). The gateway
 	// derives its snapshot→host routing from these so restore/fanout/delete
 	// reach the host that has the artifacts locally.
-	SnapshotIDs []string `json:"snapshot_ids,omitempty"`
+	SnapshotIDs []string       `json:"snapshot_ids,omitempty"`
+	RawRoutes   []RawPortRoute `json:"raw_routes,omitempty"`
+}
+
+type RawPortRoute struct {
+	PublicPort int    `json:"public_port"`
+	SandboxID  string `json:"sandbox_id"`
+	GuestPort  int    `json:"guest_port"`
 }

@@ -35,7 +35,7 @@ CONFIG="configs/devbox-gcp.json"
 GW_PORT="${GW_PORT:-9090}"
 HOST_PORT="${HOST_PORT:-8080}"
 REMOTE_DIR="/home/${SSH_USER}/sandbox"
-SECRETS="$DIR/fleet-secrets.env"
+SECRETS="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
 
 sshx() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${SSH_USER}@$1" "${@:2}"; }
 

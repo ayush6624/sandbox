@@ -51,3 +51,36 @@ func TestPortsAreExplicitOnly(t *testing.T) {
 		t.Fatalf("mapping = %+v, want explicit guest 3000 with allocated host port", got)
 	}
 }
+
+func TestURLOnlyExposureReturnsIngressURLWithoutBindingHostPort(t *testing.T) {
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"), registry.Pools{
+		TapPrefix: "fc", TapMax: 1,
+		GuestIPMin: "172.16.0.10", GuestIPMax: "172.16.0.10",
+		PortMin: 1, PortMax: 1, // binding would fail; URL-only must never try
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reg.Close() })
+	s := New(Config{IngressDomain: "sb.example.com"}, reg)
+	t.Cleanup(s.pf.CloseAll)
+	if _, err := reg.Create(context.Background(), "sandbox-id", "", "/tmp/rootfs", nil, "", 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/sandboxes/sandbox-id/ports",
+		strings.NewReader(`{"guest_port":3000,"host_port":false}`))
+	req.SetPathValue("id", "sandbox-id")
+	s.handleExposePort(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expose: %d %s", w.Code, w.Body)
+	}
+	var got registry.PortMapping
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != "url" || got.HostPort != 0 ||
+		got.URL != "https://3000-sandbox-id.sb.example.com" {
+		t.Fatalf("mapping = %+v", got)
+	}
+}

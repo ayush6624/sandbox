@@ -316,7 +316,7 @@ B_IP="$(jq -er '.guest_ip' <<<"$B")"
 
 echo "security gate: verify key-only SSH as sandbox and reject root login"
 SSH_PORT_ROW="$(api -X POST -H 'Content-Type: application/json' \
-  --data '{"guest_port":22}' "$SANDBOX_HOST_URL/sandboxes/$A_ID/ports")"
+  --data '{"guest_port":22,"host_port":true}' "$SANDBOX_HOST_URL/sandboxes/$A_ID/ports")"
 SSH_PORT="$(jq -er '.host_port | select(. > 0)' <<<"$SSH_PORT_ROW")"
 SSH_OPTIONS=(
   -i "$SSH_KEY_DIR/id_ed25519"

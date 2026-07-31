@@ -91,3 +91,42 @@ groups:
       # silently stop.
       - record: sandbox:workers_scale_in_ceiling
         expr: sum(sandbox_mig_target_size{job="sandbox-gateway"}) or ((sum(sandbox_hosts_live{job="sandbox-gateway"}) > (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))) or (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0)))
+
+  - name: public-ingress
+    interval: 15s
+    rules:
+      - alert: SandboxEdgeReplicaQuorumLost
+        expr: sum(up{job="sandbox-edge"}) < 2
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Fewer than two public edge replicas are healthy
+      - alert: SandboxEdgeCertificateExpiring
+        expr: min(sandbox_edge_certificate_expiry_timestamp_seconds{job="sandbox-edge"}) - time() < 7 * 24 * 60 * 60
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: Public ingress certificate expires within seven days
+      - alert: SandboxEdgeCertificateReloadFailure
+        expr: sum(increase(sandbox_edge_certificate_reloads_total{job="sandbox-edge",result="error"}[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: An edge replica rejected a certificate update
+      - alert: SandboxEdgeResolveFailures
+        expr: sum(rate(sandbox_edge_conns_total{job="sandbox-edge",result="error"}[5m])) / clamp_min(sum(rate(sandbox_edge_conns_total{job="sandbox-edge"}[5m])), 0.01) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: More than 5% of edge connections are failing
+      - alert: SandboxRawPortPoolNearExhaustion
+        expr: sum(sandbox_raw_leases{job="sandbox-gateway",state=~"active|pending|releasing"}) / ${RAW_PORT_CAPACITY} > 0.9
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Raw public port pool is over 90% allocated
+      - alert: SandboxRawLeaseReconciliationStuck
+        expr: sum(sandbox_raw_leases{job="sandbox-gateway",state=~"pending|releasing"}) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Durable raw port lease reconciliation is stuck

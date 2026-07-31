@@ -76,8 +76,15 @@ type hibRecord struct {
 	RootfsBaseID string `json:"rootfs_base_id,omitempty"`
 	// Explicit guest ports to re-expose on the far host. Host ports are not
 	// carried; the adopting host allocates fresh ones from its own pool.
-	GuestPorts       []int `json:"guest_ports,omitempty"`
-	LegacyGuestPorts []int `json:"extra_guest_ports,omitempty"` // read old records
+	GuestPorts       []int           `json:"guest_ports,omitempty"`
+	URLGuestPorts    []int           `json:"url_guest_ports,omitempty"`
+	PublicPorts      []hibPublicPort `json:"public_ports,omitempty"`
+	LegacyGuestPorts []int           `json:"extra_guest_ports,omitempty"` // read old records
+}
+
+type hibPublicPort struct {
+	GuestPort  int `json:"guest_port"`
+	PublicPort int `json:"public_port"`
 }
 
 func unixPtr(t *time.Time) *int64 {
@@ -109,7 +116,16 @@ func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
 		RootfsBaseID:      rootfsBaseID,
 	}
 	for _, pm := range ports {
-		rec.GuestPorts = append(rec.GuestPorts, pm.GuestPort)
+		if pm.HostPort == 0 {
+			rec.URLGuestPorts = append(rec.URLGuestPorts, pm.GuestPort)
+		} else {
+			rec.GuestPorts = append(rec.GuestPorts, pm.GuestPort)
+		}
+		if pm.PublicPort != 0 {
+			rec.PublicPorts = append(rec.PublicPorts, hibPublicPort{
+				GuestPort: pm.GuestPort, PublicPort: pm.PublicPort,
+			})
+		}
 	}
 	return rec
 }

@@ -1,5 +1,5 @@
 # Rendered by control-install.sh (envsubst):
-# ${GATEWAY_TOKEN}, ${CONTROL_IP}, ${GW_PORT}.
+# ${GATEWAY_TOKEN}, ${CONTROL_IP}, ${GW_PORT}, ${PROJECT}.
 # The gateway deliberately listens only on the private VPC address, so local
 # control-plane consumers must use that address rather than loopback.
 global:
@@ -38,3 +38,16 @@ scrape_configs:
       credentials: ${GATEWAY_TOKEN}
     static_configs:
       - targets: ["${CONTROL_IP}:${GW_PORT}"]
+
+  # Edge instances are a regional MIG, so discover them by their network tag.
+  # The edge metrics listener is VPC-only; public forwarding rules never expose
+  # 9091.
+  - job_name: sandbox-edge
+    metrics_path: /metrics
+    gce_sd_configs:
+      - project: ${PROJECT}
+        port: 9091
+        filter: 'tags.items = sandbox-edge'
+    relabel_configs:
+      - source_labels: [__meta_gce_instance_name]
+        target_label: instance_name

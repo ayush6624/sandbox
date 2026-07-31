@@ -110,6 +110,21 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))
+	if g.raw != nil {
+		pending, active, releasing, generation := g.raw.stats()
+		fmt.Fprintf(&b, "# HELP sandbox_raw_leases Durable public TCP leases by state.\n# TYPE sandbox_raw_leases gauge\n")
+		fmt.Fprintf(&b, "sandbox_raw_leases{state=\"pending\"} %d\n", pending)
+		fmt.Fprintf(&b, "sandbox_raw_leases{state=\"active\"} %d\n", active)
+		fmt.Fprintf(&b, "sandbox_raw_leases{state=\"releasing\"} %d\n", releasing)
+		fmt.Fprintf(&b, "# HELP sandbox_raw_allocations_total Raw TCP allocations by result.\n# TYPE sandbox_raw_allocations_total counter\n")
+		fmt.Fprintf(&b, "sandbox_raw_allocations_total{result=\"ok\"} %d\n", g.raw.allocOK.Load())
+		fmt.Fprintf(&b, "sandbox_raw_allocations_total{result=\"error\"} %d\n", g.raw.allocError.Load())
+		fmt.Fprintf(&b, "# HELP sandbox_raw_reconcile_total Pending raw lease reconciliations by result.\n# TYPE sandbox_raw_reconcile_total counter\n")
+		fmt.Fprintf(&b, "sandbox_raw_reconcile_total{result=\"ok\"} %d\n", g.raw.reconcileOK.Load())
+		fmt.Fprintf(&b, "sandbox_raw_reconcile_total{result=\"error\"} %d\n", g.raw.reconcileError.Load())
+		fmt.Fprintf(&b, "# HELP sandbox_raw_route_conflicts_total Worker heartbeat mappings that conflict with the durable raw index.\n# TYPE sandbox_raw_route_conflicts_total counter\nsandbox_raw_route_conflicts_total %d\n", g.raw.conflicts.Load())
+		fmt.Fprintf(&b, "# HELP sandbox_raw_index_generation Current GCS generation of the raw lease index.\n# TYPE sandbox_raw_index_generation gauge\nsandbox_raw_index_generation %d\n", generation)
+	}
 
 	// Per-host series share one HELP/TYPE header block each.
 	fmt.Fprintf(&b, "# HELP sandbox_host_slots_total Total slots on a live host.\n# TYPE sandbox_host_slots_total gauge\n")

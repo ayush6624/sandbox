@@ -336,6 +336,25 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
 
+  if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/raw-ports`) {
+    const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
+    sendJson(res, 200, {
+      guest_port: body.guest_port,
+      mode: 'raw',
+      public_host: 'tcp.example.com',
+      public_port: 20000,
+    })
+    return
+  }
+
+  const portDelete = path.match(new RegExp(`^/sandboxes/${SANDBOX_ID}/ports/(\\d+)$`))
+  if (req.method === 'DELETE' && portDelete) {
+    exposedPorts.delete(Number(portDelete[1]))
+    res.writeHead(204)
+    res.end()
+    return
+  }
+
   if (req.method === 'GET' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
     const mappings: Array<{ guest_port: number; host_port: number }> = []
     for (const [guestPort, hostPort] of exposedPorts) {
@@ -751,6 +770,21 @@ test('exposePort allocates a host port and feeds the getHost cache', async () =>
     { guestPort: 8000, hostPort: 5200 },
   ])
 
+  await sbx.kill()
+})
+
+test('raw exposure returns a stable address and unexpose clears local caches', async () => {
+  const sbx = await Sandbox.create(opts())
+  assert.deepEqual(await sbx.exposeRawPort(22), {
+    guestPort: 22,
+    publicHost: 'tcp.example.com',
+    publicPort: 20000,
+    address: 'tcp.example.com:20000',
+  })
+  await sbx.exposePort(8080)
+  assert.equal(sbx.getHost(8080), '127.0.0.1:5200')
+  await sbx.unexposePort(8080)
+  assert.throws(() => sbx.getHost(8080), SandboxError)
   await sbx.kill()
 })
 

@@ -163,17 +163,23 @@ func (f *portForwarder) handle(id string, guestPort int, client net.Conn) {
 	// EOFs, shut down only the write side of its peer so the other direction
 	// can finish (e.g. a client that closes its request stream and then reads
 	// the response).
+	pipeConns(client, backend)
+}
+
+// pipeConns copies bytes in both directions and preserves TCP half-close
+// semantics. The worker CONNECT endpoint reuses this exact data-plane path.
+func pipeConns(a, b net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(backend, client)
-		closeWrite(backend)
+		_, _ = io.Copy(b, a)
+		closeWrite(b)
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(client, backend)
-		closeWrite(client)
+		_, _ = io.Copy(a, b)
+		closeWrite(a)
 	}()
 	wg.Wait()
 }
@@ -220,7 +226,9 @@ func (s *Server) syncSandboxPorts(ctx context.Context, sb registry.Sandbox) erro
 		return err
 	}
 	for _, pm := range ports {
-		desired[pm.HostPort] = pm.GuestPort
+		if pm.HostPort != 0 {
+			desired[pm.HostPort] = pm.GuestPort
+		}
 	}
 	return s.pf.Sync(sb.ID, desired)
 }

@@ -3,3 +3,4 @@
 config.env
 # fleet-deploy.sh writes the generated gateway/host tokens here.
 fleet-secrets.env
+.edge-bootstrap-tls/

@@ -79,12 +79,26 @@ type Sandbox struct {
 	// address, so clients reach forwarded ports on the host that holds the
 	// port-forward listeners rather than on the gateway.
 	HostAddr string `json:"host_addr,omitempty"`
+	// Ports is populated by API handlers (never stored) so GET can advertise
+	// URL-only ingress without forcing a second round trip.
+	Ports []PortMapping `json:"ports,omitempty"`
 }
 
-// PortMapping is one exposed guest port → host port pair.
+// PortMapping is one explicitly exposed guest port. HostPort is zero for a
+// URL-only exposure, which deliberately consumes no worker host-port slot.
 type PortMapping struct {
-	GuestPort int `json:"guest_port"`
-	HostPort  int `json:"host_port"`
+	GuestPort  int    `json:"guest_port"`
+	HostPort   int    `json:"host_port,omitempty"`
+	PublicPort int    `json:"public_port,omitempty"`
+	Mode       string `json:"mode"`
+	URL        string `json:"url,omitempty"`
+}
+
+type RawPortMapping struct {
+	GuestPort  int    `json:"guest_port"`
+	Mode       string `json:"mode"`
+	PublicHost string `json:"public_host"`
+	PublicPort int    `json:"public_port"`
 }
 
 // Snapshot is a saved point-in-time image of a sandbox (Firecracker memory +
@@ -258,7 +272,7 @@ func (r *Registry) Stats(ctx context.Context) (Stats, error) {
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?6),
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?7),
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?8),
-			(SELECT COUNT(*) FROM sandbox_ports),
+			(SELECT COUNT(*) FROM sandbox_ports WHERE host_port IS NOT NULL),
 			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?3 ELSE mem_mib END + ?4), 0)
 			   FROM sandboxes WHERE status IN (?1, ?5, ?6, ?7, ?8))`,
 		StatusRunning, StatusHibernated, r.mem.TemplateMemMIB, r.mem.OverheadMIB,
@@ -366,10 +380,11 @@ func (r *Registry) migrate() error {
 	CREATE TABLE IF NOT EXISTS sandbox_ports (
 		sandbox_id TEXT NOT NULL,
 		guest_port INTEGER NOT NULL,
-		host_port  INTEGER NOT NULL,
+		host_port  INTEGER,
+		public_port INTEGER,
 		PRIMARY KEY (sandbox_id, guest_port)
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS uniq_host_port ON sandbox_ports(host_port);
+	CREATE UNIQUE INDEX IF NOT EXISTS uniq_host_port ON sandbox_ports(host_port) WHERE host_port IS NOT NULL;
 	CREATE TABLE IF NOT EXISTS snapshots (
 		id                 TEXT PRIMARY KEY,
 		source_id          TEXT NOT NULL,
@@ -404,6 +419,16 @@ func (r *Registry) migrate() error {
 		CREATE UNIQUE INDEX uniq_tap_running ON sandboxes(tap_device) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming');
 		CREATE UNIQUE INDEX uniq_ip_running ON sandboxes(guest_ip) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming');
 	`); err != nil {
+		return err
+	}
+	if err := r.makeHostPortsNullable(); err != nil {
+		return err
+	}
+	if _, err := r.db.Exec(`ALTER TABLE sandbox_ports ADD COLUMN public_port INTEGER`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_public_port ON sandbox_ports(public_port) WHERE public_port IS NOT NULL`); err != nil {
 		return err
 	}
 	// source_rootfs_path was added after the snapshots table first shipped.
@@ -499,6 +524,64 @@ func (r *Registry) migrate() error {
 		}
 	}
 	return nil
+}
+
+// makeHostPortsNullable upgrades the pre-ingress sandbox_ports table. SQLite
+// cannot drop a NOT NULL constraint in place, so preserve the rows while
+// rebuilding the small mapping table. The partial unique index keeps the old
+// host-port uniqueness guarantee without making NULL (URL-only) rows collide.
+func (r *Registry) makeHostPortsNullable() error {
+	rows, err := r.db.Query(`PRAGMA table_info(sandbox_ports)`)
+	if err != nil {
+		return err
+	}
+	hostPortNotNull := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "host_port" {
+			hostPortNotNull = notNull != 0
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hostPortNotNull {
+		_, err := r.db.Exec(`DROP INDEX IF EXISTS uniq_host_port;
+			CREATE UNIQUE INDEX IF NOT EXISTS uniq_host_port ON sandbox_ports(host_port) WHERE host_port IS NOT NULL`)
+		return err
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DROP INDEX IF EXISTS uniq_host_port`,
+		`ALTER TABLE sandbox_ports RENAME TO sandbox_ports_old`,
+		`CREATE TABLE sandbox_ports (
+			sandbox_id TEXT NOT NULL,
+			guest_port INTEGER NOT NULL,
+			host_port INTEGER,
+			public_port INTEGER,
+			PRIMARY KEY (sandbox_id, guest_port)
+		)`,
+		`INSERT INTO sandbox_ports (sandbox_id, guest_port, host_port)
+			SELECT sandbox_id, guest_port, host_port FROM sandbox_ports_old`,
+		`DROP TABLE sandbox_ports_old`,
+		`CREATE UNIQUE INDEX uniq_host_port ON sandbox_ports(host_port) WHERE host_port IS NOT NULL`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *Registry) dropLegacyHostPortColumn() error {
@@ -930,70 +1013,144 @@ func (r *Registry) Destroy(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
-// AddPort allocates a host port from the shared pool and records a
-// guestPort → hostPort mapping for the sandbox. If the mapping already
-// exists, the existing host port is returned.
+// AddPort allocates a host port from the shared pool and records a mapping.
+// It preserves the original API used by callers that explicitly need a worker
+// host port; a URL-only row is upgraded in place.
 func (r *Registry) AddPort(ctx context.Context, id string, guestPort int) (int, error) {
+	pm, err := r.addPort(ctx, id, guestPort, true)
+	return pm.HostPort, err
+}
+
+// AddURLPort records an exposure without consuming the worker host-port pool.
+// An existing host-port mapping is returned unchanged: every explicit mapping
+// is authorized for the ingress tunnel, so downgrading it would be surprising.
+func (r *Registry) AddURLPort(ctx context.Context, id string, guestPort int) (PortMapping, error) {
+	return r.addPort(ctx, id, guestPort, false)
+}
+
+func (r *Registry) addPort(ctx context.Context, id string, guestPort int, allocateHost bool) (PortMapping, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return PortMapping{}, err
 	}
 	defer tx.Rollback()
 
 	var status string
 	if err := tx.QueryRowContext(ctx, `SELECT status FROM sandboxes WHERE id=?`, id).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, fmt.Errorf("sandbox %s not found", id)
+			return PortMapping{}, fmt.Errorf("sandbox %s not found", id)
 		}
-		return 0, err
+		return PortMapping{}, err
 	}
 
-	var existing int
+	var existing sql.NullInt64
 	err = tx.QueryRowContext(ctx,
 		`SELECT host_port FROM sandbox_ports WHERE sandbox_id=? AND guest_port=?`, id, guestPort).Scan(&existing)
+	exists := err == nil
 	if err == nil {
-		return existing, nil
+		if existing.Valid || !allocateHost {
+			return portMapping(guestPort, existing), nil
+		}
+		// Upgrade a URL-only mapping below after allocating a host port.
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return PortMapping{}, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
+	if !allocateHost {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO sandbox_ports (sandbox_id, guest_port, host_port) VALUES (?, ?, NULL)`,
+			id, guestPort); err != nil {
+			return PortMapping{}, fmt.Errorf("insert URL port mapping: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return PortMapping{}, err
+		}
+		return PortMapping{GuestPort: guestPort, Mode: "url"}, nil
 	}
 
 	used, err := loadUsed(ctx, tx)
 	if err != nil {
-		return 0, err
+		return PortMapping{}, err
 	}
 	port, err := pickFreePort(used, r.pools)
 	if err != nil {
-		return 0, err
+		return PortMapping{}, err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO sandbox_ports (sandbox_id, guest_port, host_port) VALUES (?, ?, ?)`,
-		id, guestPort, port); err != nil {
-		return 0, fmt.Errorf("insert port mapping: %w", err)
+	var writeErr error
+	if exists {
+		res, updateErr := tx.ExecContext(ctx,
+			`UPDATE sandbox_ports SET host_port=? WHERE sandbox_id=? AND guest_port=?`,
+			port, id, guestPort)
+		writeErr = updateErr
+		if updateErr == nil {
+			if n, _ := res.RowsAffected(); n == 0 {
+				_, writeErr = tx.ExecContext(ctx,
+					`INSERT INTO sandbox_ports (sandbox_id, guest_port, host_port) VALUES (?, ?, ?)`,
+					id, guestPort, port)
+			}
+		}
+	} else {
+		_, writeErr = tx.ExecContext(ctx,
+			`INSERT INTO sandbox_ports (sandbox_id, guest_port, host_port) VALUES (?, ?, ?)`,
+			id, guestPort, port)
+	}
+	if writeErr != nil {
+		return PortMapping{}, fmt.Errorf("insert port mapping: %w", writeErr)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return PortMapping{}, err
 	}
-	return port, nil
+	return PortMapping{GuestPort: guestPort, HostPort: port, Mode: "host_port"}, nil
 }
 
 // Ports returns all explicitly exposed port mappings of a sandbox.
 func (r *Registry) Ports(ctx context.Context, id string) ([]PortMapping, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT guest_port, host_port FROM sandbox_ports WHERE sandbox_id=? ORDER BY guest_port`, id)
+		`SELECT guest_port, host_port, public_port FROM sandbox_ports WHERE sandbox_id=? ORDER BY guest_port`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []PortMapping
 	for rows.Next() {
-		var pm PortMapping
-		if err := rows.Scan(&pm.GuestPort, &pm.HostPort); err != nil {
+		var guestPort int
+		var hostPort, publicPort sql.NullInt64
+		if err := rows.Scan(&guestPort, &hostPort, &publicPort); err != nil {
 			return nil, err
+		}
+		pm := portMapping(guestPort, hostPort)
+		if publicPort.Valid {
+			pm.PublicPort = int(publicPort.Int64)
+			if pm.HostPort == 0 {
+				pm.Mode = "raw"
+			}
 		}
 		out = append(out, pm)
 	}
 	return out, rows.Err()
+}
+
+// SetPublicPort attaches the fleet-wide raw TCP allocation chosen by the
+// gateway to an existing explicit exposure.
+func (r *Registry) SetPublicPort(ctx context.Context, id string, guestPort, publicPort int) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE sandbox_ports SET public_port=? WHERE sandbox_id=? AND guest_port=?`,
+		publicPort, id, guestPort)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("sandbox %s does not expose guest port %d", id, guestPort)
+	}
+	return nil
+}
+
+func portMapping(guestPort int, hostPort sql.NullInt64) PortMapping {
+	pm := PortMapping{GuestPort: guestPort, Mode: "url"}
+	if hostPort.Valid {
+		pm.HostPort = int(hostPort.Int64)
+		pm.Mode = "host_port"
+	}
+	return pm
 }
 
 // DeletePort removes one port mapping (used to roll back a failed expose).
@@ -1403,7 +1560,7 @@ func loadUsed(ctx context.Context, tx *sql.Tx) (usedResources, error) {
 	}
 
 	// Explicitly exposed ports are hard-reserved, including during hibernation.
-	extra, err := tx.QueryContext(ctx, `SELECT host_port FROM sandbox_ports`)
+	extra, err := tx.QueryContext(ctx, `SELECT host_port FROM sandbox_ports WHERE host_port IS NOT NULL`)
 	if err != nil {
 		return u, err
 	}

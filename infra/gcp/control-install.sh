@@ -4,7 +4,8 @@
 # $REMOTE_DIR. Idempotent. Expects env: GW_TOKEN GATEWAY_CONTROL_TOKEN HOST_TOKEN CONTROL_IP GW_PORT
 # PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
 # HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
-# QUEUE_WAIT QUEUE_MAX REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
+# QUEUE_WAIT QUEUE_MAX INGRESS_BUCKET RAW_PUBLIC_HOST RAW_PORT_MIN RAW_PORT_MAX
+# REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
 # GRAFANA_ADMIN_PASSWORD
 #
 # SECTIONS=gateway installs ONLY the gateway (binary + tokens + unit + restart)
@@ -62,6 +63,11 @@ install -d -m 0700 /etc/sandbox-gateway
 printf '%s\n' "$GW_TOKEN" > /etc/sandbox-gateway/client.tokens
 printf '%s\n' "$GATEWAY_CONTROL_TOKEN" > /etc/sandbox-gateway/worker-control.tokens
 chmod 0600 /etc/sandbox-gateway/client.tokens /etc/sandbox-gateway/worker-control.tokens
+# Durable raw TCP allocation (E4) is opt-in: no INGRESS_BUCKET, no raw flags.
+RAW_ARGS=""
+if [ -n "${INGRESS_BUCKET:-}" ]; then
+  RAW_ARGS="--ingress-bucket ${INGRESS_BUCKET} --raw-public-host ${RAW_PUBLIC_HOST:?} --raw-port-min ${RAW_PORT_MIN:-20000} --raw-port-max ${RAW_PORT_MAX:-29999}"
+fi
 cat >/etc/systemd/system/sandbox-gateway.service <<UNIT
 [Unit]
 Description=sandbox multi-host gateway (control plane)
@@ -81,7 +87,7 @@ ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --direct-scale-mig ${MIG_NAME} \
   --direct-scale-max ${MIG_MAX} \
   --direct-scale-slots-per-host ${SLOTS_PER_HOST} \
-  --direct-scale-headroom ${HEADROOM_SLOTS:-0}
+  --direct-scale-headroom ${HEADROOM_SLOTS:-0} ${RAW_ARGS}
 # Single-writer invariant: the GATEWAY is the sole process allowed to GROW the
 # production MIG, and the Nomad Autoscaler policy is capped to scale-IN only
 # (see nomad/policies/workers.hcl.tpl and the sandbox:workers_scale_in_ceiling
@@ -119,9 +125,11 @@ if [ ! -x /usr/local/bin/prometheus ]; then
   rm -rf "$tmp"
 fi
 mkdir -p /etc/prometheus /var/lib/prometheus
-GATEWAY_TOKEN="$GW_TOKEN" CONTROL_IP="$CONTROL_IP" GW_PORT="$GW_PORT" \
+GATEWAY_TOKEN="$GW_TOKEN" CONTROL_IP="$CONTROL_IP" GW_PORT="$GW_PORT" PROJECT="$PROJECT" \
   envsubst < "${REMOTE_DIR}/prometheus/prometheus.yml.tpl" > /etc/prometheus/prometheus.yml
 SLOTS_PER_HOST="$SLOTS_PER_HOST" HEADROOM_SLOTS="$HEADROOM_SLOTS" \
+  LEAD_SECONDS="${LEAD_SECONDS:-90}" \
+  RAW_PORT_CAPACITY="$((${RAW_PORT_MAX:-29999} - ${RAW_PORT_MIN:-20000} + 1))" \
   envsubst < "${REMOTE_DIR}/prometheus/rules.yml.tpl" > /etc/prometheus/rules.yml
 cat >/etc/systemd/system/prometheus.service <<UNIT
 [Unit]
@@ -231,8 +239,54 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
 
+# --- 6. Wildcard certificate renewal ---
+# DNS-01 is required for the wildcard. The timer publishes new Secret Manager
+# versions; edge replicas poll and hot-reload the pair without a fleet restart.
+if [ -n "${EDGE_ACME_EMAIL:-}" ] && [ -n "${EDGE_DOMAIN:-}" ]; then
+  if [ ! -x /usr/local/bin/lego ]; then
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "$tmp/lego.tgz" \
+      "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION:-4.21.0}/lego_v${LEGO_VERSION:-4.21.0}_linux_amd64.tar.gz"
+    tar xzf "$tmp/lego.tgz" -C "$tmp"
+    install -m 0755 "$tmp/lego" /usr/local/bin/lego
+    rm -rf "$tmp"
+  fi
+  install -m 0755 "${REMOTE_DIR}/edge-cert-renew.sh" /usr/local/sbin/sandbox-edge-cert-renew
+  cat >/etc/sandbox-edge-acme.env <<ENV
+PROJECT=${PROJECT}
+EDGE_DOMAIN=${EDGE_DOMAIN}
+ACME_EMAIL=${EDGE_ACME_EMAIL}
+DNS_PROVIDER=${EDGE_DNS_PROVIDER:-gcloud}
+DNS_TOKEN_SECRET=${EDGE_DNS_TOKEN_SECRET:-sandbox-edge-dns-token}
+CERT_SECRET=${EDGE_CERT_SECRET:-sandbox-edge-cert}
+KEY_SECRET=${EDGE_KEY_SECRET:-sandbox-edge-key}
+ENV
+  chmod 0600 /etc/sandbox-edge-acme.env
+  cat >/etc/systemd/system/sandbox-edge-cert-renew.service <<UNIT
+[Unit]
+Description=Renew sandbox wildcard certificate with ACME DNS-01
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sandbox-edge-cert-renew
+UNIT
+  cat >/etc/systemd/system/sandbox-edge-cert-renew.timer <<UNIT
+[Unit]
+Description=Daily sandbox wildcard certificate renewal check
+[Timer]
+OnBootSec=5m
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+fi
+
 systemctl daemon-reload
 systemctl enable nomad-server sandbox-gateway prometheus nomad-autoscaler grafana
+if [ -f /etc/systemd/system/sandbox-edge-cert-renew.timer ]; then
+  systemctl enable --now sandbox-edge-cert-renew.timer
+fi
 # restart (not enable --now): a redeploy must pick up new binaries/config on
 # already-running services. Gateway routes rebuild from heartbeats in <=5s.
 systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler grafana

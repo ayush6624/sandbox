@@ -1,8 +1,67 @@
 # Public ingress design — URL-addressable sandbox ports
 
-Status: **design, not started.** No prereqs beyond what's shipped: the userspace
-port proxy (`internal/server/portproxy.go`), gateway routing from heartbeats
-(`internal/gateway/gateway.go`), and cross-host wake (B4, `docs/uffd-b4-design.md`).
+Status: **implemented and running on the production GCP fleet.** URL and raw
+TCP ingress, revoke/reuse, wake-on-connect, gateway-restart recovery, and edge
+load-balancer health were verified end to end on 2026-07-31. The edge serves a
+publicly trusted Let's Encrypt certificate for `sbx.getaion.ai` and
+`*.sbx.getaion.ai`, issued with a manual Cloudflare DNS-01 challenge. Renewal
+remains manual because no Cloudflare API token is installed. The design below
+is what shipped; §Implemented surface records the concrete contracts, and [the
+E4/E5 plan](public-ingress-e4-e5-plan.md) carries the remaining HA-edge and
+durable-raw-port work. Prereqs, all shipped: the userspace port proxy
+(`internal/server/portproxy.go`), gateway routing from heartbeats
+(`internal/gateway/gateway.go`), and cross-host wake (B4,
+`docs/uffd-b4-design.md`).
+
+## Implemented surface
+
+Each explicitly exposed port gets a stable URL; raw protocols such as SSH get a
+durable fleet-wide address:
+
+```text
+https://<guest-port>-<sandbox-id>.<ingress-domain>
+<raw-public-host>:<public-port>
+```
+
+The public data plane is isolated in `services/sandbox-edge`. It imports no
+gateway or worker implementation package and speaks only the HTTP contracts
+below, so extracting it into its own module and deployment is mechanical.
+
+```text
+browser/SSH
+    │
+regional external passthrough Network Load Balancer
+    │
+sandbox-edge regional MIG
+    ├── GET /route/{sandbox} ───────────────▶ gateway
+    ├── GET /raw-route/{public-port} ───────▶ gateway
+    └── CONNECT /sandboxes/{id}/connect/{port} ─▶ worker ─▶ guest
+```
+
+URL-only exposure consumes no worker host-port pool entry; raw TCP allocation is
+gateway-only and idempotent per sandbox/guest-port; unexpose releases every URL,
+worker-local listener, and raw lease:
+
+```http
+POST   /sandboxes/{id}/ports        {"guest_port":3000,"host_port":false}
+POST   /sandboxes/{id}/raw-ports    {"guest_port":22}
+       → 200 {"guest_port":22,"mode":"raw","public_host":"tcp.example.com","public_port":20000}
+DELETE /sandboxes/{id}/ports/{guestPort}
+```
+
+CLI: `sandbox expose --url-only`, `sandbox expose --raw`, `sandbox ports`,
+`sandbox unexpose`. TypeScript SDK: `exposePort`, `exposeRawPort`, `listPorts`,
+`unexposePort`.
+
+Durable raw leases live in `ingress/raw/index.json` in the configured GCS
+bucket, every mutation an object-generation CAS, moving
+`free → pending → active → releasing → free`. `pending` makes allocation
+crash-safe across the worker commit and `releasing` makes unexpose/destroy
+crash-safe; a background reconciler converges stale transitional leases against
+worker mappings, and lease IDs keep stale cleanup from releasing a newly reused
+public port. Workers persist `public_port` in SQLite and in durable hibernation
+records and advertise it in heartbeats, so the address survives
+hibernation, adoption, worker drains, gateway restarts, and edge rollouts.
 
 ## The gap
 
