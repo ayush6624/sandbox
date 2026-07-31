@@ -28,7 +28,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
 source "$DIR/config.env"
-[ -f "$DIR/fleet-secrets.env" ] && source "$DIR/fleet-secrets.env"
+# Honour FLEET_SECRETS_FILE like control.sh and edge.sh do, so a git worktree
+# (which has its own infra/gcp/ but no gitignored secrets) can point at the
+# primary checkout's file instead of silently preflight-failing on an unset
+# GATEWAY_TOKEN.
+FLEET_SECRETS="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
+# shellcheck source=/dev/null
+[ -f "$FLEET_SECRETS" ] && source "$FLEET_SECRETS"
 
 TARGET=""
 DRY_RUN=0
