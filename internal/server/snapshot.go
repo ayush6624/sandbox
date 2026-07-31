@@ -72,6 +72,41 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	if err != nil {
 		return registry.Snapshot{}, 404, err
 	}
+	// Mark a valid user sandbox busy before taking its lifecycle lock. This
+	// makes an idle-hibernation scan that has not committed to the freeze yet
+	// back off. Keep the busy mark until after the lock is released (defer
+	// ordering below is intentional).
+	var done func()
+	forgetActivity := false
+	if !golden {
+		done = s.act.begin(id)
+		defer func() {
+			done()
+			// A concurrent destroy may have removed a row that existed at the
+			// first read while this request waited for the lifecycle lock.
+			if forgetActivity {
+				s.act.forget(id)
+			}
+		}()
+	}
+	// Snapshot, hibernate, wake, and destroy all mutate the same VMM lifecycle.
+	// Serialize them so a reaper cannot kill Firecracker while snapshot creation
+	// is blocked in Pause or /snapshot/create.
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+
+	// The row may have changed while this request waited for an in-progress
+	// lifecycle operation. Re-read it under the lock and fail clearly instead
+	// of operating on a stale Machine pointer.
+	sb, err = s.reg.Get(ctx, id)
+	if err != nil {
+		forgetActivity = !golden
+		return registry.Snapshot{}, 404, err
+	}
+	if sb.Status != registry.StatusRunning {
+		return registry.Snapshot{}, 409, fmt.Errorf("sandbox %s is %s, not running", id, sb.Status)
+	}
 	v, ok := s.machines.Load(id)
 	if !ok {
 		return registry.Snapshot{}, 409, fmt.Errorf("sandbox %s is not running in this server", id)
@@ -79,18 +114,28 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	m := v.(*vm.Machine)
 
 	format, baseID := registry.FormatFull, ""
+	var baseOp *sync.Mutex
 	// Diff only while Server.diffBase still vouches for the machine's bitmap:
 	// the entry is dropped after any snapshot (Firecracker resets the bitmap
 	// at snapshot creation) and never exists for hibernation-woken machines
 	// (loaded from hib artifacts, not the recorded base). Trusting the row's
 	// BaseSnapshotID here would diff against the wrong base in both cases.
 	if v, ok := s.diffBase.Load(id); ok && !golden && vm.DiffCapable(m) {
+		candidateID := v.(string)
+		candidateOp := s.snapshotLock(candidateID)
+		candidateOp.Lock()
 		// The base must still exist locally — it anchors the diff (and the
 		// upload path reads its artifacts). A rebuilt/deleted golden falls
 		// back to a full snapshot.
-		if base, err := s.reg.GetSnapshot(ctx, v.(string)); err == nil && base.Golden {
+		if base, err := s.reg.GetSnapshot(ctx, candidateID); err == nil && base.Golden {
 			format, baseID = registry.FormatDiff, base.ID
+			baseOp = candidateOp
+		} else {
+			candidateOp.Unlock()
 		}
+	}
+	if baseOp != nil {
+		defer baseOp.Unlock()
 	}
 	snapType := vm.SnapshotFull
 	if format == registry.FormatDiff {
@@ -98,6 +143,12 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	}
 
 	snapID := uuid.NewString()
+	// Publish the id under its operation lock before creating any artifact or
+	// row. A delete that discovers the row cannot overtake uploader
+	// registration and later have meta.json resurrected behind it.
+	snapshotOp := s.snapshotLock(snapID)
+	snapshotOp.Lock()
+	defer snapshotOp.Unlock()
 	memPath, statePath, rootfsPath, err := s.cfg.Provisioner.SnapshotPaths(snapID)
 	if err != nil {
 		return registry.Snapshot{}, 500, fmt.Errorf("snapshot dir: %w", err)
@@ -182,7 +233,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	// Durability: ship the snapshot to GCS in the background. The caller gets
 	// its 201 now; until meta.json lands the snapshot is host-local only.
 	if !golden && s.blob != nil {
-		go s.uploadSnapshot(snap)
+		s.startSnapshotUpload(snap)
 	}
 	return snap, 201, nil
 }
@@ -231,6 +282,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseCreate()
 
+	snapshotOp := s.snapshotLock(snapID)
+	snapshotOp.Lock()
+	defer snapshotOp.Unlock()
+
 	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
 		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
@@ -250,6 +305,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := uuid.NewString()
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
 	// The disk path is baked into the snapshot, so the restored VM's rootfs must
 	// live exactly there — Firecracker reattaches the block device by that path.
 	rootfsPath := snap.SourceRootfsPath
@@ -265,7 +323,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Insert the row first: its partial unique indexes gate on the snapshot's
 	// tap + guest IP, so a restore fails cleanly (before any disk work) if the
 	// source or a prior restore is still live.
-	sb, err := s.reg.CreateRestore(ctx, id, body.Name, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
+	sb, err := s.reg.CreateRestoreStarting(ctx, id, body.Name, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	if err != nil {
 		// Port-pool exhaustion is capacity (503); identity conflicts stay 409.
 		capacityOrHTTPError(w, 409, fmt.Errorf("registry restore: %w", err))
@@ -340,7 +398,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// cold boot, where the agent has to start from scratch.
 	tAgent := time.Now()
 	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
-		_ = s.destroy(context.Background(), id)
+		_ = s.destroyLocked(context.Background(), id)
 		httpError(w, 500, fmt.Errorf("restored but agent never became ready: %w", err))
 		return
 	}
@@ -348,8 +406,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// push above is polled and can lag the readiness gate by a tick).
 	syncGuestClock(ctx, sb.GuestIP)
 	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
-		_ = s.destroy(context.Background(), id)
+		_ = s.destroyLocked(context.Background(), id)
 		httpError(w, 500, fmt.Errorf("restored but identity initialization failed: %w", err))
+		return
+	}
+	if err := s.reg.MarkRunning(ctx, id); err != nil {
+		_ = s.destroyLocked(context.Background(), id)
+		httpError(w, 500, fmt.Errorf("publish restored sandbox: %w", err))
 		return
 	}
 	agentMS := time.Since(tAgent).Milliseconds()
@@ -359,6 +422,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	sb.PID = pid
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
+	sb.Status = registry.StatusRunning
 	writeJSON(w, 201, s.effectiveResources(sb))
 }
 
@@ -380,6 +444,10 @@ type clone struct {
 	// same-sandbox hibernation wake that must preserve its SSH identity.
 	independent bool
 	err         error
+	// lifecycle is held from row allocation through the final readiness
+	// transition so destroy/shutdown cannot tear resources out from under a
+	// half-started clone. Wake clones already run under their caller's lock.
+	lifecycle *sync.Mutex
 }
 
 // reidentifyMargin bounds how long finishClone waits for the guest's
@@ -425,6 +493,10 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("vcpus/mem_mib cannot be set on fanout: resources are baked into the snapshot when it is taken"))
 		return
 	}
+
+	snapshotOp := s.snapshotLock(snapID)
+	snapshotOp.Lock()
+	defer snapshotOp.Unlock()
 
 	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
@@ -480,7 +552,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			clones[i] = s.bringUpClone(snap, "", expiresAt, body.HibernateAfterSec, false)
+			clones[i] = s.bringUpClone(ctx, snap, "", expiresAt, body.HibernateAfterSec, false)
 		}(i)
 	}
 	wg.Wait()
@@ -542,9 +614,17 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 
 // bringUpClone allocates resources for one clone and resumes it on an unbridged
 // tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
-func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int, warming bool) *clone {
+func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int, warming bool) *clone {
 	startedAt := time.Now()
 	id := uuid.NewString()
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	failed := true
+	defer func() {
+		if failed {
+			lifecycle.Unlock()
+		}
+	}()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 	// Clones of the golden snapshot record it as their diff base; clones of a
 	// user snapshot don't (no diff chains — their snapshots go full).
@@ -556,9 +636,9 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 	var sb registry.Sandbox
 	var err error
 	if warming {
-		sb, err = s.reg.CreateWarm(s.vmCtx, id, rootfsPath, baseID, snap.Vcpus, snap.MemMIB)
+		sb, err = s.reg.CreateWarm(ctx, id, rootfsPath, baseID, snap.Vcpus, snap.MemMIB)
 	} else {
-		sb, err = s.reg.Create(s.vmCtx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
+		sb, err = s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	}
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
@@ -602,10 +682,11 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 	if err := provisioner.WakeThawAgent(sb.TapDevice); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] thaw wake on %s failed (poll fallback remains): %v\n", id, sb.TapDevice, err)
 	}
+	failed = false
 	return &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
 		baseSnap: snap.ID, independent: true, startedAt: startedAt,
-		setupTime: setupTime, launchTime: rt.LaunchTimings,
+		setupTime: setupTime, launchTime: rt.LaunchTimings, lifecycle: lifecycle,
 	}
 }
 
@@ -613,6 +694,9 @@ func (s *Server) bringUpClone(snap registry.Snapshot, name string, expiresAt *ti
 // clone's tap, sets up port forwarding, records it, and waits for its agent on
 // the fresh IP.
 func (s *Server) finishClone(ctx context.Context, c *clone) error {
+	if c.lifecycle != nil {
+		defer c.lifecycle.Unlock()
+	}
 	sb, m := c.sb, c.m
 
 	phaseStarted := time.Now()
@@ -679,6 +763,12 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		}
 		identityTime = time.Since(phaseStarted)
 	}
+	if sb.Status == registry.StatusStarting {
+		if err := s.reg.MarkRunning(ctx, sb.ID); err != nil {
+			return fmt.Errorf("publish running clone: %w", err)
+		}
+		c.sb.Status = registry.StatusRunning
+	}
 	launch := c.launchTime
 	fmt.Fprintf(os.Stderr,
 		"[%s] clone phases: setup=%s prepare=%s process_api=%s snapshot_load=%s drive=%s mmds=%s resume=%s reidentify=%s finish=%s agent=%s clock=%s identity=%s total=%s\n",
@@ -723,12 +813,35 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteSnapshot(ctx context.Context, id string) error {
+	op := s.snapshotLock(id)
+	op.Lock()
+	defer op.Unlock()
+	return s.deleteSnapshotLocked(ctx, id)
+}
+
+func (s *Server) deleteSnapshotLocked(ctx context.Context, id string) error {
 	snap, err := s.reg.GetSnapshot(ctx, id)
 	if err != nil {
 		return err
 	}
 	if snap.Golden {
 		return fmt.Errorf("%w: server-managed template snapshot cannot be deleted", registry.ErrSnapshotInUse)
+	}
+	if dependencies, err := s.reg.SnapshotDependencyCount(ctx, id); err != nil {
+		return err
+	} else if dependencies > 0 {
+		return fmt.Errorf("%w: snapshot %s has %d dependent resources", registry.ErrSnapshotInUse, id, dependencies)
+	}
+	// Ensure no background writer can recreate meta.json or keep reading files
+	// after this point.
+	s.cancelSnapshotUpload(id)
+	if s.blob != nil {
+		// Remove the durable commit before deleting the local row. If GCS is
+		// unavailable, keep the snapshot locally registered and return an error
+		// rather than claim deletion while another host can still restore it.
+		if err := s.blob.Delete(ctx, snapObj(id, "meta.json")); err != nil {
+			return fmt.Errorf("delete durable snapshot commit: %w", err)
+		}
 	}
 	if err := s.reg.DeleteSnapshot(ctx, id); err != nil {
 		return err
@@ -738,11 +851,27 @@ func (s *Server) deleteSnapshot(ctx context.Context, id string) error {
 	if g := s.golden.Load(); g != nil && g.ID == id {
 		s.golden.Store(nil)
 	}
-	_ = s.cfg.Provisioner.CleanupSnapshot(id)
 	if s.blob != nil {
-		go s.deleteSnapshotObjects(id)
+		go s.deleteSnapshotPayloadObjects(id)
 	}
+	_ = s.cfg.Provisioner.CleanupSnapshot(id)
 	return nil
+}
+
+// deleteExpiredSnapshot repeats the expiry decision under the same operation
+// lock used by retention updates and deletion.
+func (s *Server) deleteExpiredSnapshot(ctx context.Context, id string, cutoff time.Time) error {
+	op := s.snapshotLock(id)
+	op.Lock()
+	defer op.Unlock()
+	snap, err := s.reg.GetSnapshot(ctx, id)
+	if err != nil {
+		return err
+	}
+	if snap.ExpiresAt == nil || !snap.ExpiresAt.Before(cutoff) {
+		return nil
+	}
+	return s.deleteSnapshotLocked(ctx, id)
 }
 
 // handleSnapshotPublicFields persists public retention metadata after the
@@ -761,6 +890,9 @@ func (s *Server) handleSnapshotPublicFields(w http.ResponseWriter, r *http.Reque
 		httpError(w, 400, errors.New("retention_seconds must be non-negative"))
 		return
 	}
+	op := s.snapshotLock(r.PathValue("id"))
+	op.Lock()
+	defer op.Unlock()
 	expiresAt := body.ExpiresAt
 	if expiresAt == nil && body.RetentionSeconds > 0 {
 		value := time.Now().Add(time.Duration(body.RetentionSeconds) * time.Second)

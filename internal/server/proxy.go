@@ -29,6 +29,16 @@ var agentClient = &http.Client{}
 func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		// Validate before tracking so bogus ids do not leak activity entries.
+		if _, err := s.reg.Get(r.Context(), id); err != nil {
+			capacityOrHTTPError(w, statusFor(err), err)
+			return
+		}
+		// Pin before ensureRunning takes the lifecycle lock. If hibernation
+		// already passed its busy check, ensureRunning waits for it and wakes
+		// the sandbox; otherwise the new pin makes the reaper back off.
+		done := s.act.begin(id)
+		defer done()
 		sb, err := s.ensureRunning(r.Context(), id)
 		if err != nil {
 			// A capacity-rejected wake (memory budget/pool) surfaces as 503 +
@@ -36,11 +46,6 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 			capacityOrHTTPError(w, statusFor(err), err)
 			return
 		}
-		// Track only ids that exist, or bogus-id requests would leak tracker
-		// entries. The unpinned gap between ensureRunning and begin is a few
-		// µs — the same freeze-vs-request race the reaper already tolerates.
-		done := s.act.begin(id)
-		defer done()
 
 		url := fmt.Sprintf("http://%s:%d/%s", sb.GuestIP, agentapi.Port, endpoint)
 		if r.URL.RawQuery != "" {
@@ -86,15 +91,19 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 func (s *Server) handleShellProxy() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if _, err := s.reg.Get(r.Context(), id); err != nil {
+			shellError(w, r, statusFor(err), err)
+			return
+		}
+		// An open shell pins the sandbox before lifecycle reconciliation and
+		// for its whole lifetime (ServeHTTP returns when the socket closes).
+		done := s.act.begin(id)
+		defer done()
 		sb, err := s.ensureRunning(r.Context(), id)
 		if err != nil {
 			shellError(w, r, statusFor(err), err)
 			return
 		}
-		// An open shell pins the sandbox running for its whole lifetime —
-		// ServeHTTP returns when the WebSocket closes.
-		done := s.act.begin(id)
-		defer done()
 		target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", sb.GuestIP, agentapi.Port)}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		// NewSingleHostReverseProxy joins paths; rewrite to the agent's /shell

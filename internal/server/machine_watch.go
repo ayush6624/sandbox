@@ -50,6 +50,9 @@ func (s *Server) cleanupExitedMachine(id string, exited *vm.Machine) error {
 	if err != nil {
 		return fmt.Errorf("get sandbox: %w", err)
 	}
+	if err := s.reg.MarkStopping(ctx, id); err != nil {
+		return fmt.Errorf("mark stopping: %w", err)
+	}
 
 	ports, portsErr := s.reg.Ports(ctx, id)
 	s.pf.CloseSandbox(id)

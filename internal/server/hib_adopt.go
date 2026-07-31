@@ -236,7 +236,7 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 	}
 	// Fresh identity (tap/IP) from THIS host's pools; keep the sandbox's id,
 	// name, resources, expiry, and hibernate window.
-	sb, err := s.reg.Create(ctx, id, rec.Name, rootfsPath, expiresAt, rec.BaseSnapshotID, rec.HibernateAfterSec, rec.Vcpus, rec.MemMIB)
+	sb, err := s.reg.CreateStarting(ctx, id, rec.Name, rootfsPath, expiresAt, rec.BaseSnapshotID, rec.HibernateAfterSec, rec.Vcpus, rec.MemMIB)
 	if err != nil {
 		_ = s.cfg.Provisioner.RemoveRootfs(rootfsPath)
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
@@ -255,9 +255,17 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 		s.adoptRollback(sb)
 		return registry.Sandbox{}, fmt.Errorf("clone wake: %w", err)
 	}
+	sb.Status = registry.StatusRunning
 	// Open the restored explicit-port listeners.
 	if serr := s.syncSandboxPorts(ctx, sb); serr != nil {
 		fmt.Fprintf(os.Stderr, "[%s] adopt: sync port listeners: %v\n", id, serr)
+	}
+	// The frozen generation has become a live, mutable VM. Remove its durable
+	// commit marker so a later route miss or host failure cannot resurrect the
+	// old checkpoint as a second copy.
+	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
+		s.adoptRollback(sb)
+		return registry.Sandbox{}, err
 	}
 	// The reconstructed local mem/state were consumed into the live VM; drop them.
 	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))

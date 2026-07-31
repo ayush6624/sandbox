@@ -867,13 +867,76 @@ func TestSnapshotLifecycleAndDependencyProtection(t *testing.T) {
 	if _, err := r.SetPublicFields(ctx, sb.ID, "snapshot", snap.ID, nil); err != nil {
 		t.Fatal(err)
 	}
+	if dependencies, err := r.SnapshotDependencyCount(ctx, snap.ID); err != nil || dependencies != 1 {
+		t.Fatalf("dependency count = %d, %v; want 1", dependencies, err)
+	}
 	if err := r.DeleteSnapshot(ctx, snap.ID); !errors.Is(err, ErrSnapshotInUse) {
 		t.Fatalf("dependent delete error = %v", err)
 	}
 	if err := r.Destroy(ctx, sb.ID); err != nil {
 		t.Fatal(err)
 	}
+	if dependencies, err := r.SnapshotDependencyCount(ctx, snap.ID); err != nil || dependencies != 0 {
+		t.Fatalf("dependency count after destroy = %d, %v; want 0", dependencies, err)
+	}
 	if err := r.DeleteSnapshot(ctx, snap.ID); err != nil {
 		t.Fatalf("delete after dependent removal: %v", err)
+	}
+}
+
+func TestStartingSandboxIsHiddenUntilReady(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	sb, err := r.CreateStarting(ctx, "starting", "", "/tmp/starting", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.Status != StatusStarting {
+		t.Fatalf("status = %q, want %q", sb.Status, StatusStarting)
+	}
+	routed, err := r.ListRouted(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routed) != 0 {
+		t.Fatalf("starting sandbox was routed: %+v", routed)
+	}
+	if free, err := r.FreeSlots(ctx); err != nil || free != r.pools.TapMax-1 {
+		t.Fatalf("free slots while starting = %d, %v", free, err)
+	}
+	if err := r.FinishStart(ctx, sb.ID, 123, "vm", "/tmp/socket"); err != nil {
+		t.Fatal(err)
+	}
+	if routed, _ := r.ListRouted(ctx); len(routed) != 0 {
+		t.Fatalf("FinishStart published sandbox before readiness: %+v", routed)
+	}
+	if err := r.MarkRunning(ctx, sb.ID); err != nil {
+		t.Fatal(err)
+	}
+	routed, err = r.ListRouted(ctx)
+	if err != nil || len(routed) != 1 || routed[0].Status != StatusRunning {
+		t.Fatalf("routed after MarkRunning = %+v, %v", routed, err)
+	}
+}
+
+func TestStoppingSandboxIsUnroutedButKeepsCapacity(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	sb, err := r.Create(ctx, "stopping", "", "/tmp/stopping", nil, "", 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkStopping(ctx, sb.ID); err != nil {
+		t.Fatal(err)
+	}
+	if routed, err := r.ListRouted(ctx); err != nil || len(routed) != 0 {
+		t.Fatalf("stopping sandbox routed = %+v, %v", routed, err)
+	}
+	if free, err := r.FreeSlots(ctx); err != nil || free != r.pools.TapMax-1 {
+		t.Fatalf("free slots while stopping = %d, %v", free, err)
+	}
+	if err := r.Destroy(ctx, sb.ID); err != nil {
+		t.Fatal(err)
+	}
+	if free, err := r.FreeSlots(ctx); err != nil || free != r.pools.TapMax {
+		t.Fatalf("free slots after destroy = %d, %v", free, err)
 	}
 }

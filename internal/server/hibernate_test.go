@@ -52,6 +52,7 @@ func TestActivityTrackerDoneIsIdempotentPerRequest(t *testing.T) {
 	a := newActivityTracker()
 	done := a.begin("sb")
 	done()
+	done()
 	// A second begin/done cycle must not underflow the inflight count into
 	// permanently-busy or negative territory.
 	done2 := a.begin("sb")
@@ -62,4 +63,26 @@ func TestActivityTrackerDoneIsIdempotentPerRequest(t *testing.T) {
 	if _, busy, _ := a.idleFor("sb"); busy {
 		t.Fatal("must be idle after the second request ends")
 	}
+}
+
+func TestActivityTrackerLateDoneDoesNotResurrectForgottenID(t *testing.T) {
+	a := newActivityTracker()
+	done := a.begin("sb")
+	a.forget("sb")
+	done()
+	if _, _, ok := a.idleFor("sb"); ok {
+		t.Fatal("late request completion resurrected a forgotten sandbox")
+	}
+}
+
+func TestActivityTrackerLateGenerationCannotUnpinReusedID(t *testing.T) {
+	a := newActivityTracker()
+	oldDone := a.begin("sb")
+	a.forget("sb")
+	newDone := a.begin("sb")
+	oldDone()
+	if _, busy, _ := a.idleFor("sb"); !busy {
+		t.Fatal("old generation completion unpinned reused sandbox id")
+	}
+	newDone()
 }

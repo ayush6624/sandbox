@@ -380,13 +380,15 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		}
 		return "/snapshots/" + name, finalize, nil
 	}
+	beginSnapshotWrite := snapshotWriteWindow(cfg, req.VMID)
 
 	return PreparedLaunch{
-		Command:       cmd,
-		HostAPIPath:   filepath.Join(rootDir, "run", "firecracker.socket"),
-		HostUFFDPath:  filepath.Join(rootDir, "run", "uffd.socket"),
-		Paths:         paths,
-		PrepareOutput: prepareOutput,
+		Command:            cmd,
+		HostAPIPath:        filepath.Join(rootDir, "run", "firecracker.socket"),
+		HostUFFDPath:       filepath.Join(rootDir, "run", "uffd.socket"),
+		Paths:              paths,
+		PrepareOutput:      prepareOutput,
+		BeginSnapshotWrite: beginSnapshotWrite,
 		ConfigureSocket: func(hostPath string) error {
 			if filepath.Clean(hostPath) != filepath.Join(rootDir, "run", "uffd.socket") {
 				return fmt.Errorf("refusing to configure unexpected jail socket %s", hostPath)
@@ -413,6 +415,47 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		},
 		Cleanup: cleanupJail,
 	}, nil
+}
+
+// snapshotWriteWindow returns a hook that removes only wbps from a jailed
+// VMM's io.max while Firecracker writes a host-controlled snapshot. Snapshot
+// callers pause the guest before entering this window, so tenant disk I/O
+// cannot escape its normal limit. rbps remains capped throughout.
+func snapshotWriteWindow(cfg JailerConfig, vmID string) func() (func() error, error) {
+	if cfg.IODevice == "" || cfg.IOWriteBPS <= 0 {
+		return nil
+	}
+	path := filepath.Join(jailerCgroupLeaf(cfg, vmID), "io.max")
+	limited := ioMaxValue(cfg, false)
+	unlimitedWrite := ioMaxValue(cfg, true)
+	return func() (func() error, error) {
+		if err := os.WriteFile(path, []byte(unlimitedWrite), 0600); err != nil {
+			return nil, fmt.Errorf("remove snapshot write throttle: %w", err)
+		}
+		var once sync.Once
+		var restoreErr error
+		return func() error {
+			once.Do(func() {
+				if err := os.WriteFile(path, []byte(limited), 0600); err != nil {
+					restoreErr = fmt.Errorf("restore snapshot write throttle: %w", err)
+				}
+			})
+			return restoreErr
+		}, nil
+	}
+}
+
+func ioMaxValue(cfg JailerConfig, unlimitedWrite bool) string {
+	value := cfg.IODevice
+	if cfg.IOReadBPS > 0 {
+		value += fmt.Sprintf(" rbps=%d", cfg.IOReadBPS)
+	}
+	if unlimitedWrite {
+		value += " wbps=max"
+	} else if cfg.IOWriteBPS > 0 {
+		value += fmt.Sprintf(" wbps=%d", cfg.IOWriteBPS)
+	}
+	return value
 }
 
 func validateLaunchRequest(req LaunchRequest) error {
@@ -832,17 +875,10 @@ func prepareVMMCgroup(cfg JailerConfig, req LaunchRequest) (retErr error) {
 		{"cpu.weight", strconv.FormatInt(cfg.CPUWeight, 10)},
 	}
 	if cfg.IODevice != "" && (cfg.IOReadBPS > 0 || cfg.IOWriteBPS > 0) {
-		value := cfg.IODevice
-		if cfg.IOReadBPS > 0 {
-			value += fmt.Sprintf(" rbps=%d", cfg.IOReadBPS)
-		}
-		if cfg.IOWriteBPS > 0 {
-			value += fmt.Sprintf(" wbps=%d", cfg.IOWriteBPS)
-		}
 		settings = append(settings, struct {
 			file  string
 			value string
-		}{"io.max", value})
+		}{"io.max", ioMaxValue(cfg, false)})
 	}
 	for _, setting := range settings {
 		if err := os.WriteFile(filepath.Join(leaf, setting.file), []byte(setting.value), 0600); err != nil {

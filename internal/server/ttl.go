@@ -30,6 +30,9 @@ func (s *Server) handleSetTimeout(w http.ResponseWriter, r *http.Request) {
 		t := time.Now().Add(time.Duration(body.TimeoutSec) * time.Second)
 		expiresAt = &t
 	}
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
 	if err := s.reg.SetExpiry(r.Context(), id, expiresAt); err != nil {
 		httpError(w, 404, err)
 		return
@@ -60,7 +63,7 @@ func (s *Server) reapExpired(ctx context.Context) {
 			for _, sb := range expired {
 				fmt.Fprintf(os.Stderr, "reaper: destroying expired sandbox %s (expired %s)\n",
 					sb.ID, sb.ExpiresAt.Format(time.RFC3339))
-				if err := s.destroy(context.Background(), sb.ID); err != nil {
+				if err := s.destroyExpired(context.Background(), sb.ID, now); err != nil {
 					fmt.Fprintf(os.Stderr, "reaper: destroy %s: %v\n", sb.ID, err)
 				}
 			}
@@ -72,7 +75,7 @@ func (s *Server) reapExpired(ctx context.Context) {
 			for _, snap := range expiredSnapshots {
 				fmt.Fprintf(os.Stderr, "reaper: deleting expired snapshot %s (expired %s)\n",
 					snap.ID, snap.ExpiresAt.Format(time.RFC3339))
-				if err := s.deleteSnapshot(context.Background(), snap.ID); err != nil {
+				if err := s.deleteExpiredSnapshot(context.Background(), snap.ID, now); err != nil {
 					// An in-use snapshot remains valid and is retried after its
 					// dependent resources are deleted.
 					fmt.Fprintf(os.Stderr, "reaper: delete snapshot %s: %v\n", snap.ID, err)
@@ -80,4 +83,20 @@ func (s *Server) reapExpired(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// destroyExpired revalidates the deadline under the lifecycle lock. A timeout
+// extension that lands after Expired's scan must win over the stale reaper row.
+func (s *Server) destroyExpired(ctx context.Context, id string, cutoff time.Time) error {
+	mu := s.wakeLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+	sb, err := s.reg.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if sb.ExpiresAt == nil || !sb.ExpiresAt.Before(cutoff) {
+		return nil
+	}
+	return s.destroyLocked(ctx, id)
 }

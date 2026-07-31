@@ -67,7 +67,12 @@ type PreparedLaunch struct {
 	OwnsValidation bool
 	// ProcessPID returns the Firecracker child PID (not the jailer parent).
 	ProcessPID func() (int, error)
-	Cleanup    func()
+	// BeginSnapshotWrite temporarily removes only the jailed VMM's write
+	// bandwidth cap while Firecracker writes a host-requested snapshot. The
+	// caller must have paused the guest first and must invoke the returned
+	// restore callback before resuming it. Direct launches leave this nil.
+	BeginSnapshotWrite func() (restore func() error, err error)
+	Cleanup            func()
 }
 
 // ProcessLauncher prepares the Firecracker process for every lifecycle mode.

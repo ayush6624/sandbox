@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -34,12 +35,13 @@ import (
 // is set; the lifecycle functions branch on which.
 type Machine struct {
 	*fcsdk.Machine
-	raw           *rawMachine
-	log           *vmmLog
-	launchCleanup func()
-	processPID    func() (int, error)
-	prepareOutput func(string) (string, func() error, error)
-	cleanupOnce   sync.Once
+	raw                *rawMachine
+	log                *vmmLog
+	launchCleanup      func()
+	processPID         func() (int, error)
+	prepareOutput      func(string) (string, func() error, error)
+	beginSnapshotWrite func() (func() error, error)
+	cleanupOnce        sync.Once
 	// SDK-backed machines get one process waiter shared by every Wait caller.
 	// It also finalizes the log even when startup fails after the VMM launched
 	// and the caller never reaches its normal lifecycle goroutine.
@@ -89,12 +91,13 @@ type rawMachine struct {
 	// uffd is the page-fault handler backing a UFFD-restored VM's memory; nil
 	// for cold boots and clones. It must outlive the VM (the guest faults
 	// throughout its run) and be torn down when the VM exits.
-	uffd          *uffdHandler
-	log           *vmmLog
-	launchCleanup func()
-	processPID    func() (int, error)
-	prepareOutput func(string) (string, func() error, error)
-	cleanupOnce   sync.Once
+	uffd               *uffdHandler
+	log                *vmmLog
+	launchCleanup      func()
+	processPID         func() (int, error)
+	prepareOutput      func(string) (string, func() error, error)
+	beginSnapshotWrite func() (func() error, error)
+	cleanupOnce        sync.Once
 }
 
 func (m *rawMachine) cleanupLaunch() {
@@ -293,12 +296,13 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 	}
 	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
 	return &Machine{
-		Machine:       m,
-		log:           logCloser,
-		launchCleanup: prepared.Cleanup,
-		processPID:    prepared.ProcessPID,
-		prepareOutput: prepared.PrepareOutput,
-		waitDone:      make(chan struct{}),
+		Machine:            m,
+		log:                logCloser,
+		launchCleanup:      prepared.Cleanup,
+		processPID:         prepared.ProcessPID,
+		prepareOutput:      prepared.PrepareOutput,
+		beginSnapshotWrite: prepared.BeginSnapshotWrite,
+		waitDone:           make(chan struct{}),
 	}, rt, nil
 }
 
@@ -344,12 +348,13 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 	}
 	rt := RuntimeConfig{SocketPath: fcCfg.SocketPath, VMID: fcCfg.VMID}
 	return &Machine{
-		Machine:       m,
-		log:           logCloser,
-		launchCleanup: prepared.Cleanup,
-		processPID:    prepared.ProcessPID,
-		prepareOutput: prepared.PrepareOutput,
-		waitDone:      make(chan struct{}),
+		Machine:            m,
+		log:                logCloser,
+		launchCleanup:      prepared.Cleanup,
+		processPID:         prepared.ProcessPID,
+		prepareOutput:      prepared.PrepareOutput,
+		beginSnapshotWrite: prepared.BeginSnapshotWrite,
+		waitDone:           make(chan struct{}),
 	}, rt, nil
 }
 
@@ -542,7 +547,7 @@ func Resume(ctx context.Context, m *Machine) error {
 // For a raw clone machine the snapshot bakes the clone's CURRENT config — its
 // own CoW rootfs path, tap, and reidentified IP/MAC — which is exactly what
 // the registry records for it.
-func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType string) error {
+func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType string) (retErr error) {
 	if m == nil {
 		return fmt.Errorf("nil machine")
 	}
@@ -552,6 +557,29 @@ func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType stri
 	prepareOutput := m.prepareOutput
 	if m.raw != nil {
 		prepareOutput = m.raw.prepareOutput
+	}
+	beginSnapshotWrite := m.beginSnapshotWrite
+	if m.raw != nil {
+		beginSnapshotWrite = m.raw.beginSnapshotWrite
+	}
+	if beginSnapshotWrite != nil {
+		restore, err := beginSnapshotWrite()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := restore(); err != nil {
+				// Never resume a tenant VMM after failing to restore its write
+				// policy. Stopping it is the fail-closed outcome; the server's
+				// machine watcher reconciles the row.
+				_ = StopForce(m)
+				if retErr == nil {
+					retErr = err
+				} else {
+					retErr = errors.Join(retErr, err)
+				}
+			}
+		}()
 	}
 	guestMem, guestState := memPath, statePath
 	var finalizeMem, finalizeState func() error
@@ -646,13 +674,14 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
 	rm := &rawMachine{
-		cmd:           cmd,
-		sock:          opts.SocketPath,
-		doneCh:        make(chan struct{}),
-		log:           logCloser,
-		launchCleanup: prepared.Cleanup,
-		processPID:    prepared.ProcessPID,
-		prepareOutput: prepared.PrepareOutput,
+		cmd:                cmd,
+		sock:               opts.SocketPath,
+		doneCh:             make(chan struct{}),
+		log:                logCloser,
+		launchCleanup:      prepared.Cleanup,
+		processPID:         prepared.ProcessPID,
+		prepareOutput:      prepared.PrepareOutput,
+		beginSnapshotWrite: prepared.BeginSnapshotWrite,
 	}
 	go func() {
 		rm.waitErr = cmd.Wait()
@@ -790,14 +819,15 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		return nil, RuntimeConfig{}, fmt.Errorf("start firecracker: %w", err)
 	}
 	rm := &rawMachine{
-		cmd:           cmd,
-		sock:          opts.SocketPath,
-		doneCh:        make(chan struct{}),
-		uffd:          h,
-		log:           logCloser,
-		launchCleanup: prepared.Cleanup,
-		processPID:    prepared.ProcessPID,
-		prepareOutput: prepared.PrepareOutput,
+		cmd:                cmd,
+		sock:               opts.SocketPath,
+		doneCh:             make(chan struct{}),
+		uffd:               h,
+		log:                logCloser,
+		launchCleanup:      prepared.Cleanup,
+		processPID:         prepared.ProcessPID,
+		prepareOutput:      prepared.PrepareOutput,
+		beginSnapshotWrite: prepared.BeginSnapshotWrite,
 	}
 	// If the page source can't serve a fault (e.g. a GCS chunk fetch fails after
 	// retries), Firecracker would hang forever on the unserved page. Kill it

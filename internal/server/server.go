@@ -132,6 +132,13 @@ type Server struct {
 	// pullMu/pulls serialize concurrent GCS pulls of the same snapshot id.
 	pullMu sync.Mutex
 	pulls  map[string]*sync.Mutex
+	// snapshotLocks serialize a snapshot's creation/upload, restore/fanout use,
+	// and deletion. uploads are separately cancellable so delete never waits
+	// for the full background timeout or lets a cancelled upload re-commit.
+	snapshotLocksMu sync.Mutex
+	snapshotLocks   map[string]*sync.Mutex
+	snapshotUpMu    sync.Mutex
+	snapshotUploads map[string]*backgroundUpload
 	// chunkUpMu/chunksUploaded remember content-addressed chunks this process has
 	// already pushed, so re-hibernations skip re-uploading unchanged chunks
 	// without an Exists round-trip each (roadmap Phase B2 dedup/CoW).
@@ -143,6 +150,11 @@ type Server struct {
 	act     *activityTracker
 	wakesMu sync.Mutex
 	wakes   map[string]*sync.Mutex
+	// Hibernation payloads upload after the VM is stopped. Wake/destroy cancel
+	// and join the current upload before consuming or deleting its local files,
+	// preventing late commit-marker resurrection and read-vs-unlink races.
+	hibUpMu    sync.Mutex
+	hibUploads map[string]*backgroundUpload
 
 	// diffBase maps a live machine's sandbox id → the snapshot id its
 	// dirty-page bitmap is tracking against. An entry exists ONLY while a diff
@@ -200,6 +212,11 @@ type Server struct {
 	phases *phaseRecorder
 }
 
+type backgroundUpload struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // serverMetrics are monotonic counts of lifecycle events, incremented at the
 // single choke point for each transition. All access is via the atomics, so no
 // lock is needed on the scrape path.
@@ -221,9 +238,12 @@ const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
-		stageLocks:     map[string]*sync.Mutex{},
-		chunksUploaded: map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
-		startedAt: time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder()}
+		stageLocks:      map[string]*sync.Mutex{},
+		snapshotLocks:   map[string]*sync.Mutex{},
+		snapshotUploads: map[string]*backgroundUpload{},
+		chunksUploaded:  map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
+		hibUploads: map[string]*backgroundUpload{},
+		startedAt:  time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder()}
 	sem := cfg.CreateConcurrency
 	if sem <= 0 {
 		sem = 2 * runtime.NumCPU()
@@ -444,7 +464,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		// kill_timeout / GCE stop) and hibernation needs most of it.
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		for _, srv := range servers {
-			_ = srv.Shutdown(shCtx)
+			if err := srv.Shutdown(shCtx); err != nil {
+				// Shutdown's deadline does not close active connections. Force
+				// them closed so their request contexts cancel and in-flight
+				// starts unwind instead of racing the machine snapshot below.
+				_ = srv.Close()
+			}
 		}
 		cancel()
 		s.shutdownAll()
@@ -565,7 +590,8 @@ func (s *Server) shutdownAll() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if sb, err := s.reg.Get(ctx, id); err == nil &&
-				(sb.Status == registry.StatusPreparing || sb.Status == registry.StatusWarming) {
+				(sb.Status == registry.StatusPreparing || sb.Status == registry.StatusWarming ||
+					sb.Status == registry.StatusStarting || sb.Status == registry.StatusStopping) {
 				if err := s.destroy(context.Background(), id); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] shutdown destroy warm sandbox: %v\n", id, err)
 				}
@@ -581,6 +607,31 @@ func (s *Server) shutdownAll() {
 		return true
 	})
 	wg.Wait()
+
+	// sync.Map.Range is explicitly not a point-in-time snapshot. A bring-up
+	// that was already inside an HTTP handler when draining began can publish
+	// its Machine just after the range passed its key. Reconcile the registry
+	// once more so no starting/running row or late VMM escapes shutdown.
+	rows, err := s.reg.All(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shutdown: list stragglers: %v\n", err)
+		return
+	}
+	for _, sb := range rows {
+		switch sb.Status {
+		case registry.StatusHibernated:
+			continue
+		case registry.StatusRunning:
+			if _, ok := s.machines.Load(sb.ID); ok {
+				if err := s.hibernate(ctx, sb.ID, true); err == nil {
+					continue
+				}
+			}
+		}
+		if err := s.destroy(context.Background(), sb.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] shutdown destroy straggler: %v\n", sb.ID, err)
+		}
+	}
 }
 
 // --- HTTP handlers ---
@@ -734,12 +785,15 @@ func (s *Server) releaseCreate() { <-s.createSem }
 // the template's resources when nonzero (already validated by the caller).
 func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
 	id := uuid.NewString()
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
 
 	// Allocate identity + admission BEFORE the rootfs copy: a capacity-rejected
 	// create (pool/memory exhaustion — routine under gateway failover) must not
 	// pay a multi-GB copy + cleanup on a host that's already full.
-	sb, err := s.reg.Create(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
+	sb, err := s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
 	}
@@ -798,17 +852,22 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	s.watchMachine(id, m, "VM")
 
 	if err := waitForAgent(ctx, sb.GuestIP, 60*time.Second); err != nil {
-		_ = s.destroy(context.Background(), id)
+		_ = s.destroyLocked(context.Background(), id)
 		return registry.Sandbox{}, fmt.Errorf("sandbox booted but agent never became ready: %w", err)
 	}
 	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
-		_ = s.destroy(context.Background(), id)
+		_ = s.destroyLocked(context.Background(), id)
 		return registry.Sandbox{}, fmt.Errorf("sandbox booted but identity initialization failed: %w", err)
+	}
+	if err := s.reg.MarkRunning(ctx, id); err != nil {
+		_ = s.destroyLocked(context.Background(), id)
+		return registry.Sandbox{}, fmt.Errorf("publish running sandbox: %w", err)
 	}
 
 	sb.PID = pid
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
+	sb.Status = registry.StatusRunning
 	return sb, nil
 }
 
@@ -900,6 +959,9 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
 	if err := s.reg.SetName(r.Context(), id, body.Name); err != nil {
 		httpError(w, 404, err)
 		return
@@ -926,6 +988,9 @@ func (s *Server) handleRenameSnapshot(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	op := s.snapshotLock(id)
+	op.Lock()
+	defer op.Unlock()
 	if err := s.reg.SetSnapshotName(r.Context(), id, body.Name); err != nil {
 		httpError(w, 404, err)
 		return
@@ -954,7 +1019,14 @@ func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 // handleResume is the explicit lifecycle seam used by v1. Legacy clients
 // retain implicit wake-on-use behavior.
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
-	sb, err := s.ensureRunning(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+	if _, err := s.reg.Get(r.Context(), id); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	done := s.act.begin(id)
+	defer done()
+	sb, err := s.ensureRunning(r.Context(), id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
@@ -964,11 +1036,7 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 
 // handlePublicFields persists descriptive state owned by the v1 adapter.
 func (s *Server) handlePublicFields(w http.ResponseWriter, r *http.Request) {
-	current, err := s.reg.Get(r.Context(), r.PathValue("id"))
-	if err != nil {
-		httpError(w, http.StatusNotFound, err)
-		return
-	}
+	id := r.PathValue("id")
 	var body struct {
 		Name               *string            `json:"name"`
 		Metadata           *map[string]string `json:"metadata"`
@@ -979,6 +1047,14 @@ func (s *Server) handlePublicFields(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	current, err := s.reg.Get(r.Context(), id)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err)
 		return
 	}
 	name, metadata := current.Name, current.Metadata
@@ -1046,6 +1122,11 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	mu := s.wakeLock(id)
 	mu.Lock()
 	defer mu.Unlock()
+	return s.destroyLocked(ctx, id)
+}
+
+// destroyLocked tears down id while wakeLock(id) is held.
+func (s *Server) destroyLocked(ctx context.Context, id string) error {
 	defer s.act.forget(id)
 	defer s.diffBase.Delete(id)
 
@@ -1053,14 +1134,15 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("get sandbox: %w", err)
 	}
-
-	// A hibernated sandbox has no VM or tap — just its port listeners,
-	// artifacts, and rows.
-	if sb.Status == registry.StatusHibernated {
-		s.pf.CloseSandbox(id)
-		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
-		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
-		return s.reg.Destroy(ctx, id)
+	// A durable generation must not outlive an explicit destroy. Stop its
+	// writer first, then synchronously remove the commit marker before local
+	// state becomes unrecoverable.
+	s.cancelHibernationUpload(id)
+	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
+		return err
+	}
+	if err := s.reg.MarkStopping(ctx, id); err != nil {
+		return fmt.Errorf("mark stopping: %w", err)
 	}
 
 	// Read port mappings before reg.Destroy deletes their rows.
@@ -1085,8 +1167,13 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
 	}
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
+	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
-	return s.reg.Destroy(ctx, id)
+	if err := s.reg.Destroy(ctx, id); err != nil {
+		return err
+	}
+	go s.deleteHibernationObjects(id)
+	return nil
 }
 
 // --- helpers ---

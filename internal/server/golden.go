@@ -264,7 +264,7 @@ func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot,
 	}
 
 	t0 := time.Now()
-	c := s.bringUpClone(snap, name, expiresAt, hibernateAfterSec, false)
+	c := s.bringUpClone(ctx, snap, name, expiresAt, hibernateAfterSec, false)
 	stage.Unlock()
 	if c.err != nil {
 		return registry.Sandbox{}, c.err

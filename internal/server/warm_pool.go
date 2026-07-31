@@ -180,7 +180,7 @@ func (s *Server) createWarmFromSnapshot(ctx context.Context, snap registry.Snaps
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 	started := time.Now()
-	c := s.bringUpClone(snap, "", nil, -1, true)
+	c := s.bringUpClone(ctx, snap, "", nil, -1, true)
 	stage.Unlock()
 	if c.err != nil {
 		return registry.Sandbox{}, c.err

@@ -122,11 +122,9 @@ func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
 //
 // memPath is the local mem file (a full snapshot, or a sparse diff when
 // snapType==Diff); memDiffBaseID is the golden id a diff mem rebases onto ("" for
-// full). The chunk upload for a full mem is done here (uploadMemChunks); a diff
-// mem is uploaded whole as a sparse overlay.
-func (s *Server) uploadHibernation(id string, sb registry.Sandbox, memPath, statePath, snapType, memDiffBaseID string, workingSet []uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
-	defer cancel()
+// full). rootfsPath is an immutable copy captured while the guest was paused;
+// the live rootfs may be writable again by the time this goroutine runs.
+func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.Sandbox, memPath, statePath, rootfsPath, snapType, memDiffBaseID string, workingSet []uint64) {
 	t0 := time.Now()
 
 	// --- mem ---
@@ -152,7 +150,7 @@ func (s *Server) uploadHibernation(id string, sb registry.Sandbox, memPath, stat
 	}
 
 	// --- rootfs (diff vs the golden base when we have one durable, else full) ---
-	rootfsForm, rootfsBaseID, err := s.uploadHibRootfs(ctx, id, sb, snapType, memDiffBaseID)
+	rootfsForm, rootfsBaseID, err := s.uploadHibRootfs(ctx, id, sb, rootfsPath, snapType, memDiffBaseID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: upload rootfs: %v\n", id, err)
 		return
@@ -181,7 +179,7 @@ func (s *Server) uploadHibernation(id string, sb registry.Sandbox, memPath, stat
 // golden base rootfs when one is durable (the common hot-created-clone case —
 // tens of MiB), else as a full sparse stream (cold-boot: no base to diff). It
 // returns the recorded form + base id.
-func (s *Server) uploadHibRootfs(ctx context.Context, id string, sb registry.Sandbox, snapType, memDiffBaseID string) (form, baseID string, err error) {
+func (s *Server) uploadHibRootfs(ctx context.Context, id string, sb registry.Sandbox, rootfsPath, snapType, memDiffBaseID string) (form, baseID string, err error) {
 	// Prefer the same golden the mem diffs against (already durable); otherwise
 	// the sandbox's clone base, if it's a golden we've uploaded.
 	baseID = memDiffBaseID
@@ -194,16 +192,108 @@ func (s *Server) uploadHibRootfs(ctx context.Context, id string, sb registry.San
 			baseID = "" // base vanished or isn't golden — fall back to full
 		} else if berr := s.ensureBaseUploaded(ctx, base); berr != nil {
 			baseID = "" // couldn't guarantee the base is durable — fall back to full
-		} else if ranges, derr := s.cfg.Provisioner.DiffExtents(sb.RootfsPath, base.RootfsPath); derr == nil {
-			if _, perr := s.blob.PutRanges(ctx, hibRootfsObj(id), sb.RootfsPath, toBlobRanges(ranges)); perr != nil {
+		} else if ranges, derr := s.cfg.Provisioner.DiffExtents(rootfsPath, base.RootfsPath); derr == nil {
+			if _, perr := s.blob.PutRanges(ctx, hibRootfsObj(id), rootfsPath, toBlobRanges(ranges)); perr != nil {
 				return "", "", perr
 			}
 			return rootfsFormDiff, baseID, nil
 		}
 		// DiffExtents failed — fall through to a full upload (correctness over size).
 	}
-	if _, perr := s.blob.PutSparse(ctx, hibRootfsObj(id), sb.RootfsPath); perr != nil {
+	if _, perr := s.blob.PutSparse(ctx, hibRootfsObj(id), rootfsPath); perr != nil {
 		return "", "", perr
 	}
 	return rootfsFormFull, "", nil
+}
+
+// startHibernationUpload publishes one frozen generation. It registers the
+// cancellable job before launching it, so a wake/destroy that starts
+// immediately after hibernate returns cannot miss the uploader.
+func (s *Server) startHibernationUpload(id string, sb registry.Sandbox, memPath, statePath, rootfsPath, snapType, memDiffBaseID string, workingSet []uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
+	up := &backgroundUpload{cancel: cancel, done: make(chan struct{})}
+	s.hibUpMu.Lock()
+	s.hibUploads[id] = up
+	s.hibUpMu.Unlock()
+	go func() {
+		defer cancel()
+		defer func() {
+			close(up.done)
+			s.hibUpMu.Lock()
+			if s.hibUploads[id] == up {
+				delete(s.hibUploads, id)
+			}
+			s.hibUpMu.Unlock()
+		}()
+		s.uploadHibernation(ctx, id, sb, memPath, statePath, rootfsPath, snapType, memDiffBaseID, workingSet)
+	}()
+}
+
+// cancelHibernationUpload prevents any later object/record write and waits
+// until the uploader has stopped touching the local frozen files.
+func (s *Server) cancelHibernationUpload(id string) {
+	s.hibUpMu.Lock()
+	up := s.hibUploads[id]
+	s.hibUpMu.Unlock()
+	if up == nil {
+		return
+	}
+	up.cancel()
+	<-up.done
+}
+
+// resetHibernationDurability removes a previous generation before a new freeze
+// is allowed to start. record.json goes first, so any partial cleanup is still
+// safely non-adoptable. Chunks are content-addressed and intentionally shared.
+func (s *Server) resetHibernationDurability(ctx context.Context, id string) error {
+	if s.blob == nil {
+		return nil
+	}
+	for _, object := range []string{
+		hibRecordObj(id),
+		hibManifestObj(id),
+		hibWorkingSetObj(id),
+		hibMemDiffObj(id),
+		hibStateObj(id),
+		hibRootfsObj(id),
+	} {
+		if err := s.blob.Delete(ctx, object); err != nil {
+			return fmt.Errorf("delete stale %s: %w", object, err)
+		}
+	}
+	return nil
+}
+
+// invalidateHibernationRecord removes only the cross-host commit marker. The
+// current manifest may still accelerate the imminent same-host UFFD wake.
+func (s *Server) invalidateHibernationRecord(ctx context.Context, id string) error {
+	if s.blob == nil {
+		return nil
+	}
+	if err := s.blob.Delete(ctx, hibRecordObj(id)); err != nil {
+		return fmt.Errorf("invalidate durable hibernation record: %w", err)
+	}
+	return nil
+}
+
+// deleteHibernationObjects is called only after the uploader has been joined.
+// The record is already gone synchronously; these payload deletions are cleanup.
+func (s *Server) deleteHibernationObjects(id string) {
+	if s.blob == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	for _, object := range []string{
+		hibManifestObj(id),
+		hibWorkingSetObj(id),
+		hibMemDiffObj(id),
+		hibStateObj(id),
+		hibRootfsObj(id),
+		hibOwnerObj(id),
+	} {
+		if err := s.blob.Delete(ctx, object); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] durable hibernate cleanup %s: %v\n", id, object, err)
+		}
+	}
 }

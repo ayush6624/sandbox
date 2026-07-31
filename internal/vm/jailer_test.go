@@ -162,6 +162,32 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", file, got, want)
 		}
 	}
+	if prepared.BeginSnapshotWrite == nil {
+		t.Fatal("jailed launch omitted snapshot write window")
+	}
+	restoreWriteLimit, err := prepared.BeginSnapshotWrite()
+	if err != nil {
+		t.Fatalf("begin snapshot write: %v", err)
+	}
+	ioMaxPath := filepath.Join(leaf, "io.max")
+	if got, err := os.ReadFile(ioMaxPath); err != nil {
+		t.Fatal(err)
+	} else if want := "8:16 rbps=10485760 wbps=max"; string(got) != want {
+		t.Fatalf("snapshot io.max = %q, want %q", got, want)
+	}
+	if err := restoreWriteLimit(); err != nil {
+		t.Fatalf("restore snapshot write limit: %v", err)
+	}
+	// Restoration is idempotent because Snapshot may encounter a primary
+	// failure and still run its deferred policy cleanup.
+	if err := restoreWriteLimit(); err != nil {
+		t.Fatalf("restore snapshot write limit again: %v", err)
+	}
+	if got, err := os.ReadFile(ioMaxPath); err != nil {
+		t.Fatal(err)
+	} else if want := "8:16 rbps=10485760 wbps=5242880"; string(got) != want {
+		t.Fatalf("restored io.max = %q, want %q", got, want)
+	}
 
 	hostOutput := filepath.Join(base, "published", "snapshot.mem")
 	guestOutput, finalize, err := prepared.PrepareOutput(hostOutput)

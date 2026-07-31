@@ -20,8 +20,9 @@ import (
 // Idle hibernation frees the resources of sandboxes nobody is talking to —
 // the density lever that lets a host's slot count absorb bursts. A sandbox
 // idle for cfg.HibernateAfter is paused, full-snapshotted (memory + device
-// state; its rootfs file simply stays where it is — the frozen VM can't write
-// to it), and killed. The row flips to status=hibernated and its tap/IP
+// state plus, when GCS durability is enabled, an immutable reflink/sparse
+// rootfs view for background upload), and killed. The row flips to
+// status=hibernated and its tap/IP
 // return to the pools; its host port(s) stay reserved, because the userspace
 // port-forward listeners (portproxy.go) stay bound across the freeze.
 // Hibernated sandboxes survive server restarts.
@@ -80,13 +81,17 @@ const hibernateTick = 30 * time.Second
 // many requests are in flight (a sandbox with an open shell or a running
 // exec stream is never idle, no matter how long ago it started).
 type activityTracker struct {
-	mu       sync.Mutex
-	last     map[string]time.Time
-	inflight map[string]int
+	mu      sync.Mutex
+	entries map[string]*activityEntry
+}
+
+type activityEntry struct {
+	last     time.Time
+	inflight int
 }
 
 func newActivityTracker() *activityTracker {
-	return &activityTracker{last: map[string]time.Time{}, inflight: map[string]int{}}
+	return &activityTracker{entries: map[string]*activityEntry{}}
 }
 
 // begin marks a request against id as started; the returned func marks it
@@ -94,29 +99,48 @@ func newActivityTracker() *activityTracker {
 // long-running exec/shell ENDS, not when it began.
 func (a *activityTracker) begin(id string) func() {
 	a.mu.Lock()
-	a.last[id] = time.Now()
-	a.inflight[id]++
+	entry := a.entries[id]
+	if entry == nil {
+		entry = &activityEntry{}
+		a.entries[id] = entry
+	}
+	entry.last = time.Now()
+	entry.inflight++
 	a.mu.Unlock()
+	var once sync.Once
 	return func() {
-		a.mu.Lock()
-		a.last[id] = time.Now()
-		if a.inflight[id]--; a.inflight[id] <= 0 {
-			delete(a.inflight, id)
-		}
-		a.mu.Unlock()
+		once.Do(func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			// forget removes the exact generation. A late completion from an
+			// old connection must not recreate a destroyed sandbox's activity
+			// entry or decrement a newly adopted sandbox reusing the same id.
+			if a.entries[id] != entry {
+				return
+			}
+			entry.last = time.Now()
+			entry.inflight--
+			if entry.inflight < 0 {
+				entry.inflight = 0
+			}
+		})
 	}
 }
 
 func (a *activityTracker) touch(id string) {
 	a.mu.Lock()
-	a.last[id] = time.Now()
+	entry := a.entries[id]
+	if entry == nil {
+		entry = &activityEntry{}
+		a.entries[id] = entry
+	}
+	entry.last = time.Now()
 	a.mu.Unlock()
 }
 
 func (a *activityTracker) forget(id string) {
 	a.mu.Lock()
-	delete(a.last, id)
-	delete(a.inflight, id)
+	delete(a.entries, id)
 	a.mu.Unlock()
 }
 
@@ -125,11 +149,11 @@ func (a *activityTracker) forget(id string) {
 func (a *activityTracker) idleFor(id string) (idle time.Duration, busy, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	last, ok := a.last[id]
+	entry, ok := a.entries[id]
 	if !ok {
 		return 0, false, false
 	}
-	return time.Since(last), a.inflight[id] > 0, true
+	return time.Since(entry.last), entry.inflight > 0, true
 }
 
 // --- wake/hibernate serialization ---
@@ -190,7 +214,7 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 				if busy || idle < window {
 					continue
 				}
-				if err := s.hibernate(ctx, sb.ID, false); err != nil {
+				if err := s.hibernateIfIdle(ctx, sb.ID); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] hibernate failed: %v\n", sb.ID, err)
 				}
 			}
@@ -202,6 +226,17 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 // force skips the busy check — server shutdown freezes even pinned sandboxes
 // (their connections are dying with the server either way).
 func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
+	return s.hibernateWithMode(ctx, id, force, false)
+}
+
+// hibernateIfIdle repeats the entire idle-policy decision while holding the
+// sandbox lifecycle lock. The loop's earlier scan is only an optimization:
+// activity or policy may change before this method wins the lock.
+func (s *Server) hibernateIfIdle(ctx context.Context, id string) error {
+	return s.hibernateWithMode(ctx, id, false, true)
+}
+
+func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automatic bool) error {
 	mu := s.wakeLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -218,14 +253,34 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 		return fmt.Errorf("sandbox %s has no VM in this server", id)
 	}
 	m := v.(*vm.Machine)
-	// Re-check under the lock: a request may have raced in since the reaper's
-	// scan decided this sandbox was idle.
-	if _, busy, _ := s.act.idleFor(id); busy && !force {
+	// Re-check under the lock: a request or timeout update may have raced in
+	// since the reaper's scan decided this sandbox was eligible.
+	idle, busy, tracked := s.act.idleFor(id)
+	if !force && busy {
+		if automatic {
+			return nil
+		}
 		return fmt.Errorf("sandbox %s is busy", id)
+	}
+	if automatic {
+		window := s.cfg.HibernateAfter
+		if sb.HibernateAfterSec > 0 {
+			window = time.Duration(sb.HibernateAfterSec) * time.Second
+		}
+		if sb.HibernateAfterSec < 0 || window <= 0 || !tracked || idle < window {
+			return nil
+		}
+	}
+	// A prior generation must be fully quiesced before we reuse the stable
+	// local/GCS names. Removing record.json first prevents release/adopt from
+	// mistaking old payloads for this freeze.
+	s.cancelHibernationUpload(id)
+	if err := s.resetHibernationDurability(ctx, id); err != nil {
+		return fmt.Errorf("reset durable hibernation generation: %w", err)
 	}
 
 	t0 := time.Now()
-	memPath, statePath, _, err := s.cfg.Provisioner.SnapshotPaths(hibID(id))
+	memPath, statePath, rootfsPath, err := s.cfg.Provisioner.SnapshotPaths(hibID(id))
 	if err != nil {
 		return fmt.Errorf("hibernate dir: %w", err)
 	}
@@ -267,6 +322,12 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 			_ = os.Remove(hibDiffMarker(memPath)) // stale marker from a prior freeze
 		}
 	}
+	if err == nil && s.cfg.UFFDChunkGCS && s.blob != nil {
+		// The durability upload runs after the guest is allowed to wake again.
+		// Capture an immutable rootfs view while it is paused so GCS cannot
+		// observe a mixture of pre- and post-wake filesystem writes.
+		err = s.cfg.Provisioner.CopyFileSparse(sb.RootfsPath, rootfsPath)
+	}
 	if err != nil {
 		// Snapshot (or marker write — without which a diff is unrestorable)
 		// failed: thaw the sandbox and pretend nothing happened.
@@ -305,7 +366,7 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 	// the far host rebases onto the durable golden base. diffBaseID is the golden
 	// a diff mem/rootfs rebases onto ("" for a full freeze).
 	if s.cfg.UFFDChunkGCS && s.blob != nil {
-		go s.uploadHibernation(id, sb, memPath, statePath, snapType, diffBaseID, workingSet)
+		s.startHibernationUpload(id, sb, memPath, statePath, rootfsPath, snapType, diffBaseID, workingSet)
 	}
 	return nil
 }
@@ -315,14 +376,21 @@ func (s *Server) hibernate(ctx context.Context, id string, force bool) error {
 // ensureRunning returns the sandbox row, waking it first when hibernated.
 // Every agent-bound handler goes through this.
 func (s *Server) ensureRunning(ctx context.Context, id string) (registry.Sandbox, error) {
+	mu := s.wakeLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return sb, err
 	}
-	if sb.Status != registry.StatusHibernated {
+	if sb.Status == registry.StatusRunning {
 		return sb, nil
 	}
-	return s.wake(ctx, id)
+	if sb.Status == registry.StatusHibernated {
+		return s.wakeLocked(ctx, id)
+	}
+	return sb, fmt.Errorf("sandbox %s is %s, not ready", id, sb.Status)
 }
 
 // wake brings a hibernated sandbox back to running and blocks until its agent
@@ -332,7 +400,11 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 	mu := s.wakeLock(id)
 	mu.Lock()
 	defer mu.Unlock()
+	return s.wakeLocked(ctx, id)
+}
 
+// wakeLocked implements wake while the caller holds wakeLock(id).
+func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return sb, err
@@ -343,6 +415,9 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 	if sb.Status != registry.StatusHibernated {
 		return sb, fmt.Errorf("sandbox %s is %s", id, sb.Status)
 	}
+	// Stop every background reader/writer of the local frozen files before
+	// restore consumes and then unlinks them.
+	s.cancelHibernationUpload(id)
 
 	memPath, statePath, _, err := s.cfg.Provisioner.SnapshotPaths(hibID(id))
 	if err != nil {
@@ -360,6 +435,13 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 		if memPath, err = s.materializeHibMem(ctx, memPath, strings.TrimSpace(string(b))); err != nil {
 			return sb, fmt.Errorf("materialize hibernation memory for %s: %w", id, err)
 		}
+	}
+	// All local recovery prerequisites are present. Remove the durable commit
+	// immediately before changing the row/resuming the guest, so a missing or
+	// unmaterializable local artifact never destroys the only viable recovery
+	// path, while a live mutable VM can never retain an adoptable stale record.
+	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
+		return sb, err
 	}
 
 	t0 := time.Now()

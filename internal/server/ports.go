@@ -36,6 +36,15 @@ func (s *Server) handleExposePort(w http.ResponseWriter, r *http.Request) {
 	}
 	done := s.act.begin(id)
 	defer done()
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	// The sandbox may have been destroyed or released while this request was
+	// waiting for the lifecycle lock.
+	if _, err := s.reg.Get(ctx, id); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
 
 	// An existing mapping already has its listener — don't open another.
 	existing, err := s.reg.Ports(ctx, id)

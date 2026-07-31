@@ -37,9 +37,7 @@ const uploadTimeout = 30 * time.Minute
 // uploadSnapshot ships a freshly created snapshot to GCS in the background:
 // (base template if needed) → artifacts → meta.json. Failures are logged and
 // leave the snapshot host-local only — the next snapshot retries the base.
-func (s *Server) uploadSnapshot(snap registry.Snapshot) {
-	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
-	defer cancel()
+func (s *Server) uploadSnapshot(ctx context.Context, snap registry.Snapshot) {
 	t0 := time.Now()
 
 	var rootfsRanges []provisioner.Range
@@ -98,6 +96,53 @@ func (s *Server) uploadSnapshot(snap registry.Snapshot) {
 	}
 	fmt.Fprintf(os.Stderr, "[snapshot %s] uploaded to gs://%s (%s): mem=%dMiB rootfs=%dMiB payload in %s\n",
 		snap.ID, s.blob.Bucket(), snap.Format, memBytes>>20, rootfsBytes>>20, time.Since(t0).Round(time.Millisecond))
+}
+
+// startSnapshotUpload registers the uploader before returning the freshly
+// created snapshot to the caller. Delete can therefore always cancel and join
+// it before removing files or the durable commit marker.
+func (s *Server) startSnapshotUpload(snap registry.Snapshot) {
+	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
+	up := &backgroundUpload{cancel: cancel, done: make(chan struct{})}
+	s.snapshotUpMu.Lock()
+	s.snapshotUploads[snap.ID] = up
+	s.snapshotUpMu.Unlock()
+	go func() {
+		defer cancel()
+		defer func() {
+			close(up.done)
+			s.snapshotUpMu.Lock()
+			if s.snapshotUploads[snap.ID] == up {
+				delete(s.snapshotUploads, snap.ID)
+			}
+			s.snapshotUpMu.Unlock()
+		}()
+		s.uploadSnapshot(ctx, snap)
+	}()
+}
+
+func (s *Server) cancelSnapshotUpload(id string) {
+	s.snapshotUpMu.Lock()
+	up := s.snapshotUploads[id]
+	s.snapshotUpMu.Unlock()
+	if up == nil {
+		return
+	}
+	up.cancel()
+	<-up.done
+}
+
+// snapshotLock serializes all local consumers and deletion of one snapshot.
+// Different snapshot ids remain independent.
+func (s *Server) snapshotLock(id string) *sync.Mutex {
+	s.snapshotLocksMu.Lock()
+	defer s.snapshotLocksMu.Unlock()
+	mu := s.snapshotLocks[id]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		s.snapshotLocks[id] = mu
+	}
+	return mu
 }
 
 // baseUploaded reports whether a base template is known-durable in GCS —
@@ -328,13 +373,12 @@ func (s *Server) materializeMem(ctx context.Context, snap registry.Snapshot) (st
 	return fullPath, nil
 }
 
-// deleteSnapshotObjects removes a deleted snapshot's GCS objects, meta.json
-// first so the snapshot stops being restorable before its data disappears.
-// Best-effort: leftovers cost pennies and can't be restored without meta.
-func (s *Server) deleteSnapshotObjects(id string) {
+// deleteSnapshotPayloadObjects removes uncommitted payload after meta.json was
+// synchronously deleted. Best-effort: leftovers cannot be restored.
+func (s *Server) deleteSnapshotPayloadObjects(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	for _, name := range []string{"meta.json", "mem.sz", "rootfs.sz", "state.sz"} {
+	for _, name := range []string{"mem.sz", "rootfs.sz", "state.sz"} {
 		if err := s.blob.Delete(ctx, snapObj(id, name)); err != nil {
 			fmt.Fprintf(os.Stderr, "[snapshot %s] gcs delete %s: %v\n", id, name, err)
 		}
