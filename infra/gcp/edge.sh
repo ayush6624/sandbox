@@ -42,6 +42,11 @@ create_template() {
 }
 
 cmd_init() {
+  # Secret Manager carries the cert/key/gateway-token to edge VMs, so init
+  # cannot proceed on a project where the API was never enabled. Enabling is
+  # idempotent and cheap; discovering it half-way through leaves a partially
+  # provisioned edge.
+  "${GC[@]}" services enable secretmanager.googleapis.com >/dev/null
   "${GC[@]}" iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 || \
     "${GC[@]}" iam service-accounts create "$SA_NAME" --display-name="Sandbox public ingress edge"
   ensure_secret "$CERT_SECRET"; ensure_secret "$KEY_SECRET"; ensure_secret "$TOKEN_SECRET"
@@ -91,24 +96,41 @@ cmd_init() {
       --source-ranges="${VPC_SUBNET_CIDR:-10.160.0.0/20}" --allow=tcp:9091
 }
 
+# Every step is guarded so a partially applied `up` can be re-run to completion
+# rather than aborting on the first "already exists" — the failure mode that
+# leaves an edge with no forwarding rules.
 cmd_up() {
-  local tpl; tpl="$(template_name)"; create_template "$tpl"
-  "${GC[@]}" compute instance-groups managed create "$NAME" --region="$REGION" \
-    --template="$tpl" --size="${EDGE_MIN:-2}" --target-distribution-shape=EVEN
-  "${GC[@]}" compute health-checks create http "$HC" --region="$REGION" --port=9091 --request-path=/healthz
-  "${GC[@]}" compute backend-services create "$BACKEND" --region="$REGION" \
-    --load-balancing-scheme=EXTERNAL --protocol=TCP --health-checks="$HC" \
-    --health-checks-region="$REGION" --connection-draining-timeout=300
-  "${GC[@]}" compute backend-services add-backend "$BACKEND" --region="$REGION" \
-    --instance-group="$NAME" --instance-group-region="$REGION"
+  if ! "${GC[@]}" compute instance-groups managed describe "$NAME" --region="$REGION" >/dev/null 2>&1; then
+    local tpl; tpl="$(template_name)"; create_template "$tpl"
+    "${GC[@]}" compute instance-groups managed create "$NAME" --region="$REGION" \
+      --template="$tpl" --size="${EDGE_MIN:-2}" --target-distribution-shape=EVEN
+  fi
+  "${GC[@]}" compute health-checks describe "$HC" --region="$REGION" >/dev/null 2>&1 || \
+    "${GC[@]}" compute health-checks create http "$HC" --region="$REGION" --port=9091 --request-path=/healthz
+  "${GC[@]}" compute backend-services describe "$BACKEND" --region="$REGION" >/dev/null 2>&1 || \
+    "${GC[@]}" compute backend-services create "$BACKEND" --region="$REGION" \
+      --load-balancing-scheme=EXTERNAL --protocol=TCP --health-checks="$HC" \
+      --health-checks-region="$REGION" --connection-draining-timeout=300
+  "${GC[@]}" compute backend-services describe "$BACKEND" --region="$REGION" \
+    --format='value(backends[].group)' 2>/dev/null | grep -q "instanceGroups/${NAME}" || \
+    "${GC[@]}" compute backend-services add-backend "$BACKEND" --region="$REGION" \
+      --instance-group="$NAME" --instance-group-region="$REGION"
+  # $HC is a REGIONAL health check, and this command has no --health-check-region
+  # flag: a bare name resolves as global and fails with "does not exist", which
+  # aborts `up` before the forwarding rules are created. Pass the full URI.
   "${GC[@]}" compute instance-groups managed update "$NAME" --region="$REGION" \
-    --health-check="$HC" --initial-delay=120
-  "${GC[@]}" compute forwarding-rules create "${NAME}-web" --region="$REGION" \
-    --load-balancing-scheme=EXTERNAL --address="$IP_NAME" --ip-protocol=TCP \
-    --ports=80,443 --backend-service="$BACKEND"
-  "${GC[@]}" compute forwarding-rules create "${NAME}-raw" --region="$REGION" \
-    --load-balancing-scheme=EXTERNAL --address="$IP_NAME" --ip-protocol=TCP \
-    --ports="${RAW_MIN}-${RAW_MAX}" --backend-service="$BACKEND"
+    --health-check="projects/${PROJECT}/regions/${REGION}/healthChecks/${HC}" \
+    --initial-delay=120
+  "${GC[@]}" compute forwarding-rules describe "${NAME}-web" --region="$REGION" >/dev/null 2>&1 || \
+    "${GC[@]}" compute forwarding-rules create "${NAME}-web" --region="$REGION" \
+      --load-balancing-scheme=EXTERNAL --address="$IP_NAME" --ip-protocol=TCP \
+      --ports=80,443 --backend-service="$BACKEND"
+  "${GC[@]}" compute forwarding-rules describe "${NAME}-raw" --region="$REGION" >/dev/null 2>&1 || \
+    "${GC[@]}" compute forwarding-rules create "${NAME}-raw" --region="$REGION" \
+      --load-balancing-scheme=EXTERNAL --address="$IP_NAME" --ip-protocol=TCP \
+      --ports="${RAW_MIN}-${RAW_MAX}" --backend-service="$BACKEND"
+  echo ">> edge up. Public IP: $("${GC[@]}" compute addresses describe "$IP_NAME" \
+    --region="$REGION" --format='value(address)')"
 }
 
 cmd_roll() {
