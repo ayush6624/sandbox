@@ -303,6 +303,16 @@ func (c *Client) ExposePort(ctx context.Context, id string, guestPort int) (regi
 	return pm, nil
 }
 
+// ExposeURLPort authorizes public ingress without reserving a worker host port.
+func (c *Client) ExposeURLPort(ctx context.Context, id string, guestPort int) (registry.PortMapping, error) {
+	var pm registry.PortMapping
+	body := map[string]any{"guest_port": guestPort, "host_port": false}
+	if err := c.do(ctx, "POST", "/sandboxes/"+id+"/ports", body, &pm); err != nil {
+		return registry.PortMapping{}, err
+	}
+	return pm, nil
+}
+
 // ListPorts returns every explicitly forwarded port of a sandbox.
 func (c *Client) ListPorts(ctx context.Context, id string) ([]registry.PortMapping, error) {
 	var out []registry.PortMapping
@@ -310,6 +320,30 @@ func (c *Client) ListPorts(ctx context.Context, id string) ([]registry.PortMappi
 		return nil, err
 	}
 	return out, nil
+}
+
+func (c *Client) SetPublicPort(ctx context.Context, id string, guestPort, publicPort int) (registry.PortMapping, error) {
+	var pm registry.PortMapping
+	body := map[string]int{"public_port": publicPort}
+	path := fmt.Sprintf("/sandboxes/%s/ports/%d/public", id, guestPort)
+	if err := c.do(ctx, http.MethodPut, path, body, &pm); err != nil {
+		return registry.PortMapping{}, err
+	}
+	return pm, nil
+}
+
+func (c *Client) DeletePort(ctx context.Context, id string, guestPort int) error {
+	return c.do(ctx, http.MethodDelete,
+		fmt.Sprintf("/sandboxes/%s/ports/%d", id, guestPort), nil, nil)
+}
+
+func (c *Client) ExposeRawPort(ctx context.Context, id string, guestPort int) (registry.RawPortMapping, error) {
+	var pm registry.RawPortMapping
+	body := map[string]int{"guest_port": guestPort}
+	if err := c.do(ctx, http.MethodPost, "/sandboxes/"+id+"/raw-ports", body, &pm); err != nil {
+		return registry.RawPortMapping{}, err
+	}
+	return pm, nil
 }
 
 // ReadFile streams a file out of the sandbox. The caller must Close the reader.

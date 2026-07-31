@@ -25,6 +25,31 @@ next implementation steps (level-triggered direct scaling, tap recycling,
 staged create concurrency, and prepared microVM pools), see
 [Autoscaling and burst-start latency](../../docs/autoscaling-latency.md).
 
+### Public ingress edge
+
+Public ingress is a separate deployable service, not a worker or control-plane
+role. Configure `INGRESS_BUCKET`, `EDGE_DOMAIN`, the raw port range, and either
+initial certificate files or `EDGE_ACME_EMAIL` in `config.env`, then:
+
+```bash
+make -C ../.. gcs-release
+./control.sh up
+./control.sh deploy
+./edge.sh init
+./edge.sh up
+./edge.sh status
+```
+
+Create wildcard DNS for `*.${EDGE_DOMAIN}` and the raw hostname at the regional
+IP printed by `edge.sh status`. `edge.sh roll` creates an immutable instance
+template and replaces replicas with zero configured unavailability; the backend
+drains established connections for five minutes.
+
+The gateway alone has write access to `gs://${INGRESS_BUCKET}`. Edge VMs only
+read the release artifact, certificate/key, and gateway token. Prometheus
+discovers replicas by the `sandbox-edge` GCE network tag, and the existing
+Grafana dashboard includes edge health, wake latency, errors, and raw leases.
+
 **Topology** (all in `asia-south1-a`, VPC-internal):
 
 - **`sandbox-control`** — one small non-spot VM: Nomad server + `sandbox gateway`

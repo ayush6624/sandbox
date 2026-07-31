@@ -64,7 +64,9 @@ func (s *Server) reconcile(ctx context.Context) {
 		// their rows.
 		if ports, err := s.reg.Ports(ctx, sb.ID); err == nil {
 			for _, pm := range ports {
-				s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+				if pm.HostPort != 0 {
+					s.cfg.Provisioner.RemovePortForwardTo(pm.HostPort, sb.GuestIP, pm.GuestPort)
+				}
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "reconcile: list ports for %s: %v\n", sb.ID, err)

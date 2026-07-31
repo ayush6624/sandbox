@@ -193,6 +193,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		AdvertiseAddr:       cfg.AdvertiseAddr,
 		HostID:              cfg.HostID,
 		WorkerRelease:       cfg.WorkerRelease,
+		IngressDomain:       cfg.IngressDomain,
+		DefaultURLOnly:      cfg.DefaultURLOnly,
 	}, reg)
 
 	// Every running sandbox costs a handful of fds (firecracker socket, log,

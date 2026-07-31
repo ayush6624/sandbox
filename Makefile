@@ -19,6 +19,7 @@ build-linux:
 	mkdir -p bin
 	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandbox ./cmd/sandbox
 	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandboxd ./cmd/sandboxd
+	GOOS=linux GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o bin/sandbox-edge ./services/sandbox-edge/cmd/sandbox-edge
 
 validate-infra:
 	bash infra/gcp/validate-scaling-owner.sh
@@ -98,7 +99,7 @@ RELEASE_SHA    := $(shell git rev-parse --short HEAD)
 
 gcs-release: build-linux
 	@test -n "$(RELEASE_BUCKET)" || (echo "set RELEASE_BUCKET (infra/gcp/config.env)"; exit 1)
-	gsutil -m cp bin/sandbox bin/sandboxd gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/
+	gsutil -m cp bin/sandbox bin/sandboxd bin/sandbox-edge gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/
 	@echo ">> published gs://$(RELEASE_BUCKET)/releases/$(RELEASE_SHA)/ — deploy with: infra/gcp/deploy-job.sh $(RELEASE_SHA)"
 
 # --- One-command production rollout (prefer this over the three steps above) ---

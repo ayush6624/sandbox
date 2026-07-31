@@ -23,7 +23,11 @@ func TestBuildHibRecordDiffFreeze(t *testing.T) {
 		// host-side identity must NOT leak into the record:
 		TapDevice: "fc-tap-1", GuestIP: "172.16.0.5", RootfsPath: "/opt/fc/rootfs-sb-1.ext4",
 	}
-	extras := []registry.PortMapping{{GuestPort: 8080, HostPort: 41001}, {GuestPort: 5432, HostPort: 41002}}
+	extras := []registry.PortMapping{
+		{GuestPort: 8080, HostPort: 41001},
+		{GuestPort: 5432, HostPort: 41002},
+		{GuestPort: 22, PublicPort: 20000},
+	}
 
 	rec := buildHibRecord(sb, extras, memFormDiff, "golden-abc", rootfsFormDiff, "golden-abc")
 
@@ -41,6 +45,10 @@ func TestBuildHibRecordDiffFreeze(t *testing.T) {
 	}
 	if len(rec.GuestPorts) != 2 || rec.GuestPorts[0] != 8080 || rec.GuestPorts[1] != 5432 {
 		t.Fatalf("guest ports wrong: %v", rec.GuestPorts)
+	}
+	if len(rec.URLGuestPorts) != 1 || rec.URLGuestPorts[0] != 22 ||
+		len(rec.PublicPorts) != 1 || rec.PublicPorts[0] != (hibPublicPort{GuestPort: 22, PublicPort: 20000}) {
+		t.Fatalf("public ports wrong: url=%v raw=%v", rec.URLGuestPorts, rec.PublicPorts)
 	}
 	if rec.ExpiresAtUnix == nil || *rec.ExpiresAtUnix != exp.Unix() {
 		t.Fatalf("expiry not carried: %+v", rec.ExpiresAtUnix)

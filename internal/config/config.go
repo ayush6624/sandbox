@@ -23,6 +23,12 @@ type Config struct {
 	WorkerToken         string   `json:"worker_token"`   // gateway-to-worker callback credential
 	WorkerTokens        []string `json:"worker_tokens"`
 	WorkerTokenFile     string   `json:"worker_token_file"`
+	// IngressDomain decorates exposed ports with
+	// https://<guest-port>-<sandbox-id>.<domain>. Empty disables public URLs.
+	IngressDomain string `json:"ingress_domain"`
+	// DefaultURLOnly makes an omitted POST /ports host_port flag consume no
+	// worker host port. False preserves the pre-ingress API default.
+	DefaultURLOnly bool `json:"default_url_only"`
 
 	// --- Gateway registration (optional; multi-host) ---
 	GatewayURL              string   `json:"gateway_url"`           // register/heartbeat target; requires listen_addr

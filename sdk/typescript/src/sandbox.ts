@@ -15,6 +15,8 @@ import type {
   FleetHostInfo,
   HostInfo,
   PortMapping,
+  PortExposeOpts,
+  RawPortMapping,
   SandboxCreateOpts,
   SandboxFanoutOpts,
   SandboxInfo,
@@ -80,6 +82,8 @@ export class Sandbox {
   private readonly client: ApiClient
   /** Known guest → host port mappings, used by the synchronous getHost(). */
   private readonly portCache = new Map<number, number>()
+  /** Known public ingress URLs, used by the synchronous getUrl(). */
+  private readonly urlCache = new Map<number, string>()
 
   private constructor(client: ApiClient, info: SandboxInfo) {
     this.client = client
@@ -88,6 +92,7 @@ export class Sandbox {
     this.commands = new Commands(client, info.sandboxId)
     this.files = new Files(client, info.sandboxId)
     this.pty = new Pty(client, info.sandboxId)
+    this.rememberPorts(info.ports ?? [])
   }
 
   /**
@@ -344,6 +349,22 @@ export class Sandbox {
   }
 
   /**
+   * Returns the public ingress URL for an exposed guest port.
+   *
+   * Synchronous after create/connect/refresh when the server included `ports`,
+   * or after {@link exposePort}/{@link listPorts} on this instance.
+   */
+  getUrl(port: number): string {
+    const url = this.urlCache.get(port)
+    if (url === undefined) {
+      throw new SandboxError(
+        `Guest port ${port} has no public ingress URL. Expose it and configure the worker ingress_domain first.`
+      )
+    }
+    return url
+  }
+
+  /**
    * Hostname where this sandbox's forwarded ports live: the owning host in
    * fleet mode (the gateway annotates responses with it), else the API host.
    */
@@ -372,6 +393,7 @@ export class Sandbox {
       if (!(key in fresh)) delete bag[key]
     }
     Object.assign(this.info, fresh)
+    this.rememberPorts(fresh.ports ?? [])
     return this.info
   }
 
@@ -382,13 +404,45 @@ export class Sandbox {
    * @param guestPort Port a service listens on inside the sandbox.
    * @returns The externally reachable `host:port` string.
    */
-  async exposePort(guestPort: number): Promise<string> {
+  async exposePort(guestPort: number, opts: PortExposeOpts = {}): Promise<string> {
+    const body: { guest_port: number; host_port?: boolean } = { guest_port: guestPort }
+    if (opts.hostPort !== undefined) body.host_port = opts.hostPort
     const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/ports`, {
-      json: { guest_port: guestPort },
+      json: body,
     })
     const raw = (await res.json()) as ApiPortMapping
-    this.portCache.set(raw.guest_port, raw.host_port)
-    return `${this.hostname}:${raw.host_port}`
+    if (raw.host_port !== undefined) {
+      this.portCache.set(raw.guest_port, raw.host_port)
+    }
+    if (raw.url) this.urlCache.set(raw.guest_port, raw.url)
+    if (raw.host_port !== undefined) return `${this.hostname}:${raw.host_port}`
+    if (raw.url) return raw.url
+    throw new SandboxError('Server created a URL-only exposure without returning its public URL')
+  }
+
+  /** Allocates a fleet-wide public raw TCP address, suitable for SSH. */
+  async exposeRawPort(guestPort: number): Promise<RawPortMapping> {
+    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/raw-ports`, {
+      json: { guest_port: guestPort },
+    })
+    const raw = (await res.json()) as {
+      guest_port: number
+      public_host: string
+      public_port: number
+    }
+    return {
+      guestPort: raw.guest_port,
+      publicHost: raw.public_host,
+      publicPort: raw.public_port,
+      address: `${raw.public_host}:${raw.public_port}`,
+    }
+  }
+
+  /** Removes an exposure and releases its worker-local and raw public ports. */
+  async unexposePort(guestPort: number): Promise<void> {
+    await this.client.request('DELETE', `/sandboxes/${this.sandboxId}/ports/${guestPort}`)
+    this.portCache.delete(guestPort)
+    this.urlCache.delete(guestPort)
   }
 
   /**
@@ -398,11 +452,23 @@ export class Sandbox {
   async listPorts(): Promise<PortMapping[]> {
     const res = await this.client.request('GET', `/sandboxes/${this.sandboxId}/ports`)
     const raw = (await res.json()) as ApiPortMapping[] | null
-    const mappings = (raw ?? []).map((m) => ({ guestPort: m.guest_port, hostPort: m.host_port }))
-    for (const m of mappings) {
-      this.portCache.set(m.guestPort, m.hostPort)
-    }
+    const mappings = (raw ?? []).map((m) => {
+      const mapping: PortMapping = { guestPort: m.guest_port }
+      if (m.host_port !== undefined) mapping.hostPort = m.host_port
+      if (m.mode !== undefined) mapping.mode = m.mode
+      if (m.url !== undefined) mapping.url = m.url
+      if (m.public_port !== undefined) mapping.publicPort = m.public_port
+      return mapping
+    })
+    this.rememberPorts(mappings)
     return mappings
+  }
+
+  private rememberPorts(mappings: PortMapping[]): void {
+    for (const m of mappings) {
+      if (m.hostPort !== undefined) this.portCache.set(m.guestPort, m.hostPort)
+      if (m.url !== undefined) this.urlCache.set(m.guestPort, m.url)
+    }
   }
 
   /**

@@ -109,6 +109,18 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		}
 	}
 	var snapIDs []string
+	var rawRoutes []cluster.RawPortRoute
+	for _, sb := range routed {
+		if ports, err := s.reg.Ports(ctx, sb.ID); err == nil {
+			for _, pm := range ports {
+				if pm.PublicPort != 0 {
+					rawRoutes = append(rawRoutes, cluster.RawPortRoute{
+						PublicPort: pm.PublicPort, SandboxID: sb.ID, GuestPort: pm.GuestPort,
+					})
+				}
+			}
+		}
+	}
 	if snaps, err := s.reg.ListSnapshots(ctx); err == nil {
 		for _, sn := range snaps {
 			if !sn.Golden {
@@ -128,6 +140,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		Hibernated:  hibernated,
 		SandboxIDs:  ids,
 		SnapshotIDs: snapIDs,
+		RawRoutes:   rawRoutes,
 	}
 	if s.workerCredentials != nil {
 		hb.ControlToken = s.workerCredentials.Outbound()

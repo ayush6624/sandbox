@@ -248,6 +248,20 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 			fmt.Fprintf(os.Stderr, "[%s] adopt: re-expose guest port %d: %v\n", id, gp, perr)
 		}
 	}
+	for _, gp := range rec.URLGuestPorts {
+		if _, perr := s.reg.AddURLPort(ctx, id, gp); perr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] adopt: re-expose URL guest port %d: %v\n", id, gp, perr)
+		}
+	}
+	for _, raw := range rec.PublicPorts {
+		if _, perr := s.reg.AddURLPort(ctx, id, raw.GuestPort); perr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] adopt: re-expose raw guest port %d: %v\n", id, raw.GuestPort, perr)
+			continue
+		}
+		if perr := s.reg.SetPublicPort(ctx, id, raw.GuestPort, raw.PublicPort); perr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] adopt: restore public port %d: %v\n", id, raw.PublicPort, perr)
+		}
+	}
 
 	// Clone-path wake (fresh identity: unbridged tap, MMDS reidentify, GARP),
 	// File backend off the reconstructed local mem.

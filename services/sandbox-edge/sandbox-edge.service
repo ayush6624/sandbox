@@ -1,0 +1,36 @@
+[Unit]
+Description=Sandbox public ingress edge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/sandbox-edge.env
+ExecStart=/usr/local/bin/sandbox-edge \
+  --listen=${EDGE_LISTEN} \
+  --http-listen=${EDGE_HTTP_LISTEN} \
+  --metrics-listen=${EDGE_METRICS_LISTEN} \
+  --domain=${EDGE_DOMAIN} \
+  --cert-file=${EDGE_CERT_FILE} \
+  --key-file=${EDGE_KEY_FILE} \
+  --gateway=${EDGE_GATEWAY} \
+  --gateway-token=${EDGE_GATEWAY_TOKEN} \
+  --raw-listen-ip=${EDGE_RAW_LISTEN_IP} \
+  --raw-port-min=${EDGE_RAW_PORT_MIN} \
+  --raw-port-max=${EDGE_RAW_PORT_MAX} \
+  --drain-timeout=${EDGE_DRAIN_TIMEOUT} \
+  --max-connections=${EDGE_MAX_CONNECTIONS}
+Restart=always
+RestartSec=2
+TimeoutStopSec=330
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/sandbox-edge/tls
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

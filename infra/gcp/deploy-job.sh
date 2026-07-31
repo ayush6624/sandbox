@@ -99,17 +99,28 @@ if ! [[ "$STANDBY_DELAY" =~ ^[0-9]+$ ]] || ! [[ "$PLACEMENT_HEADROOM" =~ ^[0-9]+
   exit 1
 fi
 PLACEMENT_DELAY="$((STANDBY_DELAY + PLACEMENT_HEADROOM))"
+INGRESS_DOMAIN="${EDGE_DOMAIN:-}"
+DEFAULT_URL_ONLY="${DEFAULT_URL_ONLY:-false}"
+if [ "$DEFAULT_URL_ONLY" != true ] && [ "$DEFAULT_URL_ONLY" != false ]; then
+  echo "error: DEFAULT_URL_ONLY must be true or false"; exit 1
+fi
+if [ "$DEFAULT_URL_ONLY" = true ] && [ -z "$INGRESS_DOMAIN" ]; then
+  echo "error: DEFAULT_URL_ONLY=true requires EDGE_DOMAIN"; exit 1
+fi
 GEN_CONFIG="$(mktemp)"
 jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" --argjson cc "$CREATE_CONCURRENCY" \
    --argjson placement "$PLACEMENT_DELAY" \
-   --arg gipmax "$GIP_MAX" --argjson mps "$MEM_PER_SLOT" '
+   --arg gipmax "$GIP_MAX" --argjson mps "$MEM_PER_SLOT" \
+   --arg ingress "$INGRESS_DOMAIN" --argjson urlonly "$DEFAULT_URL_ONLY" '
   .guest_subnet_bits = $bits |
   .pools.TapMax      = $n |
   .pools.GuestIPMax  = $gipmax |
   .pools.PortMax     = (.pools.PortMin + $p - 1) |
   .mem_budget_mib    = ($n * $mps) |
   .create_concurrency = $cc |
-  .placement_delay_sec = $placement
+  .placement_delay_sec = $placement |
+  .ingress_domain    = $ingress |
+  .default_url_only  = $urlonly
 ' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
 
 # Size the Nomad task cgroup to the host: MEM_PER_SLOT_MIB per slot + 2 GiB for

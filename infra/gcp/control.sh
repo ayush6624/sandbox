@@ -29,6 +29,7 @@ GW_PORT="${GW_PORT:-9090}"
 PROM_PORT="${PROM_PORT:-9091}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 GRAFANA_VERSION="${GRAFANA_VERSION:-11.1.0}"
+LEGO_VERSION="${LEGO_VERSION:-4.21.0}"
 PROM_VERSION="${PROMETHEUS_VERSION:-2.53.0}"
 AUTOSCALER_VERSION="${AUTOSCALER_VERSION:-0.5.0}"
 # gce-mig scale-out confirmation budget = scale-up blackout window (see
@@ -36,7 +37,7 @@ AUTOSCALER_VERSION="${AUTOSCALER_VERSION:-0.5.0}"
 AUTOSCALER_RETRY_ATTEMPTS="${AUTOSCALER_RETRY_ATTEMPTS:-3}"
 NOMAD_VERSION="${NOMAD_VERSION:-1.7.7}"
 REMOTE_DIR="/home/${SSH_USER}/sandbox"
-SECRETS="$DIR/fleet-secrets.env"
+SECRETS="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
 
 GC=(gcloud --project="$PROJECT")
 sshx() {
@@ -73,6 +74,13 @@ cmd_up() {
     echo "   WARN: could not bind roles/compute.instanceAdmin.v1 to $SA_EMAIL."
     echo "         Ask an admin to grant it, or the autoscaler can't resize the MIG."
   fi
+  if [ -n "${INGRESS_BUCKET:-}" ]; then
+    "${GC[@]}" storage buckets describe "gs://${INGRESS_BUCKET}" >/dev/null 2>&1 || \
+      "${GC[@]}" storage buckets create "gs://${INGRESS_BUCKET}" \
+        --location="$REGION" --uniform-bucket-level-access
+    "${GC[@]}" storage buckets add-iam-policy-binding "gs://${INGRESS_BUCKET}" \
+      --member="serviceAccount:${SA_EMAIL}" --role=roles/storage.objectAdmin >/dev/null
+  fi
 
   echo ">> Reserve static internal IP $IP ($REGION)"
   "${GC[@]}" compute addresses describe "$NAME" --region="$REGION" >/dev/null 2>&1 || \
@@ -107,6 +115,7 @@ cmd_deploy() {
   ( cd "$REPO" && make build-linux )
   rsync -az -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
     "$REPO/bin/sandbox" "$REPO/configs" "$DIR/nomad" "$DIR/prometheus" "$DIR/grafana" \
+    "$DIR/edge-cert-renew.sh" \
     "${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/"
 
   echo ">> install Nomad server + Prometheus + autoscaler + gateway on $NAME"
@@ -125,8 +134,16 @@ cmd_deploy() {
        PROJECT='$PROJECT' ZONE='$ZONE' MIG_NAME='${MIG_NAME:-sandbox-workers}' \
        MIG_MIN='${MIG_MIN:-1}' MIG_MAX='${MIG_MAX:-8}' \
        QUEUE_WAIT='${QUEUE_WAIT:-240s}' QUEUE_MAX='${QUEUE_MAX:-4096}' \
+       INGRESS_BUCKET='${INGRESS_BUCKET:-}' RAW_PUBLIC_HOST='${EDGE_DOMAIN:-}' \
+       RAW_PORT_MIN='${EDGE_RAW_PORT_MIN:-20000}' RAW_PORT_MAX='${EDGE_RAW_PORT_MAX:-29999}' \
        GRAFANA_VERSION='$GRAFANA_VERSION' GRAFANA_PORT='$GRAFANA_PORT' \
        GRAFANA_ADMIN_PASSWORD='${GRAFANA_ADMIN_PASSWORD:-sandbox}' \
+       LEGO_VERSION='$LEGO_VERSION' EDGE_DOMAIN='${EDGE_DOMAIN:-}' \
+       EDGE_ACME_EMAIL='${EDGE_ACME_EMAIL:-}' \
+       EDGE_DNS_PROVIDER='${EDGE_DNS_PROVIDER:-gcloud}' \
+       EDGE_DNS_TOKEN_SECRET='${EDGE_DNS_TOKEN_SECRET:-sandbox-edge-dns-token}' \
+       EDGE_CERT_SECRET='${EDGE_CERT_SECRET:-sandbox-edge-cert}' \
+       EDGE_KEY_SECRET='${EDGE_KEY_SECRET:-sandbox-edge-key}' \
        REMOTE_DIR='$REMOTE_DIR' bash -s" < "$DIR/control-install.sh"
 
   cmd_status

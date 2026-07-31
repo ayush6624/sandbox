@@ -211,6 +211,8 @@ type Gateway struct {
 	// addr/token change; pruned with the host). Rebuilding a proxy + three
 	// closures per proxied request is pure allocation churn at high fan-out.
 	proxies sync.Map // host id → *hostProxyEntry
+
+	raw *rawAllocator
 }
 
 // DirectScaler is implemented by the queue-triggered infrastructure fast path.
@@ -316,6 +318,12 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	if err := g.transport.ValidateListener(addr); err != nil {
 		return err
 	}
+	if g.raw != nil {
+		if err := g.raw.load(ctx); err != nil {
+			return fmt.Errorf("load raw ingress allocator: %w", err)
+		}
+		go g.rawReconcileLoop(ctx)
+	}
 	go g.pruneLoop(ctx)
 	go g.migTargetLoop(ctx)
 
@@ -329,6 +337,13 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("PUT /worker-release", g.handleWorkerRelease)
 	mux.HandleFunc("GET /internal/v1/worker-release", g.handleWorkerRelease)
 	mux.HandleFunc("PUT /internal/v1/worker-release", g.handleWorkerRelease)
+	// Edge-only route resolution. The gateway remains the sole authority for
+	// sandbox ownership and worker credentials; bulk bytes bypass it.
+	mux.HandleFunc("GET /route/{id}", g.handleRoute)
+	mux.HandleFunc("POST /sandboxes/{id}/raw-ports", g.handleAllocateRawPort)
+	mux.HandleFunc("GET /raw-route/{port}", g.handleRawRoute)
+	mux.HandleFunc("DELETE /sandboxes/{id}/ports/{port}", g.handleGatewayDeletePort)
+	mux.HandleFunc("DELETE /sandboxes/{id}", g.handleGatewayDestroy)
 	mux.HandleFunc("GET /metrics", g.handleMetrics)
 	// Per-host detail, federated: the gateway scrapes each live host's /metrics
 	// (it already holds their addr+token) and re-exports every series with a
@@ -513,6 +528,9 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 		g.snapRoute[sid] = hb.HostID
 	}
 	g.mu.Unlock()
+	if g.raw != nil {
+		g.raw.checkHeartbeat(hb.HostID, hb.RawRoutes)
+	}
 	// A heartbeat can bring capacity (new host, corrected free count) — let a
 	// queued create retry now rather than on its next poll tick.
 	g.notifySlotFreed()

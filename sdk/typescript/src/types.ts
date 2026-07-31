@@ -114,6 +114,7 @@ export interface ApiSandbox {
   mem_mib?: number
   base_snapshot_id?: string
   host_addr?: string
+  ports?: ApiPortMapping[]
 }
 
 /** Raw host info as returned by `GET /info` (snake_case). */
@@ -187,7 +188,23 @@ export interface FleetHostInfo {
 /** Raw port mapping as returned by the REST API (snake_case). */
 export interface ApiPortMapping {
   guest_port: number
-  host_port: number
+  host_port?: number
+  public_port?: number
+  mode?: 'host_port' | 'url' | 'both' | 'raw'
+  url?: string
+}
+
+/** Controls whether exposure also reserves a worker-local host port. */
+export interface PortExposeOpts {
+  /** True for legacy host:port plus URL; false for URL-only. Server default when omitted. */
+  hostPort?: boolean
+}
+
+export interface RawPortMapping {
+  guestPort: number
+  publicHost: string
+  publicPort: number
+  address: string
 }
 
 /** Raw snapshot object as returned by the REST API (snake_case). */
@@ -248,8 +265,14 @@ export interface SnapshotInfo {
 export interface PortMapping {
   /** Port inside the guest. */
   guestPort: number
-  /** Host port forwarding to it. */
-  hostPort: number
+  /** Host port forwarding to it; absent for URL-only exposure. */
+  hostPort?: number
+  /** Addressability mode reported by the server. */
+  mode?: 'host_port' | 'url' | 'both' | 'raw'
+  /** Public ingress URL when the worker is configured with an ingress domain. */
+  url?: string
+  /** Fleet-wide public TCP port for raw ingress, when allocated. */
+  publicPort?: number
 }
 
 /** Information about a sandbox, as returned by {@link Sandbox.list}. */
@@ -302,6 +325,8 @@ export interface SandboxInfo {
    * talking to a host directly, where the API hostname already is the host.
    */
   hostAddr?: string
+  /** Explicitly exposed ports, including public URLs when ingress is configured. */
+  ports?: PortMapping[]
 }
 
 /** Result of a command executed via `sandbox.commands.run()`. */
@@ -426,5 +451,15 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
   if (raw.mem_mib) info.memMib = raw.mem_mib
   if (raw.base_snapshot_id) info.baseSnapshotId = raw.base_snapshot_id
   if (raw.host_addr) info.hostAddr = raw.host_addr
+  if (raw.ports) {
+    info.ports = raw.ports.map((m) => {
+      const port: PortMapping = { guestPort: m.guest_port }
+      if (m.host_port !== undefined) port.hostPort = m.host_port
+      if (m.mode !== undefined) port.mode = m.mode
+      if (m.url !== undefined) port.url = m.url
+      if (m.public_port !== undefined) port.publicPort = m.public_port
+      return port
+    })
+  }
   return info
 }

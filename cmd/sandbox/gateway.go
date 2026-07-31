@@ -33,6 +33,10 @@ var (
 	gwScaleSlots      int
 	gwScaleHeadroom   int
 	gwReleaseFile     string
+	gwIngressBucket   string
+	gwRawHost         string
+	gwRawMin          int
+	gwRawMax          int
 )
 
 func gatewayCmd() *cobra.Command {
@@ -73,6 +77,10 @@ The gateway exposes the same API as a single server; point the CLI at it with
 	cmd.Flags().IntVar(&gwScaleSlots, "direct-scale-slots-per-host", 0, "sandbox slots supplied by each worker")
 	cmd.Flags().IntVar(&gwScaleHeadroom, "direct-scale-headroom", 0, "extra slots included in direct scale-out demand")
 	cmd.Flags().StringVar(&gwReleaseFile, "worker-release-file", "", "persisted expected worker release used to gate stale allocations")
+	cmd.Flags().StringVar(&gwIngressBucket, "ingress-bucket", "", "GCS bucket for durable raw TCP allocations (empty disables E4)")
+	cmd.Flags().StringVar(&gwRawHost, "raw-public-host", "", "public hostname returned for raw TCP allocations")
+	cmd.Flags().IntVar(&gwRawMin, "raw-port-min", 20000, "public raw TCP port range start")
+	cmd.Flags().IntVar(&gwRawMax, "raw-port-max", 29999, "public raw TCP port range end")
 	return cmd
 }
 
@@ -123,6 +131,14 @@ func runGateway(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if err := g.ConfigureDirectScaleOut(scaler, gwScaleSlots, gwScaleHeadroom); err != nil {
+			return err
+		}
+	}
+	if gwIngressBucket != "" {
+		if err := g.ConfigureRaw(gateway.RawConfig{
+			Bucket: gwIngressBucket, PublicHost: gwRawHost,
+			PortMin: gwRawMin, PortMax: gwRawMax,
+		}); err != nil {
 			return err
 		}
 	}

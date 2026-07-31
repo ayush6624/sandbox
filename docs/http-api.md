@@ -123,7 +123,8 @@ extras — see [gateway differences](#gateway-differences).
 ### PortMapping
 
 ```json
-{"guest_port": 8000, "host_port": 5201}
+{"guest_port":8000,"host_port":5201,"mode":"both","url":"https://8000-<id>.sb.example.com"}
+{"guest_port":22,"public_port":20000,"mode":"raw"}
 ```
 
 ## Host info
@@ -370,12 +371,15 @@ truncates any existing file (mode 0644).
 
 ### Expose — `POST /sandboxes/{id}/ports`
 
-Body: `{"guest_port": 8000}` (1–65535). Forwards the guest port to a
-pool-allocated host port. Idempotent — re-exposing the same guest port returns
-the existing mapping.
+Body: `{"guest_port": 8000, "host_port": true}` (1–65535). `host_port:true`
+allocates the legacy worker-local forwarding port. `false` creates a URL-only
+exposure and consumes no worker port-pool entry. Omitting the flag uses the
+worker's `default_url_only` setting (false by default for compatibility).
+Idempotent — re-exposing the same guest port returns the existing mapping.
 
 ```json
-200 {"guest_port": 8000, "host_port": 5201}
+200 {"guest_port":8000,"host_port":5201,"mode":"both","url":"https://8000-<id>.sb.example.com"}
+200 {"guest_port":8000,"mode":"url","url":"https://8000-<id>.sb.example.com"}
 ```
 
 Works on a hibernated sandbox without waking it — the new port is just
@@ -383,8 +387,32 @@ another wake-on-connect entry point.
 
 ### List — `GET /sandboxes/{id}/ports`
 
-`200 [PortMapping…]` — all explicitly forwarded ports. A newly created
+`200 [PortMapping…]` — all explicitly exposed ports. A newly created
 sandbox returns `[]`.
+
+### Raw TCP — `POST /sandboxes/{id}/raw-ports` (gateway)
+
+Body: `{"guest_port":22}`. Allocates a durable fleet-wide port and returns:
+
+```json
+200 {"guest_port":22,"mode":"raw","public_host":"tcp.example.com","public_port":20000}
+```
+
+The address survives hibernation, worker adoption, gateway restarts, and edge
+rollouts. Allocation is idempotent for a sandbox/guest-port pair.
+
+### Unexpose — `DELETE /sandboxes/{id}/ports/{guestPort}`
+
+Removes URL, worker-local, and raw exposure state. A raw public port is returned
+to the durable pool only after the worker mapping is removed. Returns `204`.
+
+### Worker tunnel — `CONNECT /sandboxes/{id}/connect/{guestPort}`
+
+Host-token-authenticated internal endpoint used by `sandbox-edge`. Returns
+`404` unless the port was explicitly exposed. A successful `200 Connection
+Established` turns the HTTP connection into an opaque bidirectional TCP stream
+to the guest. It wakes a hibernated sandbox, re-reads its post-wake guest IP,
+and pins it against idle hibernation for the connection lifetime.
 
 ## Snapshots
 
@@ -440,6 +468,7 @@ The gateway fronts N hosts with the same API, plus:
 | --- | --- |
 | `GET /info` | Forwarded to one live host (fleet hosts share a template config); `503` when none is live |
 | `GET /hosts` | Fleet state: `[{"id","addr","slots_total","slots_used","hibernated","free","alive","last_seen_ms_ago"}]` |
+| `GET /route/{id}` | Edge route contract: owning worker `host_addr`, worker bearer `token`, and cache `ttl`; gateway-token authenticated |
 | `GET /metrics` | Prometheus text format: `sandbox_hosts_live`, `sandbox_slots_total/used/free`, `sandbox_create_queue_depth`, per-host gauges |
 | `GET /metrics/hosts` | Federated per-host metrics: the gateway scrapes each live host's `/metrics` (using the addr+token from its heartbeat) and re-exports every series with a `host="<id>"` label, grouped into valid exposition. `sandbox_host_scrape_ok{host}` flags any host it couldn't reach. Lets Prometheus collect per-host detail while scraping only the gateway — no worker service discovery |
 | `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |

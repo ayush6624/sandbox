@@ -357,6 +357,55 @@
         "mode": "markdown",
         "content": "**Live now:** 10s gateway occupancy, allocatable slots, queue depth, rejected demand, create rate, desired workers, direct scale-out attempts/failures, and release-gate mismatches; 30s per-worker pools, memory admission, create concurrency, lifecycle counters, readiness phases, process uptime, golden state, scrape health, and release identity.\n\n**Not currently emitted:** request-duration histograms (create/wake/restore p50/p95/p99), Nomad autoscaler action/confirmation timestamps, GCE MIG target/current state, host CPU/disk/network pressure, or deploy annotations.\n\nThat distinction is intentional: latency numbers above remain benchmark evidence until the HTTP paths expose histograms. For a production rollout, watch expected/observed release presence together with queue, rejection/error rates, golden readiness, direct-scaler failures, and worker readiness; do not infer live latency from the static benchmark table."
       }
+    },
+
+    { "type": "row", "title": "Public ingress", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 80 }, "id": 106, "collapsed": false },
+
+    {
+      "type": "stat", "title": "Healthy edge replicas", "id": 31,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 81 },
+      "fieldConfig": { "defaults": { "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 2 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "refId": "A", "expr": "sum(up{job=\"sandbox-edge\"})" } ]
+    },
+    {
+      "type": "timeseries", "title": "Ingress connections and errors", "id": 32,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 7, "w": 9, "x": 6, "y": 81 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(sandbox_edge_conns_open{job=\"sandbox-edge\"})", "legendFormat": "HTTPS open" },
+        { "refId": "B", "expr": "sum(sandbox_edge_raw_conns_open{job=\"sandbox-edge\"})", "legendFormat": "raw open" },
+        { "refId": "C", "expr": "sum(rate(sandbox_edge_conns_total{job=\"sandbox-edge\",result=\"error\"}[5m]))", "legendFormat": "HTTPS errors/s" },
+        { "refId": "D", "expr": "sum(rate(sandbox_edge_raw_conns_total{job=\"sandbox-edge\",result=\"error\"}[5m]))", "legendFormat": "raw errors/s" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Wake latency (fleet quantiles)", "id": 33,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 7, "w": 9, "x": 15, "y": 81 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(sandbox_edge_wake_seconds_bucket{job=\"sandbox-edge\"}[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(sandbox_edge_wake_seconds_bucket{job=\"sandbox-edge\"}[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(sandbox_edge_wake_seconds_bucket{job=\"sandbox-edge\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Raw lease pool", "id": 34,
+      "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 88 },
+      "fieldConfig": { "defaults": { "decimals": 0, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sandbox_raw_leases{job=\"sandbox-gateway\",state=\"active\"}", "legendFormat": "active" },
+        { "refId": "B", "expr": "sandbox_raw_leases{job=\"sandbox-gateway\",state=\"pending\"}", "legendFormat": "pending" },
+        { "refId": "C", "expr": "sandbox_raw_leases{job=\"sandbox-gateway\",state=\"releasing\"}", "legendFormat": "releasing" },
+        { "refId": "D", "expr": "increase(sandbox_raw_route_conflicts_total{job=\"sandbox-gateway\"}[5m])", "legendFormat": "route conflicts / 5m" }
+      ]
     }
   ]
 }
