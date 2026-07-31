@@ -23,6 +23,7 @@ build-linux:
 
 validate-infra:
 	bash infra/gcp/validate-scaling-owner.sh
+	bash infra/gcp/validate-control-deploy.sh
 
 check-remote:
 	@test -n "$(REMOTE_HOST)" || (echo "set REMOTE_HOST"; exit 1)

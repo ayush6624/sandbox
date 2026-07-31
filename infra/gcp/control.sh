@@ -190,6 +190,8 @@ cmd_gateway() {
        PROJECT='$PROJECT' ZONE='$ZONE' MIG_NAME='${MIG_NAME:-sandbox-workers}' \
        MIG_MAX='${MIG_MAX:-8}' SLOTS_PER_HOST='${SLOTS_PER_HOST:-24}' \
        HEADROOM_SLOTS='${HEADROOM_SLOTS:-12}' \
+       INGRESS_BUCKET='${INGRESS_BUCKET:-}' RAW_PUBLIC_HOST='${EDGE_DOMAIN:-}' \
+       RAW_PORT_MIN='${EDGE_RAW_PORT_MIN:-20000}' RAW_PORT_MAX='${EDGE_RAW_PORT_MAX:-29999}' \
        REMOTE_DIR='$REMOTE_DIR' bash -s" < "$DIR/control-install.sh"
 }
 
