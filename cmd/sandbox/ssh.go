@@ -115,13 +115,21 @@ func ensureSSHPort(ctx context.Context, c *client.Client, id string) (int, error
 		return 0, err
 	}
 	for _, pm := range mappings {
-		if pm.GuestPort == sshGuestPort {
+		// A URL-only mapping carries no host port; fall through and upgrade it
+		// rather than handing back port 0.
+		if pm.GuestPort == sshGuestPort && pm.HostPort != 0 {
 			return pm.HostPort, nil
 		}
 	}
-	pm, err := c.ExposePort(ctx, id, sshGuestPort)
+	// Demand a host port explicitly: on a host configured with
+	// default_url_only, an unqualified expose returns a URL-only mapping and
+	// SSH has nothing to dial.
+	pm, err := c.ExposeHostPort(ctx, id, sshGuestPort)
 	if err != nil {
 		return 0, fmt.Errorf("forward guest port %d: %w", sshGuestPort, err)
+	}
+	if pm.HostPort == 0 {
+		return 0, fmt.Errorf("forward guest port %d: host returned no host port (mode %q)", sshGuestPort, pm.Mode)
 	}
 	return pm.HostPort, nil
 }
