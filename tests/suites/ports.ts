@@ -36,7 +36,7 @@ async function fetchText(url: string): Promise<string> {
 suite.test('guest port 3000 is reachable after explicit exposure', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 3000)
-  const host = await sbx.exposePort(3000)
+  const host = await sbx.exposePort(3000, { hostPort: true })
   assertEq(sbx.getHost(3000), host, 'getHost must cache the explicit mapping')
   assert(/^[\d.]+:\d+$/.test(host), `getHost must return host:port, got ${host}`)
   const body = await eventually(() => fetchText(`http://${host}/hello`), {
@@ -54,7 +54,7 @@ suite.test('getHost throws for a port that was never exposed', async (ctx) => {
 suite.test('exposePort forwards a guest port end-to-end', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 8000)
-  const hostPort = await sbx.exposePort(8000)
+  const hostPort = await sbx.exposePort(8000, { hostPort: true })
   assert(/^[\d.]+:\d+$/.test(hostPort), `exposePort must return host:port, got ${hostPort}`)
   assertEq(sbx.getHost(8000), hostPort, 'getHost must work after exposePort')
 
@@ -86,7 +86,10 @@ suite.test('listPorts reports only explicitly exposed mappings', async (ctx) => 
 suite.test('two sandboxes get distinct host ports and isolated servers', async (ctx) => {
   const [a, b] = await Promise.all([ctx.createTracked(), ctx.createTracked()])
   await Promise.all([startServer(a, 3000), startServer(b, 3000)])
-  const [hostA, hostB] = await Promise.all([a.exposePort(3000), b.exposePort(3000)])
+  const [hostA, hostB] = await Promise.all([
+    a.exposePort(3000, { hostPort: true }),
+    b.exposePort(3000, { hostPort: true }),
+  ])
   const [bodyA, bodyB] = await Promise.all([
     eventually(() => fetchText(`http://${hostA}/A`), {
       timeoutMs: 15_000,
@@ -107,7 +110,7 @@ suite.test('two sandboxes get distinct host ports and isolated servers', async (
 suite.test('killed sandbox stops answering on its forwarded port', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 3000)
-  const host = await sbx.exposePort(3000)
+  const host = await sbx.exposePort(3000, { hostPort: true })
   await eventually(() => fetchText(`http://${host}/up`), {
     timeoutMs: 15_000,
     what: 'server up before kill',
@@ -130,7 +133,7 @@ suite.test('killed sandbox stops answering on its forwarded port', async (ctx) =
 suite.test('connecting to a forwarded port wakes a hibernated sandbox', async (ctx) => {
   const sbx = await ctx.createTracked()
   await startServer(sbx, 3000)
-  const host = await sbx.exposePort(3000)
+  const host = await sbx.exposePort(3000, { hostPort: true })
   await eventually(() => fetchText(`http://${host}/pre-freeze`), {
     timeoutMs: 15_000,
     what: 'guest server up before hibernating',
