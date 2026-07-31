@@ -141,15 +141,27 @@ func (s *Server) handleDeletePort(w http.ResponseWriter, r *http.Request) {
 	}
 	done := s.act.begin(id)
 	defer done()
+	// Take the lifecycle lock like every other port mutation (handleExposePort,
+	// wake, destroy). Without it this handler's Sync can run concurrently with a
+	// destroy's CloseSandbox and re-bind listeners for a row that is already
+	// gone, permanently leaking those host ports: the registry hands the port to
+	// the next sandbox, whose bind then fails with EADDRINUSE.
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	// The sandbox may have been destroyed while this request waited for the lock.
+	sb, err := s.reg.Get(r.Context(), id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
 	if err := s.reg.DeletePort(r.Context(), id, guestPort); err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if sb, err := s.reg.Get(r.Context(), id); err == nil {
-		if err := s.syncSandboxPorts(r.Context(), sb); err != nil {
-			httpError(w, http.StatusInternalServerError, err)
-			return
-		}
+	if err := s.syncSandboxPorts(r.Context(), sb); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -178,6 +190,15 @@ func (s *Server) handleSetPublicPort(w http.ResponseWriter, r *http.Request) {
 	}
 	done := s.act.begin(id)
 	defer done()
+	// Same lifecycle serialization as every other port mutation: this handler
+	// can create a mapping (AddURLPort) and must not race a concurrent destroy.
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	if _, err := s.reg.Get(r.Context(), id); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
 	ports, err := s.reg.Ports(r.Context(), id)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)

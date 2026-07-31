@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/gcsblob"
@@ -134,15 +133,8 @@ func (s *Server) cancelSnapshotUpload(id string) {
 
 // snapshotLock serializes all local consumers and deletion of one snapshot.
 // Different snapshot ids remain independent.
-func (s *Server) snapshotLock(id string) *sync.Mutex {
-	s.snapshotLocksMu.Lock()
-	defer s.snapshotLocksMu.Unlock()
-	mu := s.snapshotLocks[id]
-	if mu == nil {
-		mu = &sync.Mutex{}
-		s.snapshotLocks[id] = mu
-	}
-	return mu
+func (s *Server) snapshotLock(id string) *keyedMutex {
+	return s.snapshotLocks.acquire(id)
 }
 
 // baseUploaded reports whether a base template is known-durable in GCS —
@@ -197,15 +189,8 @@ func (s *Server) ensureBaseUploaded(ctx context.Context, base registry.Snapshot)
 // pullLock returns a mutex dedicated to one pull key (snapshot or base id),
 // so concurrent restores of the same id download once while different ids
 // proceed in parallel.
-func (s *Server) pullLock(key string) *sync.Mutex {
-	s.pullMu.Lock()
-	defer s.pullMu.Unlock()
-	mu, ok := s.pulls[key]
-	if !ok {
-		mu = &sync.Mutex{}
-		s.pulls[key] = mu
-	}
-	return mu
+func (s *Server) pullLock(key string) *keyedMutex {
+	return s.pulls.acquire(key)
 }
 
 // ensureSnapshotLocal returns the snapshot row, pulling the snapshot down

@@ -122,7 +122,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 
 	format, baseID := registry.FormatFull, ""
 	var parentFullPath, goldenMemPath string
-	var baseOp *sync.Mutex
+	var baseOp *keyedMutex
 	usingHibLineage := false
 	// Diff only while Server.diffBase vouches for the machine's bitmap. After
 	// every successful Firecracker snapshot the bitmap resets, so the new
@@ -623,7 +623,7 @@ type clone struct {
 	// lifecycle is held from row allocation through the final readiness
 	// transition so destroy/shutdown cannot tear resources out from under a
 	// half-started clone. Wake clones already run under their caller's lock.
-	lifecycle *sync.Mutex
+	lifecycle *keyedMutex
 }
 
 // reidentifyMargin bounds how long finishClone waits for the guest's

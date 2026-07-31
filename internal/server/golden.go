@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/registry"
@@ -230,15 +229,8 @@ func (s *Server) uploadGoldenBase(snap registry.Snapshot) {
 // snapshotStageLock returns the lock for one path baked into Firecracker
 // snapshot state. Callers hold it from staging until every VMM in that request
 // has completed LoadSnapshot.
-func (s *Server) snapshotStageLock(path string) *sync.Mutex {
-	s.stageLocksMu.Lock()
-	defer s.stageLocksMu.Unlock()
-	mu, ok := s.stageLocks[path]
-	if !ok {
-		mu = &sync.Mutex{}
-		s.stageLocks[path] = mu
-	}
-	return mu
+func (s *Server) snapshotStageLock(path string) *keyedMutex {
+	return s.stageLocks.acquire(path)
 }
 
 // stageSnapshotRootfs makes sure the rootfs path baked into the snapshot

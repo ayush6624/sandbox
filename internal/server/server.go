@@ -123,22 +123,19 @@ type Server struct {
 	// rootfs path. A snapshot fanout may temporarily stage and then unlink that
 	// path; without this lock, concurrent fanout/restore requests can remove it
 	// while a sibling VMM is still opening the drive.
-	stageLocksMu sync.Mutex
-	stageLocks   map[string]*sync.Mutex
+	stageLocks keyedMutexes
 
 	// blob is the GCS client for snapshot durability; nil when disabled.
 	blob *gcsblob.Client
 	// baseUpMu/basesUploaded gate the once-per-base template upload.
 	baseUpMu      sync.Mutex
 	basesUploaded map[string]bool
-	// pullMu/pulls serialize concurrent GCS pulls of the same snapshot id.
-	pullMu sync.Mutex
-	pulls  map[string]*sync.Mutex
+	// pulls serializes concurrent GCS pulls of the same snapshot id.
+	pulls keyedMutexes
 	// snapshotLocks serialize a snapshot's creation/upload, restore/fanout use,
 	// and deletion. uploads are separately cancellable so delete never waits
 	// for the full background timeout or lets a cancelled upload re-commit.
-	snapshotLocksMu sync.Mutex
-	snapshotLocks   map[string]*sync.Mutex
+	snapshotLocks   keyedMutexes
 	snapshotUpMu    sync.Mutex
 	snapshotUploads map[string]*backgroundUpload
 	// chunkUpMu/chunksUploaded remember content-addressed chunks this process has
@@ -149,9 +146,8 @@ type Server struct {
 
 	// act tracks per-sandbox API activity for idle hibernation; wakesMu/wakes
 	// serialize hibernate/wake/destroy per sandbox id.
-	act     *activityTracker
-	wakesMu sync.Mutex
-	wakes   map[string]*sync.Mutex
+	act   *activityTracker
+	wakes keyedMutexes
 	// Hibernation payloads upload after the VM is stopped. Wake/destroy cancel
 	// and join the current upload before consuming or deleting its local files,
 	// preventing late commit-marker resurrection and read-vs-unlink races.
@@ -239,11 +235,9 @@ type serverMetrics struct {
 const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
-	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{}, pulls: map[string]*sync.Mutex{},
-		stageLocks:      map[string]*sync.Mutex{},
-		snapshotLocks:   map[string]*sync.Mutex{},
+	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{},
 		snapshotUploads: map[string]*backgroundUpload{},
-		chunksUploaded:  map[string]bool{}, act: newActivityTracker(), wakes: map[string]*sync.Mutex{},
+		chunksUploaded:  map[string]bool{}, act: newActivityTracker(),
 		hibUploads: map[string]*backgroundUpload{},
 		startedAt:  time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder()}
 	sem := cfg.CreateConcurrency

@@ -152,6 +152,7 @@ func (g *Gateway) recordSnapshotOp(r *http.Request, snapID string, target *host,
 		var sb registry.Sandbox
 		if err := json.Unmarshal(*respBody, &sb); err == nil && sb.ID != "" {
 			g.route[sb.ID] = target.id
+			g.pinRouteLocked(sb.ID)
 			if hh := g.hosts[target.id]; hh != nil {
 				hh.slotsUsed++
 				if hh.slotsFree > 0 {
@@ -168,6 +169,7 @@ func (g *Gateway) recordSnapshotOp(r *http.Request, snapID string, target *host,
 		if err := json.Unmarshal(*respBody, &sbs); err == nil {
 			for i := range sbs {
 				g.route[sbs[i].ID] = target.id
+				g.pinRouteLocked(sbs[i].ID)
 				sbs[i].HostAddr = hostOnly(target.addr)
 			}
 			if hh := g.hosts[target.id]; hh != nil {

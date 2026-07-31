@@ -255,17 +255,17 @@ func (a *activityTracker) idleFor(id string) (idle time.Duration, busy, ok bool)
 // --- wake/hibernate serialization ---
 
 // wakeLock returns a mutex dedicated to one sandbox id, serializing
-// hibernate, wake, and destroy against each other (mirrors pullLock).
-func (s *Server) wakeLock(id string) *sync.Mutex {
-	s.wakesMu.Lock()
-	defer s.wakesMu.Unlock()
-	mu, ok := s.wakes[id]
-	if !ok {
-		mu = &sync.Mutex{}
-		s.wakes[id] = mu
-	}
-	return mu
+// hibernate, wake, and destroy against each other (mirrors pullLock). The
+// returned handle's Lock and Unlock must each be called exactly once — Unlock
+// also releases the entry, so the map does not retain a mutex per sandbox the
+// server has ever seen (see keyedMutexes).
+func (s *Server) wakeLock(id string) *keyedMutex {
+	return s.wakes.acquire(id)
 }
+
+// wakeLockLen reports how many sandbox ids currently hold or await a lifecycle
+// lock. Test/diagnostic only.
+func (s *Server) wakeLockLen() int { return s.wakes.len() }
 
 // --- the idle reaper ---
 

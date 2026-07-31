@@ -151,7 +151,7 @@ func (g *Gateway) handleDrain(w http.ResponseWriter, r *http.Request) {
 		// The source no longer owns it; drop the stale route so adopt can place
 		// it (and so a heartbeat race doesn't route back to the drained host).
 		g.mu.Lock()
-		delete(g.route, id)
+		g.unpinRouteLocked(id)
 		g.mu.Unlock()
 		if _, ok := g.resolveViaAdopt(id, exclude); ok {
 			moved++

@@ -196,6 +196,15 @@ type Gateway struct {
 	hosts     map[string]*host  // host id → host
 	route     map[string]string // sandbox id → host id (derived from heartbeats)
 	snapRoute map[string]string // snapshot id → host id (derived from heartbeats)
+	// routePin protects routes this gateway recorded itself (a landed create,
+	// restore, fanout, or adopt) from being erased by a heartbeat that was
+	// SAMPLED BEFORE the sandbox committed on the worker. Heartbeats rebuild a
+	// host's route table wholesale, so without this a create that lands in the
+	// window between a worker's sample and its POST /register is unroutable
+	// until the next heartbeat — the sandbox 404s immediately after a 201.
+	// A pin is dropped as soon as a heartbeat actually reports the id, and
+	// expires after routePinGrace so a destroyed sandbox can't pin forever.
+	routePin map[string]time.Time // sandbox id → pin expiry
 
 	// Cross-host wake (roadmap B4). When an id-scoped request finds no live
 	// route (the owning host is gone), the gateway dispatches an /adopt to a
@@ -248,6 +257,7 @@ func New(token string, ttl time.Duration, queueWait time.Duration, queueMax int)
 		hosts:             map[string]*host{},
 		route:             map[string]string{},
 		snapRoute:         map[string]string{},
+		routePin:          map[string]time.Time{},
 		adopts:            map[string]*adoptInflight{},
 	}
 }
@@ -511,13 +521,35 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.hibernated = hb.Hibernated
 	h.lastSeen = time.Now()
 	// Rebuild this host's routes: drop stale entries, add current ones.
+	// A route this gateway recorded itself is kept while its pin is unexpired
+	// even when absent from this heartbeat — the sample may predate the create's
+	// commit on the worker (see Gateway.routePin). Every reported id clears its
+	// pin below: once a heartbeat names the sandbox, heartbeats are authoritative
+	// for it again.
+	now := time.Now()
 	for sid, hid := range g.route {
-		if hid == hb.HostID {
-			delete(g.route, sid)
+		if hid != hb.HostID {
+			continue
 		}
+		if pin, pinned := g.routePin[sid]; pinned {
+			if now.Before(pin) {
+				continue // in-flight landing this heartbeat can't have seen yet
+			}
+			delete(g.routePin, sid)
+		}
+		delete(g.route, sid)
 	}
 	for _, sid := range hb.SandboxIDs {
 		g.route[sid] = hb.HostID
+		delete(g.routePin, sid)
+	}
+	// Bound the pin map: an id whose pin lapsed without ever being heartbeated
+	// (destroyed mid-create, or landed on a host that then died) has no route
+	// left to protect.
+	for sid, pin := range g.routePin {
+		if !now.Before(pin) {
+			delete(g.routePin, sid)
+		}
 	}
 	for sid, hid := range g.snapRoute {
 		if hid == hb.HostID {
@@ -813,9 +845,36 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 		}
 	}
 	g.route[sandboxID] = routeID
+	g.pinRouteLocked(sandboxID)
 	g.mu.Unlock()
 	g.createsOK.Add(1)
 	return routeID
+}
+
+// routePinGrace is how long a gateway-recorded route survives heartbeats that
+// don't mention it. It must exceed one full worker heartbeat period plus the
+// sampling skew (a worker samples its registry, then posts), so it is sized at
+// several heartbeat intervals. Overshooting is safe: a pin only preserves a
+// route to the host the sandbox was created on, and if the sandbox is really
+// gone that host answers 404 — which is the same result an erased route
+// produces, minus the cross-host adopt storm.
+const routePinGrace = 30 * time.Second
+
+// pinRouteLocked protects a route this gateway just recorded. g.mu must be held
+// for writing.
+func (g *Gateway) pinRouteLocked(sandboxID string) {
+	if g.routePin == nil {
+		g.routePin = map[string]time.Time{}
+	}
+	g.routePin[sandboxID] = time.Now().Add(routePinGrace)
+}
+
+// unpinRouteLocked drops a route and its pin together, for paths that KNOW the
+// sandbox no longer lives on its routed host (explicit destroy, drain).
+// g.mu must be held for writing.
+func (g *Gateway) unpinRouteLocked(sandboxID string) {
+	delete(g.route, sandboxID)
+	delete(g.routePin, sandboxID)
 }
 
 // notifySlotFreed broadcasts to every awaitHost waiter without blocking. Each
@@ -1286,6 +1345,18 @@ func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReversePr
 				g.mu.Unlock()
 			}
 			return replaceJSONBody(resp, sn)
+		case req.Method == http.MethodDelete && isPlainSandboxGet(req.URL.Path):
+			// A confirmed destroy retires the route immediately, pin included.
+			// Otherwise the create-time pin (see Gateway.routePin) would keep
+			// the dead id routed for its whole grace window.
+			if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+				if id, ok := strings.CutPrefix(req.URL.Path, "/sandboxes/"); ok && id != "" {
+					g.mu.Lock()
+					g.unpinRouteLocked(id)
+					g.mu.Unlock()
+				}
+			}
+			return nil
 		case req.Method == http.MethodGet && isPlainSandboxGet(req.URL.Path):
 			if resp.StatusCode != http.StatusOK {
 				return nil
@@ -1540,7 +1611,7 @@ func (g *Gateway) dropHostLocked(id string) {
 	g.proxies.Delete(id)
 	for sid, hid := range g.route {
 		if hid == id {
-			delete(g.route, sid)
+			g.unpinRouteLocked(sid)
 		}
 	}
 	for sid, hid := range g.snapRoute {

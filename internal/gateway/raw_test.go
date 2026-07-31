@@ -29,6 +29,7 @@ func TestHandleRawRouteReturnsDialableWorkerAddress(t *testing.T) {
 		}},
 		loaded: true,
 	}
+	g.raw.publishLocked()
 	req := httptest.NewRequest("GET", "/raw-route/20000", nil)
 	req.SetPathValue("port", "20000")
 	w := httptest.NewRecorder()

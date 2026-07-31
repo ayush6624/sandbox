@@ -62,6 +62,16 @@ func newPortForwarder(dial dialGuestFunc, track func(string) func()) *portForwar
 func (f *portForwarder) Open(id string, hostPort, guestPort int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.openLocked(id, hostPort, guestPort)
+}
+
+// openLocked is Open's body; f.mu must be held. Sync uses it to reconcile a
+// sandbox's whole listener set inside ONE critical section — releasing the lock
+// between "close stale" and "open desired" let a concurrent CloseSandbox land
+// in the middle, so the sandbox ended up with a half-reconciled set (and, when
+// the destroy went first, listeners bound for a row that no longer exists,
+// permanently leaking those host ports from the pool's point of view).
+func (f *portForwarder) openLocked(id string, hostPort, guestPort int) error {
 	if f.closed {
 		return errors.New("port forwarder is shut down")
 	}
@@ -91,16 +101,16 @@ func (f *portForwarder) Open(id string, hostPort, guestPort int) error {
 // survives a server restart) and defensively after a wake.
 func (f *portForwarder) Sync(id string, desired map[int]int) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	for hostPort, pl := range f.listeners[id] {
 		if gp, ok := desired[hostPort]; !ok || gp != pl.guestPort {
 			_ = pl.ln.Close()
 			delete(f.listeners[id], hostPort)
 		}
 	}
-	f.mu.Unlock()
 	var firstErr error
 	for hostPort, guestPort := range desired {
-		if err := f.Open(id, hostPort, guestPort); err != nil && firstErr == nil {
+		if err := f.openLocked(id, hostPort, guestPort); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

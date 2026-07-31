@@ -73,14 +73,31 @@ type rawIndex struct {
 	Leases  map[string]rawLease `json:"leases"`
 }
 
+// rawSnapshot is an immutable view of the lease index for the READ path.
+// route() runs for every inbound public raw TCP connection, and stats() runs on
+// every metrics scrape; neither may block behind an allocation, which holds
+// rawAllocator.mu across GCS commits, the worker assign() round trip, and
+// jittered CAS backoff (measured: a single exposure stalled route() by ~485 ms).
+// Mutators publish a fresh snapshot before releasing mu; readers never take it.
+type rawSnapshot struct {
+	leases map[string]rawLease
+	gen    int64
+}
+
 type rawAllocator struct {
 	cfg   RawConfig
 	store rawStore
 
+	// mu serializes index mutation and the durable CAS behind it. It is held
+	// across network I/O by design, so nothing on a latency-sensitive path may
+	// acquire it — use snap instead.
 	mu     sync.Mutex
 	index  rawIndex
 	gen    int64
 	loaded bool
+	// snap is the lock-free read view of index/gen, republished by
+	// publishLocked at the end of every mutating critical section.
+	snap atomic.Pointer[rawSnapshot]
 
 	allocOK        atomic.Int64
 	allocError     atomic.Int64
@@ -96,13 +113,22 @@ func (g *Gateway) ConfigureRaw(cfg RawConfig) error {
 	if cfg.PortMin < 1 || cfg.PortMax > 65535 || cfg.PortMin > cfg.PortMax {
 		return fmt.Errorf("invalid raw port range %d-%d", cfg.PortMin, cfg.PortMax)
 	}
-	g.raw = &rawAllocator{cfg: cfg, store: gcsblob.New(cfg.Bucket)}
+	g.raw = newRawAllocator(cfg, gcsblob.New(cfg.Bucket))
 	return nil
+}
+
+// newRawAllocator builds an allocator with its lock-free read view already
+// published, so route()/stats() never observe a nil snapshot.
+func newRawAllocator(cfg RawConfig, store rawStore) *rawAllocator {
+	a := &rawAllocator{cfg: cfg, store: store, index: rawIndex{Version: 1, Leases: map[string]rawLease{}}}
+	a.publishLocked() // no contention yet; nothing else holds a reference
+	return a
 }
 
 func (a *rawAllocator) load(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer a.publishLocked()
 	return a.loadLocked(ctx)
 }
 
@@ -153,6 +179,7 @@ func (a *rawAllocator) allocate(ctx context.Context, id string, guestPort int,
 	assign func(int) error) (rawLease, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer a.publishLocked()
 	if !a.loaded {
 		a.allocError.Add(1)
 		return rawLease{}, errors.New("raw allocator is not ready")
@@ -256,6 +283,7 @@ func (a *rawAllocator) checkHeartbeat(hostID string, routes []cluster.RawPortRou
 func (a *rawAllocator) beginRemove(ctx context.Context, id string, guestPort int) (rawLease, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer a.publishLocked()
 	key, lease, ok := a.findBySandboxLocked(id, guestPort)
 	if !ok {
 		return rawLease{}, false, nil
@@ -280,6 +308,7 @@ func (a *rawAllocator) beginRemove(ctx context.Context, id string, guestPort int
 func (a *rawAllocator) beginRemoveSandbox(ctx context.Context, id string) ([]rawLease, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer a.publishLocked()
 	var releasing, changed []rawLease
 	now := time.Now().UTC()
 	for key, lease := range a.index.Leases {
@@ -313,6 +342,7 @@ func (a *rawAllocator) beginRemoveSandbox(ctx context.Context, id string) ([]raw
 func (a *rawAllocator) finishRemove(ctx context.Context, leases []rawLease) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer a.publishLocked()
 	removed := make([]rawLease, 0, len(leases))
 	for _, lease := range leases {
 		key := strconv.Itoa(lease.PublicPort)
@@ -341,6 +371,7 @@ func (a *rawAllocator) finishRemove(ctx context.Context, leases []rawLease) erro
 func (a *rawAllocator) restore(ctx context.Context, leases []rawLease) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer a.publishLocked()
 	for _, lease := range leases {
 		key := strconv.Itoa(lease.PublicPort)
 		current, ok := a.index.Leases[key]
@@ -354,17 +385,43 @@ func (a *rawAllocator) restore(ctx context.Context, leases []rawLease) {
 	}
 }
 
+// publishLocked republishes the lock-free read view. a.mu must be held; call it
+// before releasing the lock in every mutating critical section (a deferred
+// publish registered AFTER `defer a.mu.Unlock()` runs first, which is correct).
+// Copy-on-write is the right trade here: mutations are rare (a port exposure),
+// reads are per-connection.
+func (a *rawAllocator) publishLocked() {
+	leases := make(map[string]rawLease, len(a.index.Leases))
+	for k, v := range a.index.Leases {
+		leases[k] = v
+	}
+	a.snap.Store(&rawSnapshot{leases: leases, gen: a.gen})
+}
+
+// emptyRawSnapshot answers reads on an allocator that has not published yet
+// (i.e. before the startup load completed). It must NOT fall back to locking
+// a.mu: that would reintroduce exactly the data-plane stall this snapshot
+// exists to remove. "Not loaded" and "no such lease" are the same answer to a
+// caller — route() reports unroutable either way.
+var emptyRawSnapshot = &rawSnapshot{leases: map[string]rawLease{}}
+
+// readSnapshot returns the current lock-free read view.
+func (a *rawAllocator) readSnapshot() *rawSnapshot {
+	if s := a.snap.Load(); s != nil {
+		return s
+	}
+	return emptyRawSnapshot
+}
+
 func (a *rawAllocator) route(publicPort int) (rawLease, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	lease, ok := a.index.Leases[strconv.Itoa(publicPort)]
+	lease, ok := a.readSnapshot().leases[strconv.Itoa(publicPort)]
 	return lease, ok && lease.State == "active"
 }
 
 func (a *rawAllocator) stats() (pending, active, releasing int, generation int64) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, lease := range a.index.Leases {
+	s := a.readSnapshot()
+	generation = s.gen
+	for _, lease := range s.leases {
 		if lease.State == "active" {
 			active++
 		} else if lease.State == "releasing" {
@@ -373,7 +430,7 @@ func (a *rawAllocator) stats() (pending, active, releasing int, generation int64
 			pending++
 		}
 	}
-	return pending, active, releasing, a.gen
+	return pending, active, releasing, generation
 }
 
 func (g *Gateway) sandboxHost(id string) (host, bool) {
@@ -547,7 +604,7 @@ func (g *Gateway) handleGatewayDestroy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	g.mu.Lock()
-	delete(g.route, id)
+	g.unpinRouteLocked(id)
 	g.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -621,6 +678,7 @@ func (g *Gateway) reconcilePendingRaw(ctx context.Context) {
 			} else {
 				g.raw.reconcileOK.Add(1)
 			}
+			g.raw.publishLocked()
 		}
 		g.raw.mu.Unlock()
 	}

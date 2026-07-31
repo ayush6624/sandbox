@@ -1,13 +1,12 @@
 package server
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
 
 func TestSnapshotStageLockSerializesSameBakedPath(t *testing.T) {
-	s := &Server{stageLocks: map[string]*sync.Mutex{}}
+	s := &Server{}
 	first := s.snapshotStageLock("/rootfs/source.ext4")
 	if first != s.snapshotStageLock("/rootfs/source.ext4") {
 		t.Fatal("same baked path returned different locks")
