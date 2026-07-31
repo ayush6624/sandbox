@@ -283,6 +283,64 @@ func CloneFile(src, dst string) error {
 	return nil
 }
 
+// WriteSparseRanges creates dst with logical size and copies only ranges from
+// src. Holes remain holes. It is used after composing snapshot layers into a
+// full reflink: DiffExtents identifies every block no longer shared with the
+// immutable golden, and this function turns those blocks back into a portable
+// one-level sparse delta.
+func WriteSparseRanges(src, dst string, size int64, ranges []Range) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		_ = out.Close()
+		if !ok {
+			_ = os.Remove(dst)
+		}
+	}()
+	if err := out.Truncate(size); err != nil {
+		return err
+	}
+	buf := make([]byte, 1<<20)
+	for _, r := range ranges {
+		if r.Off < 0 || r.Len < 0 || r.Off > size || r.Len > size-r.Off {
+			return fmt.Errorf("range [%d,%d) outside file size %d", r.Off, r.Off+r.Len, size)
+		}
+		for off, remaining := r.Off, r.Len; remaining > 0; {
+			n := remaining
+			if n > int64(len(buf)) {
+				n = int64(len(buf))
+			}
+			if _, err := in.ReadAt(buf[:n], off); err != nil {
+				return fmt.Errorf("read %s @%d: %w", src, off, err)
+			}
+			if _, err := out.WriteAt(buf[:n], off); err != nil {
+				return fmt.Errorf("write %s @%d: %w", dst, off, err)
+			}
+			off += n
+			remaining -= n
+		}
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
 // reflinkUnsupported reports whether a failed `cp --reflink=always` failed
 // because the filesystem can't reflink (vs. a real error like ENOSPC), so we
 // know it's safe to fall back to a sparse copy. coreutils emits EOPNOTSUPP /

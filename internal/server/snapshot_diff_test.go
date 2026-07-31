@@ -59,8 +59,11 @@ func TestSnapshotDiffPlanFlattensUserDeltaToGolden(t *testing.T) {
 	if !ok {
 		t.Fatal("user delta was not accepted as a differential parent")
 	}
-	if plan.goldenID != golden.ID || plan.parentDiffPath != parent.MemPath {
-		t.Fatalf("plan = %+v, want golden=%q parent=%q", plan, golden.ID, parent.MemPath)
+	if plan.goldenID != golden.ID || plan.goldenMemPath != golden.MemPath {
+		t.Fatalf("plan = %+v, want golden=%q memory=%q", plan, golden.ID, golden.MemPath)
+	}
+	if plan.parent.ID != parent.ID {
+		t.Fatalf("parent = %q, want %q", plan.parent.ID, parent.ID)
 	}
 }
 
@@ -96,10 +99,11 @@ func TestFlattenSnapshotDiffLatestLayerWins(t *testing.T) {
 		t.Skip("sparse overlay uses Linux SEEK_DATA/SEEK_HOLE")
 	}
 	dir := t.TempDir()
-	parent := filepath.Join(dir, "parent.mem")
+	golden := filepath.Join(dir, "golden.mem")
+	parent := filepath.Join(dir, "parent.full.mem")
 	layer := filepath.Join(dir, "layer.mem")
 	const size = 64 << 10
-	for _, path := range []string{parent, layer} {
+	for _, path := range []string{golden, parent, layer} {
 		f, err := os.Create(path)
 		if err != nil {
 			t.Fatal(err)
@@ -109,6 +113,13 @@ func TestFlattenSnapshotDiffLatestLayerWins(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = f.Close()
+	}
+	// Parent is a reflink of golden with one prior changed page.
+	if err := os.Remove(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisioner.CloneFile(golden, parent); err != nil {
+		t.Fatal(err)
 	}
 	if f, err := os.OpenFile(parent, os.O_WRONLY, 0); err != nil {
 		t.Fatal(err)
@@ -132,7 +143,7 @@ func TestFlattenSnapshotDiffLatestLayerWins(t *testing.T) {
 		}
 	}
 	s := &Server{cfg: Config{Provisioner: &provisioner.Provisioner{}}}
-	if err := s.flattenSnapshotDiff(parent, layer); err != nil {
+	if err := s.flattenSnapshotDiff(parent, golden, layer); err != nil {
 		t.Fatal(err)
 	}
 	got := make([]byte, 6)
@@ -146,5 +157,16 @@ func TestFlattenSnapshotDiffLatestLayerWins(t *testing.T) {
 	}
 	if _, err := f.ReadAt(got, 12<<10); err != nil || string(got) != "second" {
 		t.Fatalf("new page = %q err=%v", got, err)
+	}
+	full, err := os.Open(filepath.Join(dir, "mem.full.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer full.Close()
+	if _, err := full.ReadAt(got, 4<<10); err != nil || string(got) != "child!" {
+		t.Fatalf("materialized overridden page = %q err=%v", got, err)
+	}
+	if _, err := full.ReadAt(got, 12<<10); err != nil || string(got) != "second" {
+		t.Fatalf("materialized new page = %q err=%v", got, err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -113,7 +114,8 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	}
 	m := v.(*vm.Machine)
 
-	format, baseID, parentDiffPath := registry.FormatFull, "", ""
+	format, baseID := registry.FormatFull, ""
+	var parentFullPath, goldenMemPath string
 	var baseOp *sync.Mutex
 	// Diff only while Server.diffBase vouches for the machine's bitmap. After
 	// every successful Firecracker snapshot the bitmap resets, so the new
@@ -127,8 +129,17 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		candidateOp := s.snapshotLock(candidateID)
 		candidateOp.Lock()
 		if plan, ok := s.snapshotDiffPlan(ctx, candidateID); ok {
-			format, baseID, parentDiffPath = registry.FormatDiff, plan.goldenID, plan.parentDiffPath
-			baseOp = candidateOp
+			if plan.parent.ID != "" {
+				parentFullPath, err = s.materializeMem(ctx, plan.parent)
+				ok = err == nil
+			}
+			if ok {
+				format, baseID = registry.FormatDiff, plan.goldenID
+				goldenMemPath = plan.goldenMemPath
+				baseOp = candidateOp
+			} else {
+				candidateOp.Unlock()
+			}
 		} else {
 			candidateOp.Unlock()
 		}
@@ -203,8 +214,8 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	// cumulative delta, not directly relative to the golden. Compose the two
 	// sparse layers after resuming the guest so this host-side work does not
 	// extend pause time. The result remains a single delta over baseID.
-	if parentDiffPath != "" {
-		if err := s.flattenSnapshotDiff(parentDiffPath, memPath); err != nil {
+	if parentFullPath != "" {
+		if err := s.flattenSnapshotDiff(parentFullPath, goldenMemPath, memPath); err != nil {
 			_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 			return registry.Snapshot{}, 500, fmt.Errorf("flatten snapshot diff: %w", err)
 		}
@@ -259,8 +270,9 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 }
 
 type snapshotDiffPlan struct {
-	goldenID       string
-	parentDiffPath string
+	goldenID      string
+	parent        registry.Snapshot
+	goldenMemPath string
 }
 
 // snapshotDiffPlan resolves the snapshot represented by Firecracker's current
@@ -279,45 +291,69 @@ func (s *Server) snapshotDiffPlan(ctx context.Context, candidateID string) (snap
 	if candidate.Format != registry.FormatDiff || candidate.BaseID == "" {
 		return snapshotDiffPlan{}, false
 	}
-	if _, err := os.Stat(candidate.MemPath); err != nil {
-		return snapshotDiffPlan{}, false
-	}
-
 	// A local row lets us prove the root is actually golden. On a host that
 	// pulled the user snapshot, the golden has no registry row; ensureBaseLocal
 	// verifies the immutable bases/<id>/complete object and cache instead.
+	var goldenMem string
 	if root, err := s.reg.GetSnapshot(ctx, candidate.BaseID); err == nil {
 		if !root.Golden {
 			return snapshotDiffPlan{}, false
 		}
-		if _, _, err := s.ensureBaseLocal(ctx, root.ID); err != nil {
+		if goldenMem, _, err = s.ensureBaseLocal(ctx, root.ID); err != nil {
 			return snapshotDiffPlan{}, false
 		}
-	} else if _, _, err := s.ensureBaseLocal(ctx, candidate.BaseID); err != nil {
-		return snapshotDiffPlan{}, false
+	} else {
+		if goldenMem, _, err = s.ensureBaseLocal(ctx, candidate.BaseID); err != nil {
+			return snapshotDiffPlan{}, false
+		}
 	}
 	return snapshotDiffPlan{
-		goldenID:       candidate.BaseID,
-		parentDiffPath: candidate.MemPath,
+		goldenID:      candidate.BaseID,
+		parent:        candidate,
+		goldenMemPath: goldenMem,
 	}, true
 }
 
-// flattenSnapshotDiff replaces layerPath with parent cumulative delta + layer,
-// preserving sparse holes. Latest writes win, including a page changed back to
-// the same bytes as the golden (it remains present but is still correct).
-func (s *Server) flattenSnapshotDiff(parentDiffPath, layerPath string) error {
-	tmp := layerPath + ".cumulative"
-	_ = os.Remove(tmp)
-	if err := provisioner.CloneFile(parentDiffPath, tmp); err != nil {
-		return fmt.Errorf("clone parent delta: %w", err)
+// flattenSnapshotDiff applies Firecracker's new layer to the exact full memory
+// image it was based on, then derives a fresh one-level delta from the
+// materialized result's XFS sharing with the immutable golden. We deliberately
+// do not union sparse layer extents: an allocated zero-filled block is valid
+// data, not an "unchanged" marker, and treating it otherwise corrupts memory.
+func (s *Server) flattenSnapshotDiff(parentFullPath, goldenMemPath, layerPath string) error {
+	fullPath := filepath.Join(filepath.Dir(layerPath), "mem.full.bin")
+	tmpFull := fullPath + ".tmp"
+	tmpDelta := layerPath + ".cumulative"
+	_ = os.Remove(tmpFull)
+	_ = os.Remove(tmpDelta)
+	if err := provisioner.CloneFile(parentFullPath, tmpFull); err != nil {
+		return fmt.Errorf("clone full parent: %w", err)
 	}
-	if err := s.cfg.Provisioner.OverlaySparse(layerPath, tmp); err != nil {
-		_ = os.Remove(tmp)
+	if err := s.cfg.Provisioner.OverlaySparse(layerPath, tmpFull); err != nil {
+		_ = os.Remove(tmpFull)
 		return fmt.Errorf("overlay new layer: %w", err)
 	}
-	if err := os.Rename(tmp, layerPath); err != nil {
-		_ = os.Remove(tmp)
+	ranges, err := s.cfg.Provisioner.DiffExtents(tmpFull, goldenMemPath)
+	if err != nil {
+		_ = os.Remove(tmpFull)
+		return fmt.Errorf("compare cumulative memory to golden: %w", err)
+	}
+	fi, err := os.Stat(tmpFull)
+	if err != nil {
+		_ = os.Remove(tmpFull)
+		return err
+	}
+	if err := provisioner.WriteSparseRanges(tmpFull, tmpDelta, fi.Size(), ranges); err != nil {
+		_ = os.Remove(tmpFull)
+		return fmt.Errorf("write cumulative delta: %w", err)
+	}
+	if err := os.Rename(tmpDelta, layerPath); err != nil {
+		_ = os.Remove(tmpFull)
+		_ = os.Remove(tmpDelta)
 		return fmt.Errorf("publish cumulative delta: %w", err)
+	}
+	if err := os.Rename(tmpFull, fullPath); err != nil {
+		_ = os.Remove(tmpFull)
+		return fmt.Errorf("publish materialized memory: %w", err)
 	}
 	return nil
 }
