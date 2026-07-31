@@ -10,6 +10,7 @@ SA_NAME="${EDGE_SA_NAME:-sandbox-edge-sa}"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 IP_NAME="${EDGE_IP_NAME:-sandbox-edge-ip}"
 HC="${NAME}-health"
+LB_HC="${NAME}-lb-tcp-health"
 BACKEND="${NAME}-backend"
 RELEASE_BUCKET="${RELEASE_BUCKET:?set RELEASE_BUCKET}"
 RELEASE_SHA="${EDGE_RELEASE_SHA:-$(git -C "$DIR/../.." rev-parse --short HEAD)}"
@@ -107,10 +108,21 @@ cmd_up() {
   fi
   "${GC[@]}" compute health-checks describe "$HC" --region="$REGION" >/dev/null 2>&1 || \
     "${GC[@]}" compute health-checks create http "$HC" --region="$REGION" --port=9091 --request-path=/healthz
+  # Keep load-balancing eligibility separate from autohealing: a transient LB
+  # probe failure should not replace a VM. The passthrough NLB's off-rule
+  # :9091 probes did not reach the backends in production even though Google
+  # documents fixed health ports as supported; checking the already-forwarded
+  # TLS listener made backend health truthful without exposing another port.
+  "${GC[@]}" compute health-checks describe "$LB_HC" --region="$REGION" >/dev/null 2>&1 || \
+    "${GC[@]}" compute health-checks create tcp "$LB_HC" --region="$REGION" \
+      --port=443 --enable-logging
   "${GC[@]}" compute backend-services describe "$BACKEND" --region="$REGION" >/dev/null 2>&1 || \
     "${GC[@]}" compute backend-services create "$BACKEND" --region="$REGION" \
-      --load-balancing-scheme=EXTERNAL --protocol=TCP --health-checks="$HC" \
+      --load-balancing-scheme=EXTERNAL --protocol=TCP --health-checks="$LB_HC" \
       --health-checks-region="$REGION" --connection-draining-timeout=300
+  # Converge an existing backend created before the dedicated LB check existed.
+  "${GC[@]}" compute backend-services update "$BACKEND" --region="$REGION" \
+    --health-checks="$LB_HC" --health-checks-region="$REGION" >/dev/null
   "${GC[@]}" compute backend-services describe "$BACKEND" --region="$REGION" \
     --format='value(backends[].group)' 2>/dev/null | grep -q "instanceGroups/${NAME}" || \
     "${GC[@]}" compute backend-services add-backend "$BACKEND" --region="$REGION" \
@@ -147,7 +159,7 @@ cmd_status() {
 cmd_down() {
   "${GC[@]}" compute forwarding-rules delete "${NAME}-web" "${NAME}-raw" --region="$REGION" --quiet || true
   "${GC[@]}" compute backend-services delete "$BACKEND" --region="$REGION" --quiet || true
-  "${GC[@]}" compute health-checks delete "$HC" --region="$REGION" --quiet || true
+  "${GC[@]}" compute health-checks delete "$HC" "$LB_HC" --region="$REGION" --quiet || true
   "${GC[@]}" compute instance-groups managed delete "$NAME" --region="$REGION" --quiet || true
   echo "reserved IP, secrets, service account, and templates retained"
 }
