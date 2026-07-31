@@ -94,6 +94,33 @@ func TestSnapshotDiffPlanRejectsFullUserSnapshot(t *testing.T) {
 	}
 }
 
+func TestClearHibernationLineageRemovesPrivateBaseline(t *testing.T) {
+	dir := t.TempDir()
+	p := &provisioner.Provisioner{SnapshotDir: filepath.Join(dir, "snapshots")}
+	s := &Server{cfg: Config{Provisioner: p}}
+	id := "sandbox"
+	mem, _, _, err := p.SnapshotPaths(hibLineageID(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mem, []byte("baseline"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.hibLineage.Store(id, hibernationLineage{
+		goldenID:      "golden",
+		parentFullMem: mem,
+	})
+
+	s.clearHibernationLineage(id)
+
+	if _, ok := s.hibLineage.Load(id); ok {
+		t.Fatal("private hibernation lineage remained in memory")
+	}
+	if _, err := os.Stat(filepath.Dir(mem)); !os.IsNotExist(err) {
+		t.Fatalf("private hibernation directory still exists: %v", err)
+	}
+}
+
 func TestFlattenSnapshotDiffLatestLayerWins(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("sparse overlay uses Linux SEEK_DATA/SEEK_HOLE")

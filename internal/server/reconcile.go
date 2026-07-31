@@ -17,6 +17,21 @@ import (
 // can no longer control via the SDK. Both get torn down and their resources
 // (DNAT rules, tap, rootfs copy, row) released.
 func (s *Server) reconcile(ctx context.Context) {
+	// Every private post-wake lineage belongs to a Firecracker bitmap held by
+	// the previous process, so none can survive a server restart. Sweep the
+	// directory rather than only known rows: a crash between row deletion and
+	// deferred cleanup must not leak a 1 GiB logical reflink indefinitely.
+	if s.cfg.Provisioner != nil {
+		if entries, err := os.ReadDir(s.cfg.Provisioner.SnapshotDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() && strings.HasPrefix(entry.Name(), "hib-lineage-") {
+					_ = s.cfg.Provisioner.CleanupSnapshot(entry.Name())
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "reconcile: list snapshot directory for private lineage cleanup: %v\n", err)
+		}
+	}
 	rows, err := s.reg.All(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reconcile: list registry: %v\n", err)

@@ -41,6 +41,7 @@ func (s *Server) cleanupExitedMachine(id string, exited *vm.Machine) error {
 	s.machines.Delete(id)
 	s.act.forget(id)
 	s.diffBase.Delete(id)
+	s.clearHibernationLineage(id)
 
 	ctx := context.Background()
 	sb, err := s.reg.Get(ctx, id)

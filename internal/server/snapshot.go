@@ -117,6 +117,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	format, baseID := registry.FormatFull, ""
 	var parentFullPath, goldenMemPath string
 	var baseOp *sync.Mutex
+	usingHibLineage := false
 	// Diff only while Server.diffBase vouches for the machine's bitmap. After
 	// every successful Firecracker snapshot the bitmap resets, so the new
 	// snapshot becomes the next parent. User-snapshot parents are cumulative
@@ -142,6 +143,30 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 			}
 		} else {
 			candidateOp.Unlock()
+		}
+	}
+	// A machine woken from a differential hibernation has no public snapshot
+	// row to name as diffBase. Its private full-memory reflink is nevertheless
+	// the exact baseline of Firecracker's bitmap, so compose the new layer onto
+	// it and publish the result as another one-level delta over the golden.
+	if format == registry.FormatFull && !golden && vm.DiffCapable(m) {
+		if v, ok := s.hibLineage.Load(id); ok {
+			lineage := v.(hibernationLineage)
+			candidateOp := s.snapshotLock(lineage.goldenID)
+			candidateOp.Lock()
+			if _, statErr := os.Stat(lineage.parentFullMem); statErr == nil {
+				if goldenMem, _, baseErr := s.ensureBaseLocal(ctx, lineage.goldenID); baseErr == nil {
+					format, baseID = registry.FormatDiff, lineage.goldenID
+					parentFullPath = lineage.parentFullMem
+					goldenMemPath = goldenMem
+					baseOp = candidateOp
+					usingHibLineage = true
+				} else {
+					candidateOp.Unlock()
+				}
+			} else {
+				candidateOp.Unlock()
+			}
 		}
 	}
 	if baseOp != nil {
@@ -190,6 +215,14 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	defer resume()
 
 	t0 := time.Now()
+	// Once Firecracker is asked to snapshot, its dirty bitmap is either reset
+	// or indeterminate. Keep a lineage used for flattening alive until this
+	// request returns, then retire it; any unrelated stale lineage can go now.
+	if usingHibLineage {
+		defer s.clearHibernationLineage(id)
+	} else {
+		s.clearHibernationLineage(id)
+	}
 	err = vm.Snapshot(ctx, m, memPath, statePath, snapType)
 	if err != nil {
 		// Firecracker documents a failed snapshot as side-effect free, but the

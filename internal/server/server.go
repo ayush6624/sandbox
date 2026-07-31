@@ -156,17 +156,17 @@ type Server struct {
 	hibUpMu    sync.Mutex
 	hibUploads map[string]*backgroundUpload
 
-	// diffBase maps a live machine's sandbox id → the snapshot id its
-	// dirty-page bitmap is tracking against. An entry exists ONLY while a diff
-	// snapshot would be valid: set when a clone is loaded from a snapshot
-	// (bringUpClone→finishClone), deleted the moment the bitmap stops matching
-	// that base — any snapshot of the sandbox (Firecracker resets the bitmap
-	// at snapshot creation) or a machine reload (hibernation wake loads from
-	// the hib mem, not the original base). sb.BaseSnapshotID alone is NOT
-	// sufficient: it's never cleared, so trusting it would write diffs against
-	// the wrong base after a wake or a second snapshot — silent memory
-	// corruption on restore.
+	// diffBase maps a live machine's sandbox id → the snapshot represented by
+	// the baseline of its dirty-page bitmap. A successful diff snapshot becomes
+	// the next baseline because Firecracker resets the bitmap after capture.
+	// sb.BaseSnapshotID alone is NOT sufficient: it is never cleared and cannot
+	// describe repeated snapshots or hibernation generations.
 	diffBase sync.Map // sandbox id → snapshot id
+	// hibLineage keeps the exact full-memory baseline loaded by a successful
+	// diff hibernation wake. Hibernation has no public snapshot row, so this
+	// private reflink is what lets the next snapshot (or hibernation) compose
+	// Firecracker's new dirty layer back onto the immutable golden.
+	hibLineage sync.Map // sandbox id → hibernationLineage
 
 	// pf owns the userspace host-port → guest-port TCP proxies (see
 	// portproxy.go). Its listeners persist through hibernation so a connection
@@ -1129,6 +1129,7 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 func (s *Server) destroyLocked(ctx context.Context, id string) error {
 	defer s.act.forget(id)
 	defer s.diffBase.Delete(id)
+	defer s.clearHibernationLineage(id)
 
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {

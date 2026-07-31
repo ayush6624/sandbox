@@ -428,16 +428,51 @@ async function main(): Promise<void> {
         passed: wakeResult.elapsedMs <= args.restoreBudgetMs,
       })
       await installState(paused, run, 11)
-      // A hibernation wake currently has no durable user-visible snapshot row
-      // to serve as a delta parent, so this is allowed to be a bounded full
-      // snapshot. The measurement keeps that limitation visible.
-      await capture(
+      const postWake = await capture(
         iteration,
         'pause-wake-snapshot',
         'snapshot after wake',
         paused,
-        'any',
+        'diff',
       )
+      if (goldenBase && postWake.baseId && postWake.baseId !== goldenBase) {
+        failures.push('pause-wake-snapshot/snapshot after wake: lost golden ancestry')
+      }
+
+      // Exercise the next generation too: the public snapshot is now the
+      // bitmap baseline, hibernation must flatten that layer safely, and wake
+      // must retain the resulting private lineage for one more snapshot.
+      const secondPause = await timed(() => paused.pause())
+      const secondFrozen = await paused.refresh()
+      record({
+        iteration,
+        path: 'repeat-pause-wake-snapshot',
+        operation: 'pause after snapshot',
+        elapsed_ms: secondPause.elapsedMs,
+        budget_ms: args.diffBudgetMs,
+        passed: secondFrozen.status === 'hibernated' && secondPause.elapsedMs <= args.diffBudgetMs,
+        detail: `status=${secondFrozen.status}`,
+      })
+      const secondWake = await timed(() => verifyState(paused, run, 11))
+      record({
+        iteration,
+        path: 'repeat-pause-wake-snapshot',
+        operation: 'second implicit wake + command',
+        elapsed_ms: secondWake.elapsedMs,
+        budget_ms: args.restoreBudgetMs,
+        passed: secondWake.elapsedMs <= args.restoreBudgetMs,
+      })
+      await installState(paused, run, 12)
+      const secondPostWake = await capture(
+        iteration,
+        'repeat-pause-wake-snapshot',
+        'snapshot after second wake',
+        paused,
+        'diff',
+      )
+      if (goldenBase && secondPostWake.baseId && secondPostWake.baseId !== goldenBase) {
+        failures.push('repeat-pause-wake-snapshot/snapshot after second wake: lost golden ancestry')
+      }
       await terminate(paused)
     }
   } finally {

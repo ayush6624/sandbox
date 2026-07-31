@@ -38,6 +38,45 @@ import (
 // artifacts (mem + device state; the rootfs needs no frozen copy).
 func hibID(id string) string { return "hib-" + id }
 
+// hibLineageID names the private full-memory baseline retained after a diff
+// hibernation wake. It is never published or uploaded.
+func hibLineageID(id string) string { return "hib-lineage-" + id }
+
+type hibernationLineage struct {
+	goldenID      string
+	parentFullMem string
+}
+
+func (s *Server) clearHibernationLineage(id string) {
+	s.hibLineage.Delete(id)
+	if s.cfg.Provisioner != nil {
+		_ = s.cfg.Provisioner.CleanupSnapshot(hibLineageID(id))
+	}
+}
+
+// preserveHibernationLineage takes a reflink of the exact full image loaded by
+// Firecracker. The hibernation directory can then be removed without losing
+// the baseline of the newly reset dirty bitmap.
+func (s *Server) preserveHibernationLineage(id, goldenID, fullMem string) error {
+	if s.cfg.Provisioner == nil {
+		return fmt.Errorf("provisioner is not configured")
+	}
+	s.clearHibernationLineage(id)
+	lineageMem, _, _, err := s.cfg.Provisioner.SnapshotPaths(hibLineageID(id))
+	if err != nil {
+		return err
+	}
+	if err := provisioner.CloneFile(fullMem, lineageMem); err != nil {
+		_ = s.cfg.Provisioner.CleanupSnapshot(hibLineageID(id))
+		return fmt.Errorf("clone hibernation baseline: %w", err)
+	}
+	s.hibLineage.Store(id, hibernationLineage{
+		goldenID:      goldenID,
+		parentFullMem: lineageMem,
+	})
+	return nil
+}
+
 // hibDiffMarker is the file recording, beside a diff hibernation's mem file,
 // the golden snapshot id the diff must be rebased onto at wake. Its absence
 // means the mem file is a full, directly loadable snapshot.
@@ -70,6 +109,63 @@ func (s *Server) materializeHibMem(ctx context.Context, diffMem, baseID string) 
 		return "", err
 	}
 	return fullPath, nil
+}
+
+type hibernateDiffPlan struct {
+	baseID        string
+	parentFullMem string
+	goldenMem     string
+	unlock        func()
+}
+
+// planHibernateDiff resolves the baseline of a live machine's dirty bitmap.
+// It accepts both public snapshot ancestry and the private baseline retained
+// after a hibernation wake. The returned lock fences deletion of the public
+// parent/base until capture and any cumulative-layer materialization finish.
+func (s *Server) planHibernateDiff(ctx context.Context, id string, m *vm.Machine) hibernateDiffPlan {
+	if !vm.DiffCapable(m) {
+		return hibernateDiffPlan{}
+	}
+	if v, ok := s.diffBase.Load(id); ok {
+		candidateID := v.(string)
+		op := s.snapshotLock(candidateID)
+		op.Lock()
+		if plan, valid := s.snapshotDiffPlan(ctx, candidateID); valid {
+			parentFull := ""
+			if plan.parent.ID != "" {
+				var err error
+				parentFull, err = s.materializeMem(ctx, plan.parent)
+				if err != nil {
+					op.Unlock()
+					return hibernateDiffPlan{}
+				}
+			}
+			return hibernateDiffPlan{
+				baseID:        plan.goldenID,
+				parentFullMem: parentFull,
+				goldenMem:     plan.goldenMemPath,
+				unlock:        op.Unlock,
+			}
+		}
+		op.Unlock()
+	}
+	if v, ok := s.hibLineage.Load(id); ok {
+		lineage := v.(hibernationLineage)
+		op := s.snapshotLock(lineage.goldenID)
+		op.Lock()
+		if _, err := os.Stat(lineage.parentFullMem); err == nil {
+			if goldenMem, _, err := s.ensureBaseLocal(ctx, lineage.goldenID); err == nil {
+				return hibernateDiffPlan{
+					baseID:        lineage.goldenID,
+					parentFullMem: lineage.parentFullMem,
+					goldenMem:     goldenMem,
+					unlock:        op.Unlock,
+				}
+			}
+		}
+		op.Unlock()
+	}
+	return hibernateDiffPlan{}
 }
 
 // hibernateTick is how often the reaper looks for idle sandboxes.
@@ -294,9 +390,13 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automa
 	// golden is deleted whenever it's rebuilt (agent update), which would
 	// orphan the frozen sandbox forever.
 	snapType, diffBaseID := vm.SnapshotFull, ""
-	if v, ok := s.diffBase.Load(id); ok && vm.DiffCapable(m) {
-		if base, err := s.reg.GetSnapshot(ctx, v.(string)); err == nil && base.Golden && s.baseUploaded(base.ID) {
-			snapType, diffBaseID = vm.SnapshotDiff, base.ID
+	diffPlan := s.planHibernateDiff(ctx, id, m)
+	if diffPlan.unlock != nil {
+		defer diffPlan.unlock()
+		// A hibernation diff can only outlive this host when its immutable
+		// golden base is already durable.
+		if s.baseUploaded(diffPlan.baseID) {
+			snapType, diffBaseID = vm.SnapshotDiff, diffPlan.baseID
 		}
 	}
 	// Seal working-set recording BEFORE Pause+Snapshot: the snapshot reads the
@@ -315,6 +415,10 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, force, automa
 	// The snapshot attempt reset (or left indeterminate) the dirty bitmap —
 	// no future diff against the old base is valid either way.
 	s.diffBase.Delete(id)
+	defer s.clearHibernationLineage(id)
+	if err == nil && snapType == vm.SnapshotDiff && diffPlan.parentFullMem != "" {
+		err = s.flattenSnapshotDiff(diffPlan.parentFullMem, diffPlan.goldenMem, memPath)
+	}
 	if err == nil {
 		if diffBaseID != "" {
 			err = os.WriteFile(hibDiffMarker(memPath), []byte(diffBaseID), 0o644)
@@ -431,8 +535,10 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 	// A diff freeze stored only dirty pages; rebase onto the golden base
 	// before anything commits. Failure leaves the row hibernated and the
 	// artifacts intact — wakeable once the base is available again.
+	hibBaseID := ""
 	if b, err := os.ReadFile(hibDiffMarker(memPath)); err == nil {
-		if memPath, err = s.materializeHibMem(ctx, memPath, strings.TrimSpace(string(b))); err != nil {
+		hibBaseID = strings.TrimSpace(string(b))
+		if memPath, err = s.materializeHibMem(ctx, memPath, hibBaseID); err != nil {
 			return sb, fmt.Errorf("materialize hibernation memory for %s: %w", id, err)
 		}
 	}
@@ -470,6 +576,18 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 		fmt.Fprintf(os.Stderr, "[%s] wake: sync port listeners: %v\n", id, serr)
 	}
 
+	// Preserve the exact baseline of a differential wake before dropping the
+	// hibernation artifacts. Firecracker reset dirty tracking when it loaded
+	// this image, so the next snapshot can remain differential even though
+	// hibernation itself has no public snapshot row.
+	s.clearHibernationLineage(id)
+	if hibBaseID != "" {
+		if loaded, ok := s.machines.Load(id); ok && vm.DiffCapable(loaded.(*vm.Machine)) {
+			if err := s.preserveHibernationLineage(id, hibBaseID, memPath); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] wake: preserve differential lineage: %v\n", id, err)
+			}
+		}
+	}
 	// The frozen memory was consumed into the live VM; drop the artifacts.
 	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 	s.act.touch(id)
