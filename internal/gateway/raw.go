@@ -463,7 +463,7 @@ func (g *Gateway) handleRawRoute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sandbox_id": lease.SandboxID, "guest_port": lease.GuestPort,
-		"host_addr": h.addr, "token": h.token, "ttl": 5,
+		"host_addr": dialAddr(h.addr), "token": h.token, "ttl": 5,
 	})
 }
 

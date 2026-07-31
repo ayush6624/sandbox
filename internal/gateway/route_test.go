@@ -9,7 +9,7 @@ import (
 
 func TestHandleRouteReturnsDirectWorkerCredential(t *testing.T) {
 	g := liveGateway(&host{
-		id: "worker-a", addr: "10.0.0.2:8080", token: "worker-token",
+		id: "worker-a", addr: "http://10.0.0.2:8080", token: "worker-token",
 		slotsTotal: 2, lastSeen: time.Now(),
 	})
 	g.route["sandbox-a"] = "worker-a"

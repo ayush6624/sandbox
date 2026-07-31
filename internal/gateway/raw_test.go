@@ -2,12 +2,55 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ayush6624/sandbox/internal/gcsblob"
 )
+
+func TestHandleRawRouteReturnsDialableWorkerAddress(t *testing.T) {
+	g := liveGateway(&host{
+		id: "worker-a", addr: "http://10.0.0.2:8080", token: "worker-token",
+		slotsTotal: 2, lastSeen: time.Now(),
+	})
+	g.route["sandbox-a"] = "worker-a"
+	g.raw = &rawAllocator{
+		index: rawIndex{Version: 1, Leases: map[string]rawLease{
+			"20000": {
+				PublicPort: 20000,
+				SandboxID:  "sandbox-a",
+				GuestPort:  22,
+				State:      "active",
+			},
+		}},
+		loaded: true,
+	}
+	req := httptest.NewRequest("GET", "/raw-route/20000", nil)
+	req.SetPathValue("port", "20000")
+	w := httptest.NewRecorder()
+	g.handleRawRoute(w, req)
+	if w.Code != 200 {
+		t.Fatalf("raw route: %d %s", w.Code, w.Body)
+	}
+	var got struct {
+		SandboxID string `json:"sandbox_id"`
+		GuestPort int    `json:"guest_port"`
+		HostAddr  string `json:"host_addr"`
+		Token     string `json:"token"`
+		TTL       int    `json:"ttl"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SandboxID != "sandbox-a" || got.GuestPort != 22 ||
+		got.HostAddr != "10.0.0.2:8080" || got.Token != "worker-token" || got.TTL != 5 {
+		t.Fatalf("raw route = %+v", got)
+	}
+}
 
 type memoryRawStore struct {
 	mu   sync.Mutex

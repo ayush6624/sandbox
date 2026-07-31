@@ -46,7 +46,7 @@ func (g *Gateway) handleRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, edgeRoute{
-		HostAddr: snap.addr,
+		HostAddr: dialAddr(snap.addr),
 		Token:    snap.token,
 		TTL:      int(edgeRouteTTL / time.Second),
 	})

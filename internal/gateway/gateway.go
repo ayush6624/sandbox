@@ -1041,6 +1041,27 @@ func ceilDiv(n, d int) int {
 	return (n + d - 1) / d
 }
 
+// dialAddr renders a worker's stored API address as a bare host:port suitable
+// for net.Dial. Heartbeats register addr as a URL ("http://10.0.0.8:8080")
+// because the gateway's own callers feed it to client.NewHTTP, but the edge
+// hands host_addr straight to net.Dial and a URL fails with "too many colons in
+// address". hostOnly is NOT a substitute: it deliberately drops the port, since
+// its callers pair it with a separately reported host port.
+func dialAddr(addr string) string {
+	parsed, err := url.Parse(addr)
+	if err != nil || parsed.Host == "" {
+		return addr // already host:port (or unparseable; let the dial report it)
+	}
+	if parsed.Port() != "" {
+		return parsed.Host
+	}
+	port := "80"
+	if parsed.Scheme == "https" {
+		port = "443"
+	}
+	return net.JoinHostPort(parsed.Hostname(), port)
+}
+
 // hostOnly strips the port from an addr, so clients can pair it with a
 // sandbox's forwarded ports (which live on the host, not the gateway).
 func hostOnly(addr string) string {
