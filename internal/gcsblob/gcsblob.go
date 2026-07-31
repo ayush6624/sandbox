@@ -35,6 +35,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,7 +48,8 @@ const (
 	sparseMagic   = "SBSPARSE"
 	sparseVersion = 1
 
-	metadataTokenURL   = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+	metadataHost       = "metadata.google.internal"
+	metadataTokenPath  = "/computeMetadata/v1/instance/service-accounts/default/token"
 	defaultStorageBase = "https://storage.googleapis.com/storage/v1"
 	defaultUploadBase  = "https://storage.googleapis.com/upload/storage/v1"
 
@@ -94,6 +96,19 @@ func New(bucket string) *Client {
 // Bucket returns the bucket this client targets.
 func (c *Client) Bucket() string { return c.bucket }
 
+// metadataTokenURL is the GCE metadata token endpoint. GCE_METADATA_HOST
+// overrides the host, matching the convention Google's own client libraries
+// use; it lets code that needs real GCS run off-GCE (integration tests) against
+// a local token provider. Unset — always, in production — it resolves to the
+// metadata server exactly as before.
+func metadataTokenURL() string {
+	host := metadataHost
+	if override := strings.TrimSpace(os.Getenv("GCE_METADATA_HOST")); override != "" {
+		host = override
+	}
+	return "http://" + host + metadataTokenPath
+}
+
 // token returns a cached service-account access token from the GCE metadata
 // server, refreshing when within a minute of expiry.
 func (c *Client) token(ctx context.Context) (string, error) {
@@ -104,7 +119,7 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", metadataTokenURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", metadataTokenURL(), nil)
 	if err != nil {
 		return "", err
 	}

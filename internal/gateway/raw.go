@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"sync"
@@ -21,6 +22,27 @@ import (
 )
 
 const rawIndexObject = "ingress/raw/index.json"
+
+// A single allocation performs two generation-CAS writes (pending, then active),
+// so concurrent gateway replicas contend on every allocation. Retrying that
+// contention with no delay just re-collides: measured against real GCS, three
+// replicas allocating 8 ports concurrently exhausted a 5-attempt budget and
+// failed a legitimate request. Retry more times, and space the attempts with
+// jittered backoff so colliding writers separate instead of thrashing.
+const rawCASAttempts = 10
+
+func rawCASBackoff(ctx context.Context, attempt int) {
+	delay := time.Duration(20<<attempt) * time.Millisecond
+	if delay > 400*time.Millisecond {
+		delay = 400 * time.Millisecond
+	}
+	// Jitter is what actually breaks up a collision between equal writers.
+	delay = delay/2 + time.Duration(rand.Int63n(int64(delay/2)+1))
+	select {
+	case <-ctx.Done():
+	case <-time.After(delay):
+	}
+}
 
 var errRawReleasing = errors.New("raw port exposure is being released")
 
@@ -135,7 +157,7 @@ func (a *rawAllocator) allocate(ctx context.Context, id string, guestPort int,
 		a.allocError.Add(1)
 		return rawLease{}, errors.New("raw allocator is not ready")
 	}
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < rawCASAttempts; attempt++ {
 		if key, lease, ok := a.findBySandboxLocked(id, guestPort); ok {
 			if lease.State == "active" {
 				a.allocOK.Add(1)
@@ -153,6 +175,7 @@ func (a *rawAllocator) allocate(ctx context.Context, id string, guestPort int,
 			a.index.Leases[key] = lease
 			if err := a.commitLocked(ctx); err != nil {
 				if errors.Is(err, gcsblob.ErrPreconditionFailed) {
+					rawCASBackoff(ctx, attempt)
 					_ = a.loadLocked(ctx)
 					continue
 				}
@@ -182,6 +205,7 @@ func (a *rawAllocator) allocate(ctx context.Context, id string, guestPort int,
 		a.index.Leases[key] = lease
 		if err := a.commitLocked(ctx); err != nil {
 			if errors.Is(err, gcsblob.ErrPreconditionFailed) {
+				rawCASBackoff(ctx, attempt)
 				_ = a.loadLocked(ctx)
 				continue
 			}
@@ -202,6 +226,7 @@ func (a *rawAllocator) allocate(ctx context.Context, id string, guestPort int,
 		a.index.Leases[key] = lease
 		if err := a.commitLocked(ctx); err != nil {
 			if errors.Is(err, gcsblob.ErrPreconditionFailed) {
+				rawCASBackoff(ctx, attempt)
 				_ = a.loadLocked(ctx)
 				continue
 			}
