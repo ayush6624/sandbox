@@ -328,7 +328,17 @@ fi
 
 if [ "$NEED_WORKERS" = 1 ]; then
   step "Roll workers -> ${TARGET}"
-  ( cd "$DIR" && ./deploy-job.sh "$TARGET" ) >/dev/null 2>&1 || fail "deploy-job.sh"
+  # Keep the happy path quiet so the summary stays readable, but NEVER discard
+  # the diagnosis: a bare "FAILED: deploy-job.sh" forces the operator to
+  # hand-run the very step this command exists to wrap.
+  DEPLOY_LOG="$(mktemp)"
+  if ! ( cd "$DIR" && ./deploy-job.sh "$TARGET" ) >"$DEPLOY_LOG" 2>&1; then
+    echo "--- deploy-job.sh output (last 40 lines) ---" >&2
+    tail -40 "$DEPLOY_LOG" >&2
+    echo "--- full log: $DEPLOY_LOG ---" >&2
+    fail "deploy-job.sh"
+  fi
+  rm -f "$DEPLOY_LOG"
   info "nomad job submitted"
 fi
 

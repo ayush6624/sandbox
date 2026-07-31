@@ -13,7 +13,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
 source "$DIR/config.env"
-[ -f "$DIR/fleet-secrets.env" ] && source "$DIR/fleet-secrets.env"
+# Honour FLEET_SECRETS_FILE like control.sh/edge.sh/rollout.sh: a worktree has
+# its own infra/gcp/ but not the gitignored secrets file.
+FLEET_SECRETS="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
+# shellcheck source=/dev/null
+[ -f "$FLEET_SECRETS" ] && source "$FLEET_SECRETS"
 : "${GATEWAY_TOKEN:?run control.sh deploy first (populates fleet-secrets.env)}"
 : "${GATEWAY_CONTROL_TOKEN:?run control.sh deploy first}"
 : "${HOST_TOKEN:?run control.sh deploy first}"

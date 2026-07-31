@@ -8,7 +8,7 @@ REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
 source "$DIR/config.env"
 # shellcheck source=fleet-secrets.env
-source "$DIR/fleet-secrets.env"
+source "${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
 
 CONTROL_NAME="${CONTROL_NAME:-sandbox-control}"
 CONTROL_SSH_HOST="${CONTROL_SSH_HOST:-$CONTROL_NAME}"
