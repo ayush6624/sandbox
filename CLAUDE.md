@@ -476,6 +476,17 @@ scripts/              Host setup shell scripts
   create-to-ready in **30 ms**, returned delete 204 then get 404, and left zero
   sandboxes. Release `9b6a9fc` predates the startup-script fix; repeat the
   128-way benchmark before declaring the measured fleet result healthy.
+  **Repeated and clean on release `f7f8c47` (2026-08-01): 128/128 created,
+  0 failures, 23.2 s wall**, placed across four workers as the standby pool
+  came online — so the `startup-worker.sh` data-disk fix is confirmed in
+  production and the earlier 80/128 is closed out. Same release, same session:
+  full e2e **64/64**, stress suites **12/12** on repeat, 64-way burst 64/64,
+  churn burst-bench **96/96 with zero capacity/pool/agent-timeout/other
+  errors**, snapshot batch-create usable at 1/4/16/32, and 192 burst VMs left
+  **zero** leaked sandboxes. Lifecycle from the control VM: create p50
+  **10 ms** / p95 **13 ms**, pause 279 ms, resume 851 ms, terminate 863 ms;
+  create-with-`ssh_pubkey` p50 **17 ms**; snapshot-source create p50 **721 ms**
+  (was 1.897 s).
   A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
   leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
   clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and
@@ -521,6 +532,25 @@ scripts/              Host setup shell scripts
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
   that's the first thing to check.
+- **The host→guest connection pool is keyed on the SANDBOX, never on the guest IP alone**
+  (`agentAuthority`/`dialAgentAuthority` in `internal/server/proxy.go`). Guest IPs come from
+  a small per-host pool and are recycled the instant a sandbox is destroyed or hibernated
+  (the tap/IP unique indexes only bind `running` rows), so an IP-keyed pool hands a
+  brand-new sandbox a live keep-alive connection to the **dead** VM that previously held
+  that address. The dead peer RSTs it, and net/http will **not** silently retry a POST/PUT
+  carrying a body — so this shows up as `502 agent unreachable: read: connection reset by
+  peer` on exec and file writes under churn, while GETs (which *are* retried) look perfectly
+  healthy. It stayed latent for as long as the path used `http.DefaultTransport` (2 idle
+  conns per host, evicted constantly past 100) and became a fleet-wide failure the moment
+  the path got a properly sized pool. The fix encodes the sandbox id in the URL authority —
+  a synthetic name that never reaches DNS, since the dialer parses the real address back out
+  and callers set `req.Host` so the guest still sees a plain `ip:port`. It also covers a
+  clone-path wake, which keeps the id but moves to a new IP. The once-per-bring-up calls
+  (`/identity`, `/clock`, `/ssh-key`, `/snapshot-poll`, `/health`) use a **keep-alive-free**
+  transport instead: they fire once per VM, so pooling bought nothing and only carried the
+  same hazard at the riskiest moment. `tests/pty-stress.ts` and `tests/sshkey-probe.ts`
+  drive both shapes across churn rounds; `internal/server/agentpool_test.go` pins the
+  pool-key behavior directly.
 - **Memory is admission-checked; CPU is deliberately oversubscribed (~6:1).**
   `mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
   total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running
