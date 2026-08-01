@@ -12,7 +12,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v1.0.1/sandbox-1.0.1.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.0.0/sandbox-2.0.0.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -37,6 +37,11 @@ programmatically via the `opts` argument on every entry point):
 export SANDBOX_API_URL=http://100.99.183.74:8080
 export SANDBOX_API_KEY=<your-key>
 ```
+
+Fleet operators additionally use `SANDBOX_CONTROL_KEY` (and optionally
+`SANDBOX_CONTROL_URL`) for [`FleetClient`](#fleet-capacity-operator-api). That
+credential is a different trust domain from `SANDBOX_API_KEY` and is never read
+by the tenant clients.
 
 ## Resource client
 
@@ -342,13 +347,21 @@ wakes a hibernated sandbox and pins it for the session. In fleet mode the
 gateway proxies HTTP only, so SSH needs a `ProxyJump` through the owning
 worker (`sbx.info.hostAddr` names it).
 
-### Fleet capacity
+### Fleet capacity (operator API)
 
-Against a gateway, `Sandbox.hosts()` returns the same fleet view the gateway
-places against — useful for dashboards and for deciding whether to retry:
+Host inventory is **not** a tenant call: it discloses per-host addresses and
+live capacity, so the gateway authenticates it with the worker-control
+credential. It therefore lives on its own client, `FleetClient`, with its own
+credential — a tenant `Sandbox`/`SandboxClient` cannot express the call at all:
 
 ```ts
-for (const h of await Sandbox.hosts()) {
+import { FleetClient } from 'sandbox'
+
+// SANDBOX_CONTROL_KEY (the gateway's GATEWAY_CONTROL_TOKEN), and
+// SANDBOX_CONTROL_URL or SANDBOX_API_URL for the gateway address.
+const fleet = new FleetClient()
+
+for (const h of await fleet.hosts.list()) {
   console.log(h.hostId, `${h.slotsUsed}/${h.slotsTotal} used`, `${h.free} free`,
               h.hibernated, 'hibernated', h.alive ? 'live' : 'stale')
 }
@@ -357,7 +370,10 @@ for (const h of await Sandbox.hosts()) {
 `free` is what placement trusts: tap/IP availability bounded by memory
 admission, so it can be lower than `slotsTotal - slotsUsed` when
 large-memory sandboxes are running. Host-only URLs answer 404 here (a single
-host has no fleet view of itself).
+host has no fleet view of itself), and a tenant API key gets an
+`AuthenticationError`.
+
+`Sandbox.hosts()` was removed in 2.0.0 — see the [changelog](CHANGELOG.md).
 
 ### Refreshing a handle
 
@@ -424,7 +440,7 @@ try {
 | `sbx.pty.create({ onData, cols, rows })` | `sbx.pty.create({ onData, cols, rows, cwd })` — `sendInput` / `resize` / `kill` / `await pty.exited` |
 | `sbx.getInfo()` | `sbx.info` (a live object) + `await sbx.refresh()` to re-read it; `sbx.info.vcpus` / `memMib` are always the effective values, and `Sandbox.hostInfo()` gives defaults/limits |
 | — | `Sandbox.create({ sshPubkey })` + `exposePort(22)` — key-only SSH as `sandbox` |
-| — | `Sandbox.hosts()` — fleet capacity behind a gateway |
+| — | `new FleetClient().hosts.list()` — fleet capacity behind a gateway (operator credential, not the tenant API key) |
 | rate-limit errors | `CapacityError` (429/503) with `retryAfterMs` — distinguishes "fleet full" from "broken" |
 
 Not supported (yet): background commands (`commands.run(..., { background: true })`),

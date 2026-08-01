@@ -5,14 +5,12 @@ import { Files } from './files.js'
 import { Pty } from './pty.js'
 import { ClientSandbox, Operation, SandboxClient } from './v1.js'
 import type { CreateManyOptions, CreateSandboxOptions, SandboxSource } from './v1.js'
-import { toFleetHostInfo, toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
+import { toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
 import type {
-  ApiFleetHost,
   ApiHostInfo,
   ApiPortMapping,
   ApiSandbox,
   ApiSnapshot,
-  FleetHostInfo,
   HostInfo,
   PortMapping,
   PortExposeOpts,
@@ -186,26 +184,33 @@ export class Sandbox {
   }
 
   /**
-   * Lists the hosts behind a fleet gateway with their live capacity — what the
-   * gateway itself places against. Useful for dashboards and for deciding
-   * whether a {@link CapacityError} is worth retrying.
+   * @deprecated Removed in 2.0.0. Fleet host inventory is an operator call, not
+   * a tenant one: it discloses per-host addresses and live capacity, so the
+   * gateway authenticates it with the worker-control credential. Use
+   * {@link FleetClient} — `new FleetClient().hosts.list()`.
    *
-   * Gateway-only: a single host has no fleet view of itself and answers 404.
+   * ```ts
+   * // before
+   * const hosts = await Sandbox.hosts()
+   * // after
+   * const hosts = await new FleetClient({ controlKey: process.env.SANDBOX_CONTROL_KEY }).hosts.list()
+   * ```
    *
-   * Operator-only: the fleet inventory discloses per-host addresses and
-   * capacity, so the gateway authenticates it with the **worker-control**
-   * credential, not the tenant API key. Pass it explicitly —
-   * `Sandbox.hosts({ apiKey: gatewayControlToken })`. An ordinary API key gets
-   * an {@link AuthenticationError}.
+   * Removal is enforced at **compile time**: the required `[never]` parameter
+   * means no call site can typecheck — `Sandbox.hosts()` fails with "Expected 1
+   * arguments, but got 0" and `Sandbox.hosts(opts)` with "not assignable to
+   * never". `Promise<never>` alone would not do it: it is assignable to
+   * `Promise<FleetHostInfo[]>`, so unchanged 1.x call sites would still build
+   * and only fail in production. The body still throws so JavaScript
+   * consumers, who have no compile step, get a message naming the replacement
+   * instead of `TypeError: Sandbox.hosts is not a function`.
    *
-   * @throws {NotFoundError} when the API URL points at a host, not a gateway.
-   * @throws {AuthenticationError} when called with a tenant API key.
+   * @throws {SandboxError} always.
    */
-  static async hosts(opts: SandboxOpts = {}): Promise<FleetHostInfo[]> {
-    const client = new ApiClient(opts)
-    const res = await client.request('GET', '/hosts')
-    const raw = (await res.json()) as ApiFleetHost[] | null
-    return (raw ?? []).map(toFleetHostInfo)
+  static async hosts(..._migratedToFleetClient: [never]): Promise<never> {
+    throw new SandboxError(
+      'Sandbox.hosts() was removed in sandbox SDK 2.0.0: fleet host inventory is an operator API, not a tenant one. Use the FleetClient: `new FleetClient({ controlKey }).hosts.list()`, with the gateway worker-control credential (SANDBOX_CONTROL_KEY / GATEWAY_CONTROL_TOKEN). A tenant SANDBOX_API_KEY cannot read it.'
+    )
   }
 
   /**

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { gatewayHostsEndpoint } from './fleet-bench.js'
+import { AuthenticationError } from '../src/index.js'
+import { fleetClient } from './fleet-bench.js'
 
 const SCRIPT = fileURLToPath(new URL('./fleet-bench.ts', import.meta.url))
 
@@ -21,9 +22,27 @@ test('fleet benchmark documents safe arguments without requiring credentials', (
 })
 
 // Host inventory is operator-gated (worker-control credential), so the benchmark
-// must use the canonical /internal/v1 path — the tenant API key cannot read it.
-test('fleet inventory uses the operator-gated hosts endpoint', () => {
-  assert.equal(gatewayHostsEndpoint('https://gateway.example/'), 'https://gateway.example/internal/v1/hosts')
+// samples it through the SDK's operator client — never with the tenant API key,
+// which the gateway answers 401 for.
+test('fleet inventory demands the operator credential, not the tenant key', () => {
+  const previousControl = process.env.SANDBOX_CONTROL_KEY
+  delete process.env.SANDBOX_CONTROL_KEY
+  process.env.SANDBOX_API_URL = 'https://gateway.example'
+  process.env.SANDBOX_API_KEY = 'tenant-key'
+  try {
+    assert.throws(() => fleetClient(), (err: unknown) => {
+      assert.ok(err instanceof AuthenticationError)
+      assert.match(String((err as Error).message), /SANDBOX_CONTROL_KEY/)
+      return true
+    })
+    process.env.SANDBOX_CONTROL_KEY = 'control-key'
+    assert.doesNotThrow(() => fleetClient())
+  } finally {
+    delete process.env.SANDBOX_API_URL
+    delete process.env.SANDBOX_API_KEY
+    if (previousControl === undefined) delete process.env.SANDBOX_CONTROL_KEY
+    else process.env.SANDBOX_CONTROL_KEY = previousControl
+  }
 })
 
 for (const [name, args, expected] of [

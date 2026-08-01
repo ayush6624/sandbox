@@ -148,6 +148,12 @@ capacity, so it authenticates with the worker-control credential
 (`GATEWAY_CONTROL_TOKEN`), not the client API key. `GET /internal/v1/hosts` is
 the same handler under its canonical path.
 
+In the TypeScript SDK that split is a separate client, so a tenant handle cannot
+express an operator call: `new FleetClient().hosts.list()` (credential from
+`SANDBOX_CONTROL_KEY`, gateway address from `SANDBOX_CONTROL_URL` or
+`SANDBOX_API_URL`). It requests `/internal/v1/hosts`. `Sandbox.hosts()`, which
+used the tenant key, was removed in SDK 2.0.0.
+
 ## Performance reference
 
 Measured on the 4-host GCP fleet (n2-standard-8, XFS reflink storage):

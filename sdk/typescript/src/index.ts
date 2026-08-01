@@ -3,6 +3,8 @@ export { Commands } from './commands.js'
 export { Files } from './files.js'
 export { Pty, PtyHandle } from './pty.js'
 export type { PtyCreateOpts } from './pty.js'
+export { FleetClient, FleetHostsCollection } from './fleet.js'
+export type { FleetClientOptions } from './fleet.js'
 export {
   SandboxClient,
   ClientSandbox,

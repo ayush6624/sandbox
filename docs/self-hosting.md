@@ -102,6 +102,9 @@ sudo ./sandbox serve --config configs/devbox.json \
 Hosts heartbeat every 5 s; `GET /hosts` on the gateway shows who's alive — with
 the worker-control credential, not the client one (it discloses per-host
 addresses and capacity). See [management-security.md](management-security.md).
+From the TypeScript SDK that is the operator client, not the tenant one:
+`new FleetClient().hosts.list()` with `SANDBOX_CONTROL_KEY` set to
+`GATEWAY_CONTROL_TOKEN` (SDK ≥ 2.0.0; `Sandbox.hosts()` was removed).
 Clients point at the gateway and never think about hosts again
 (`SANDBOX_API_URL=http://<gw-ip>:9090`).
 

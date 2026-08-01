@@ -146,7 +146,10 @@ export interface HostInfo {
   hostId?: string
 }
 
-/** Raw fleet host entry as returned by the gateway's `GET /hosts` (snake_case). */
+/**
+ * Raw fleet host entry as returned by the gateway's `GET /internal/v1/hosts`
+ * (snake_case). Worker-control-gated; see {@link FleetClient}.
+ */
 export interface ApiFleetHost {
   id: string
   addr: string
@@ -159,8 +162,8 @@ export interface ApiFleetHost {
 }
 
 /**
- * One host in the fleet, as reported by {@link Sandbox.hosts}. Gateway-only:
- * a single host has no fleet view of itself.
+ * One host in the fleet, as reported by `FleetClient.hosts.list()`.
+ * Gateway-only: a single host has no fleet view of itself.
  */
 export interface FleetHostInfo {
   /** Host identity, as it registers itself with the gateway. */

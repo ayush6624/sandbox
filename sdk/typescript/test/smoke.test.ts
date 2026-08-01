@@ -8,6 +8,7 @@ import {
   CapacityError,
   CommandExitError,
   ConflictError,
+  FleetClient,
   NotFoundError,
   Sandbox,
   SandboxError,
@@ -15,6 +16,8 @@ import {
 } from '../src/index.js'
 
 const API_KEY = 'test-key'
+/** The gateway's worker-control credential, for fleet-control routes only. */
+const CONTROL_KEY = 'test-control-key'
 const SANDBOX_ID = '0f5e3a1c-1111-2222-3333-444455556666'
 const SNAPSHOT_ID = '7b2c9d4e-aaaa-bbbb-cccc-ddddeeeeffff'
 const GOLDEN_SNAPSHOT_ID = '1a1a1a1a-golden-0000-0000-000000000000'
@@ -143,7 +146,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   const url = new URL(req.url ?? '/', 'http://localhost')
   const path = url.pathname
 
-  if (req.headers.authorization !== `Bearer ${API_KEY}`) {
+  // The gateway keeps the tenant and worker-control credentials in disjoint
+  // trust domains: /internal/v1 accepts only the control token, and every
+  // public route only the tenant key. Mirroring that here is what makes the
+  // fleet-client tests meaningful — a tenant key must fail, not pass.
+  const expectedToken = path.startsWith('/internal/v1/') ? CONTROL_KEY : API_KEY
+  if (req.headers.authorization !== `Bearer ${expectedToken}`) {
     sendJson(res, 401, { error: 'invalid or missing API key' })
     return
   }
@@ -181,8 +189,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
 
-  // Gateway-only fleet view.
-  if (req.method === 'GET' && path === '/hosts') {
+  // Gateway-only fleet view, on the worker-control-gated canonical path.
+  if (req.method === 'GET' && path === '/internal/v1/hosts') {
     sendJson(res, 200, [
       {
         id: 'testvm-1',
@@ -1036,8 +1044,9 @@ test('a full fleet surfaces CapacityError with the Retry-After hint', async () =
   }
 })
 
-test('hosts() maps the gateway fleet view to camelCase', async () => {
-  const hosts = await Sandbox.hosts(opts())
+test('FleetClient.hosts.list() maps the gateway fleet view to camelCase', async () => {
+  const fleet = new FleetClient({ gatewayUrl: apiUrl, controlKey: CONTROL_KEY })
+  const hosts = await fleet.hosts.list()
   assert.deepEqual(hosts, [
     {
       hostId: 'testvm-1',
@@ -1060,6 +1069,55 @@ test('hosts() maps the gateway fleet view to camelCase', async () => {
       lastSeenMsAgo: 31_000,
     },
   ])
+})
+
+test('the fleet client refuses a tenant API key instead of half-working', async () => {
+  const fleet = new FleetClient({ gatewayUrl: apiUrl, controlKey: API_KEY })
+  await assert.rejects(
+    () => fleet.hosts.list(),
+    (err: unknown) => {
+      assert.ok(err instanceof AuthenticationError)
+      assert.equal(err.status, 401)
+      return true
+    }
+  )
+})
+
+test('the fleet client demands its own credential, never SANDBOX_API_KEY', () => {
+  const previous = process.env.SANDBOX_CONTROL_KEY
+  delete process.env.SANDBOX_CONTROL_KEY
+  process.env.SANDBOX_API_KEY = API_KEY
+  try {
+    assert.throws(
+      () => new FleetClient({ gatewayUrl: apiUrl }),
+      (err: unknown) => {
+        assert.ok(err instanceof AuthenticationError)
+        assert.match(String((err as Error).message), /SANDBOX_CONTROL_KEY/)
+        return true
+      }
+    )
+  } finally {
+    delete process.env.SANDBOX_API_KEY
+    if (previous !== undefined) process.env.SANDBOX_CONTROL_KEY = previous
+  }
+})
+
+test('Sandbox.hosts() throws a migration error without touching the network', async () => {
+  // A TypeScript call site cannot compile at all (asserted in
+  // removed-api.types.ts). This is the JavaScript caller's path, which has no
+  // compile step — erasing the types is what reproduces it.
+  const asJavaScriptCaller = Sandbox.hosts as unknown as (o?: unknown) => Promise<never>
+  await assert.rejects(
+    () => asJavaScriptCaller(opts()),
+    (err: unknown) => {
+      assert.ok(err instanceof SandboxError)
+      // Not an HTTP failure: it never left the process.
+      assert.equal(err.status, undefined)
+      assert.match(err.message, /FleetClient/)
+      assert.match(err.message, /SANDBOX_CONTROL_KEY/)
+      return true
+    }
+  )
 })
 
 test('errors carry the HTTP status they came from', async () => {

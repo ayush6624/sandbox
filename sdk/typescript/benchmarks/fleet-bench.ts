@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import {
+  FleetClient,
   NotFoundError,
   SandboxClient,
   type ClientSandbox,
@@ -148,19 +149,15 @@ const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : 'n/a')
 // Fleet inventory is an operator route: it discloses per-host addresses and
 // capacity, so the gateway gates it on the worker-control credential
 // (SANDBOX_CONTROL_KEY / GATEWAY_CONTROL_TOKEN) rather than the tenant API key.
-// The /internal/v1 path is the canonical one and has always been gated.
-export function gatewayHostsEndpoint(baseURL: string): string {
-  return baseURL.replace(/\/+$/, '') + '/internal/v1/hosts'
+// FleetClient is the SDK's operator surface for exactly that; constructing it
+// throws if the control credential is absent, rather than sending the tenant
+// key and collecting a 401.
+export function fleetClient(): FleetClient {
+  return new FleetClient({ requestTimeoutMs: 10_000 })
 }
 
 async function gatewayHosts(): Promise<unknown> {
-  const url = gatewayHostsEndpoint(process.env.SANDBOX_API_URL ?? '')
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${process.env.SANDBOX_CONTROL_KEY ?? ''}` },
-    signal: AbortSignal.timeout(10_000),
-  })
-  if (!res.ok) throw new Error(`host inventory returned HTTP ${res.status}`)
-  return res.json()
+  return fleetClient().hosts.list()
 }
 
 interface Run {
