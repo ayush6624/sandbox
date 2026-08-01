@@ -110,6 +110,23 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Queued creates are demand without a slot — the recording rule adds this
 	// to slots_used so a burst pulls scale-up before any create lands.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))
+	// Cross-host adopt on a route miss. suppressed{reason} is the load a
+	// hostname scan is NOT allowed to put on the workers: malformed = rejected
+	// on shape alone, cached = known-absent, throttled = fleet-wide dispatch
+	// limit. A rising throttled rate with a low dispatch rate means something is
+	// probing ids; a rising wait_timeout means real adopts are slower than
+	// requestAdoptWait and clients are relying on the retry-joins-flight path.
+	g.adoptMu.Lock()
+	adoptInflightNow := len(g.adopts)
+	g.adoptMu.Unlock()
+	gauge("sandbox_adopt_inflight", "Cross-host adopts running in the background.", adoptInflightNow)
+	gauge("sandbox_adopt_negative_cache_entries", "Ids cached as having no durable record anywhere (bounded).", g.notFound.len())
+	fmt.Fprintf(&b, "# HELP sandbox_adopt_dispatched_total Cross-host adopts dispatched to a worker.\n# TYPE sandbox_adopt_dispatched_total counter\nsandbox_adopt_dispatched_total %d\n", g.adoptDispatched.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_adopt_wait_timeout_total Requests that stopped waiting on an in-flight adopt and 404'd.\n# TYPE sandbox_adopt_wait_timeout_total counter\nsandbox_adopt_wait_timeout_total %d\n", g.adoptWaitTimeouts.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_adopt_suppressed_total Route misses answered without dispatching an adopt.\n# TYPE sandbox_adopt_suppressed_total counter\n")
+	fmt.Fprintf(&b, "sandbox_adopt_suppressed_total{reason=\"malformed_id\"} %d\n", g.adoptSuppressedMalformed.Load())
+	fmt.Fprintf(&b, "sandbox_adopt_suppressed_total{reason=\"cached\"} %d\n", g.adoptSuppressedCached.Load())
+	fmt.Fprintf(&b, "sandbox_adopt_suppressed_total{reason=\"throttled\"} %d\n", g.adoptSuppressedThrottled.Load())
 	if g.raw != nil {
 		pending, active, releasing, generation := g.raw.stats()
 		fmt.Fprintf(&b, "# HELP sandbox_raw_leases Durable public TCP leases by state.\n# TYPE sandbox_raw_leases gauge\n")

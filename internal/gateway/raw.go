@@ -433,7 +433,14 @@ func (a *rawAllocator) stats() (pending, active, releasing int, generation int64
 	return pending, active, releasing, generation
 }
 
-func (g *Gateway) sandboxHost(id string) (host, bool) {
+// sandboxHost resolves a sandbox to its live host, adopting it on a route miss
+// under pol. Callers pass the policy matching their trust level: edgeResolve for
+// public ingress resolution, requestResolve for authenticated id-scoped calls.
+// sandboxHost resolves a sandbox to its owning live host, adopting it when no
+// live route exists. It returns the resolve outcome rather than a bool so
+// callers answer 404 only for a definitive absence — see resolveOutcome and
+// writeResolveFailure.
+func (g *Gateway) sandboxHost(id string, pol resolvePolicy) (host, resolveOutcome) {
 	g.mu.RLock()
 	hid := g.route[id]
 	h := g.hosts[hid]
@@ -443,18 +450,24 @@ func (g *Gateway) sandboxHost(id string) (host, bool) {
 	}
 	g.mu.RUnlock()
 	if h != nil && snap.id != "" {
-		return snap, true
+		return snap, resolveAdopted
 	}
-	if hid, ok := g.resolveViaAdopt(id, nil); ok {
-		g.mu.RLock()
-		h = g.hosts[hid]
-		if h != nil {
-			snap = *h
-		}
-		g.mu.RUnlock()
-		return snap, h != nil
+	hid, outcome := g.resolveViaAdopt(id, nil, pol)
+	if outcome != resolveAdopted {
+		return host{}, outcome
 	}
-	return host{}, false
+	g.mu.RLock()
+	h = g.hosts[hid]
+	if h != nil {
+		snap = *h
+	}
+	g.mu.RUnlock()
+	if h == nil {
+		// Adopted, but the winning host aged out of the registry between the
+		// adopt landing and this read. The sandbox exists — don't 404 it.
+		return host{}, resolveUnknown
+	}
+	return snap, resolveAdopted
 }
 
 func (g *Gateway) handleAllocateRawPort(w http.ResponseWriter, r *http.Request) {
@@ -470,9 +483,9 @@ func (g *Gateway) handleAllocateRawPort(w http.ResponseWriter, r *http.Request) 
 		httpError(w, http.StatusBadRequest, errors.New("invalid guest_port"))
 		return
 	}
-	h, ok := g.sandboxHost(id)
-	if !ok {
-		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s not found", id))
+	h, outcome := g.sandboxHost(id, requestResolve)
+	if outcome != resolveAdopted {
+		writeResolveFailure(w, r, id, outcome)
 		return
 	}
 	lease, err := g.raw.allocate(r.Context(), id, body.GuestPort, func(publicPort int) error {
@@ -512,9 +525,9 @@ func (g *Gateway) handleRawRoute(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, fmt.Errorf("raw port %d is not allocated", port))
 		return
 	}
-	h, ok := g.sandboxHost(lease.SandboxID)
-	if !ok {
-		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s not found", lease.SandboxID))
+	h, outcome := g.sandboxHost(lease.SandboxID, edgeResolve)
+	if outcome != resolveAdopted {
+		writeResolveFailure(w, r, lease.SandboxID, outcome)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -531,9 +544,9 @@ func (g *Gateway) handleGatewayDeletePort(w http.ResponseWriter, r *http.Request
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	h, ok := g.sandboxHost(id)
-	if !ok {
-		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s not found", id))
+	h, outcome := g.sandboxHost(id, requestResolve)
+	if outcome != resolveAdopted {
+		writeResolveFailure(w, r, id, outcome)
 		return
 	}
 	var releasing []rawLease
@@ -565,8 +578,12 @@ func (g *Gateway) handleGatewayDeletePort(w http.ResponseWriter, r *http.Request
 
 func (g *Gateway) handleGatewayDestroy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	h, ok := g.sandboxHost(id)
-	if !ok {
+	h, outcome := g.sandboxHost(id, requestResolve)
+	switch outcome {
+	case resolveAbsent:
+		// Provably gone: release its public-port leases (they would otherwise
+		// hold entries in the fleet-wide index forever) and report the delete
+		// as done, since there is nothing left to delete.
 		if g.raw != nil {
 			leases, err := g.raw.beginRemoveSandbox(r.Context(), id)
 			if err != nil {
@@ -579,6 +596,12 @@ func (g *Gateway) handleGatewayDestroy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.WriteHeader(http.StatusNoContent)
+		return
+	case resolveUnknown:
+		// We could not determine whether it exists, so we must not claim to
+		// have deleted it — and must not drop its leases, which would strand a
+		// live sandbox's public port.
+		writeResolveFailure(w, r, id, outcome)
 		return
 	}
 	var releasing []rawLease
@@ -636,9 +659,13 @@ func (g *Gateway) reconcilePendingRaw(ctx context.Context) {
 	}
 	g.raw.mu.Unlock()
 	for _, lease := range candidates {
-		h, ok := g.sandboxHost(lease.SandboxID)
-		if !ok {
-			if lease.State == "releasing" {
+		h, outcome := g.sandboxHost(lease.SandboxID, requestResolve)
+		if outcome != resolveAdopted {
+			// Only a PROVEN absence retires a lease. An indeterminate answer
+			// (throttled, no capacity, adopt still running) leaves it for the
+			// next pass: retiring it here would hand the public port to another
+			// sandbox while this one is merely unreachable.
+			if outcome == resolveAbsent && lease.State == "releasing" {
 				if err := g.raw.finishRemove(ctx, []rawLease{lease}); err != nil {
 					g.raw.reconcileError.Add(1)
 				} else {

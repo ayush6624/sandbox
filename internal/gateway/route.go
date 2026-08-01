@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 )
@@ -31,18 +30,29 @@ func (g *Gateway) handleRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	g.mu.RUnlock()
 
+	outcome := resolveAdopted
 	if h == nil {
-		if adopted, ok := g.resolveViaAdopt(id, nil); ok {
+		// The public edge calls this on every cache miss for an unknown
+		// hostname, so it takes the bounded, rate-limited, id-screened policy:
+		// an unresolvable label must cost the control plane ~nothing.
+		var adopted string
+		if adopted, outcome = g.resolveViaAdopt(id, nil, edgeResolve); outcome == resolveAdopted {
 			g.mu.RLock()
 			if ah := g.hosts[adopted]; ah != nil && time.Since(ah.lastSeen) <= g.ttl {
 				snap = *ah
 				h = ah
 			}
 			g.mu.RUnlock()
+			if h == nil {
+				outcome = resolveUnknown
+			}
 		}
 	}
 	if h == nil {
-		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s not found on any host", id))
+		// 404 only when provably absent. The edge negative-caches a 404 but not
+		// a 503, so mislabelling an in-flight adopt here would make the edge
+		// remember a live sandbox as dead for its whole negative TTL.
+		writeResolveFailure(w, r, id, outcome)
 		return
 	}
 	writeJSON(w, http.StatusOK, edgeRoute{

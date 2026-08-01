@@ -220,12 +220,25 @@ type Gateway struct {
 	// Cross-host wake (roadmap B4). When an id-scoped request finds no live
 	// route (the owning host is gone), the gateway dispatches an /adopt to a
 	// live host, which reconstructs the sandbox from GCS. adopts single-flights
-	// concurrent misses for the same id onto one adopt; notFound briefly caches
-	// a definitive 404 (no durable record) so a storm of requests for a dead id
-	// doesn't fan /adopt out to every host.
+	// concurrent misses for the same id onto one adopt; notFound caches a
+	// definitive 404 (no durable record) so a storm of requests for a dead id
+	// doesn't fan /adopt out to every host. adoptTokens rate-limits DISPATCH
+	// fleet-wide — single-flight only collapses same-id concurrency, and this
+	// path is reachable from unauthenticated public-edge traffic, so a scan of
+	// distinct ids would otherwise fan out per id (audit L1).
 	adoptMu  sync.Mutex
 	adopts   map[string]*adoptInflight
-	notFound sync.Map // sandbox id → time.Time (negative-cache expiry)
+	notFound *negCache
+	// Separate buckets so a hostname scan through the public edge exhausts the
+	// edge budget only, leaving authenticated cross-host wakes unaffected.
+	edgeAdopts *tokenBucket
+	apiAdopts  *tokenBucket
+
+	adoptDispatched          atomic.Int64
+	adoptWaitTimeouts        atomic.Int64
+	adoptSuppressedCached    atomic.Int64
+	adoptSuppressedMalformed atomic.Int64
+	adoptSuppressedThrottled atomic.Int64
 
 	// proxies caches one ReverseProxy per host id (self-invalidating on
 	// addr/token change; pruned with the host). Rebuilding a proxy + three
@@ -270,6 +283,9 @@ func New(token string, ttl time.Duration, queueWait time.Duration, queueMax int)
 		snapRoute:         map[string]string{},
 		routePin:          map[string]time.Time{},
 		adopts:            map[string]*adoptInflight{},
+		notFound:          newNegCache(negCacheTTL, negCacheMax),
+		edgeAdopts:        newTokenBucket(adoptEdgeBurst, adoptEdgeRefill),
+		apiAdopts:         newTokenBucket(adoptAPIBurst, adoptAPIRefill),
 	}
 }
 
@@ -907,6 +923,10 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 	g.route[sandboxID] = routeID
 	g.pinRouteLocked(sandboxID)
 	g.mu.Unlock()
+	// A landed create/restore/adopt makes any cached "no durable record"
+	// verdict for this id false; drop it so the negative TTL can't outlive the
+	// truth (an id can be handed out again after a failed adopt).
+	g.notFound.drop(sandboxID)
 	g.createsOK.Add(1)
 	return routeID
 }
@@ -1466,26 +1486,31 @@ func (g *Gateway) handleProxyByID(w http.ResponseWriter, r *http.Request) {
 	}
 	g.mu.RUnlock()
 
+	outcome := resolveAdopted
 	if h == nil {
 		// No live route: the owning host may be gone. Try to adopt the sandbox
 		// onto a live host from its durable GCS record (roadmap B4). Adopt can
 		// take seconds (reconstruct + wake), so this blocks the request like a
-		// wake-on-connect; concurrent misses for the same id single-flight.
-		if hid, ok := g.resolveViaAdopt(id, nil); ok {
+		// wake-on-connect — but only for requestAdoptWait. Past that the adopt
+		// continues in the background and this request answers 503, NOT 404: the
+		// sandbox probably exists, and a retry joins the same in-flight adopt.
+		var hid string
+		if hid, outcome = g.resolveViaAdopt(id, nil, requestResolve); outcome == resolveAdopted {
 			g.mu.RLock()
 			if ah := g.hosts[hid]; ah != nil {
 				snap = *ah
 				h = ah
 			}
 			g.mu.RUnlock()
+			if h == nil {
+				// Adopted onto a host that aged out before this read; the
+				// sandbox is not absent, so don't say it is.
+				outcome = resolveUnknown
+			}
 		}
 	}
 	if h == nil {
-		err := fmt.Errorf("sandbox %s not found on any host", id)
-		if wsutil.IsUpgrade(r) && wsutil.Reject(w, r, wsutil.CloseNotFound, err.Error()) == nil {
-			return
-		}
-		httpError(w, 404, err)
+		writeResolveFailure(w, r, id, outcome)
 		return
 	}
 
