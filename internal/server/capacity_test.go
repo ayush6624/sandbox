@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,6 +134,156 @@ func TestStatusForCapacityWake(t *testing.T) {
 	}
 	if got := statusFor(fmt.Errorf("boom")); got != 500 {
 		t.Fatalf("statusFor(generic) = %d, want 500", got)
+	}
+}
+
+// TestFanoutRejectsCountAboveCap: fanout sizes its own work (a registry TX, a
+// rootfs clone, a VMM and a 30 s agent wait per clone, under the snapshot lock),
+// so the count is capped at the same 100 the v1 batch endpoint enforces.
+func TestFanoutRejectsCountAboveCap(t *testing.T) {
+	s, _ := capacityTestServer(t)
+	for _, body := range []string{`{"count": 101}`, `{"count": 100000}`, `{"count": 0}`} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/snapshots/snap-1/fanout", strings.NewReader(body))
+		r.SetPathValue("id", "snap-1")
+		s.handleFanout(w, r)
+		if w.Code != 400 {
+			t.Fatalf("fanout %s: got %d, want 400 (body: %s)", body, w.Code, w.Body)
+		}
+		if !strings.Contains(w.Body.String(), "between 1 and 100") {
+			t.Fatalf("fanout %s: error should name the cap: %s", body, w.Body)
+		}
+	}
+}
+
+// TestFanoutFailsFastBeyondFreeCapacity: a batch the host cannot hold must be
+// refused as capacity (503 + Retry-After, so the gateway/SDK back off) instead
+// of booting and tearing down clones a wave at a time while holding the
+// snapshot lock against restores and deletes.
+func TestFanoutFailsFastBeyondFreeCapacity(t *testing.T) {
+	s, reg := capacityTestServer(t)
+	ctx := context.Background()
+	if err := reg.CreateSnapshot(ctx, registry.Snapshot{ID: "snap-1", SourceID: "gone", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	// Pools hold 3; ask for 4.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/snapshots/snap-1/fanout", strings.NewReader(`{"count": 4}`))
+	r.SetPathValue("id", "snap-1")
+	s.handleFanout(w, r)
+	if w.Code != 503 {
+		t.Fatalf("fanout beyond free capacity: got %d, want 503 (body: %s)", w.Code, w.Body)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("capacity 503 must carry Retry-After")
+	}
+	if len(s.createSem) != 0 {
+		t.Fatalf("fail-fast must not retain create permits, held %d", len(s.createSem))
+	}
+}
+
+// TestFanoutWaitsForCreateBudget: fanout bring-ups run on the same host-wide
+// create budget as handleCreate and handleRestore — it used to bypass createSem
+// entirely, so one call could boot-storm a host already at its ceiling. The
+// permit is taken before any snapshot work, so a client that disconnects while
+// queued costs nothing.
+func TestFanoutWaitsForCreateBudget(t *testing.T) {
+	s, reg := capacityTestServer(t)
+	if err := reg.CreateSnapshot(context.Background(), registry.Snapshot{ID: "snap-1", SourceID: "gone", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+	s.createSem = make(chan struct{}, 1)
+	if err := s.acquireCreate(context.Background()); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/snapshots/snap-1/fanout", strings.NewReader(`{"count": 1}`)).WithContext(ctx)
+	r.SetPathValue("id", "snap-1")
+	start := time.Now()
+	s.handleFanout(w, r)
+	if time.Since(start) < 25*time.Millisecond {
+		t.Fatal("fanout should have blocked on the create semaphore until cancel")
+	}
+	if w.Code != 499 {
+		t.Fatalf("cancelled queued fanout: got %d, want 499 (body: %s)", w.Code, w.Body)
+	}
+}
+
+// TestFanoutPhaseTwoIsBounded: phase 2 (announce wait, bridge, 30 s agent wait
+// per clone) used to spawn one unbounded goroutine per clone, undoing the pacing
+// phase 1 applied. Both phases now share the batch's permit count.
+func TestFanoutPhaseTwoIsBounded(t *testing.T) {
+	s, _ := capacityTestServer(t)
+	const limit = 3
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	s.finishCloneFn = func(context.Context, *clone) error {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(5 * time.Millisecond) // hold the slot like a real agent wait
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return nil
+	}
+
+	clones := make([]*clone, 24)
+	for i := range clones {
+		clones[i] = &clone{sb: registry.Sandbox{ID: fmt.Sprintf("clone-%d", i)}}
+	}
+	clones[7] = nil                                        // never allocated
+	clones[9] = &clone{err: fmt.Errorf("bring-up failed")} // failed phase 1
+
+	live := s.finishClones(context.Background(), "snap-1", clones, limit)
+	if len(live) != len(clones)-2 {
+		t.Fatalf("finished %d clones, want %d", len(live), len(clones)-2)
+	}
+	if peak > limit {
+		t.Fatalf("phase 2 ran %d clones concurrently, limit is %d", peak, limit)
+	}
+	if peak < 2 {
+		t.Fatalf("phase 2 ran serially (peak %d) — the bound must not remove parallelism", peak)
+	}
+}
+
+// TestRunBoundedRespectsLimit exercises the shared fan-out helper directly,
+// including the degenerate limit both phases would hit if the permit count were
+// ever computed as zero.
+func TestRunBoundedRespectsLimit(t *testing.T) {
+	for _, limit := range []int{0, 1, 4} {
+		var mu sync.Mutex
+		inFlight, peak, done := 0, 0, 0
+		runBounded(limit, 40, func(int) {
+			mu.Lock()
+			inFlight++
+			if inFlight > peak {
+				peak = inFlight
+			}
+			mu.Unlock()
+			time.Sleep(time.Millisecond)
+			mu.Lock()
+			inFlight--
+			done++
+			mu.Unlock()
+		})
+		want := limit
+		if want < 1 {
+			want = 1
+		}
+		if peak > want {
+			t.Fatalf("limit %d: peak concurrency %d", limit, peak)
+		}
+		if done != 40 {
+			t.Fatalf("limit %d: ran %d of 40", limit, done)
+		}
 	}
 }
 

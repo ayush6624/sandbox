@@ -247,8 +247,16 @@ func (c *Config) Defaults() {
 		if c.JailerIdentityCount == 0 {
 			c.JailerIdentityCount = 4096
 		}
+		// Per-VM cgroup headroom above the guest's mem_mib, and the single
+		// source of truth for per-VM overhead: memory admission charges at
+		// least this much (internal/vm.CheckMemoryAdmission refuses to serve
+		// otherwise), so raising it lowers how many sandboxes mem_budget_mib
+		// admits rather than letting the per-VM allowances overcommit the
+		// parent task cgroup. 156 matches the MEM_PER_SLOT_MIB arithmetic
+		// deploy-job.sh has always used (1024 + 156 = 1180) and the ~91 MiB
+		// per-VM footprint measured on the fleet (docs/benchmarks.md).
 		if c.JailerMemoryOverheadMIB == 0 {
-			c.JailerMemoryOverheadMIB = 512
+			c.JailerMemoryOverheadMIB = 156
 		}
 		if c.JailerPIDsMax == 0 {
 			c.JailerPIDsMax = 64

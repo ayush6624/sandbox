@@ -200,6 +200,16 @@ type Server struct {
 	// validateResources/handleInfo can clamp the per-sandbox override too.
 	memBudgetMIB int64
 
+	// vmOverheadMIB is the per-VM memory admission charges on top of the
+	// guest's mem_mib. It is NEVER below what the jailer's per-VM cgroup
+	// allows (JailerConfig.MemoryOverheadMIB): if admission charged less, the
+	// per-VM memory.max values at full admitted occupancy would sum above
+	// mem_budget_mib and therefore above the parent task cgroup that also
+	// contains serve — the parent OOMs and every VM on the host dies at once
+	// instead of one create failing. vm.CheckMemoryAdmission re-proves this at
+	// startup; see fcOverheadMIB for the floor.
+	vmOverheadMIB int64
+
 	// met holds process-lifetime lifecycle counters exposed on /metrics as
 	// Prometheus counters (monotonic; reset only on a server restart).
 	met serverMetrics
@@ -209,6 +219,11 @@ type Server struct {
 	// bootAge reads Linux boot age (/proc/uptime, CLOCK_BOOTTIME semantics).
 	// Kept injectable for deterministic placement-quarantine tests.
 	bootAge func() (time.Duration, error)
+
+	// finishCloneFn is finishClone, injectable so the fanout phase-2
+	// concurrency bound is testable without a real VMM (bring-up needs Linux
+	// and KVM). nil selects the real method.
+	finishCloneFn func(context.Context, *clone) error
 
 	// phases records the worker boot/readiness timeline (see bootphase.go) so
 	// the autoscale "host becomes usable" span is attributable per stage
@@ -235,9 +250,11 @@ type serverMetrics struct {
 	warmFailures atomic.Int64 // background ready-VM builds that failed
 }
 
-// fcOverheadMIB is the per-VM memory charged on top of the guest's mem_mib:
-// firecracker/VMM overhead. 1024 (template) + 156 = 1180, matching the
-// MiB-per-slot arithmetic deploy-job.sh sizes the Nomad cgroup with.
+// fcOverheadMIB is the FLOOR on per-VM memory charged on top of the guest's
+// mem_mib: firecracker/VMM overhead. 1024 (template) + 156 = 1180, matching the
+// MiB-per-slot arithmetic deploy-job.sh sizes the Nomad cgroup with. Under the
+// jailer the effective charge is raised to the per-VM cgroup allowance
+// (jailer_memory_overhead_mib) so the two can't drift — see vmOverheadMIB.
 const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
@@ -278,14 +295,22 @@ func New(cfg Config, reg *registry.Registry) *Server {
 		budget = 0
 	}
 	s.memBudgetMIB = budget
+	// One per-VM overhead number, derived from the jailer's per-VM cgroup
+	// allowance so admission can never charge less than the kernel will let a
+	// VM use (that mismatch is what lets the per-VM leaves overcommit the
+	// parent cgroup); never below the measured VMM floor.
+	s.vmOverheadMIB = fcOverheadMIB
+	if allowance := cfg.VMTemplate.Jailer.EffectiveMemoryOverheadMIB(); allowance > s.vmOverheadMIB {
+		s.vmOverheadMIB = allowance
+	}
 	reg.SetMemAccounting(registry.MemAccounting{
 		TemplateMemMIB: cfg.VMTemplate.MemMIB,
 		BudgetMIB:      budget,
-		OverheadMIB:    fcOverheadMIB,
+		OverheadMIB:    s.vmOverheadMIB,
 	})
-	if budget > 0 && budget < cfg.VMTemplate.MemMIB+fcOverheadMIB {
+	if budget > 0 && budget < cfg.VMTemplate.MemMIB+s.vmOverheadMIB {
 		fmt.Fprintf(os.Stderr, "WARNING: mem_budget_mib %d cannot fit even one template sandbox (%d+%d MiB) — every create (incl. the golden build) will be rejected\n",
-			budget, cfg.VMTemplate.MemMIB, fcOverheadMIB)
+			budget, cfg.VMTemplate.MemMIB, s.vmOverheadMIB)
 	}
 
 	s.pf = newPortForwarder(s.dialGuest, s.act.begin)
@@ -301,6 +326,22 @@ func New(cfg Config, reg *registry.Registry) *Server {
 // sandboxes are hibernated (frozen to disk, wakeable on next start) rather
 // than destroyed — see shutdownAll.
 func (s *Server) Serve(ctx context.Context) error {
+	// Fail closed before anything can be admitted: with the jailer on, the
+	// per-VM cgroup allowances of a fully admitted host must fit inside the
+	// parent task cgroup that also holds serve. If they don't, the failure is
+	// the parent OOMing — every VM on the host at once — so refusing to start
+	// is strictly better than serving. Checked here (not in New) because it
+	// needs the RESOLVED budget.
+	if jailer := s.cfg.VMTemplate.Jailer; jailer != nil {
+		if err := vm.CheckMemoryAdmission(*jailer, vm.MemoryAdmission{
+			BudgetMIB:          s.memBudgetMIB,
+			ChargedOverheadMIB: s.vmOverheadMIB,
+			TemplateMemMIB:     s.cfg.VMTemplate.MemMIB,
+		}); err != nil {
+			return fmt.Errorf("memory admission: %w", err)
+		}
+	}
+
 	// vmCtx must NOT be the serve ctx: the firecracker SDK (and the raw clone
 	// path's CommandContext) kill their VMs the moment their context cancels,
 	// and the serve ctx cancels on SIGTERM — before shutdownAll gets a chance
@@ -783,6 +824,19 @@ func (s *Server) acquireCreate(ctx context.Context) error {
 }
 
 func (s *Server) releaseCreate() { <-s.createSem }
+
+// tryAcquireCreate takes one bring-up slot only if one is free right now. A
+// fanout uses it to widen its parallelism beyond the one permit it waited for:
+// blocking for further permits while already holding some would let two
+// concurrent fanouts split a small budget and deadlock each other.
+func (s *Server) tryAcquireCreate() bool {
+	select {
+	case s.createSem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
 
 // createCold boots a brand-new sandbox from the base rootfs: full rootfs copy,
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
@@ -1327,7 +1381,7 @@ func maxVcpus() int64 {
 // bounds a single sandbox only — the registry's admission check bounds the sum.
 func (s *Server) maxMemMIB() int64 {
 	if s.memBudgetMIB > 0 {
-		return s.memBudgetMIB - fcOverheadMIB
+		return s.memBudgetMIB - s.vmOverheadMIB
 	}
 	if total := hostTotalMemMIB(); total > 0 {
 		return total

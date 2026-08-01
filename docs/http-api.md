@@ -442,8 +442,11 @@ the source's resources.
 ### Fan-out (1:N) — `POST /snapshots/{id}/fanout`
 
 Body: `{"count": 32, "timeout_sec": 600, "hibernate_after_sec": N}`
-(`count` >= 1 required). Starts N identity-neutral clones concurrently — each
-with a fresh IP and copy-on-write disk. Returns `201 [Sandbox…]` with
+(`count` must be 1..100, matching `POST /v1/sandbox-batches`). Starts N
+identity-neutral clones concurrently — each with a fresh IP and copy-on-write
+disk, paced by the host's create budget (`create_concurrency`), and refused
+with `503` + `Retry-After` up front when `count` exceeds the host's free
+slots. Returns `201 [Sandbox…]` with
 every clone that came up (**partial success possible** — the array may be
 shorter than `count`; failures are logged server-side and their resources
 reclaimed). `500` only if every clone failed. `vcpus`/`mem_mib` are rejected
@@ -482,7 +485,7 @@ The gateway fronts N hosts with the same API, plus:
 
 | Status | Meaning |
 | --- | --- |
-| 400 | malformed body (`timeout_sec < 0`, `count < 1`, out-of-bounds `vcpus`/`mem_mib`, resource overrides on restore/fanout, missing `path`, bad JSON) |
+| 400 | malformed body (`timeout_sec < 0`, fanout `count` outside 1..100, out-of-bounds `vcpus`/`mem_mib`, resource overrides on restore/fanout, missing `path`, bad JSON) |
 | 401 | missing/invalid bearer token (TCP/gateway listeners only) |
 | 404 | unknown sandbox/snapshot/file |
 | 409 | restore conflict (source or a prior restore still running); snapshot/hibernate of a sandbox not running on this server |

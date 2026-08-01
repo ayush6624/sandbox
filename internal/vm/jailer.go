@@ -14,9 +14,17 @@ import (
 )
 
 const (
-	defaultJailerUIDStart       = 200000
-	defaultJailerIdentityCount  = 4096
-	defaultJailerMemoryOverhead = int64(512)
+	defaultJailerUIDStart      = 200000
+	defaultJailerIdentityCount = 4096
+	// defaultJailerMemoryOverhead is the per-VM cgroup headroom above the
+	// guest's mem_mib. It is NOT a free safety margin: the server's memory
+	// admission must charge at least this much per VM (see CheckMemoryAdmission),
+	// so every MiB here is a MiB of admitted density on the host. Measured
+	// per-VM footprint on the production fleet is ~91 MiB total for a 1 GiB
+	// guest (docs/benchmarks.md, memory density), so 156 — the value
+	// deploy-job.sh has always folded into MEM_PER_SLOT_MIB (1024+156=1180) —
+	// both covers the VMM and keeps admission and the cgroups consistent.
+	defaultJailerMemoryOverhead = int64(156)
 	defaultJailerPIDsMax        = int64(64)
 	defaultJailerIOBPS          = int64(256 << 20)
 	defaultJailerNoFile         = uint64(256)
@@ -28,13 +36,18 @@ var delegationMu sync.Mutex
 // JailerConfig defines the host isolation policy shared by all launch modes.
 // The zero values of limits select conservative production defaults.
 type JailerConfig struct {
-	JailerBin         string
-	ChrootBaseDir     string
-	UIDStart          int
-	GIDStart          int
-	IdentityCount     int
-	CgroupParent      string
-	CgroupRoot        string // defaults to /sys/fs/cgroup; injectable for probes/tests
+	JailerBin     string
+	ChrootBaseDir string
+	UIDStart      int
+	GIDStart      int
+	IdentityCount int
+	CgroupParent  string
+	CgroupRoot    string // defaults to /sys/fs/cgroup; injectable for probes/tests
+	// MemoryOverheadMIB is the per-VM cgroup allowance above the guest's
+	// mem_mib. It is the single source of truth for per-VM overhead: the
+	// server's memory admission charges at least this much (see
+	// CheckMemoryAdmission), so raising it lowers admitted density instead of
+	// letting the per-VM allowances overcommit the parent task cgroup.
 	MemoryOverheadMIB int64
 	PIDsMax           int64
 	CPUWeight         int64
@@ -107,17 +120,12 @@ func CheckJailerPrerequisites(cfg JailerConfig, firecrackerBin, rootfsBase, root
 	if err := checkIdentityRangeUnused(cfg.UIDStart, cfg.IdentityCount); err != nil {
 		return "", err
 	}
-	rel, err := currentUnifiedCgroup()
+	task, rel, err := taskCgroupPath(cfg)
 	if err != nil {
 		return "", err
 	}
-	if filepath.Base(rel) == "sandbox-control" {
-		rel = filepath.Dir(rel)
-	}
-	task := filepath.Join(cfg.CgroupRoot, rel)
-	limit, err := os.ReadFile(filepath.Join(task, "memory.max"))
-	if err != nil || strings.TrimSpace(string(limit)) == "max" {
-		return "", fmt.Errorf("serve task cgroup must have a finite aggregate memory.max")
+	if _, err := taskMemoryMaxMIB(task); err != nil {
+		return "", err
 	}
 	controllers, err := os.ReadFile(filepath.Join(task, "cgroup.controllers"))
 	if err != nil {
@@ -134,6 +142,112 @@ func CheckJailerPrerequisites(cfg JailerConfig, firecrackerBin, rootfsBase, root
 	}
 	return fmt.Sprintf(" (jailer/firecracker %s, task cgroup %s, UID/GID pool %d..%d)",
 		firecrackerVersion, rel, cfg.UIDStart, cfg.UIDStart+cfg.IdentityCount-1), nil
+}
+
+// MemoryAdmission is the server's memory-accounting side of the per-VM memory
+// contract, handed to CheckMemoryAdmission so the two halves can be validated
+// against each other and against the parent cgroup.
+type MemoryAdmission struct {
+	// BudgetMIB is the RESOLVED mem_budget_mib: the ceiling on the sum of
+	// per-VM charges the registry will admit. <=0 means admission is off (or
+	// was derived from /proc/meminfo), which under a finite parent cgroup is
+	// itself the inconsistency.
+	BudgetMIB int64
+	// ChargedOverheadMIB is what admission charges per VM on top of its
+	// mem_mib. Must be >= the jailer's per-VM cgroup allowance.
+	ChargedOverheadMIB int64
+	// TemplateMemMIB is the template guest size; used only to make the error
+	// message actionable (it names the per-VM charge an operator must divide
+	// the budget by).
+	TemplateMemMIB int64
+}
+
+// CheckMemoryAdmission fails closed when the server's memory admission and the
+// jailer's per-VM cgroup allowances are mutually inconsistent, i.e. when a
+// FULLY ADMITTED host would install per-VM memory.max values summing above the
+// parent (serve task) cgroup's memory.max. The per-VM caps stop one guest from
+// ballooning, but nothing stops the aggregate from exceeding the parent — and
+// the parent contains serve, so the parent OOMing kills every VM on the host at
+// once instead of failing one create. Two independent numbers used to drift
+// here (admission charged 156 MiB, the cgroups allowed 512), which is why the
+// allowance is now the single source of truth and this gate refuses to serve
+// when the pair cannot hold.
+func CheckMemoryAdmission(cfg JailerConfig, adm MemoryAdmission) error {
+	cfg.defaults()
+	task, _, err := taskCgroupPath(cfg)
+	if err != nil {
+		return err
+	}
+	taskMaxMIB, err := taskMemoryMaxMIB(task)
+	if err != nil {
+		return err
+	}
+	return checkMemoryAdmission(cfg.EffectiveMemoryOverheadMIB(), adm, taskMaxMIB, task)
+}
+
+// checkMemoryAdmission is CheckMemoryAdmission's pure core: it takes the
+// numbers rather than reading them, so the failure modes are unit-testable
+// without a delegated cgroup.
+func checkMemoryAdmission(allowanceMIB int64, adm MemoryAdmission, taskMaxMIB int64, taskPath string) error {
+	if adm.ChargedOverheadMIB < allowanceMIB {
+		return fmt.Errorf("memory admission charges %d MiB per-VM overhead but each VM's cgroup allows %d MiB (jailer_memory_overhead_mib): at full occupancy the per-VM memory.max values sum above mem_budget_mib and OOM the parent cgroup %s, killing serve and every VM with it — charge at least the allowance or lower jailer_memory_overhead_mib",
+			adm.ChargedOverheadMIB, allowanceMIB, taskPath)
+	}
+	if adm.BudgetMIB <= 0 {
+		return fmt.Errorf("mem_budget_mib must be set positive under the jailer: with admission off (or derived from /proc/meminfo, which reports the machine total, not this task's limit) nothing bounds the summed per-VM allowances below the %d MiB memory.max of %s — set mem_budget_mib to at most that minus serve's own footprint (deploy-job.sh: SLOTS_PER_HOST × MEM_PER_SLOT_MIB)",
+			taskMaxMIB, taskPath)
+	}
+	if adm.BudgetMIB > taskMaxMIB {
+		return fmt.Errorf("mem_budget_mib %d MiB exceeds the serve task cgroup memory.max %d MiB (%s): a fully admitted host would overcommit the parent cgroup and OOM serve along with every VM — lower SLOTS_PER_HOST × MEM_PER_SLOT_MIB (per-VM charge is %d guest + %d overhead MiB) or raise the task memory",
+			adm.BudgetMIB, taskMaxMIB, taskPath, adm.TemplateMemMIB, adm.ChargedOverheadMIB)
+	}
+	return nil
+}
+
+// taskCgroupPath resolves serve's own cgroup — the parent every per-VM leaf is
+// charged against — returning its absolute path and the relative name used in
+// operator-facing messages. The "sandbox-control" leaf is stripped: serve moves
+// itself into that sibling so the VMM leaves are not its own children, but the
+// aggregate limit lives one level up.
+func taskCgroupPath(cfg JailerConfig) (string, string, error) {
+	rel, err := currentUnifiedCgroup()
+	if err != nil {
+		return "", "", err
+	}
+	if filepath.Base(rel) == "sandbox-control" {
+		rel = filepath.Dir(rel)
+	}
+	return filepath.Join(cfg.CgroupRoot, rel), rel, nil
+}
+
+// taskMemoryMaxMIB reads the parent task cgroup's finite aggregate limit. An
+// absent or "max" limit is fatal: without it neither the per-VM caps nor the
+// admission budget bound anything the kernel will enforce.
+func taskMemoryMaxMIB(task string) (int64, error) {
+	raw, err := os.ReadFile(filepath.Join(task, "memory.max"))
+	value := strings.TrimSpace(string(raw))
+	if err != nil || value == "max" {
+		return 0, fmt.Errorf("serve task cgroup must have a finite aggregate memory.max")
+	}
+	limit, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse task cgroup memory.max %q: %w", value, err)
+	}
+	return limit >> 20, nil
+}
+
+// EffectiveMemoryOverheadMIB is the per-VM memory the jailer's cgroup allows on
+// top of the guest's mem_mib, with the zero value resolved to the default. A
+// nil config is an unjailed (development) launch, which installs no cgroup and
+// therefore allows nothing extra.
+func (c *JailerConfig) EffectiveMemoryOverheadMIB() int64 {
+	if c == nil {
+		return 0
+	}
+	if c.MemoryOverheadMIB == 0 {
+		return defaultJailerMemoryOverhead
+	}
+	return c.MemoryOverheadMIB
 }
 
 func executableVersion(path string) (string, error) {
@@ -862,7 +976,9 @@ func prepareVMMCgroup(cfg JailerConfig, req LaunchRequest) (retErr error) {
 		}
 	}()
 
-	memoryMax := (req.MemMIB + cfg.MemoryOverheadMIB) << 20
+	// Same allowance the server's admission charges for this VM — see
+	// CheckMemoryAdmission for why the two must not drift.
+	memoryMax := (req.MemMIB + cfg.EffectiveMemoryOverheadMIB()) << 20
 	cpuMax := req.Vcpus * cfg.CPUPeriodUS
 	settings := []struct {
 		file  string

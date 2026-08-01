@@ -147,7 +147,10 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	}
 	leaf := jailerCgroupLeaf(cfg, req.VMID)
 	for file, want := range map[string]string{
-		"memory.max":      "1610612736",
+		// 1024 MiB guest + the 156 MiB per-VM overhead the server's memory
+		// admission charges (defaultJailerMemoryOverhead). The two MUST agree:
+		// see CheckMemoryAdmission.
+		"memory.max":      "1237319680",
 		"memory.swap.max": "0",
 		"pids.max":        "64",
 		"cpu.max":         "200000 100000",
@@ -286,6 +289,96 @@ func TestValidateCgroupParentFailsClosed(t *testing.T) {
 	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "../../escape", TrustedOwnerUID: os.Geteuid()}
 	if err := validateCgroupParent(cfg); err == nil {
 		t.Fatal("escaping cgroup parent accepted")
+	}
+}
+
+// TestMemoryAdmissionFailsClosedOnInconsistentPair pins the gate that keeps the
+// admission budget and the per-VM cgroup allowances from drifting apart: an
+// under-charging admission (or an unbounded one) lets a fully occupied host sum
+// its per-VM memory.max values above the parent task cgroup, whose OOM takes
+// serve and every VM with it.
+func TestMemoryAdmissionFailsClosedOnInconsistentPair(t *testing.T) {
+	// 32 template VMs at 1024+156 fit inside a 40960 MiB task cgroup.
+	const taskMaxMIB = 40960
+	for name, tc := range map[string]struct {
+		allowanceMIB int64
+		adm          MemoryAdmission
+		wantErr      string
+	}{
+		"consistent pair": {
+			allowanceMIB: 156,
+			adm:          MemoryAdmission{BudgetMIB: 37760, ChargedOverheadMIB: 156, TemplateMemMIB: 1024},
+		},
+		"admission charges less than the cgroup allows": {
+			allowanceMIB: 512,
+			adm:          MemoryAdmission{BudgetMIB: 37760, ChargedOverheadMIB: 156, TemplateMemMIB: 1024},
+			wantErr:      "jailer_memory_overhead_mib",
+		},
+		"admission disabled": {
+			allowanceMIB: 156,
+			adm:          MemoryAdmission{BudgetMIB: 0, ChargedOverheadMIB: 156, TemplateMemMIB: 1024},
+			wantErr:      "mem_budget_mib must be set positive",
+		},
+		"budget exceeds the parent cgroup": {
+			allowanceMIB: 156,
+			adm:          MemoryAdmission{BudgetMIB: 56640, ChargedOverheadMIB: 156, TemplateMemMIB: 1024},
+			wantErr:      "exceeds the serve task cgroup memory.max",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := checkMemoryAdmission(tc.allowanceMIB, tc.adm, taskMaxMIB, "/sys/fs/cgroup/nomad/task")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("consistent pair rejected: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("inconsistent memory accounting accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not name the knob to change (%q)", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTaskMemoryMaxRequiresFiniteLimit covers the read CheckMemoryAdmission
+// shares with the prerequisite gate: without a finite parent limit neither the
+// budget nor the per-VM caps bound anything the kernel enforces.
+func TestTaskMemoryMaxRequiresFiniteLimit(t *testing.T) {
+	task := t.TempDir()
+	if _, err := taskMemoryMaxMIB(task); err == nil {
+		t.Fatal("absent memory.max accepted")
+	}
+	writeFixtureFile(t, filepath.Join(task, "memory.max"), "max", 0644)
+	if _, err := taskMemoryMaxMIB(task); err == nil {
+		t.Fatal("unlimited memory.max accepted")
+	}
+	writeFixtureFile(t, filepath.Join(task, "memory.max"), "42949672960\n", 0644)
+	got, err := taskMemoryMaxMIB(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 40960 {
+		t.Fatalf("memory.max = %d MiB, want 40960", got)
+	}
+}
+
+// TestEffectiveMemoryOverheadResolvesZeroToDefault guards the single source of
+// truth: the server charges this number, so a zero-valued config must resolve to
+// the same default the cgroup writer uses, and an unjailed launch (nil) allows
+// no extra memory because it installs no cgroup.
+func TestEffectiveMemoryOverheadResolvesZeroToDefault(t *testing.T) {
+	var nilCfg *JailerConfig
+	if got := nilCfg.EffectiveMemoryOverheadMIB(); got != 0 {
+		t.Fatalf("nil (unjailed) overhead = %d, want 0", got)
+	}
+	if got := (&JailerConfig{}).EffectiveMemoryOverheadMIB(); got != defaultJailerMemoryOverhead {
+		t.Fatalf("zero-value overhead = %d, want %d", got, defaultJailerMemoryOverhead)
+	}
+	if got := (&JailerConfig{MemoryOverheadMIB: 300}).EffectiveMemoryOverheadMIB(); got != 300 {
+		t.Fatalf("explicit overhead = %d, want 300", got)
 	}
 }
 
