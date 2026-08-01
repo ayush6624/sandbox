@@ -37,6 +37,8 @@ import (
 // IdleConnTimeout is deliberately shorter than the gateway's 90 s: guests are
 // destroyed and hibernated constantly, and an idle connection to a guest that
 // no longer exists is a wasted file descriptor on the host.
+//
+// The pool is keyed on the SANDBOX, not on the guest IP — see agentAuthority.
 var agentTransport = &http.Transport{
 	MaxIdleConns:        4096,
 	MaxIdleConnsPerHost: 32,
@@ -44,13 +46,72 @@ var agentTransport = &http.Transport{
 	// Guest IPs live on the local bridge: an inherited HTTP(S)_PROXY from the
 	// environment (which DefaultTransport honors) would be wrong for every one
 	// of them, and Proxy lookups are per-request work for nothing.
-	Proxy: nil,
-	DialContext: (&net.Dialer{
-		Timeout:   5 * time.Second, // local bridge; a slow connect means a dead guest
-		KeepAlive: 30 * time.Second,
-	}).DialContext,
+	Proxy:       nil,
+	DialContext: dialAgentAuthority,
 	// The agent is plain HTTP/1.1; skip the h2 negotiation attempt.
 	ForceAttemptHTTP2: false,
+}
+
+// guestOneShotTransport serves the once-per-lifecycle guest calls (/identity,
+// /clock, /ssh-key, /snapshot-poll, /health). Keep-alive is DISABLED: each
+// fires once per VM bring-up, so pooling buys nothing, and a pooled connection
+// here is actively dangerous for the reason described on agentAuthority — these
+// calls run at the exact moment a recycled guest IP has just changed owner.
+// They previously rode http.DefaultTransport, whose pool is keyed on the IP
+// alone.
+var guestOneShotTransport = &http.Transport{
+	DisableKeepAlives: true,
+	Proxy:             nil,
+	DialContext:       agentDialer.DialContext,
+	ForceAttemptHTTP2: false,
+}
+
+var agentDialer = &net.Dialer{
+	Timeout:   5 * time.Second, // local bridge; a slow connect means a dead guest
+	KeepAlive: 30 * time.Second,
+}
+
+// agentAuthority builds the URL authority used for BOTH the connection-pool key
+// and the dial. It deliberately encodes the sandbox id alongside the guest IP.
+//
+// Guest IPs are drawn from a small per-host pool and are RECYCLED the instant a
+// sandbox is destroyed or hibernated (their partial unique indexes only bind
+// running rows). net/http keys its idle-connection pool on the URL authority,
+// so an IP-only authority lets a brand-new sandbox inherit a live keep-alive
+// connection to the DEAD VM that previously held that address. The dead peer
+// RSTs it — and net/http will NOT silently retry a POST/PUT carrying a body, so
+// this surfaced to users as "502 agent unreachable: read: connection reset by
+// peer" on exec and file writes under churn, while GETs (which are retried)
+// looked fine. Including the id makes a recycled address a different pool key,
+// so the stale entry is never reused; it also covers a clone-path wake, which
+// keeps the sandbox id but moves it to a NEW IP.
+//
+// The synthetic authority never reaches DNS: dialAgentAuthority parses the real
+// address back out, and callers set req.Host so the wire Host header stays a
+// plain ip:port. Sandbox ids are UUIDs and IPv4 literals contain no '_', so the
+// last '_' is an unambiguous separator.
+func agentAuthority(sandboxID, guestIP string) string {
+	return fmt.Sprintf("%s_%s:%d", sandboxID, guestIP, agentapi.Port)
+}
+
+// agentHostPort is the real address an agentAuthority stands for — the value
+// callers put in req.Host so the guest sees an ordinary Host header.
+func agentHostPort(guestIP string) string {
+	return fmt.Sprintf("%s:%d", guestIP, agentapi.Port)
+}
+
+// dialAgentAuthority resolves the synthetic authority built by agentAuthority
+// back to the guest address and dials it. An address without the separator is
+// dialed unchanged, so a plain ip:port target still works.
+func dialAgentAuthority(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if i := strings.LastIndex(host, "_"); i >= 0 {
+		host = host[i+1:]
+	}
+	return agentDialer.DialContext(ctx, network, net.JoinHostPort(host, port))
 }
 
 // agentClient talks to in-guest sandboxd agents. No overall timeout — exec
@@ -83,7 +144,10 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 			return
 		}
 
-		url := fmt.Sprintf("http://%s:%d/%s", sb.GuestIP, agentapi.Port, endpoint)
+		// Authority carries the sandbox id so the connection pool can never hand
+		// this request a keep-alive connection belonging to a previous owner of
+		// a recycled guest IP (see agentAuthority).
+		url := fmt.Sprintf("http://%s/%s", agentAuthority(id, sb.GuestIP), endpoint)
 		if r.URL.RawQuery != "" {
 			url += "?" + r.URL.RawQuery
 		}
@@ -92,6 +156,8 @@ func (s *Server) handleAgentProxy(endpoint string) http.HandlerFunc {
 			httpError(w, 500, err)
 			return
 		}
+		// The guest sees an ordinary ip:port Host, not the pool-keying authority.
+		req.Host = agentHostPort(sb.GuestIP)
 		req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 
 		resp, err := agentClient.Do(req)
@@ -140,8 +206,12 @@ func (s *Server) handleShellProxy() http.HandlerFunc {
 			shellError(w, r, statusFor(err), err)
 			return
 		}
-		target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", sb.GuestIP, agentapi.Port)}
+		target := &url.URL{Scheme: "http", Host: agentAuthority(id, sb.GuestIP)}
 		proxy := httputil.NewSingleHostReverseProxy(target)
+		// Same sandbox-keyed pool as the REST path; without an explicit
+		// transport this would fall back to http.DefaultTransport, whose pool is
+		// keyed on the guest IP alone.
+		proxy.Transport = agentTransport
 		// NewSingleHostReverseProxy joins paths; rewrite to the agent's /shell
 		// (the incoming path is /sandboxes/{id}/shell) while preserving the
 		// cols/rows/cwd query string. access_token is auth plumbing for
@@ -150,6 +220,8 @@ func (s *Server) handleShellProxy() http.HandlerFunc {
 		proxy.Director = func(req *http.Request) {
 			base(req)
 			req.URL.Path = "/shell"
+			// Director runs per attempt; keep the wire Host a plain ip:port.
+			req.Host = agentHostPort(sb.GuestIP)
 			if q := req.URL.Query(); q.Has("access_token") {
 				q.Del("access_token")
 				req.URL.RawQuery = q.Encode()
@@ -214,7 +286,7 @@ func syncGuestClock(ctx context.Context, guestIP string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: guestOneShotTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "clock sync %s: %v\n", guestIP, err)
@@ -242,7 +314,7 @@ func initializeGuestIdentity(ctx context.Context, guestIP, sandboxID string) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second, Transport: guestOneShotTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("initialize guest identity on %s: %w", guestIP, err)
@@ -271,7 +343,7 @@ func setGuestSnapshotPoll(ctx context.Context, guestIP string, armed bool) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: guestOneShotTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot poll arm=%t %s: %v\n", armed, guestIP, err)
@@ -300,7 +372,7 @@ func installSSHKey(ctx context.Context, guestIP, pubkey string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: guestOneShotTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("install ssh key on %s: %w", guestIP, err)
@@ -324,7 +396,7 @@ func waitForAgent(ctx context.Context, guestIP string, deadline time.Duration) e
 	// A ready agent answers over the host bridge in well under a millisecond.
 	// Keep each attempt short so a missing neighbor/FDB entry or a booting NIC
 	// cannot pin the readiness path to Linux's one-second ARP retransmit timer.
-	probe := &http.Client{Timeout: 100 * time.Millisecond}
+	probe := &http.Client{Timeout: 100 * time.Millisecond, Transport: guestOneShotTransport}
 	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	for {
