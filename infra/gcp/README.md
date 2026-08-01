@@ -81,6 +81,35 @@ make -C ../.. gcs-release             # build + upload binaries to gs://$RELEASE
 ./deploy-job.sh                      # submit the sandbox-serve system job to Nomad
 ```
 
+### Public ingress needs TWO things that no health check covers
+
+Both failed silently for a day after the ingress rollout, and the symptom was
+identical in each case: the API hands back a private `10.x` worker IP and never
+a URL.
+
+1. **`EDGE_DOMAIN` must be in `config.env`.** It feeds two independent places —
+   `edge.sh` bakes it into the edge instance template, and `deploy-job.sh`
+   copies it into each worker's `ingress_domain`. A worker with an empty
+   `ingress_domain` decorates no exposure with a URL, so `POST /ports` can only
+   ever return `host_port`. Nothing errors; you just never see a URL. Check
+   with `nomad job inspect sandbox-serve | grep ingress_domain`.
+
+2. **The edge's gateway token must be `GATEWAY_EDGE_TOKEN`, not
+   `GATEWAY_TOKEN`.** `edge.sh` seeds the Secret Manager secret with
+   `${GATEWAY_EDGE_TOKEN:-${GATEWAY_TOKEN}}`, so a fleet initialised before the
+   edge credential domain existed has the *client* token in there. Once the
+   gateway gates `/route` on `--edge-token-file`, every ingress request dies as
+   `resolve sandbox: 401` — and **`edge.sh roll` does not fix it**, because roll
+   only replaces the instance template and never touches the secret. Rotate it
+   explicitly, then let the 5-minute `sandbox-edge-secrets.timer` pick it up:
+
+   ```bash
+   printf '%s' "$GATEWAY_EDGE_TOKEN" \
+     | gcloud secrets versions add sandbox-edge-gateway-token --data-file=-
+   ```
+
+   Compare the two stores by hash before assuming they agree — never print them.
+
 **Drive it** from the laptop over Tailscale (token printed by `control.sh status`):
 
 ```bash
