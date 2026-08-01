@@ -635,6 +635,18 @@ func (g *Gateway) handleGatewayDestroy(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	g.unpinRouteLocked(id)
 	g.mu.Unlock()
+	// We just destroyed it, so its absence is proven by the strongest evidence
+	// the gateway can have — its own completed delete. Record that, because the
+	// only OTHER way to reach a definitive absence is an adopt probe answering
+	// 404, and that probe is rate-limited: during a bulk teardown a follow-up
+	// GET degrades to "not resolvable yet, retry" (503) for a sandbox this
+	// gateway knows is gone. Measured on a 64-way fleet teardown, that turned
+	// 10/64 delete-then-verify checks into retryable failures.
+	//
+	// Nothing can wrongly resurrect this: the negative is dropped only when a
+	// create/restore/adopt LANDS for the id, and a destroyed id is never handed
+	// out again.
+	g.notFound.add(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

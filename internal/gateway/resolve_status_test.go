@@ -187,3 +187,37 @@ func TestGatewayDestroyUnknownIs503NotDeleted(t *testing.T) {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
+
+// A completed delete is the strongest absence evidence the gateway can hold, so
+// a follow-up GET must answer 404 immediately rather than "not resolvable yet,
+// retry". The only other route to a definitive absence is an adopt probe
+// answering 404, and that probe is rate-limited — so without this, a bulk
+// teardown makes delete-then-verify fail with a retryable 503 for sandboxes the
+// gateway itself just destroyed (measured: 10/64 on a fleet teardown).
+func TestGatewayDestroyRecordsAbsenceForFollowUpReads(t *testing.T) {
+	g := New("tok", 20*time.Second, 0, 0)
+	id := testID(63)
+	srv, _ := fakeHost(t, 204, ``)
+	addTestHost(g, "a", strings.TrimPrefix(srv.URL, "http://"), 0, 24)
+	// Route it to that host so the destroy takes the live path, not resolveAbsent.
+	g.mu.Lock()
+	g.route[id] = "a"
+	g.pinRouteLocked(id)
+	g.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxes/"+id, nil)
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	g.handleGatewayDestroy(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204", rec.Code)
+	}
+
+	if !g.notFound.has(id) {
+		t.Fatalf("a completed delete must record the id as known-absent")
+	}
+	// The follow-up read is now definitive, with no host probe needed.
+	if got := routeStatus(t, g, id); got.Code != http.StatusNotFound {
+		t.Fatalf("GET after delete = %d, want 404 (not a retryable 503)", got.Code)
+	}
+}
