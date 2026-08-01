@@ -109,16 +109,28 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		}
 	}
 	var snapIDs []string
+	// One query for the whole host's public routes, not one per routed sandbox.
+	// The per-sandbox loop this replaces made every heartbeat cost O(N)
+	// registry round trips, so a host's control-plane overhead grew with its
+	// inventory and (before the registry's reader/writer split) sat in front of
+	// creates every 5 s. Filter against the routed ids we just read so we never
+	// advertise a route for a sandbox absent from SandboxIDs — the gateway
+	// would keep a route it cannot resolve to a host.
 	var rawRoutes []cluster.RawPortRoute
-	for _, sb := range routed {
-		if ports, err := s.reg.Ports(ctx, sb.ID); err == nil {
-			for _, pm := range ports {
-				if pm.PublicPort != 0 {
-					rawRoutes = append(rawRoutes, cluster.RawPortRoute{
-						PublicPort: pm.PublicPort, SandboxID: sb.ID, GuestPort: pm.GuestPort,
-					})
-				}
+	if routes, err := s.reg.PublicRoutes(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "heartbeat: list public routes: %v\n", err)
+	} else {
+		routedIDs := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			routedIDs[id] = struct{}{}
+		}
+		for _, pr := range routes {
+			if _, ok := routedIDs[pr.SandboxID]; !ok {
+				continue
 			}
+			rawRoutes = append(rawRoutes, cluster.RawPortRoute{
+				PublicPort: pr.PublicPort, SandboxID: pr.SandboxID, GuestPort: pr.GuestPort,
+			})
 		}
 	}
 	if snaps, err := s.reg.ListSnapshots(ctx); err == nil {

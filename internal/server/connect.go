@@ -22,6 +22,19 @@ func (s *Server) handleConnectPort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admit before touching the registry: this is the public edge's data path,
+	// so the two exposure lookups below are themselves load a flood can aim at
+	// the host's registry. Shares the forwarder's limiter, because a sandbox's
+	// fan-in budget must be one budget however the connection arrives — a
+	// per-path cap would let an attacker double it by using both.
+	release, err := s.pf.limits.acquire(id)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		httpError(w, http.StatusTooManyRequests, err)
+		return
+	}
+	defer release()
+
 	exposed, err := s.portIsExposed(r.Context(), id, guestPort)
 	if err != nil {
 		httpError(w, statusFor(err), err)
@@ -38,7 +51,7 @@ func (s *Server) handleConnectPort(w http.ResponseWriter, r *http.Request) {
 	done := s.act.begin(id)
 	defer done()
 	dialStarted := time.Now()
-	ctx, cancel := context.WithTimeout(r.Context(), portDialTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), portDialWakeTimeout)
 	backend, err := s.pf.dial(ctx, id, guestPort)
 	cancel()
 	if err != nil {

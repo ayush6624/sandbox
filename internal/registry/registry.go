@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -216,7 +219,7 @@ func (p Pools) ipPoolSize() int {
 func (r *Registry) FreeSlots(ctx context.Context) (int, error) {
 	var running int
 	var committedMem int64
-	err := r.db.QueryRowContext(ctx, `
+	err := r.rdb.QueryRowContext(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM sandboxes WHERE status IN (?1, ?2, ?5, ?6, ?7)),
 			(SELECT COALESCE(SUM(CASE WHEN mem_mib = 0 THEN ?3 ELSE mem_mib END + ?4), 0)
@@ -274,7 +277,7 @@ type Stats struct {
 // on every Prometheus scrape.
 func (r *Registry) Stats(ctx context.Context) (Stats, error) {
 	var s Stats
-	err := r.db.QueryRowContext(ctx, `
+	err := r.rdb.QueryRowContext(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?1),
 			(SELECT COUNT(*) FROM sandboxes WHERE status = ?2),
@@ -315,10 +318,33 @@ type MemAccounting struct {
 }
 
 // Registry wraps the SQLite-backed sandbox state.
+//
+// Two handles onto the same database file, and WHICH ONE A METHOD USES IS PART
+// OF ITS CONTRACT — see the rule documented on Open:
+//
+//	db  — every write and every transaction. Single connection (see Open).
+//	rdb — pure reads only. Read-only at the driver level, N connections.
 type Registry struct {
 	db    *sql.DB
+	rdb   *sql.DB
 	pools Pools
 	mem   MemAccounting
+
+	// portReads counts port-mapping reads. It exists to keep one invariant
+	// testable: sampling the host's public routes must cost ONE query
+	// (PublicRoutes), never one Ports() per sandbox — that loop made the
+	// heartbeat's cost grow with inventory. Two atomic adds on a path that
+	// already does SQLite work.
+	portReads struct {
+		publicRoutes atomic.Int64
+		ports        atomic.Int64
+	}
+}
+
+// PortReadCounts reports how many PublicRoutes and per-sandbox Ports queries
+// this registry has served. See Registry.portReads.
+func (r *Registry) PortReadCounts() (publicRoutes, ports int64) {
+	return r.portReads.publicRoutes.Load(), r.portReads.ports.Load()
 }
 
 // SetMemAccounting installs the memory-admission parameters. Call once before
@@ -340,9 +366,10 @@ func Open(dbPath string, pools Pools) (*Registry, error) {
 	// burst of POST /sandboxes placed on the same host) deadlock on the
 	// write-lock upgrade and fail with SQLITE_BUSY — busy_timeout can't resolve a
 	// lock-upgrade conflict. One connection makes registry ops queue instead.
-	// They're sub-millisecond and creates are bottlenecked on rootfs copy + VM
-	// boot, so this isn't a throughput concern; cross-host parallelism is
-	// unaffected (each host has its own DB).
+	// Creates are bottlenecked on rootfs copy + VM boot, so making them queue
+	// behind each other here is free; cross-host parallelism is unaffected
+	// (each host has its own DB). What is NOT free is putting the data plane
+	// behind the same connection — see the read-only handle below.
 	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
@@ -353,11 +380,84 @@ func Open(dbPath string, pools Pools) (*Registry, error) {
 		_ = db.Close()
 		return nil, err
 	}
+
+	// Second handle, READ-ONLY, with real concurrency. The data plane reads the
+	// registry on every unit of traffic: each accepted forwarded-port
+	// connection and each CONNECT tunnel resolves the sandbox row, every
+	// heartbeat samples capacity, every metrics scrape runs an aggregate. On
+	// one connection all of that queues behind Create/Wake transactions (two
+	// full pool scans plus an insert), so traffic slowed down CREATES and the
+	// gateway saw capacity pushback caused by load rather than by capacity.
+	//
+	// THE RULE for routing a method here — undo it and the races the single
+	// connection was protecting come back:
+	//
+	//  1. Only statements that run OUTSIDE a transaction. A read issued from
+	//     inside a write TX must see that TX's own uncommitted rows, which a
+	//     different connection cannot; it would also deadlock the single
+	//     writer against itself.
+	//  2. Only reads whose result is not the basis of a resource allocation or
+	//     admission decision. Those reads (loadUsed's tap/IP/port scans,
+	//     checkMemBudget) must stay INSIDE the allocating TX on this handle,
+	//     which is where they already are. They are correct because of the
+	//     transaction, never because of the connection count.
+	//
+	// What the split does NOT weaken: the single connection never gave a
+	// read-then-write PAIR of separate calls any atomicity (another goroutine
+	// could always interleave between them), and in WAL mode a fresh read sees
+	// every commit that completed before it started. So a pure read is exactly
+	// as fresh here as it was on the writer.
+	//
+	// Read-only is enforced by SQLite (mode=ro), not by convention: a routing
+	// mistake fails loudly with "attempt to write a readonly database" instead
+	// of silently reintroducing multi-writer lock upgrades — the exact
+	// SQLITE_BUSY failure the single connection exists to prevent. Opened after
+	// migrate() so the WAL and shm files exist (a read-only connection can
+	// create neither).
+	rdsn := url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"}
+	rdb, err := sql.Open("sqlite", rdsn.String())
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	rdb.SetMaxOpenConns(readerConns())
+	rdb.SetMaxIdleConns(readerConns())
+	rdb.SetConnMaxIdleTime(5 * time.Minute)
+	if err := rdb.Ping(); err != nil {
+		_ = rdb.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	r.rdb = rdb
 	return r, nil
 }
 
-// Close releases the database handle.
-func (r *Registry) Close() error { return r.db.Close() }
+// readerConns sizes the read-only pool. Readers are short CPU-bound SQLite
+// queries against a page cache, so scaling with cores is the right shape;
+// clamped low because each connection costs a page cache and a host running
+// hundreds of sandboxes has better uses for its RAM.
+func readerConns() int {
+	n := runtime.NumCPU()
+	if n < 4 {
+		n = 4
+	}
+	if n > 16 {
+		n = 16
+	}
+	return n
+}
+
+// Close releases both database handles.
+func (r *Registry) Close() error {
+	var firstErr error
+	if r.rdb != nil {
+		firstErr = r.rdb.Close()
+	}
+	if err := r.db.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
 
 // Pools returns the configured pools.
 func (r *Registry) Pools() Pools { return r.pools }
@@ -896,7 +996,7 @@ func (r *Registry) SetExpiry(ctx context.Context, id string, t *time.Time) error
 // expires_at has passed. Including stopping makes transient teardown failures
 // retryable by the next reaper pass.
 func (r *Registry) Expired(ctx context.Context, now time.Time) ([]Sandbox, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes
 		 WHERE status IN (?, ?, ?) AND expires_at IS NOT NULL AND expires_at < ?`,
 		StatusRunning, StatusHibernated, StatusStopping, now.Unix())
@@ -1026,7 +1126,7 @@ func (r *Registry) Wake(ctx context.Context, id string) (Sandbox, bool, error) {
 // ListRouted returns the sandboxes this host must answer for: running and
 // hibernated (a hibernated sandbox is still addressable — a request wakes it).
 func (r *Registry) ListRouted(ctx context.Context) ([]Sandbox, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?) ORDER BY created_at DESC`,
 		StatusRunning, StatusHibernated)
 	if err != nil {
@@ -1042,7 +1142,7 @@ func (r *Registry) ListRouted(ctx context.Context) ([]Sandbox, error) {
 // (for example) 7 running sandboxes while the later read reports 46 free
 // slots, an impossible 53/48 accounting state.
 func (r *Registry) RoutedCapacity(ctx context.Context) ([]Sandbox, int, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?, ?, ?, ?, ?) ORDER BY created_at DESC`,
 		StatusRunning, StatusHibernated, StatusPreparing, StatusWarming, StatusStarting, StatusStopping)
 	if err != nil {
@@ -1190,9 +1290,47 @@ func (r *Registry) addPort(ctx context.Context, id string, guestPort int, alloca
 	return PortMapping{GuestPort: guestPort, HostPort: port, Mode: "host_port"}, nil
 }
 
+// PublicRoute is one raw-ingress route: a fleet-wide public TCP port pointing
+// at a guest port of a specific sandbox.
+type PublicRoute struct {
+	SandboxID  string
+	GuestPort  int
+	PublicPort int
+}
+
+// PublicRoutes returns every mapping that carries a public port, for the whole
+// host, in ONE query. The heartbeat used to call Ports() once per routed
+// sandbox: O(N) round trips through the registry every 5 s, which on a host
+// with a few hundred sandboxes is the single biggest consumer of registry time
+// and (before the reader split) queued in front of creates. Only rows with a
+// public port exist here, so the result stays small even when N is large; the
+// caller filters against the routed set it already has, which keeps
+// "advertised routes ⊆ advertised sandboxes" a property of the caller's own
+// snapshot rather than of a status JOIN that could drift from it.
+func (r *Registry) PublicRoutes(ctx context.Context) ([]PublicRoute, error) {
+	r.portReads.publicRoutes.Add(1)
+	rows, err := r.rdb.QueryContext(ctx,
+		`SELECT sandbox_id, guest_port, public_port FROM sandbox_ports
+		 WHERE public_port IS NOT NULL ORDER BY public_port`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PublicRoute
+	for rows.Next() {
+		var pr PublicRoute
+		if err := rows.Scan(&pr.SandboxID, &pr.GuestPort, &pr.PublicPort); err != nil {
+			return nil, err
+		}
+		out = append(out, pr)
+	}
+	return out, rows.Err()
+}
+
 // Ports returns all explicitly exposed port mappings of a sandbox.
 func (r *Registry) Ports(ctx context.Context, id string) ([]PortMapping, error) {
-	rows, err := r.db.QueryContext(ctx,
+	r.portReads.ports.Add(1)
+	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT guest_port, host_port, public_port FROM sandbox_ports WHERE sandbox_id=? ORDER BY guest_port`, id)
 	if err != nil {
 		return nil, err
@@ -1276,19 +1414,19 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 
 // GoldenSnapshot returns the snapshot marked golden (sql.ErrNoRows if none).
 func (r *Registry) GoldenSnapshot(ctx context.Context) (Snapshot, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=1`)
+	row := r.rdb.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=1`)
 	return scanSnapshot(row)
 }
 
 // GetSnapshot returns a snapshot by id.
 func (r *Registry) GetSnapshot(ctx context.Context, id string) (Snapshot, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE id=?`, id)
+	row := r.rdb.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE id=?`, id)
 	return scanSnapshot(row)
 }
 
 // ListSnapshots returns all snapshots (most recent first).
 func (r *Registry) ListSnapshots(ctx context.Context) ([]Snapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots ORDER BY created_at DESC`)
+	rows, err := r.rdb.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1336,7 +1474,7 @@ func (r *Registry) SetSnapshotDurability(ctx context.Context, id, durability str
 // ExpiredSnapshots returns non-golden snapshots whose retention deadline has
 // passed. Deletion still performs dependency checks.
 func (r *Registry) ExpiredSnapshots(ctx context.Context, now time.Time) ([]Snapshot, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=0 AND expires_at IS NOT NULL AND expires_at < ? ORDER BY expires_at`, now.Unix())
+	rows, err := r.rdb.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=0 AND expires_at IS NOT NULL AND expires_at < ? ORDER BY expires_at`, now.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -1377,7 +1515,7 @@ func (r *Registry) DeleteSnapshot(ctx context.Context, id string) error {
 // cancels durability or removes the GCS commit marker.
 func (r *Registry) SnapshotDependencyCount(ctx context.Context, id string) (int, error) {
 	var dependencies int
-	if err := r.db.QueryRowContext(ctx, `
+	if err := r.rdb.QueryRowContext(ctx, `
 		SELECT
 		  (SELECT COUNT(*) FROM snapshots WHERE base_id=?1) +
 		  (SELECT COUNT(*) FROM sandboxes WHERE source_type='snapshot' AND source_id=?1)`,
@@ -1420,7 +1558,7 @@ const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_p
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
-	row := r.db.QueryRowContext(ctx,
+	row := r.rdb.QueryRowContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes WHERE id=?`, id)
 	return scanSandbox(row)
 }
@@ -1428,7 +1566,7 @@ func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
 // All returns every row regardless of status (most recent first).
 // Used by startup reconciliation to find stale state from a previous server run.
 func (r *Registry) All(ctx context.Context) ([]Sandbox, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1439,7 +1577,7 @@ func (r *Registry) All(ctx context.Context) ([]Sandbox, error) {
 
 // List returns all running sandboxes (most recent first).
 func (r *Registry) List(ctx context.Context) ([]Sandbox, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes WHERE status=? ORDER BY created_at DESC`, StatusRunning)
 	if err != nil {
 		return nil, err
@@ -1568,13 +1706,13 @@ func (r *Registry) ClaimWarm(ctx context.Context, name string, expiresAt *time.T
 // WarmCount reports hidden ready VMs, used by the background replenisher.
 func (r *Registry) WarmCount(ctx context.Context) (int, error) {
 	var n int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sandboxes WHERE status=?`, StatusWarming).Scan(&n)
+	err := r.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM sandboxes WHERE status=?`, StatusWarming).Scan(&n)
 	return n, err
 }
 
 // WarmInventory reports ready and still-preparing pool entries.
 func (r *Registry) WarmInventory(ctx context.Context) (ready, preparing int, err error) {
-	err = r.db.QueryRowContext(ctx, `
+	err = r.rdb.QueryRowContext(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM sandboxes WHERE status=?1),
 			(SELECT COUNT(*) FROM sandboxes WHERE status=?2)`,

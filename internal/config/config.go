@@ -93,6 +93,19 @@ type Config struct {
 	// WarmPoolSize keeps this many fully isolated golden clones ready to claim.
 	// They consume normal VM capacity; 0 disables prewarming.
 	WarmPoolSize int `json:"warm_pool_size"`
+	// Data-plane fan-in caps. They bound forwarded-port accepts and CONNECT
+	// tunnels together, so a sandbox's budget is the same however traffic
+	// reaches it. Each connection costs a goroutine, a dial budget, an activity
+	// pin (which suppresses hibernation) and registry reads, so an unbounded
+	// data plane is a way to starve creates on the same worker. Defaults are far
+	// above any well-behaved workload; 0 = default, negative = disabled.
+	MaxPortConnsPerSandbox int `json:"max_port_conns_per_sandbox"` // 0 = 256
+	MaxPortConnsTotal      int `json:"max_port_conns_total"`       // 0 = 4096, host-wide
+	// PortConnRatePerSec limits how fast NEW connections may be accepted for one
+	// sandbox (burst = 2×). It is the control that matters against a connect
+	// flood, since short-lived connections never accumulate against the
+	// concurrency caps. 0 = 200.
+	PortConnRatePerSec int `json:"port_conn_rate_per_sec"`
 	// PlacementDelaySec keeps a freshly booted worker routable but advertises
 	// zero create capacity until Linux boot age reaches this threshold. Fleet
 	// deployments set it beyond the MIG standby initial delay so refill VMs

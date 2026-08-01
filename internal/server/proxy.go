@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,9 +18,44 @@ import (
 	"github.com/ayush6624/sandbox/internal/wsutil"
 )
 
+// agentTransport is the host→guest transport, shared by every sandbox on this
+// worker. It exists because http.DefaultTransport is sized for a browser-ish
+// workload and this is the opposite shape: every guest is a distinct "host"
+// (its own bridge IP), and one worker fronts hundreds of them.
+//
+// DefaultTransport's MaxIdleConnsPerHost is 2, so the third concurrent
+// exec/file request to a single sandbox — trivially reached by a client running
+// commands in parallel — could not reuse a connection and paid a fresh TCP
+// handshake, leaving TIME_WAIT behind. Its MaxIdleConns is 100, so past ~100
+// sandboxes per host the pool evicted idle connections continuously and
+// essentially every request handshaked. internal/client made exactly this fix
+// for the gateway→worker path; the numbers here are sized per SANDBOX rather
+// than per host: MaxIdleConnsPerHost covers a sandbox's parallel calls, and
+// MaxIdleConns is generous enough that a full host never evicts as a side
+// effect of its own breadth.
+//
+// IdleConnTimeout is deliberately shorter than the gateway's 90 s: guests are
+// destroyed and hibernated constantly, and an idle connection to a guest that
+// no longer exists is a wasted file descriptor on the host.
+var agentTransport = &http.Transport{
+	MaxIdleConns:        4096,
+	MaxIdleConnsPerHost: 32,
+	IdleConnTimeout:     60 * time.Second,
+	// Guest IPs live on the local bridge: an inherited HTTP(S)_PROXY from the
+	// environment (which DefaultTransport honors) would be wrong for every one
+	// of them, and Proxy lookups are per-request work for nothing.
+	Proxy: nil,
+	DialContext: (&net.Dialer{
+		Timeout:   5 * time.Second, // local bridge; a slow connect means a dead guest
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	// The agent is plain HTTP/1.1; skip the h2 negotiation attempt.
+	ForceAttemptHTTP2: false,
+}
+
 // agentClient talks to in-guest sandboxd agents. No overall timeout — exec
 // requests are bounded by their own timeout_sec and the request context.
-var agentClient = &http.Client{}
+var agentClient = &http.Client{Transport: agentTransport}
 
 // handleAgentProxy forwards a request to the sandbox's in-guest agent,
 // rewriting /sandboxes/{id}/<endpoint> to http://guestIP:agentPort/<endpoint>.

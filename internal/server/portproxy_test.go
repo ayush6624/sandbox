@@ -72,7 +72,14 @@ func freePort(t *testing.T) int {
 
 func testForwarder(t *testing.T, dial dialGuestFunc, track func(string) func()) *portForwarder {
 	t.Helper()
-	f := newPortForwarder(dial, track)
+	return testForwarderWithLimits(t, dial, track, nil)
+}
+
+// testForwarderWithLimits builds a forwarder with explicit accept limits (nil =
+// production defaults).
+func testForwarderWithLimits(t *testing.T, dial dialGuestFunc, track func(string) func(), limits *connLimits) *portForwarder {
+	t.Helper()
+	f := newPortForwarder(dial, track, limits)
 	f.bind = "127.0.0.1"
 	t.Cleanup(f.CloseAll)
 	return f

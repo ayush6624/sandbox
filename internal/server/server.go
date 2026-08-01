@@ -61,6 +61,12 @@ type Config struct {
 	// WarmPoolSize keeps fully started, independently identified golden clones
 	// off the routed inventory until a create atomically claims one.
 	WarmPoolSize int
+	// Accept-side data-plane fan-in caps shared by forwarded host ports and
+	// CONNECT tunnels. 0 = default, negative = disabled. See connLimits in
+	// portproxy.go and config.MaxPortConnsPerSandbox.
+	MaxPortConnsPerSandbox int
+	MaxPortConnsTotal      int
+	PortConnRatePerSec     int
 	// PlacementDelay suppresses advertised create capacity until Linux boot
 	// age reaches this duration. Routing and heartbeat registration are not
 	// delayed. See config.PlacementDelaySec.
@@ -313,7 +319,8 @@ func New(cfg Config, reg *registry.Registry) *Server {
 			budget, cfg.VMTemplate.MemMIB, s.vmOverheadMIB)
 	}
 
-	s.pf = newPortForwarder(s.dialGuest, s.act.begin)
+	s.pf = newPortForwarder(s.dialGuest, s.act.begin,
+		newConnLimits(cfg.MaxPortConnsPerSandbox, cfg.MaxPortConnsTotal, cfg.PortConnRatePerSec))
 	if cfg.SnapshotBucket != "" {
 		s.blob = gcsblob.New(cfg.SnapshotBucket)
 		fmt.Fprintf(os.Stderr, "snapshot durability on: gs://%s\n", cfg.SnapshotBucket)
