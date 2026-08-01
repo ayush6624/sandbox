@@ -145,3 +145,45 @@ func TestResolveFailureNothingAskedIs503(t *testing.T) {
 		t.Fatalf("negative cache holds %d entries, want 0: only a definitive absence may be cached", n)
 	}
 }
+
+// DELETE must agree with the rest of the API about what "gone" means. A worker's
+// handleDestroy answers 404 for a row it does not have, and every other
+// id-scoped gateway route already 404s a deleted sandbox through this same
+// resolveAbsent path — so a 204 here made the fleet contradict both a worker and
+// itself, and left a caller unable to tell "I deleted it" from "never existed".
+func TestGatewayDestroyAbsentIs404(t *testing.T) {
+	g := New("tok", 20*time.Second, 0, 0)
+	id := testID(61)
+	srv, _ := fakeHost(t, 404, `{"error":"no durable record"}`)
+	addTestHost(g, "a", strings.TrimPrefix(srv.URL, "http://"), 0, 24)
+
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxes/"+id, nil)
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	g.handleGatewayDestroy(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a provably absent sandbox", rec.Code)
+	}
+}
+
+// An indeterminate answer must NOT be reported as a completed delete: that
+// would tell a client its sandbox is gone while it is merely unreachable.
+func TestGatewayDestroyUnknownIs503NotDeleted(t *testing.T) {
+	g := New("tok", 20*time.Second, 0, 0)
+	id := testID(62)
+	srv, _ := fakeHost(t, 503, `{"error":"no capacity"}`)
+	addTestHost(g, "a", strings.TrimPrefix(srv.URL, "http://"), 0, 24)
+
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxes/"+id, nil)
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	g.handleGatewayDestroy(rec, req)
+
+	if rec.Code == http.StatusNoContent || rec.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, want an indeterminate status (not 204/404)", rec.Code)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}

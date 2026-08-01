@@ -581,9 +581,8 @@ func (g *Gateway) handleGatewayDestroy(w http.ResponseWriter, r *http.Request) {
 	h, outcome := g.sandboxHost(id, requestResolve)
 	switch outcome {
 	case resolveAbsent:
-		// Provably gone: release its public-port leases (they would otherwise
-		// hold entries in the fleet-wide index forever) and report the delete
-		// as done, since there is nothing left to delete.
+		// Provably gone: release its public-port leases, which would otherwise
+		// hold entries in the fleet-wide index forever...
 		if g.raw != nil {
 			leases, err := g.raw.beginRemoveSandbox(r.Context(), id)
 			if err != nil {
@@ -595,7 +594,14 @@ func (g *Gateway) handleGatewayDestroy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		w.WriteHeader(http.StatusNoContent)
+		// ...then report it the way a single host does. handleDestroy answers
+		// 404 for a row that is not there, and the gateway fronts the same API,
+		// so answering 204 made the fleet contradict a worker for the same id —
+		// and contradict ITSELF, since every other id-scoped route (connect,
+		// exec, files) already 404s a deleted sandbox through this same
+		// resolveAbsent path. A caller cannot distinguish "I deleted it" from
+		// "it was never there" under 204.
+		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s not found", id))
 		return
 	case resolveUnknown:
 		// We could not determine whether it exists, so we must not claim to
