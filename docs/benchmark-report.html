@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sandbox production benchmarks — release 9b6a9fc</title>
+  <title>Sandbox production benchmarks — release c0d0c0f</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -184,93 +184,92 @@
   <div class="wrap">
     <p class="eyebrow">Sandbox · Benchmark report</p>
     <h1>Production validation for the jailed Firecracker fleet</h1>
-    <p class="dek">Lifecycle latency, ready-capacity bursts, launch-path
-      timing, direct source creates, snapshot batches, 32/64/128-way gateway
-      workloads, memory density, failure attribution, and verified cleanup.</p>
-    <p class="stamp">updated 2026-07-29 · release 9b6a9fc · GCP
+    <p class="dek">Lifecycle latency, ready-capacity bursts, direct source
+      creates, snapshot batches, 32/64/128-way gateway workloads, correctness
+      gates, and verified cleanup.</p>
+    <p class="stamp">updated 2026-08-01 · release c0d0c0f · GCP
       n2-standard-16 · 48 slots/worker · 2 vCPU / 1 GiB guests · Firecracker
       v1.15.0 · XFS reflink</p>
 
     <div class="tiles">
-      <div class="tile ours" data-tip="<b>Lifecycle create p50</b>Across 25 full gateway lifecycle cycles, create completed at 200 ms p50 and 304 ms p95.">
-        <div class="v">200 ms</div>
+      <div class="tile ours" data-tip="<b>Lifecycle create p50</b>Across 25 full gateway lifecycle cycles from the in-VPC control VM, create completed at 12 ms p50 and 15 ms p95.">
+        <div class="v">12 ms</div>
         <div class="k">gateway create p50</div>
       </div>
-      <div class="tile ours" data-tip="<b>Control-VM burst p95</b>The latest 16-way ready-capacity burst measured from the control VM completed at 118 ms p95, with 16/16 ready hits and no errors.">
-        <div class="v">118 ms</div>
-        <div class="k">VPC-local burst p95</div>
+      <div class="tile ours" data-tip="<b>Ready-capacity burst p95</b>A 16-way hold burst completed at 114 ms p95, 16/16, with zero capacity errors, pool errors, agent timeouts, or other errors.">
+        <div class="v">114 ms</div>
+        <div class="k">16-way burst create p95</div>
       </div>
-      <div class="tile ours" data-tip="<b>Ready-pool claims</b>22 of 25 direct default-source creates completed in 8–15 ms. The other three exhausted ready capacity and paid the secure refill path.">
+      <div class="tile ours" data-tip="<b>128-way default</b>Created, exercised, and verifiably deleted 128 of 128 sandboxes across five workers. The same run produced 80/128 on the previous release.">
+        <div class="v">128/128</div>
+        <div class="k">128-way fleet run</div>
+      </div>
+      <div class="tile ours" data-tip="<b>Ready-pool claims</b>22 of 25 direct default-source creates completed in 7–16 ms. The other three exhausted ready capacity and paid the secure refill path.">
         <div class="v">22/25</div>
-        <div class="k">direct claims in 8–15 ms</div>
-      </div>
-      <div class="tile ours" data-tip="<b>Memory density</b>Across 32 additional VMs, snapshot source added 2,460 MiB PSS versus 2,912 MiB for default source: 452 MiB, or 15.5%, less.">
-        <div class="v">−15.5%</div>
-        <div class="k">snapshot-source PSS at N=32</div>
+        <div class="k">direct claims in 7–16 ms</div>
       </div>
     </div>
     <p class="note">Current production release only. Historical and provider
-      comparisons are excluded. “Created” means the in-guest agent answered;
-      cleanup means each created resource was verified absent afterward.</p>
+      comparisons are excluded. &ldquo;Created&rdquo; means the in-guest agent
+      answered; cleanup means each created resource was verified absent
+      afterward. Gateway-facing runs were driven from inside the VPC.</p>
 
     <h2>Verdict</h2>
-    <p>The original ready-pool latency improvement still works. This campaign
-      found a <strong>different startup/admission bug</strong> when a larger
-      burst forced placement onto a misconfigured worker.</p>
+    <p>Release <code>c0d0c0f</code> passes the full matrix with
+      <strong>no failures in any run</strong>. Both defects that blocked the
+      previous release&rsquo;s campaign are resolved, and one further defect was
+      found and fixed during this campaign.</p>
     <div class="tablewrap">
       <table>
         <thead>
           <tr><th>Area</th><th>Outcome</th><th>Status</th></tr>
         </thead>
         <tbody>
-          <tr class="us"><td>Ready-pool create</td><td>22/25 samples in 8–15 ms</td><td>fast path works</td></tr>
+          <tr class="us"><td>Ready-pool create</td><td>22/25 samples in 7–16 ms</td><td>fast path works</td></tr>
           <tr class="us"><td>32- and 64-way default</td><td>96/96 workloads passed</td><td>pass</td></tr>
-          <tr class="fail"><td>128-way default</td><td>80/128 created</td><td>48 host-specific cgroup failures</td></tr>
-          <tr class="fail"><td>64-way fsync</td><td>64 created, 63 workloads passed</td><td>one SQLite lock failure</td></tr>
+          <tr class="us"><td>128-way default</td><td>128/128 created and exercised</td><td>pass · was 80/128</td></tr>
+          <tr class="us"><td>64-way fsync</td><td>64/64 workloads passed</td><td>pass · was 63/64</td></tr>
           <tr class="us"><td>64-way large</td><td>64/64 workloads passed</td><td>pass</td></tr>
-          <tr class="us"><td>Cleanup</td><td>final gateway sandbox count 0</td><td>pass</td></tr>
+          <tr class="us"><td>Cleanup</td><td>352/352 verified; fleet returned to baseline</td><td>pass</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note bad-note"><strong>Not an unconditional production pass.</strong>
-      The post-campaign fix is deployed, but the 128-way benchmark must be
-      repeated before this measured result becomes a pass.</p>
 
-    <h2>Full lifecycle stays below 500 ms for create</h2>
+    <h2>Full lifecycle: create is an order of magnitude under the objective</h2>
     <p>Twenty-five sequential gateway cycles exercised create, pause, resume,
       and terminate. Resume includes an in-guest <code>echo ready</code>
       probe.</p>
     <div class="chart">
       <h3>Lifecycle latency</h3>
-      <p class="sub">milliseconds · p50 and p95 · lower is better · 25 samples per operation</p>
+      <p class="sub">milliseconds · lower is better · 25 samples per operation</p>
       <div class="legend">
         <span><span class="sw ours"></span>p50</span>
         <span><span class="sw peer"></span>p95</span>
       </div>
-      <div class="row" data-tip="<b>Create</b>Mean 215 ms · p50 200 ms · p90 237 ms · p95 304 ms · min 197 ms · max 404 ms.">
+      <div class="row" data-tip="<b>Create</b>Mean 16 ms · p50 12 ms · p90 14 ms · p95 15 ms · min 10 ms · max 107 ms.">
         <span class="lab">create p50</span>
-        <span class="track"><span class="bar ours" style="width:15.4%"></span></span>
-        <span class="val">200 ms</span>
+        <span class="track"><span class="bar ours" style="width:0.9%"></span></span>
+        <span class="val">12 ms</span>
       </div>
-      <div class="row" data-tip="<b>Create p95 — 304 ms</b>The request-to-ready path remained below the 500 ms objective at p95.">
+      <div class="row" data-tip="<b>Create p95 — 15 ms</b>The request-to-ready path stayed far below the 500 ms objective at p95.">
         <span class="lab">create p95</span>
-        <span class="track"><span class="bar" style="width:23.4%"></span></span>
-        <span class="val">304 ms</span>
+        <span class="track"><span class="bar" style="width:1.2%"></span></span>
+        <span class="val">15 ms</span>
       </div>
-      <div class="row" data-tip="<b>Pause</b>Mean 395 ms · p50 375 ms · p90 434 ms · p95 490 ms · min 356 ms · max 583 ms.">
+      <div class="row" data-tip="<b>Pause</b>Mean 262 ms · p50 255 ms · p90 284 ms · p95 293 ms · min 241 ms · max 316 ms.">
         <span class="lab">pause p50</span>
-        <span class="track"><span class="bar ours" style="width:28.8%"></span></span>
-        <span class="val">375 ms</span>
+        <span class="track"><span class="bar ours" style="width:19.6%"></span></span>
+        <span class="val">255 ms</span>
       </div>
-      <div class="row" data-tip="<b>Resume + ready probe</b>Mean 1,113 ms · p50 1,090 ms · p90 1,218 ms · p95 1,222 ms · min 1,060 ms · max 1,269 ms.">
+      <div class="row" data-tip="<b>Resume + ready probe</b>Mean 829 ms · p50 831 ms · p90 861 ms · p95 870 ms · min 787 ms · max 871 ms.">
         <span class="lab">resume p50</span>
-        <span class="track"><span class="bar ours" style="width:83.8%"></span></span>
-        <span class="val">1,090 ms</span>
+        <span class="track"><span class="bar ours" style="width:63.9%"></span></span>
+        <span class="val">831 ms</span>
       </div>
-      <div class="row" data-tip="<b>Terminate</b>Mean 1,077 ms · p50 1,074 ms · p90 1,216 ms · p95 1,226 ms · min 924 ms · max 1,269 ms.">
+      <div class="row" data-tip="<b>Terminate</b>Mean 889 ms · p50 876 ms · p90 938 ms · p95 945 ms · min 812 ms · max 1,133 ms.">
         <span class="lab">terminate p50</span>
-        <span class="track"><span class="bar ours" style="width:82.6%"></span></span>
-        <span class="val">1,074 ms</span>
+        <span class="track"><span class="bar ours" style="width:67.4%"></span></span>
+        <span class="val">876 ms</span>
       </div>
       <div class="axis"><span>0</span><span>650</span><span>1,300 ms</span></div>
     </div>
@@ -280,96 +279,65 @@
           <tr><th>Operation</th><th>Mean</th><th>p50</th><th>p90</th><th>p95</th><th>Min</th><th>Max</th></tr>
         </thead>
         <tbody>
-          <tr class="us"><td>Create</td><td class="num">215 ms</td><td class="num">200 ms</td><td class="num">237 ms</td><td class="num">304 ms</td><td class="num">197 ms</td><td class="num">404 ms</td></tr>
-          <tr><td>Pause</td><td class="num">395 ms</td><td class="num">375 ms</td><td class="num">434 ms</td><td class="num">490 ms</td><td class="num">356 ms</td><td class="num">583 ms</td></tr>
-          <tr><td>Resume + ready</td><td class="num">1,113 ms</td><td class="num">1,090 ms</td><td class="num">1,218 ms</td><td class="num">1,222 ms</td><td class="num">1,060 ms</td><td class="num">1,269 ms</td></tr>
-          <tr><td>Terminate</td><td class="num">1,077 ms</td><td class="num">1,074 ms</td><td class="num">1,216 ms</td><td class="num">1,226 ms</td><td class="num">924 ms</td><td class="num">1,269 ms</td></tr>
+          <tr class="us"><td>Create</td><td class="num">16 ms</td><td class="num">12 ms</td><td class="num">14 ms</td><td class="num">15 ms</td><td class="num">10 ms</td><td class="num">107 ms</td></tr>
+          <tr><td>Pause</td><td class="num">262 ms</td><td class="num">255 ms</td><td class="num">284 ms</td><td class="num">293 ms</td><td class="num">241 ms</td><td class="num">316 ms</td></tr>
+          <tr><td>Resume + ready</td><td class="num">829 ms</td><td class="num">831 ms</td><td class="num">861 ms</td><td class="num">870 ms</td><td class="num">787 ms</td><td class="num">871 ms</td></tr>
+          <tr><td>Terminate</td><td class="num">889 ms</td><td class="num">876 ms</td><td class="num">938 ms</td><td class="num">945 ms</td><td class="num">812 ms</td><td class="num">1,133 ms</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note">This is an end-to-end gateway clock. The sub-500 ms result
-      depends on ready capacity; it does not describe an exhausted pool.</p>
+    <p class="note">This is an end-to-end gateway clock. The result depends on
+      ready capacity; it does not describe an exhausted pool.</p>
 
-    <h2>Ready-capacity burst and locality</h2>
-    <p>The 16-way hold burst was <strong>16/16 ready-pool hits</strong>, with
-      zero misses, capacity errors, tap-pool errors, agent timeouts, other
-      errors, or pool-build failures.</p>
+    <h2>Ready-capacity burst</h2>
+    <p>The 16-way hold burst was <strong>16/16</strong>, with zero capacity
+      errors, tap/IP/port pool errors, agent timeouts, and other errors.</p>
     <div class="tablewrap">
       <table>
         <thead>
-          <tr><th>Clock and location</th><th>Create p50</th><th>Create p95</th><th>Max</th><th>Outcome</th></tr>
+          <tr><th>Phase</th><th>Mean</th><th>p50</th><th>p95</th><th>Max</th></tr>
         </thead>
         <tbody>
-          <tr><td>Client · Greece → India gateway</td><td class="num">426 ms</td><td class="num">600 ms</td><td class="num">600 ms</td><td class="num">16/16</td></tr>
-          <tr class="us"><td>Control VM → gateway · run 1</td><td class="num">71 ms</td><td class="num">130 ms</td><td class="num">130 ms</td><td class="num">16/16</td></tr>
-          <tr class="us"><td>Control VM → gateway · run 2</td><td class="num">82 ms</td><td class="num">118 ms</td><td class="num">118 ms</td><td class="num">16/16</td></tr>
+          <tr class="us"><td>Create</td><td class="num">82 ms</td><td class="num">79 ms</td><td class="num">114 ms</td><td class="num">114 ms</td></tr>
+          <tr><td>In-guest workload</td><td class="num">3,991 ms</td><td class="num">3,988 ms</td><td class="num">4,195 ms</td><td class="num">4,195 ms</td></tr>
+          <tr><td>Terminate</td><td class="num">199 ms</td><td class="num">230 ms</td><td class="num">246 ms</td><td class="num">246 ms</td></tr>
         </tbody>
       </table>
     </div>
-    <p>The committed client-side burst's in-guest workload measured mean
-      <strong>4,401 ms</strong>, p50 <strong>4,644 ms</strong>, and p95
-      <strong>4,853 ms</strong>. Termination measured mean
-      <strong>385 ms</strong>, p50 <strong>396 ms</strong>, and p95
-      <strong>459 ms</strong>. The full burst wall time was
-      <strong>5.926 s (5,926 ms)</strong> at peak concurrency 16.</p>
-    <p class="note">The client/control-VM delta is transport RTT and tunneling,
-      not extra VM work. Installing a fresh Ed25519 client public key completed
-      in <strong>92 ms</strong> from the control VM.</p>
-
-    <h2>Where exhausted-pool time actually goes</h2>
-    <p>Internal phase clocks explain the launch path. They are narrower than
-      the lifecycle and burst clocks, so the rows must not be summed into an
-      end-to-end percentile.</p>
-    <div class="tablewrap">
-      <table>
-        <thead>
-          <tr><th>Measured segment</th><th>Current-release observation</th></tr>
-        </thead>
-        <tbody>
-          <tr class="us"><td>Direct ready-row claim at worker API</td><td class="num">8–15 ms · 22/25 samples</td></tr>
-          <tr class="us"><td>Hot jailed launch · prepare + process-to-API</td><td class="num">24–47 ms</td></tr>
-          <tr><td>Cold first staging pass</td><td class="num">about 123 ms</td></tr>
-          <tr><td>Resumed guest network re-identification</td><td class="num">333–399 ms</td></tr>
-          <tr><td>SSH identity readiness</td><td class="num">125–136 ms</td></tr>
-          <tr class="fail"><td>Ordinary secure clone after pool exhaustion</td><td class="num">about 734 ms end-to-end</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="note">The jailer itself is not a 390 ms tax. Guest resume,
-      network re-identification, and SSH readiness dominate the exhausted
-      path. Ready capacity meets the latency goal without weakening isolation.</p>
+    <p class="note">Complete create/workload/terminate wall time was
+      <strong>4.6 s</strong> at peak concurrency 16.</p>
 
     <h2>Default source is fast until the pool refills</h2>
     <p>Twenty-five default-source creates and 25 snapshot-source creates ran
       directly against a warm production worker.</p>
     <div class="chart">
       <h3>Direct source-create latency</h3>
-      <p class="sub">milliseconds · lower is better · bars scaled to 2,200 ms</p>
+      <p class="sub">milliseconds · lower is better · bars scaled to 1,700 ms</p>
       <div class="legend">
         <span><span class="sw ours"></span>default source</span>
         <span><span class="sw peer"></span>snapshot source</span>
       </div>
-      <div class="row" data-tip="<b>Default p50 — 10 ms</b>22 of 25 samples were ready-pool claims between 8 and 15 ms.">
+      <div class="row" data-tip="<b>Default p50 — 9 ms</b>22 of 25 samples were ready-pool claims between 7 and 16 ms.">
         <span class="lab">default p50</span>
-        <span class="track"><span class="bar ours" style="width:.45%"></span></span>
-        <span class="val">10 ms</span>
+        <span class="track"><span class="bar ours" style="width:0.5%"></span></span>
+        <span class="val">9 ms</span>
       </div>
-      <div class="row" data-tip="<b>Default mean — 237 ms</b>The mean includes three secure refill launches at 1.756, 1.812, and 2.132 seconds.">
+      <div class="row" data-tip="<b>Default mean — 132 ms</b>The mean is pulled up by three secure refill launches at 734 ms, 984 ms, and 1.381 s.">
         <span class="lab">default mean</span>
-        <span class="track"><span class="bar ours" style="width:10.8%"></span></span>
-        <span class="val">237 ms</span>
+        <span class="track"><span class="bar ours" style="width:7.8%"></span></span>
+        <span class="val">132 ms</span>
       </div>
-      <div class="row" data-tip="<b>Default max — 2,132 ms</b>Pool exhaustion exposes the ordinary secure launch and readiness path.">
+      <div class="row" data-tip="<b>Default max — 1,381 ms</b>Pool exhaustion exposes the ordinary secure launch and readiness path.">
         <span class="lab">default max</span>
-        <span class="track"><span class="bar ours" style="width:96.9%"></span></span>
-        <span class="val">2,132 ms</span>
+        <span class="track"><span class="bar ours" style="width:81.2%"></span></span>
+        <span class="val">1,381 ms</span>
       </div>
-      <div class="row" data-tip="<b>Snapshot p50 — 1,897 ms</b>Snapshot-source creation did not use the ready-pool claim path and was slower at every reported percentile.">
+      <div class="row" data-tip="<b>Snapshot p50 — 696 ms</b>Snapshot-source creation does not use the ready-pool claim path and is slower at every reported percentile.">
         <span class="lab">snapshot p50</span>
-        <span class="track"><span class="bar" style="width:86.2%"></span></span>
-        <span class="val">1,897 ms</span>
+        <span class="track"><span class="bar" style="width:40.9%"></span></span>
+        <span class="val">696 ms</span>
       </div>
-      <div class="axis"><span>0</span><span>1,100</span><span>2,200 ms</span></div>
+      <div class="axis"><span>0</span><span>850</span><span>1,700 ms</span></div>
     </div>
     <div class="tablewrap">
       <table>
@@ -377,13 +345,13 @@
           <tr><th>Source</th><th>Mean</th><th>p50</th><th>p90</th><th>Min</th><th>Max</th><th>Outcome</th></tr>
         </thead>
         <tbody>
-          <tr class="us"><td>Default</td><td class="num">237 ms</td><td class="num">10 ms</td><td class="num">1,756 ms</td><td class="num">8 ms</td><td class="num">2,132 ms</td><td class="num">25/25</td></tr>
-          <tr><td>Snapshot</td><td class="num">1,878 ms</td><td class="num">1,897 ms</td><td class="num">2,049 ms</td><td class="num">955 ms</td><td class="num">2,138 ms</td><td class="num">25/25</td></tr>
+          <tr class="us"><td>Default</td><td class="num">132 ms</td><td class="num">9 ms</td><td class="num">734 ms</td><td class="num">7 ms</td><td class="num">1,381 ms</td><td class="num">25/25</td></tr>
+          <tr><td>Snapshot</td><td class="num">735 ms</td><td class="num">696 ms</td><td class="num">734 ms</td><td class="num">673 ms</td><td class="num">1,608 ms</td><td class="num">25/25</td></tr>
         </tbody>
       </table>
     </div>
     <p class="note">The sub-500 ms objective is a ready-capacity objective.
-      Refill-bound creates remain above one second.</p>
+      Size the ready pool for the latency-critical arrival burst.</p>
 
     <h2>Snapshot batch scaling</h2>
     <p>Each batch used one immutable snapshot and waited until every returned
@@ -391,95 +359,101 @@
     <div class="chart">
       <h3>Command-ready wall time</h3>
       <p class="sub">seconds · lower is better · all 63 batch-created sandboxes usable</p>
-      <div class="row" data-tip="<b>N=1 — 2.583 s</b>One operation result, one successful readiness probe, and verified cleanup.">
+      <div class="row" data-tip="<b>N=1 — 1.057 s</b>One operation result, one successful readiness probe, and verified cleanup.">
         <span class="lab">N=1</span>
-        <span class="track"><span class="bar" style="width:17.3%"></span></span>
-        <span class="val">2.583 s</span>
+        <span class="track"><span class="bar" style="width:4.2%"></span></span>
+        <span class="val">1.057 s</span>
       </div>
-      <div class="row" data-tip="<b>N=2 — 1.067 s</b>Both sandboxes usable; 534 ms amortized per sandbox.">
+      <div class="row" data-tip="<b>N=2 — 1.565 s</b>Both sandboxes usable; 783 ms amortized per sandbox.">
         <span class="lab">N=2</span>
-        <span class="track"><span class="bar" style="width:7.2%"></span></span>
-        <span class="val">1.067 s</span>
+        <span class="track"><span class="bar" style="width:6.3%"></span></span>
+        <span class="val">1.565 s</span>
       </div>
-      <div class="row" data-tip="<b>N=4 — 3.078 s</b>Four of four usable; 770 ms amortized per sandbox.">
+      <div class="row" data-tip="<b>N=4 — 3.088 s</b>Four of four usable; 772 ms amortized per sandbox.">
         <span class="lab">N=4</span>
-        <span class="track"><span class="bar" style="width:20.7%"></span></span>
-        <span class="val">3.078 s</span>
+        <span class="track"><span class="bar" style="width:12.4%"></span></span>
+        <span class="val">3.088 s</span>
       </div>
-      <div class="row" data-tip="<b>N=8 — 4.107 s</b>Eight of eight usable; 513 ms amortized per sandbox.">
+      <div class="row" data-tip="<b>N=8 — 6.122 s</b>Eight of eight usable; 765 ms amortized per sandbox.">
         <span class="lab">N=8</span>
-        <span class="track"><span class="bar" style="width:27.6%"></span></span>
-        <span class="val">4.107 s</span>
+        <span class="track"><span class="bar" style="width:24.5%"></span></span>
+        <span class="val">6.122 s</span>
       </div>
-      <div class="row" data-tip="<b>N=16 — 6.175 s</b>Sixteen of sixteen usable; 386 ms amortized per sandbox.">
+      <div class="row" data-tip="<b>N=16 — 12.219 s</b>Sixteen of sixteen usable; 764 ms amortized per sandbox.">
         <span class="lab">N=16</span>
-        <span class="track"><span class="bar" style="width:41.4%"></span></span>
-        <span class="val">6.175 s</span>
+        <span class="track"><span class="bar" style="width:48.9%"></span></span>
+        <span class="val">12.219 s</span>
       </div>
-      <div class="row" data-tip="<b>N=32 — 14.898 s</b>Thirty-two of thirty-two usable; 466 ms amortized per sandbox.">
+      <div class="row" data-tip="<b>N=32 — 24.456 s</b>Thirty-two of thirty-two usable; 764 ms amortized per sandbox.">
         <span class="lab">N=32</span>
-        <span class="track"><span class="bar" style="width:100%"></span></span>
-        <span class="val">14.898 s</span>
+        <span class="track"><span class="bar" style="width:97.8%"></span></span>
+        <span class="val">24.456 s</span>
       </div>
-      <div class="axis"><span>0</span><span>7.5</span><span>15 s</span></div>
+      <div class="axis"><span>0</span><span>12.5</span><span>25 s</span></div>
     </div>
-    <p class="note">The N=32 default-source baseline completed in
-      <strong>6.486 s</strong> (203 ms per sandbox), versus 14.898 s for
-      snapshot source. Snapshot source is not currently a latency optimization.</p>
+    <p class="note">Per-sandbox cost is flat at roughly <strong>764 ms</strong>
+      from N=4 upward, so batch snapshot creation scales linearly rather than
+      degrading. The N=32 default-source baseline completed in
+      <strong>6.464 s</strong> (202 ms per sandbox), so snapshot source remains
+      a state-fidelity feature, not a latency optimization.</p>
 
     <h2>Fleet workload matrix</h2>
     <p>The gateway created with concurrency 12, staged the TypeScript
-      SQLite/filesystem workload, ran all successful VMs concurrently, and
-      verified each deletion.</p>
+      SQLite/filesystem workload, ran all VMs concurrently, and verified each
+      deletion.</p>
     <div class="tablewrap">
       <table>
         <thead>
           <tr><th>Run</th><th>Created</th><th>Workload</th><th>Fleet wall</th><th>Create p50</th><th>Create p95</th><th>Cleanup</th></tr>
         </thead>
         <tbody>
-          <tr class="us"><td>32 default</td><td class="num">32/32</td><td class="num">32/32</td><td class="num">40.299 s</td><td class="num">97 ms</td><td class="num">5.020 s</td><td class="num">32/32</td></tr>
-          <tr class="us"><td>64 default</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">67.085 s</td><td class="num">2.221 s</td><td class="num">4.719 s</td><td class="num">64/64</td></tr>
-          <tr class="fail"><td>128 default</td><td class="num">80/128</td><td class="num">80/80</td><td class="num">144.447 s</td><td class="num">80 ms</td><td class="num">5.150 s</td><td class="num">80/80</td></tr>
-          <tr class="fail"><td>64 fsync</td><td class="num">64/64</td><td class="num">63/64</td><td class="num">45.403 s</td><td class="num">95 ms</td><td class="num">4.699 s</td><td class="num">64/64</td></tr>
-          <tr class="us"><td>64 large</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">165.596 s</td><td class="num">133 ms</td><td class="num">5.477 s</td><td class="num">64/64</td></tr>
+          <tr class="us"><td>32 default</td><td class="num">32/32</td><td class="num">32/32</td><td class="num">15.171 s</td><td class="num">51 ms</td><td class="num">94 ms</td><td class="num">32/32</td></tr>
+          <tr class="us"><td>64 default</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">42.980 s</td><td class="num">51 ms</td><td class="num">4.473 s</td><td class="num">64/64</td></tr>
+          <tr class="us"><td>128 default</td><td class="num">128/128</td><td class="num">128/128</td><td class="num">66.182 s</td><td class="num">45 ms</td><td class="num">3.571 s</td><td class="num">128/128</td></tr>
+          <tr class="us"><td>64 fsync</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">28.337 s</td><td class="num">52 ms</td><td class="num">4.586 s</td><td class="num">64/64</td></tr>
+          <tr class="us"><td>64 large</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">92.405 s</td><td class="num">51 ms</td><td class="num">4.249 s</td><td class="num">64/64</td></tr>
         </tbody>
       </table>
     </div>
     <p class="note">Create percentiles mix ready-pool claims with secure refill
-      launches, so a low p50 can coexist with a multi-second p95.</p>
+      launches, so a 45–52 ms p50 coexists with a multi-second p95 once a run
+      exceeds fleet-wide ready capacity. The 32-way run fits inside ready
+      capacity and shows no such tail. At peak the 128-way run was spread
+      35/34/28/16/15 across five workers.</p>
 
-    <h2>The 128-way failure, fully attributed</h2>
-    <p>All 48 failed creates landed on worker <code>10.160.0.7</code> and
-      reported the same error:</p>
-    <p><code>configure VM cgroup io.max: .../io.max: no such device</code></p>
+    <h2>What changed since the previous release</h2>
+    <p>Both <code>9b6a9fc</code> failures are closed, and one further defect was
+      found and fixed while running this campaign.</p>
     <div class="tablewrap">
       <table>
         <thead>
-          <tr><th>Check</th><th>Failing worker</th><th>Healthy worker</th></tr>
+          <tr><th>Defect</th><th>Previous</th><th>Now</th></tr>
         </thead>
         <tbody>
-          <tr class="fail"><td>Data disk</td><td><code>/dev/sdb</code> XFS, unmounted</td><td><code>/dev/sdb</code> XFS, mounted</td></tr>
-          <tr><td><code>/mnt/sandbox-data</code></td><td>boot partition <code>/dev/sda1</code> · <code>8:1</code></td><td>data disk <code>/dev/sdb</code> · <code>8:16</code></td></tr>
-          <tr class="fail"><td>fstab entries for mountpoint</td><td class="num">5 stale UUIDs</td><td class="num">1 current UUID</td></tr>
-          <tr class="fail"><td>Startup result</td><td><code>xfs_growfs</code> failed, ignored</td><td>mount and grow succeeded</td></tr>
-          <tr class="fail"><td>Admission</td><td>Nomad started; 48 slots advertised</td><td>Nomad started after valid mount</td></tr>
+          <tr class="us"><td>Worker data-disk admission</td><td class="num">80/128 created</td><td class="num">128/128 created</td></tr>
+          <tr class="us"><td>Guest SQLite under fsync</td><td class="num">63/64 workloads</td><td class="num">64/64 workloads</td></tr>
+          <tr class="us"><td>Bulk delete verification</td><td class="num">54/64 verified</td><td class="num">64/64 verified</td></tr>
         </tbody>
       </table>
     </div>
-    <p>This is a startup/admission bug, not the original create-latency bug.
-      The worker script accumulated stale UUID lines, failed to establish the
-      mount, suppressed the only explicit failure with <code>|| true</code>,
-      stamped <code>data_disk_ready</code>, and admitted the worker.</p>
-    <p class="note"><strong>Post-campaign fix implemented:</strong> startup now
-      replaces all fstab rows for this mountpoint, mounts the named disk
-      explicitly, validates mountpoint + filesystem + backing major:minor +
-      read-write options before and after mandatory XFS growth, and keeps Nomad
-      disabled and stopped until every admission check passes. Template
-      <code>sandbox-workers-tpl-20260729-093155</code> is deployed and stable
-      at two running plus six suspended workers; both active workers passed
-      direct disk validation and a create/delete smoke left zero sandboxes.
-      Release <code>9b6a9fc</code> predates the fix, so the 128-way
-      rebenchmark still remains.</p>
+    <p><strong>Data-disk admission.</strong> A worker&rsquo;s
+      <code>/etc/fstab</code> had accumulated stale
+      <code>/mnt/sandbox-data</code> UUID entries, so the data disk was
+      unmounted and the mountpoint silently resolved to the boot partition;
+      <code>xfs_growfs</code> failed and <code>|| true</code> suppressed it, yet
+      the script still stamped <code>data_disk_ready</code> and started Nomad.
+      Startup now replaces every fstab row for the mountpoint, mounts the named
+      disk explicitly, validates its backing major:minor, XFS type, and
+      read-write options around a non-optional <code>xfs_growfs</code>, and
+      keeps Nomad stopped until admission succeeds.</p>
+    <p><strong>Bulk delete verification.</strong> An interim run of this
+      campaign measured <strong>10/64</strong> delete-then-verify reads failing
+      with <code>503 not resolvable yet (adopt in flight or deferred); retry</code>
+      &mdash; for sandboxes the gateway had just deleted itself. Requiring a
+      proven absence before answering 404 is correct, but it left an adopt probe
+      as the only proof, and that probe is rate-limited, so a bulk teardown
+      degraded to retryable errors. A completed destroy now records the absence
+      directly. Every table on this page is from the fixed release.</p>
 
     <h2>Fsync and large-file modes</h2>
     <div class="tablewrap">
@@ -488,39 +462,48 @@
           <tr><th>Mode</th><th>Created</th><th>Workload</th><th>Workload p50</th><th>Workload p95</th><th>Failure</th></tr>
         </thead>
         <tbody>
-          <tr class="fail"><td>fsync</td><td class="num">64/64</td><td class="num">63/64</td><td class="num">32.557 s</td><td class="num">34.828 s</td><td>one <code>database is locked</code></td></tr>
-          <tr class="us"><td>large</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">138.647 s</td><td class="num">153.696 s</td><td>none</td></tr>
+          <tr class="us"><td>fsync</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">18.244 s</td><td class="num">22.344 s</td><td>none</td></tr>
+          <tr class="us"><td>large</td><td class="num">64/64</td><td class="num">64/64</td><td class="num">82.951 s</td><td class="num">85.651 s</td><td>none</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note">The fsync failure was inside the guest benchmark.
-      Creation and cleanup both passed 64/64.</p>
 
     <h2>Memory density</h2>
-    <p>Thirty-two additional VMs were measured after subtracting a baseline of
-      eight warm VMs plus one anchor VM.</p>
-    <div class="chart">
-      <h3>Added proportional set size for 32 VMs</h3>
-      <p class="sub">MiB PSS · lower is better</p>
-      <div class="legend">
-        <span><span class="sw ours"></span>snapshot source</span>
-        <span><span class="sw peer"></span>default source</span>
-      </div>
-      <div class="row" data-tip="<b>Snapshot source — 2,460 MiB PSS</b>76.9 MiB per additional VM after subtracting the nine-process baseline.">
-        <span class="lab">snapshot source</span>
-        <span class="track"><span class="bar ours" style="width:84.5%"></span></span>
-        <span class="val">2,460 MiB</span>
-      </div>
-      <div class="row" data-tip="<b>Default source — 2,912 MiB PSS</b>91.0 MiB per additional VM after subtracting the same baseline.">
-        <span class="lab">default source</span>
-        <span class="track"><span class="bar" style="width:100%"></span></span>
-        <span class="val">2,912 MiB</span>
-      </div>
-      <div class="axis"><span>0</span><span>1,500</span><span>3,000 MiB</span></div>
+    <p><strong>Not re-measured for this release.</strong>
+      <code>scripts/mem-density.sh</code> requires the target worker to have
+      zero sandboxes <em>and</em> zero Firecracker processes so it can subtract
+      a clean baseline. Every production worker now keeps a resident pool of
+      eight ready VMs, so that precondition cannot be met without draining or
+      reconfiguring a live worker &mdash; which this campaign deliberately did
+      not do.</p>
+    <p class="note">The last measured figures, on release <code>9b6a9fc</code>,
+      were 76.9 MiB PSS per VM for snapshot source versus 91.0 MiB for default
+      source: a saving of 452 MiB, or 15.5%, across 32 VMs, with PSS
+      essentially equal to RSS in both arms and <code>uffd_restore</code>
+      disabled. Treat those as indicative for the current release rather than as
+      current evidence. To re-measure, point the script at a worker started with
+      <code>warm_pool_size: 0</code>, or teach it to subtract a non-zero
+      baseline.</p>
+
+    <h2>Correctness gates run alongside this campaign</h2>
+    <p>Pass/fail suites rather than latency measurements, run against the same
+      release.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Gate</th><th>Result</th></tr>
+        </thead>
+        <tbody>
+          <tr class="us"><td>Fleet e2e, 10 suites</td><td class="num">64/64</td></tr>
+          <tr class="us"><td>Stress suites on repeat · concurrency, churn, load</td><td class="num">12/12</td></tr>
+          <tr class="us"><td>64-way and 128-way create bursts</td><td class="num">64/64 · 128/128</td></tr>
+          <tr class="us"><td>Churn burst-bench · 96 short-lived sandboxes</td><td class="num">96/96</td></tr>
+          <tr class="us"><td>PTY/WebSocket stress · 48 shells across churn rounds</td><td class="num">48/48</td></tr>
+          <tr class="us"><td><code>ssh_pubkey</code> create plus real SSH login</td><td class="num">12/12</td></tr>
+          <tr class="us"><td>v1 contract and SDK v1 fleet probes</td><td class="num">passed</td></tr>
+        </tbody>
+      </table>
     </div>
-    <p class="note">Snapshot source saved <strong>452 MiB PSS
-      (15.5%)</strong>. PSS remained essentially equal to RSS in both arms;
-      this production configuration had <code>uffd_restore</code> disabled.</p>
 
     <h2>Security and cleanup</h2>
     <p>No benchmark bypassed production security. Every created VM used jailer
@@ -529,24 +512,27 @@
       agent readiness checks, and fresh Ed25519 host-key rotation.</p>
     <ul>
       <li>All source and batch resources were deleted.</li>
-      <li>Fleet cleanup verified 32/32, 64/64, 80/80, 64/64, and 64/64.</li>
-      <li>The density worker returned from 41 Firecracker processes to its
-        nine-process baseline before the anchor was deleted.</li>
-      <li>Final gateway-wide sandbox count: <strong>0</strong>.</li>
+      <li>Fleet cleanup verified 32/32, 64/64, 128/128, 64/64, and 64/64 &mdash;
+        352 sandboxes in total.</li>
+      <li>The fleet returned to its pre-campaign baseline with no leaked
+        sandboxes.</li>
     </ul>
+    <p class="note">The previous release&rsquo;s 128-way result is why the
+      security path must be benchmarked as part of fleet admission: a
+      host-specific cgroup assumption turned otherwise available capacity into
+      deterministic create failures, and only a full-size run surfaced it.</p>
 
     <h2>Raw evidence</h2>
     <ul class="sources">
-      <li><a href="../sdk/typescript/benchmarks/results/production_lifecycle_9b6a9fc_20260729.json">25-cycle lifecycle JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_burst_9b6a9fc_20260729.json">16-way create/exec/terminate burst JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/snapshot-source.json">Source latency JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/snapshot-batch.json">Snapshot batch JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_32_default.json">32-way default JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_64_default.json">64-way default JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_128_default.json">128-way default JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_64_fsync.json">64-way fsync JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/fleet_64_large.json">64-way large JSON</a></li>
-      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_9b6a9fc_20260729/memory-density.json">Memory-density JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_lifecycle_c0d0c0f_20260801.json">25-cycle lifecycle JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_burst_c0d0c0f_20260801.json">16-way create/exec/terminate burst JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/snapshot-source.json">Source latency JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/snapshot-batch.json">Snapshot batch JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/fleet_32_default.json">32-way default JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/fleet_64_default.json">64-way default JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/fleet_128_default.json">128-way default JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/fleet_64_fsync.json">64-way fsync JSON</a></li>
+      <li><a href="../sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/fleet_64_large.json">64-way large JSON</a></li>
     </ul>
 
     <footer>

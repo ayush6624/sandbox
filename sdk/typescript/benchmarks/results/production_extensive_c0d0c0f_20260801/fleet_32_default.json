@@ -1,0 +1,569 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "fleet-sqlite-filesystem",
+    "workload": {
+      "count": 32,
+      "mode": "default",
+      "iterations": 1,
+      "create_concurrency": 12,
+      "run_concurrency": 32,
+      "request_timeout_ms": 120000,
+      "cleanup_timeout_ms": 30000
+    },
+    "run_id": "production_extensive_c0d0c0f_20260801",
+    "started_at": "2026-08-01T09:23:19.646Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "1.0.0"
+    },
+    "release": "c0d0c0f",
+    "target": "http://10.160.0.100:9090"
+  },
+  "passed": true,
+  "args": {
+    "count": 32,
+    "mode": "default",
+    "iterations": 1,
+    "createConcurrency": 12,
+    "runConcurrency": 32,
+    "requestTimeoutMs": 120000,
+    "cleanupTimeoutMs": 30000,
+    "output": "/home/ayush/web-sandbox/sdk/typescript/benchmarks/results/production_extensive_c0d0c0f_20260801/fleet_32_default.json"
+  },
+  "fleetWall": 15.171,
+  "created": 32,
+  "workloadOk": 32,
+  "createStats": {
+    "n": 32,
+    "mean": 0.05590625000000001,
+    "p50": 0.051,
+    "p95": 0.094,
+    "min": 0.024,
+    "max": 0.137
+  },
+  "uploadStats": {
+    "n": 32,
+    "mean": 0.06443750000000002,
+    "p50": 0.068,
+    "p95": 0.079,
+    "min": 0.05,
+    "max": 0.079
+  },
+  "runWallStats": {
+    "n": 32,
+    "mean": 14.266718750000003,
+    "p50": 14.302,
+    "p95": 14.805,
+    "min": 13.599,
+    "max": 14.843
+  },
+  "benchStats": {
+    "n": 32,
+    "mean": 8.892578124999998,
+    "p50": 8.9004,
+    "p95": 9.4863,
+    "min": 8.0561,
+    "max": 9.7059
+  },
+  "peakHosts": {
+    "value": [
+      {
+        "hostId": "528c2625-0e86-a787-285a-6bfd4e416551",
+        "addr": "http://10.160.0.55:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 8,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 4823
+      },
+      {
+        "hostId": "796d6926-ccdc-f03d-d4f2-7a7d2ce70398",
+        "addr": "http://10.160.0.48:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 17,
+        "hibernated": 7,
+        "free": 16,
+        "alive": true,
+        "lastSeenMsAgo": 4691
+      },
+      {
+        "hostId": "9dc0138c-359b-bb4d-3bae-27a6f0fc1baa",
+        "addr": "http://10.160.0.40:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 8,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 4924
+      },
+      {
+        "hostId": "b6c00ee2-6759-2a60-1c17-7786b77c00c1",
+        "addr": "http://10.160.0.116:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 8,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 4894
+      },
+      {
+        "hostId": "e017637f-b9b1-7859-0559-8444604f85c1",
+        "addr": "http://10.160.0.52:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 8,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 4865
+      }
+    ]
+  },
+  "finalHosts": {
+    "value": [
+      {
+        "hostId": "528c2625-0e86-a787-285a-6bfd4e416551",
+        "addr": "http://10.160.0.55:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 0,
+        "hibernated": 0,
+        "free": 33,
+        "alive": true,
+        "lastSeenMsAgo": 1173
+      },
+      {
+        "hostId": "796d6926-ccdc-f03d-d4f2-7a7d2ce70398",
+        "addr": "http://10.160.0.48:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 0,
+        "hibernated": 7,
+        "free": 40,
+        "alive": true,
+        "lastSeenMsAgo": 1044
+      },
+      {
+        "hostId": "9dc0138c-359b-bb4d-3bae-27a6f0fc1baa",
+        "addr": "http://10.160.0.40:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 5,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 1268
+      },
+      {
+        "hostId": "b6c00ee2-6759-2a60-1c17-7786b77c00c1",
+        "addr": "http://10.160.0.116:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 7,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 1244
+      },
+      {
+        "hostId": "e017637f-b9b1-7859-0559-8444604f85c1",
+        "addr": "http://10.160.0.52:8080",
+        "slotsTotal": 48,
+        "slotsUsed": 8,
+        "hibernated": 0,
+        "free": 32,
+        "alive": true,
+        "lastSeenMsAgo": 1214
+      }
+    ]
+  },
+  "cleanup": {
+    "requested": 32,
+    "verified": 32,
+    "failed": 0
+  },
+  "runs": [
+    {
+      "idx": 0,
+      "id": "fe50dee2-ac79-4ec5-85ff-e2ec1f4fa710",
+      "createMs": 137,
+      "uploadMs": 50,
+      "runMs": 14077,
+      "totalTime": 8.854,
+      "cleanupMs": 355,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 1,
+      "id": "171af17c-0fbb-477a-9b5a-1674a0971ae3",
+      "createMs": 77,
+      "uploadMs": 53,
+      "runMs": 14162,
+      "totalTime": 8.8593,
+      "cleanupMs": 259,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 2,
+      "id": "94a4da09-df75-40d9-a285-0cf4476ea48d",
+      "createMs": 81,
+      "uploadMs": 53,
+      "runMs": 14222,
+      "totalTime": 8.9662,
+      "cleanupMs": 184,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 3,
+      "id": "14b43a9d-f9a1-4286-ab1b-db0a3526f40e",
+      "createMs": 72,
+      "uploadMs": 54,
+      "runMs": 13654,
+      "totalTime": 8.3629,
+      "cleanupMs": 347,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 4,
+      "id": "0d4c65dd-87a7-4a78-a185-799e3ffad885",
+      "createMs": 94,
+      "uploadMs": 55,
+      "runMs": 14047,
+      "totalTime": 8.8579,
+      "cleanupMs": 345,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 5,
+      "id": "6b0bacc0-d9a0-4c14-a359-22a7369ca23c",
+      "createMs": 86,
+      "uploadMs": 55,
+      "runMs": 14126,
+      "totalTime": 8.6894,
+      "cleanupMs": 357,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 6,
+      "id": "8e72cba1-3e09-49c7-ac28-30b035208334",
+      "createMs": 64,
+      "uploadMs": 54,
+      "runMs": 14317,
+      "totalTime": 8.4026,
+      "cleanupMs": 323,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 7,
+      "id": "32f052ff-598c-42df-b6c4-e36dfaae2581",
+      "createMs": 90,
+      "uploadMs": 55,
+      "runMs": 14229,
+      "totalTime": 8.6526,
+      "cleanupMs": 354,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 8,
+      "id": "f365fbe8-54c6-46b3-912d-47d305d84374",
+      "createMs": 65,
+      "uploadMs": 55,
+      "runMs": 14310,
+      "totalTime": 8.6993,
+      "cleanupMs": 612,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 9,
+      "id": "e53dd80a-9e70-46ee-818c-c67ff5bd03db",
+      "createMs": 58,
+      "uploadMs": 57,
+      "runMs": 13727,
+      "totalTime": 8.096,
+      "cleanupMs": 580,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 10,
+      "id": "b6c21007-77ee-481c-b585-44eeb0e33569",
+      "createMs": 53,
+      "uploadMs": 57,
+      "runMs": 14060,
+      "totalTime": 8.6725,
+      "cleanupMs": 461,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 11,
+      "id": "fbe7ddcd-13aa-4ecf-96e3-6482d46bb830",
+      "createMs": 71,
+      "uploadMs": 55,
+      "runMs": 13983,
+      "totalTime": 8.6039,
+      "cleanupMs": 349,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 12,
+      "id": "20e8e2ce-5909-4c06-83f4-51d51e9edc1b",
+      "createMs": 44,
+      "uploadMs": 57,
+      "runMs": 13732,
+      "totalTime": 8.2679,
+      "cleanupMs": 574,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 13,
+      "id": "3195a0a9-c567-4e23-ac07-d2820af5a1c5",
+      "createMs": 42,
+      "uploadMs": 56,
+      "runMs": 13599,
+      "totalTime": 8.0561,
+      "cleanupMs": 591,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 14,
+      "id": "82351622-edbb-4ece-a073-705e2ab162f5",
+      "createMs": 42,
+      "uploadMs": 56,
+      "runMs": 14227,
+      "totalTime": 8.8188,
+      "cleanupMs": 580,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 15,
+      "id": "cbab6210-d7dc-479b-a513-377fa2e29686",
+      "createMs": 49,
+      "uploadMs": 57,
+      "runMs": 14843,
+      "totalTime": 9.7059,
+      "cleanupMs": 815,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 16,
+      "id": "849d2e87-286e-4392-862b-2a144a26ec26",
+      "createMs": 38,
+      "uploadMs": 78,
+      "runMs": 14346,
+      "totalTime": 8.6296,
+      "cleanupMs": 369,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 17,
+      "id": "b38b2468-ad12-40e8-a17b-6c0c9582147f",
+      "createMs": 51,
+      "uploadMs": 78,
+      "runMs": 14668,
+      "totalTime": 9.4863,
+      "cleanupMs": 671,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 18,
+      "id": "028819d9-f9e0-49c2-b4d1-59cfd6d5598f",
+      "createMs": 51,
+      "uploadMs": 78,
+      "runMs": 14440,
+      "totalTime": 9.1157,
+      "cleanupMs": 494,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 19,
+      "id": "8ba4f3fe-a410-4930-8f5a-4fc43ea7abdd",
+      "createMs": 67,
+      "uploadMs": 77,
+      "runMs": 14634,
+      "totalTime": 9.2146,
+      "cleanupMs": 598,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 20,
+      "id": "9fbdf684-f4d0-46ba-8fd9-f4067d097e5b",
+      "createMs": 66,
+      "uploadMs": 68,
+      "runMs": 14519,
+      "totalTime": 9.0799,
+      "cleanupMs": 388,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 21,
+      "id": "7e81ebf4-18b9-4f32-b41c-ddc74f2782d3",
+      "createMs": 55,
+      "uploadMs": 69,
+      "runMs": 14805,
+      "totalTime": 9.3986,
+      "cleanupMs": 492,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 22,
+      "id": "fab06fba-c908-4dab-ab95-8efa67ed4ca9",
+      "createMs": 28,
+      "uploadMs": 69,
+      "runMs": 14553,
+      "totalTime": 9.1737,
+      "cleanupMs": 550,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 23,
+      "id": "1ba210b9-deb0-4f06-85ca-4b516636ef0c",
+      "createMs": 45,
+      "uploadMs": 70,
+      "runMs": 14302,
+      "totalTime": 8.9004,
+      "cleanupMs": 510,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 24,
+      "id": "49efe6f0-5dd2-4568-8f7a-9ab5c5e5d635",
+      "createMs": 28,
+      "uploadMs": 70,
+      "runMs": 14218,
+      "totalTime": 8.9927,
+      "cleanupMs": 157,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 25,
+      "id": "4cbea3e4-7ee3-49e7-8a83-5a31bb4c85d1",
+      "createMs": 40,
+      "uploadMs": 70,
+      "runMs": 14144,
+      "totalTime": 8.8405,
+      "cleanupMs": 105,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 26,
+      "id": "13f586ae-5fe9-4d58-a041-cdf59fb2ed3d",
+      "createMs": 34,
+      "uploadMs": 70,
+      "runMs": 14372,
+      "totalTime": 9.1478,
+      "cleanupMs": 266,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 27,
+      "id": "874dd220-cefe-41f9-849a-85bd28e15be5",
+      "createMs": 40,
+      "uploadMs": 70,
+      "runMs": 14486,
+      "totalTime": 9.2131,
+      "cleanupMs": 841,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 28,
+      "id": "9c982f2c-06ea-4ff9-aa33-33cad0111c02",
+      "createMs": 34,
+      "uploadMs": 79,
+      "runMs": 14528,
+      "totalTime": 9.2473,
+      "cleanupMs": 253,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 29,
+      "id": "9ecd6f6e-c0ae-4de6-b1a5-eee9552c7811",
+      "createMs": 28,
+      "uploadMs": 79,
+      "runMs": 14437,
+      "totalTime": 9.1758,
+      "cleanupMs": 813,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 30,
+      "id": "b6baf134-6713-4a5f-8d32-f2e442ef8573",
+      "createMs": 35,
+      "uploadMs": 79,
+      "runMs": 14494,
+      "totalTime": 9.3337,
+      "cleanupMs": 262,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    },
+    {
+      "idx": 31,
+      "id": "4b7b33e5-196c-474e-8647-ae4de17a9fe4",
+      "createMs": 24,
+      "uploadMs": 79,
+      "runMs": 14274,
+      "totalTime": 9.0475,
+      "cleanupMs": 211,
+      "cleanupAttempts": 1,
+      "cleanupVerified": true,
+      "cleanupAttemptErrors": []
+    }
+  ]
+}

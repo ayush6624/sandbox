@@ -23,22 +23,28 @@ credentials. Curated numbers live in
 ## Current production result
 
 The latest campaign is
-[`production_extensive_9b6a9fc_20260729/`](./production_extensive_9b6a9fc_20260729/)
-for release `9b6a9fc`:
+[`production_extensive_c0d0c0f_20260801/`](./production_extensive_c0d0c0f_20260801/)
+for release `c0d0c0f`, alongside
+[`production_lifecycle_c0d0c0f_20260801.json`](./production_lifecycle_c0d0c0f_20260801.json)
+and
+[`production_burst_c0d0c0f_20260801.json`](./production_burst_c0d0c0f_20260801.json):
 
-- Default source: 22/25 ready-pool hits in 8–15 ms; three refill-bound
-  creates in 1.756–2.132 s.
-- Snapshot batch N=32: 32/32 usable in 14.898 s, versus 6.486 s for the
-  default-source baseline.
-- Fleet default: 32/32 and 64/64 passed; the 128-way run created 80/128 because
-  one worker's jailer `io.max` referenced an absent device.
-- Fsync: 64/64 created, 63/64 workloads passed; large: 64/64 passed.
-- Snapshot-source density used 452 MiB (15.5%) less PSS than default source
-  across 32 additional VMs.
-- Every created resource was verified deleted; the final fleet count was zero.
+- Lifecycle through the gateway: create p50 12 ms, p95 15 ms over 25 cycles.
+- Default source: 22/25 ready-pool hits in 7–16 ms; three refill-bound creates
+  at 734 ms, 984 ms, and 1.381 s.
+- Snapshot batch: 1/2/4/8/16/32 all fully usable, flat at ~764 ms per sandbox
+  from N=4 up, versus 6.464 s for the 32-way default-source baseline.
+- Fleet: 32/32, 64/64, **128/128**, fsync 64/64, large 64/64 — no failures in
+  any run. The 128-way run was 80/128 on the previous release, and fsync was
+  63/64.
+- Every created resource was verified deleted (352 across the matrix) and the
+  fleet returned to its pre-campaign baseline.
+- Memory density was **not** re-measured: the script needs a worker with zero
+  Firecracker processes, which the resident 8-VM ready pool prevents. See
+  `docs/benchmarks.md`.
 
-Environment, methodology, security gates, and failure attribution:
-[`docs/benchmarks.md`](../../../../docs/benchmarks.md).
+Environment, methodology, security gates, and what changed since the previous
+release: [`docs/benchmarks.md`](../../../../docs/benchmarks.md).
 
 ## Regenerate
 
@@ -48,7 +54,7 @@ export GATEWAY_URL=http://<gateway>:9090
 export SANDBOX_HOST_KEY=<worker-client-token>
 export SANDBOX_API_KEY=<gateway-client-token>
 export SSH_HOST=<direct-worker>
-export SANDBOX_RELEASE=<release>
+export SANDBOX_RELEASE=c0d0c0f
 export BENCH_RUN_ID=<unique-run-id>
 export SINGLE_HOST_COUNT=32
 

@@ -431,62 +431,50 @@ scripts/              Host setup shell scripts
   then `sandbox ssh <id>` (forwards :22 on first use) or
   `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
   `--jump <bastion>`.
-- **Current jailed production benchmark result (2026-07-29, release `9b6a9fc`;
+- **Current jailed production benchmark result (2026-08-01, release `c0d0c0f`;
   pool hardening landed in `f12c004`):** the production pool is **8 ready VMs per active worker**
-  (`warm_pool_size: 8`). A 16-way hold burst across two active workers was
-  **16/16 ready-pool hits**, zero misses/errors, and zero pool-build failures.
-  Measured from the control VM (removing the Greece→India SSH/Tailscale path),
-  two runs were p50 **71/82 ms**, p95 **130/118 ms**, max **130/118 ms**.
-  A create that also installed a fresh Ed25519 client public key completed in
-  **92 ms**. Repeated 16-way workloads from Greece were p50 **414–426 ms**,
-  p95 **589–600 ms**: all creates were still confirmed ready hits, so that tail
-  is transport RTT/tunneling rather than VM creation. A fresh 25-iteration
-  production lifecycle run on `9b6a9fc` measured create p50 **200 ms**, p95
-  **304 ms**, max **404 ms**. The earlier run was p50 **198 ms**, p95 **204
-  ms** (direct worker p50 **196 ms**, p95 **201 ms**). Historical results are in
-  `sdk/typescript/benchmarks/results/lifecycle_c990555_gateway_20260729.json`
-  and `lifecycle_c990555_20260729.json` (gitignored). The latest extensive
-  campaign is in `production_extensive_9b6a9fc_20260729/`: 22/25 direct
-  default-source creates were ready-pool hits in **8–15 ms**, while three
-  refill-bound creates took **1.756–2.132 s**; snapshot-source create p50 was
-  **1.897 s**. Fleet default passed at **32/32** and **64/64**, but the 128-way
-  run created **80/128** because one placement-eligible worker's jailer
-  `io.max` referenced a block device absent on that host. The 64-way fsync run
-  created 64/64 but one workload hit SQLite `database is locked`; the 64-way
-  large run passed 64/64. Snapshot source saved **452 MiB PSS (15.5%)** across
-  32 VMs versus default source. All created resources were verified deleted and
-  the final gateway sandbox count was zero. Treat sub-500 ms as a
-  ready-capacity objective, not an unconditional create guarantee; validate
-  jailer I/O devices before a worker becomes placement-eligible. Root cause on
-  the failing worker: `/etc/fstab` had accumulated stale data-disk UUID entries,
-  `/dev/sdb` was XFS but unmounted, and `/mnt/sandbox-data` silently fell back
-  to boot-disk `/dev/sda1`. `startup-worker.sh` ignored the resulting
-  `xfs_growfs` failure, stamped `data_disk_ready`, and started Nomad anyway.
-  **Post-benchmark fix:** `startup-worker.sh` now replaces every existing
-  fstab row for the mountpoint, mounts the named disk explicitly, validates the
-  backing major:minor, XFS type, and read-write options before and after a
-  non-optional `xfs_growfs`, and keeps Nomad disabled/stopped until those
-  checks pass. `infra/gcp/startup-worker_test.sh` covers stale rows, the exact
-  boot-disk fallback, wrong filesystem/options, and the Nomad admission gate;
-  `make validate-infra` runs it. The fix was deployed in instance template
-  `sandbox-workers-tpl-20260729-093155`: both active workers reported XFS
-  `8:16` read-write and startup exit 0, all six standby workers registered with
-  Nomad before suspending, and the restored MIG reached 2 running + 6
-  suspended on the new template. A production create/delete smoke completed
-  create-to-ready in **30 ms**, returned delete 204 then get 404, and left zero
-  sandboxes. Release `9b6a9fc` predates the startup-script fix; repeat the
-  128-way benchmark before declaring the measured fleet result healthy.
-  **Repeated and clean on release `f7f8c47` (2026-08-01): 128/128 created,
-  0 failures, 23.2 s wall**, placed across four workers as the standby pool
-  came online — so the `startup-worker.sh` data-disk fix is confirmed in
-  production and the earlier 80/128 is closed out. Same release, same session:
-  full e2e **64/64**, stress suites **12/12** on repeat, 64-way burst 64/64,
-  churn burst-bench **96/96 with zero capacity/pool/agent-timeout/other
-  errors**, snapshot batch-create usable at 1/4/16/32, and 192 burst VMs left
-  **zero** leaked sandboxes. Lifecycle from the control VM: create p50
-  **10 ms** / p95 **13 ms**, pause 279 ms, resume 851 ms, terminate 863 ms;
-  create-with-`ssh_pubkey` p50 **17 ms**; snapshot-source create p50 **721 ms**
-  (was 1.897 s).
+  (`warm_pool_size: 8`). The full matrix passes with **no failures in any run** —
+  fleet default **32/32**, **64/64**, and **128/128**, fsync **64/64**, large
+  **64/64**, with cleanup verified for all 352 sandboxes and the fleet returning
+  to its pre-campaign baseline. Measured from the in-VPC control VM: 25-cycle
+  lifecycle create p50 **12 ms** / p95 **15 ms** (pause 255 ms, resume 831 ms,
+  terminate 876 ms); a 16-way hold burst **16/16** at create p50 **79 ms** /
+  p95 **114 ms** with zero capacity, pool, agent-timeout, or other errors;
+  direct default-source **22/25** ready-pool hits in **7–16 ms** with three
+  refill-bound creates at 734 ms / 984 ms / 1.381 s; snapshot-source create p50
+  **696 ms**; snapshot batch 1/2/4/8/16/32 all usable, flat at **~764 ms per
+  sandbox** from N=4 up versus 6.464 s for the 32-way default baseline.
+  **Always drive gateway-facing benchmarks from the control VM** — a laptop
+  tunnel adds hundreds of ms of transport RTT that reads as VM-creation cost.
+  Full report: `docs/benchmarks.md` (+ `docs/benchmark-report.html`); artifacts
+  in `production_extensive_c0d0c0f_20260801/`,
+  `production_lifecycle_c0d0c0f_20260801.json`, and
+  `production_burst_c0d0c0f_20260801.json`.
+  This closes BOTH blockers from the `9b6a9fc` campaign: the 128-way run was
+  80/128 there (a placement-eligible worker's jailer `io.max` referenced a block
+  device absent on that host — the `startup-worker.sh` data-disk admission fix
+  is now confirmed in production), and fsync was 63/64 on a guest SQLite
+  `database is locked`. A third defect was found and fixed DURING this campaign:
+  a 64-way teardown had **10/64** delete-then-verify reads answer 503
+  "not resolvable yet" for sandboxes the gateway had just deleted itself, because
+  a rate-limited adopt probe was the only way to prove absence; a completed
+  destroy now records the absence in the gateway's negative cache.
+  **Memory density was NOT re-measured** on this release: `scripts/mem-density.sh`
+  requires the target worker to have zero sandboxes AND zero Firecracker
+  processes, which the resident 8-VM ready pool makes impossible without draining
+  a live worker. The last figures (release `9b6a9fc`) were 76.9 MiB PSS/VM
+  snapshot-source vs 91.0 MiB default-source, i.e. **452 MiB (15.5%)** saved
+  across 32 VMs; treat them as indicative, not current. To re-measure, use a
+  worker started with `warm_pool_size: 0`.
+  Correctness gates on the same release: fleet e2e **64/64**, stress suites
+  **12/12** on repeat, 64-way and 128-way bursts 64/64 and 128/128, churn
+  burst-bench **96/96** with zero errors in every class, PTY/WebSocket stress
+  **48/48** shells across churn rounds, `ssh_pubkey` create + real SSH login
+  12/12 with unique host keys and root refused, and the v1 contract + SDK v1
+  fleet probes passing.
+  Treat sub-500 ms as a ready-capacity objective, not an unconditional create
+  guarantee; validate jailer I/O devices before a worker becomes
+  placement-eligible.
   A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
   leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
   clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and
@@ -528,6 +516,22 @@ scripts/              Host setup shell scripts
   reverse-proxy and does NOT forward raw TCP, so fleet SSH needs a ProxyJump to
   the owning worker (`--jump`; the sandbox's `host_addr` names that worker) or a
   WS tunnel — the gateway itself will never route it.
+- **404 from the gateway means a PROVEN absence; anything indeterminate is 503.**
+  An id the gateway cannot resolve is not the same as an id that does not exist:
+  answering 404 when a host is merely throttled, at capacity, or mid-adopt tells
+  the SDK to raise NotFoundError, which reads as data loss for a sandbox that is
+  very much alive. So the only definitive verdict is a host answering 404 from
+  the shared durable store (cached in a bounded negative cache), and everything
+  else returns 503 + Retry-After. The corollary is easy to miss: that adopt
+  probe is RATE-LIMITED, so it cannot be the only way to prove absence — a bulk
+  teardown starves it and delete-then-verify starts failing with "not resolvable
+  yet" for sandboxes the gateway itself just deleted (measured: 10/64 on a
+  64-way fleet teardown). `handleGatewayDestroy` therefore records the absence
+  directly on a completed destroy. Nothing can wrongly resurrect that entry:
+  it is dropped only when a create/restore/adopt LANDS for the id, and a
+  destroyed id is never handed out again. DELETE of an already-absent sandbox
+  answers 404, matching a single host's `handleDestroy` — the gateway fronts the
+  same API and must not contradict a worker for the same id.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
   for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
   lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —

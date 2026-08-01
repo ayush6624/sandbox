@@ -40,9 +40,12 @@ while the MIG resumed two suspended standby workers.
 | Gateway registration → eligible capacity | 27–28 ms |
 | First request → all 160 creates ready | 18.653 s |
 
-See [Benchmarks](benchmarks.md#2026-07-25-suspended-standby-and-event-driven-scale-out-release-releasegate-20260725-1-commit-0b049db)
-for the workload, timestamps, latency distribution, and comparison with the
-older control-loop path.
+The raw evidence is
+[`suspended-standby-2026-07-24.json`](../sdk/typescript/benchmarks/results/suspended-standby-2026-07-24.json);
+the workload, timestamps, latency distribution, and comparison with the older
+control-loop path are in this document below and in Git history.
+[Benchmarks](benchmarks.md) tracks the CURRENT release only, so it no longer
+carries this run.
 
 The result says that the initial decision is no longer the dominant cost.
 Worker resume is the hard lower bound for requests that exceed ready capacity,

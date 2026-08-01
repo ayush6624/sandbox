@@ -1,0 +1,113 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "burst-create-exec-terminate",
+    "workload": {
+      "count": 16,
+      "concurrency": 16,
+      "mode": "hold",
+      "retry_ms": 0,
+      "disable_idle_pause": false,
+      "math_terms": 2000000,
+      "modulus": 1000000007
+    },
+    "run_id": "production_burst_c0d0c0f_20260801",
+    "started_at": "2026-08-01T09:32:20.592Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.0.0"
+    },
+    "release": "c0d0c0f",
+    "target": "http://10.160.0.100:9090"
+  },
+  "args": {
+    "count": 16,
+    "concurrency": 16,
+    "hold": true,
+    "disableIdlePause": false,
+    "retryMs": 0,
+    "output": "benchmarks/results/production_burst_c0d0c0f_20260801.json"
+  },
+  "wallMs": 4608,
+  "counts": {
+    "ok": 16,
+    "capacity": 0,
+    "tap_pool": 0,
+    "agent_timeout": 0,
+    "other": 0
+  },
+  "createMs": [
+    114,
+    74,
+    70,
+    78,
+    96,
+    68,
+    65,
+    71,
+    105,
+    80,
+    89,
+    101,
+    66,
+    94,
+    65,
+    79
+  ],
+  "execMs": [
+    3932,
+    3769,
+    3988,
+    4195,
+    4012,
+    4138,
+    4098,
+    4099,
+    3931,
+    3878,
+    3942,
+    3860,
+    3971,
+    4026,
+    3903,
+    4112
+  ],
+  "terminateMs": [
+    237,
+    246,
+    241,
+    237,
+    113,
+    214,
+    224,
+    90,
+    223,
+    152,
+    119,
+    242,
+    135,
+    230,
+    244,
+    236
+  ],
+  "killMs": [
+    237,
+    246,
+    241,
+    237,
+    113,
+    214,
+    224,
+    90,
+    223,
+    152,
+    119,
+    242,
+    135,
+    230,
+    244,
+    236
+  ],
+  "peak": 16
+}
