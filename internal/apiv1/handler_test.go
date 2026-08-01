@@ -44,6 +44,7 @@ type fakeLegacy struct {
 	creates int
 	items   map[string]registry.Sandbox
 	snaps   map[string]registry.Snapshot
+	exposed []registry.PortMapping
 }
 
 func newFakeLegacy() *fakeLegacy {
@@ -74,7 +75,9 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.items[id] = registry.Sandbox{ID: id, Status: registry.StatusRunning, CreatedAt: time.Now(), Vcpus: 2, MemMIB: 1024}
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(f.items[id])
-	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/sandboxes/"):
+	// Subresource GETs are matched further down; this case is the id lookup.
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/sandboxes/") &&
+		!strings.HasSuffix(r.URL.Path, "/ports"):
 		id := strings.Split(r.URL.Path, "/")[2]
 		item, ok := f.items[id]
 		if !ok {
@@ -128,10 +131,25 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(out)
 	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/ports"):
+		// Mirror a worker with an ingress domain configured: every exposure
+		// carries a URL, and host_port decides whether a host port comes too.
+		var body struct {
+			GuestPort int   `json:"guest_port"`
+			HostPort  *bool `json:"host_port"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		pm := registry.PortMapping{
+			GuestPort: body.GuestPort, HostPort: 5200, Mode: "both",
+			URL: fmt.Sprintf("https://%d-existing.sandboxes.example.com", body.GuestPort),
+		}
+		if body.HostPort != nil && !*body.HostPort {
+			pm.HostPort, pm.Mode = 0, "url"
+		}
+		f.exposed = append(f.exposed, pm)
 		w.WriteHeader(201)
-		_ = json.NewEncoder(w).Encode(registry.PortMapping{GuestPort: 8080, HostPort: 5200})
+		_ = json.NewEncoder(w).Encode(pm)
 	case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/ports"):
-		_ = json.NewEncoder(w).Encode([]registry.PortMapping{{GuestPort: 8080, HostPort: 5200}})
+		_ = json.NewEncoder(w).Encode(f.exposed)
 	case r.Method == "PATCH" && strings.HasSuffix(r.URL.Path, "/public-fields"):
 		id := strings.Split(r.URL.Path, "/")[2]
 		item := f.items[id]
@@ -256,6 +274,63 @@ func TestLifecycleSnapshotTemplateAndPortResources(t *testing.T) {
 	}
 	if got := call("POST", "/v1/sandboxes/existing/port-forwards", `{"guest_port":0}`, "bad-port"); got.Code != 400 {
 		t.Fatalf("bad port=%d body=%s", got.Code, got.Body.String())
+	}
+}
+
+// A URL-only exposure has no host port, and the public ingress URL is the only
+// way to reach it — so /v1 must carry `url`/`mode` through and must NOT report
+// `host_port: 0`, which is both undialable and below the contract's minimum.
+func TestPortForwardsCarryIngressURLAndOmitAbsentHostPort(t *testing.T) {
+	h := testHandler(t, newFakeLegacy())
+	call := func(body, key string) map[string]any {
+		req := httptest.NewRequest("POST", "/v1/sandboxes/existing/port-forwards", strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", key)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != 201 {
+			t.Fatalf("create port forward=%d body=%s", w.Code, w.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	both := call(`{"guest_port":8080,"host_port":true}`, "both")
+	if both["host_port"] != float64(5200) || both["mode"] != "both" ||
+		both["url"] != "https://8080-existing.sandboxes.example.com" {
+		t.Fatalf("host+url exposure lost fields: %#v", both)
+	}
+
+	urlOnly := call(`{"guest_port":3000,"host_port":false}`, "url-only")
+	if _, ok := urlOnly["host_port"]; ok {
+		t.Fatalf("URL-only exposure must omit host_port entirely, got %#v", urlOnly)
+	}
+	if urlOnly["mode"] != "url" || urlOnly["url"] != "https://3000-existing.sandboxes.example.com" {
+		t.Fatalf("URL-only exposure lost fields: %#v", urlOnly)
+	}
+
+	// The same shape must survive the list path, not just the create response.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/v1/sandboxes/existing/port-forwards", nil))
+	if w.Code != 200 {
+		t.Fatalf("list=%d body=%s", w.Code, w.Body.String())
+	}
+	var list struct {
+		PortForwards []map[string]any `json:"port_forwards"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.PortForwards) != 2 {
+		t.Fatalf("want 2 port forwards, got %#v", list.PortForwards)
+	}
+	if _, ok := list.PortForwards[1]["host_port"]; ok {
+		t.Fatalf("listed URL-only exposure must omit host_port, got %#v", list.PortForwards[1])
+	}
+	if list.PortForwards[1]["url"] != "https://3000-existing.sandboxes.example.com" {
+		t.Fatalf("listed URL-only exposure lost its url: %#v", list.PortForwards[1])
 	}
 }
 

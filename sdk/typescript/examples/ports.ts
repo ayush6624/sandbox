@@ -46,9 +46,21 @@ async function main(): Promise<void> {
     const res = await poll(`http://${hostAddr}/`)
     console.log(`  HTTP ${res.status}: ${(await res.text()).trim()}`)
 
+    // Behind a gateway with public ingress the same exposure also gets a URL,
+    // reachable without any route to the worker. Absent on a plain host.
+    try {
+      const url = sbx.getUrl(8000)
+      step('Fetching the same server over its public ingress URL...')
+      const viaUrl = await poll(url)
+      console.log(`  ${url} -> HTTP ${viaUrl.status}`)
+    } catch {
+      console.log('  (no public ingress URL — this worker has no ingress_domain)')
+    }
+
     step('All explicitly forwarded ports:')
     for (const p of await sbx.listPorts()) {
-      console.log(`  guest ${p.guestPort} -> host ${p.hostPort}`)
+      const via = p.hostPort === undefined ? '(url-only)' : `host ${p.hostPort}`
+      console.log(`  guest ${p.guestPort} -> ${via} [${p.mode}]${p.url ? ` ${p.url}` : ''}`)
     }
   } finally {
     step(`Killing sandbox ${sbx.sandboxId}...`)

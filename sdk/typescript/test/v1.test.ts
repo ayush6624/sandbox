@@ -132,11 +132,28 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   const portMatch = url.pathname.match(/^\/v1\/sandboxes\/([^/]+)\/port-forwards$/)
   if (portMatch && req.method === 'POST') {
     const input = await body(req)
-    json(res, 201, { id: 'port-1', sandbox_id: portMatch[1], guest_port: input.guest_port, host_port: 5200, status: 'active' })
+    const base = {
+      id: 'port-1', sandbox_id: portMatch[1], guest_port: input.guest_port, status: 'active',
+      url: `https://${input.guest_port}-${portMatch[1]}.sandboxes.example.com`,
+    }
+    // A URL-only exposure has no worker-local host port, and the server omits
+    // the field rather than reporting an undialable 0.
+    json(res, 201, input.host_port === false
+      ? { ...base, mode: 'url' }
+      : { ...base, mode: 'both', host_port: 5200 })
     return
   }
   if (portMatch && req.method === 'GET') {
-    json(res, 200, { port_forwards: [{ id: 'port-1', sandbox_id: portMatch[1], guest_port: 3000, host_port: 5200, status: 'active' }] })
+    json(res, 200, { port_forwards: [
+      {
+        id: 'port-1', sandbox_id: portMatch[1], guest_port: 3000, host_port: 5200,
+        mode: 'both', url: `https://3000-${portMatch[1]}.sandboxes.example.com`, status: 'active',
+      },
+      {
+        id: 'port-2', sandbox_id: portMatch[1], guest_port: 8080,
+        mode: 'url', url: `https://8080-${portMatch[1]}.sandboxes.example.com`, status: 'active',
+      },
+    ] })
     return
   }
 
@@ -197,6 +214,21 @@ test('configured client exposes standard resources and lifecycle methods', async
   assert.equal((await first.createSnapshot({ name: 'ready' })).name, 'ready')
   assert.equal((await first.createPortForward(3000)).hostPort, 5200)
   assert.equal((await first.listPortForwards())[0]?.guestPort, 3000)
+
+  // Public ingress: the URL rides along with an ordinary host-port exposure,
+  // and `hostPort: false` asks for a URL-only one that reserves no host port.
+  const both = await first.createPortForward(3000)
+  assert.equal(both.mode, 'both')
+  assert.equal(both.url, 'https://3000-sandbox-1.sandboxes.example.com')
+  const urlOnly = await first.createPortForward(8080, { hostPort: false })
+  assert.equal(urlOnly.mode, 'url')
+  assert.equal(urlOnly.hostPort, undefined)
+  assert.equal(urlOnly.url, 'https://8080-sandbox-1.sandboxes.example.com')
+
+  const listed = await first.listPortForwards()
+  assert.equal(listed[1]?.mode, 'url')
+  assert.equal(listed[1]?.hostPort, undefined)
+  assert.equal(listed[1]?.url, 'https://8080-sandbox-1.sandboxes.example.com')
   await first.terminate()
   assert.ok(mutationKeys.every(Boolean))
 })

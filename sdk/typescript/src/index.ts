@@ -29,6 +29,7 @@ export type {
   SnapshotResource,
   TemplateResource,
   PortForwardResource,
+  PortForwardCreateOptions,
   BatchResult,
   OperationState,
 } from './v1.js'

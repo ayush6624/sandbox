@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.1.0 - 2026-08-01
+
+### Added
+
+- **Public ingress URLs on the facade are now documented and covered.** They
+  shipped in the code but appeared in no README, changelog entry, or test:
+  - `sbx.getUrl(port)` — synchronous public URL for an exposed port, served
+    from a cache filled by `create`/`connect`/`refresh`/`exposePort`/`listPorts`.
+  - `sbx.exposePort(port, { hostPort: false })` — URL-only exposure, which
+    reserves no worker host port; `{ hostPort: true }` forces one. Omitted
+    follows the worker default.
+  - `PortMapping.mode` (`host_port` | `url` | `both` | `raw`), `.url`, and
+    `.publicPort`.
+  - `sbx.exposeRawPort(port)` — fleet-wide raw TCP address, for SSH and
+    anything else ingress's HTTP termination cannot carry.
+- **The `/v1` contract and typed client learned the same thing.** `PortForward`
+  gained `mode`, `url`, and `public_port`; `createPortForward` accepts
+  `{ hostPort }`. Previously `internal/apiv1` dropped the URL entirely, so a
+  `/v1` client on a URL-only worker received a mapping it could not reach.
+
+### Changed
+
+- **`PortForwardResource.hostPort` is now optional**, because a URL-only
+  exposure genuinely has no worker-local host port. The `/v1` contract no
+  longer requires `host_port`, and the field is omitted rather than reported
+  as `0` — a value nothing can dial, and one that violated the contract's own
+  `minimum: 1`. Read `mode` first:
+
+  ```ts
+  const addr = forward.mode === 'url' ? forward.url! : `${host}:${forward.hostPort}`
+  ```
+
+  Only the `/v1` `SandboxClient` surface is affected; the facade's
+  `PortMapping.hostPort` was already optional. **Heads-up for a minor
+  release:** code that reads `hostPort` as a plain `number` becomes a compile
+  error under `strict` (`TS2322`/`TS18048`). That is deliberate — the
+  alternative is a silent `":0"` in a URL at runtime — but it does mean `tsc`
+  may fail on upgrade. The fix is the one-line guard above.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.1.0`).
+
 ## 2.0.0 - 2026-08-01
 
 ### Breaking

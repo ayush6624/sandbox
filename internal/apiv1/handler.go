@@ -589,6 +589,9 @@ func (h *Handler) listOperations(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) createPortForward(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		GuestPort int `json:"guest_port"`
+		// Tri-state, forwarded verbatim: true reserves a worker-local host
+		// port, false is URL-only, and absent defers to the worker default.
+		HostPort *bool `json:"host_port,omitempty"`
 	}
 	if !decodeBody(w, r, &body, true) {
 		return
@@ -685,11 +688,25 @@ func publicSnapshot(s registry.Snapshot) Snapshot {
 	}
 }
 
+// publicPort renders one exposure in the /v1 shape. host_port, public_port and
+// url are omitted rather than zero-valued: a URL-only exposure genuinely has no
+// host port, and reporting 0 gave v1 clients a port they could not dial (and
+// violated the contract's own `minimum: 1`). Clients switch on mode.
 func publicPort(sandboxID string, p registry.PortMapping) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"id": fmt.Sprintf("%s:%d", sandboxID, p.GuestPort), "sandbox_id": sandboxID,
-		"guest_port": p.GuestPort, "host_port": p.HostPort, "status": "active",
+		"guest_port": p.GuestPort, "mode": p.Mode, "status": "active",
 	}
+	if p.HostPort != 0 {
+		out["host_port"] = p.HostPort
+	}
+	if p.PublicPort != 0 {
+		out["public_port"] = p.PublicPort
+	}
+	if p.URL != "" {
+		out["url"] = p.URL
+	}
+	return out
 }
 
 func template(vcpu, memoryMIB int64) map[string]any {

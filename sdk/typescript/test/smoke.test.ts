@@ -57,7 +57,16 @@ const hostInfoRecord = {
 
 // In-memory fake API state
 const guestFiles = new Map<string, Buffer>()
-const exposedPorts = new Map<number, number>() // guest_port -> host_port
+// guest_port -> host_port, or null for a URL-only exposure (no host port).
+const exposedPorts = new Map<number, number | null>()
+// The mock stands in for a worker that HAS an ingress domain configured, so
+// every exposure also carries a public URL.
+const INGRESS_DOMAIN = 'sandboxes.example.com'
+const ingressUrl = (guestPort: number) => `https://${guestPort}-${SANDBOX_ID}.${INGRESS_DOMAIN}`
+const portRecord = (guestPort: number, hostPort: number | null) =>
+  hostPort === null
+    ? { guest_port: guestPort, mode: 'url', url: ingressUrl(guestPort) }
+    : { guest_port: guestPort, host_port: hostPort, mode: 'both', url: ingressUrl(guestPort) }
 let sandboxAlive = false
 let sandboxName: string | undefined
 let sandboxExpiresAt: string | undefined
@@ -88,6 +97,11 @@ function currentSandboxRecord(): Record<string, unknown> {
     ...sandboxResources,
     ...(sandboxName ? { name: sandboxName } : {}),
     ...(sandboxExpiresAt !== undefined ? { expires_at: sandboxExpiresAt } : {}),
+    // The server reports exposures on the sandbox itself, so a fresh handle
+    // knows its host ports and public URLs without a separate call.
+    ...(exposedPorts.size > 0
+      ? { ports: [...exposedPorts].map(([guest, host]) => portRecord(guest, host)) }
+      : {}),
   }
 }
 
@@ -333,14 +347,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (req.method === 'POST' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
-    const body = JSON.parse((await readBody(req)).toString()) as { guest_port: number }
+    const body = JSON.parse((await readBody(req)).toString()) as {
+      guest_port: number
+      host_port?: boolean
+    }
     const guestPort = body.guest_port
     let hostPort = exposedPorts.get(guestPort)
     if (hostPort === undefined) {
-      hostPort = 5200 + exposedPorts.size
+      if (body.host_port === false) {
+        hostPort = null
+      } else {
+        // Number only the mappings that actually hold a host port, so a
+        // URL-only exposure doesn't shift the ports handed out after it.
+        const allocated = [...exposedPorts.values()].filter((p) => p !== null).length
+        hostPort = 5200 + allocated
+      }
       exposedPorts.set(guestPort, hostPort)
     }
-    sendJson(res, 200, { guest_port: guestPort, host_port: hostPort })
+    sendJson(res, 200, portRecord(guestPort, hostPort))
     return
   }
 
@@ -364,10 +388,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (req.method === 'GET' && path === `/sandboxes/${SANDBOX_ID}/ports`) {
-    const mappings: Array<{ guest_port: number; host_port: number }> = []
-    for (const [guestPort, hostPort] of exposedPorts) {
-      mappings.push({ guest_port: guestPort, host_port: hostPort })
-    }
+    const mappings = [...exposedPorts].map(([guestPort, hostPort]) => portRecord(guestPort, hostPort))
     mappings.sort((a, b) => a.guest_port - b.guest_port)
     sendJson(res, 200, mappings)
     return
@@ -774,9 +795,63 @@ test('exposePort allocates a host port and feeds the getHost cache', async () =>
 
   const ports = await sbx.listPorts()
   assert.deepEqual(ports, [
-    { guestPort: 3000, hostPort: 5201 },
-    { guestPort: 8000, hostPort: 5200 },
+    {
+      guestPort: 3000, hostPort: 5201, mode: 'both',
+      url: `https://3000-${SANDBOX_ID}.sandboxes.example.com`,
+    },
+    {
+      guestPort: 8000, hostPort: 5200, mode: 'both',
+      url: `https://8000-${SANDBOX_ID}.sandboxes.example.com`,
+    },
   ])
+
+  await sbx.kill()
+})
+
+test('public ingress URLs are exposed, cached, and survive unexpose', async () => {
+  const sbx = await Sandbox.create(opts())
+
+  // Unexposed ports have no URL, and the error says how to get one.
+  assert.throws(
+    () => sbx.getUrl(3000),
+    (err: unknown) => err instanceof SandboxError && /ingress_domain/.test((err as Error).message)
+  )
+
+  // Default exposure is host:port PLUS a URL — exposePort still returns the
+  // host address, and getUrl serves the URL from the same response.
+  const host = await sbx.exposePort(3000)
+  assert.equal(host, '127.0.0.1:5200')
+  assert.equal(sbx.getUrl(3000), `https://3000-${SANDBOX_ID}.sandboxes.example.com`)
+
+  // URL-only exposure consumes no host port, so the URL is the return value.
+  const url = await sbx.exposePort(8080, { hostPort: false })
+  assert.equal(url, `https://8080-${SANDBOX_ID}.sandboxes.example.com`)
+  assert.equal(sbx.getUrl(8080), url)
+  // ...and there is no host address to hand out for it.
+  assert.throws(() => sbx.getHost(8080), SandboxError)
+
+  assert.deepEqual(await sbx.listPorts(), [
+    {
+      guestPort: 3000, hostPort: 5200, mode: 'both',
+      url: `https://3000-${SANDBOX_ID}.sandboxes.example.com`,
+    },
+    { guestPort: 8080, mode: 'url', url: `https://8080-${SANDBOX_ID}.sandboxes.example.com` },
+  ])
+
+  await sbx.unexposePort(8080)
+  assert.throws(() => sbx.getUrl(8080), SandboxError)
+
+  await sbx.kill()
+})
+
+test('a sandbox knows its port URLs straight from create, with no extra call', async () => {
+  // The server reports `ports` on the sandbox itself, so a reconnecting client
+  // can read URLs synchronously without a listPorts() round trip.
+  const sbx = await Sandbox.create(opts())
+  await sbx.exposePort(3000, { hostPort: false })
+
+  const reconnected = await Sandbox.connect(sbx.sandboxId, opts())
+  assert.equal(reconnected.getUrl(3000), `https://3000-${SANDBOX_ID}.sandboxes.example.com`)
 
   await sbx.kill()
 })

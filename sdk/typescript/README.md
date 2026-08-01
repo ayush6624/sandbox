@@ -12,7 +12,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.0.0/sandbox-2.0.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.1.0/sandbox-2.1.0.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -100,6 +100,24 @@ for await (const sandbox of client.sandboxes.list({ status: 'running' })) {
 }
 ```
 
+Port forwards carry the same addressability as the facade — a worker-local host
+port, a public ingress URL, or both. Read `mode` rather than assuming a host
+port exists: `hostPort` is `undefined` for a URL-only exposure.
+
+```ts
+const forward = await sandbox.createPortForward(3000)
+forward.mode        // 'both' behind ingress, 'host_port' without it
+forward.hostPort    // 5200
+forward.url         // 'https://3000-<id>.sandboxes.example.com'
+
+// URL-only — reserves no worker host port.
+const urlOnly = await sandbox.createPortForward(8080, { hostPort: false })
+urlOnly.url         // the only way to reach it
+urlOnly.hostPort    // undefined
+
+await sandbox.listPortForwards()
+```
+
 ## Compatibility facade
 
 The original static `Sandbox` surface remains available during the migration
@@ -150,6 +168,9 @@ const api = await sbx.exposePort(8000)          // e.g. "100.99.183.74:5201"
 const ports = await sbx.listPorts()             // only explicitly exposed mappings
 sbx.getHost(8000)                               // works now; throws for unexposed ports
 
+// Behind a gateway with public ingress, the same exposure also gets a URL:
+sbx.getUrl(3000)                                // "https://3000-<id>.<ingress-domain>"
+
 // Lifecycle (standard names)
 const all = await Sandbox.list()
 const again = await Sandbox.connect(sbx.sandboxId)
@@ -157,6 +178,57 @@ await sbx.pause()
 await sbx.resume()
 await sbx.terminate()                           // or: await Sandbox.terminate(id)
 ```
+
+### Exposing ports: host addresses and public URLs
+
+A guest port can be reached two ways, and one exposure can carry both. A
+**host port** is a worker-local `host:port` drawn from that worker's port pool
+— reachable by anyone who can route to the worker. A **public URL** is served
+by the fleet's ingress edge at `https://<guestPort>-<sandboxId>.<domain>`,
+needs no route to the worker, and consumes no host-port slot.
+
+```ts
+// Default: whatever the worker is configured for. On a worker with an ingress
+// domain that is host:port PLUS a URL, and exposePort returns the host address.
+const host = await sbx.exposePort(3000)   // "100.99.183.74:5200"
+sbx.getUrl(3000)                          // "https://3000-<id>.sandboxes.example.com"
+
+// URL-only: reserves no host port. exposePort returns the URL itself, and
+// getHost() throws for this port because there is no host address to give.
+const url = await sbx.exposePort(8080, { hostPort: false })
+await fetch(url)
+
+// Force a host port even where the worker defaults to URL-only.
+await sbx.exposePort(9000, { hostPort: true })
+```
+
+`getUrl(port)` is synchronous and reads a per-instance cache filled by
+`Sandbox.create()`, `Sandbox.connect()`, `refresh()`, `exposePort()`, and
+`listPorts()` — so a reconnecting client knows its URLs without an extra call.
+It throws when the port has no URL, which also happens when the worker has no
+ingress domain configured; there, URL-only exposure is rejected with a 400.
+
+`listPorts()` reports the addressability of each mapping:
+
+```ts
+for (const p of await sbx.listPorts()) {
+  p.guestPort   // port inside the guest
+  p.mode        // 'host_port' | 'url' | 'both' | 'raw'
+  p.hostPort    // undefined when mode is 'url'
+  p.url         // undefined when the worker has no ingress domain
+  p.publicPort  // set for 'raw' — see below
+}
+```
+
+Ingress terminates TLS and speaks HTTP, so it cannot carry SSH. For a
+fleet-wide **raw TCP** address, use `exposeRawPort()`:
+
+```ts
+const raw = await sbx.exposeRawPort(22)   // { publicHost, publicPort, address }
+```
+
+`unexposePort(guestPort)` removes an exposure and releases both its
+worker-local and raw public ports.
 
 ### Auto-destroy (TTL)
 
@@ -432,6 +504,7 @@ try {
 | `sbx.files.list(path)` | `sbx.files.list(path)` |
 | `sbx.getHost(port)` | `sbx.getHost(port)` after `await sbx.exposePort(port)` |
 | — | `sbx.exposePort(guestPort)` / `sbx.listPorts()` |
+| `sbx.getHost(port)` (host:port only) | `sbx.getUrl(port)` — public ingress URL; `exposePort(port, { hostPort: false })` for URL-only, `exposeRawPort(port)` for raw TCP |
 | `sbx.kill()` | `sbx.kill()` |
 | `E2B_API_KEY` env var | `SANDBOX_API_KEY` (+ `SANDBOX_API_URL`) |
 | `CommandExitError` / `TimeoutError` | same names and semantics |

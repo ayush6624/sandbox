@@ -288,11 +288,27 @@ export interface components {
             revision: string;
             resources: components["schemas"]["Resources"];
         };
+        /**
+         * @description One explicitly exposed guest port. How it is reachable depends on
+         *     `mode`: `host_port` is a worker-local `host:port`, `url` is a public
+         *     ingress URL only, `both` is a host port that ingress also fronts, and
+         *     `raw` is a fleet-wide public TCP address (`public_port`). `host_port`
+         *     is therefore ABSENT for a URL-only exposure — read `mode` first rather
+         *     than assuming a host port exists.
+         */
         PortForward: {
             id: string;
             sandbox_id: string;
             guest_port: number;
-            host_port: number;
+            host_port?: number;
+            /** @enum {string} */
+            mode: "host_port" | "url" | "both" | "raw";
+            /**
+             * Format: uri
+             * @description Public ingress URL; present only when the worker is configured with an ingress domain.
+             */
+            url?: string;
+            public_port?: number;
             /** @constant */
             status: "active";
         };
@@ -628,6 +644,14 @@ export interface operations {
             content: {
                 "application/json": {
                     guest_port: number;
+                    /**
+                     * @description Whether to also reserve a worker-local host port. `true`
+                     *     gives `host:port` plus an ingress URL, `false` is URL-only
+                     *     and consumes no host-port slot. Omitted follows the
+                     *     worker's own default. URL-only exposure is rejected with
+                     *     400 on a worker with no ingress domain configured.
+                     */
+                    host_port?: boolean;
                 };
             };
         };

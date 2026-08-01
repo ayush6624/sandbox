@@ -108,8 +108,26 @@ export interface PortForwardResource {
   id: string
   sandboxId: string
   guestPort: number
-  hostPort: number
+  /** Worker-local host port. Absent for a URL-only exposure — switch on {@link mode}. */
+  hostPort?: number
+  /** How this port is reachable. */
+  mode: 'host_port' | 'url' | 'both' | 'raw'
+  /** Public ingress URL; present only when the worker has an ingress domain configured. */
+  url?: string
+  /** Fleet-wide public TCP port, for a `raw` exposure. */
+  publicPort?: number
   status: 'active'
+}
+
+/** Options for creating a port forward. */
+export interface PortForwardCreateOptions extends RequestControl {
+  /**
+   * Whether to also reserve a worker-local host port: `true` for
+   * `host:port` plus an ingress URL, `false` for URL-only (which consumes no
+   * host-port slot). Omitted follows the worker's own default. URL-only
+   * exposure needs a worker with an ingress domain configured.
+   */
+  hostPort?: boolean
 }
 
 export interface BatchResult<T> {
@@ -259,9 +277,12 @@ export class ClientSandbox {
     return snapshotFromApi(raw)
   }
 
-  async createPortForward(guestPort: number, control: RequestControl = {}): Promise<PortForwardResource> {
+  async createPortForward(
+    guestPort: number, opts: PortForwardCreateOptions = {},
+  ): Promise<PortForwardResource> {
     const raw = await this.transport.mutate<ApiPortForward>(
-      'POST', `/v1/sandboxes/${encodeURIComponent(this.id)}/port-forwards`, { guest_port: guestPort }, control,
+      'POST', `/v1/sandboxes/${encodeURIComponent(this.id)}/port-forwards`,
+      portForwardBody(guestPort, opts), opts,
     )
     return portForwardFromApi(raw)
   }
@@ -423,9 +444,12 @@ export class OperationsCollection {
 
 export class PortForwardsCollection {
   constructor(private readonly transport: V1Transport) {}
-  async create(sandboxId: string, guestPort: number, control: RequestControl = {}): Promise<PortForwardResource> {
+  async create(
+    sandboxId: string, guestPort: number, opts: PortForwardCreateOptions = {},
+  ): Promise<PortForwardResource> {
     const raw = await this.transport.mutate<ApiPortForward>(
-      'POST', `/v1/sandboxes/${encodeURIComponent(sandboxId)}/port-forwards`, { guest_port: guestPort }, control,
+      'POST', `/v1/sandboxes/${encodeURIComponent(sandboxId)}/port-forwards`,
+      portForwardBody(guestPort, opts), opts,
     )
     return portForwardFromApi(raw)
   }
@@ -477,7 +501,20 @@ function templateFromApi(raw: ApiTemplate): TemplateResource {
 }
 
 function portForwardFromApi(raw: ApiPortForward): PortForwardResource {
-  return { id: raw.id, sandboxId: raw.sandbox_id, guestPort: raw.guest_port, hostPort: raw.host_port, status: raw.status }
+  const out: PortForwardResource = {
+    id: raw.id, sandboxId: raw.sandbox_id, guestPort: raw.guest_port,
+    mode: raw.mode, status: raw.status,
+  }
+  if (raw.host_port !== undefined) out.hostPort = raw.host_port
+  if (raw.url !== undefined) out.url = raw.url
+  if (raw.public_port !== undefined) out.publicPort = raw.public_port
+  return out
+}
+
+/** Builds the create body, omitting `host_port` so the worker default applies. */
+function portForwardBody(guestPort: number, opts: PortForwardCreateOptions): unknown {
+  if (opts.hostPort === undefined) return { guest_port: guestPort }
+  return { guest_port: guestPort, host_port: opts.hostPort }
 }
 
 function operationFromApi<T>(raw: ApiOperation, mapValue: (raw: ApiSandbox) => T): OperationState<T> {
