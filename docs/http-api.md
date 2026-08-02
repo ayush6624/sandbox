@@ -207,12 +207,12 @@ Body (optional — empty body is fine):
   create-time extras this is **not** best-effort: if the key can't be
   installed the sandbox is destroyed and the create fails, so a sandbox
   handed back with SSH requested is always reachable. The key lives in the
-  rootfs, so it survives hibernation/wake with no re-push. Reach it by
-  exposing guest port 22 (`POST /sandboxes/{id}/ports`) and connecting to
-  the returned `host_port` — the port proxy carries wake-on-connect, so SSH
-  to a hibernated sandbox wakes it. **Fleet caveat:** the gateway proxies
-  HTTP only, so fleet SSH needs a `ProxyJump` through the owning worker
-  (`host_addr`).
+  rootfs, so it survives hibernation/wake with no re-push. On a fleet,
+  allocate public raw TCP for guest port 22
+  (`POST /sandboxes/{id}/raw-ports`) and connect to the returned
+  `public_host:public_port`; users never route to a private worker. A
+  single-host deployment can use `POST /sandboxes/{id}/ports` and its local
+  `host_port`. Both paths carry wake-on-connect.
 
 Every independent create rotates the guest's SSH host keys and clears login
 keys inherited from its image or snapshot before installing `ssh_pubkey`.

@@ -29,6 +29,7 @@ export type {
   SnapshotResource,
   TemplateResource,
   PortForwardResource,
+  RawPortForwardResource,
   PortForwardCreateOptions,
   BatchResult,
   OperationState,

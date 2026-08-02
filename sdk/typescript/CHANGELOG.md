@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.2.0 - 2026-08-02
+
+### Added
+
+- **Raw TCP is now first-class on the primary `/v1` client.**
+  `sandbox.createRawPortForward(22)` and
+  `client.portForwards.createRaw(sandboxId, 22)` allocate a durable public TCP
+  endpoint suitable for SSH. The returned `RawPortForwardResource` has
+  non-optional `publicHost`, `publicPort`, and ready-to-dial `address` fields.
+- `createPortForward(port, { mode: 'raw' })` exposes the same v1 contract for
+  callers that select modes dynamically. It rejects combinations with
+  `hostPort` before making a request.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.2.0`).
+
 ## 2.1.0 - 2026-08-01
 
 ### Added

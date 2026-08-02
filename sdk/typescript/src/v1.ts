@@ -114,9 +114,20 @@ export interface PortForwardResource {
   mode: 'host_port' | 'url' | 'both' | 'raw'
   /** Public ingress URL; present only when the worker has an ingress domain configured. */
   url?: string
-  /** Fleet-wide public TCP port, for a `raw` exposure. */
+  /** Fleet-wide public TCP port, when raw TCP access is allocated. */
   publicPort?: number
+  /** Fleet-wide public hostname, when raw TCP access is allocated. */
+  publicHost?: string
+  /** Ready-to-dial `publicHost:publicPort`, when raw TCP access is allocated. */
+  address?: string
   status: 'active'
+}
+
+export interface RawPortForwardResource extends PortForwardResource {
+  mode: 'raw'
+  publicPort: number
+  publicHost: string
+  address: string
 }
 
 /** Options for creating a port forward. */
@@ -128,6 +139,8 @@ export interface PortForwardCreateOptions extends RequestControl {
    * exposure needs a worker with an ingress domain configured.
    */
   hostPort?: boolean
+  /** Allocate a durable fleet-wide public TCP address. Mutually exclusive with hostPort. */
+  mode?: 'raw'
 }
 
 export interface BatchResult<T> {
@@ -285,6 +298,17 @@ export class ClientSandbox {
       portForwardBody(guestPort, opts), opts,
     )
     return portForwardFromApi(raw)
+  }
+
+  /** Allocates a durable public TCP address, suitable for SSH. */
+  async createRawPortForward(
+    guestPort: number, control: RequestControl = {},
+  ): Promise<RawPortForwardResource> {
+    const raw = await this.transport.mutate<ApiPortForward>(
+      'POST', `/v1/sandboxes/${encodeURIComponent(this.id)}/port-forwards`,
+      { guest_port: guestPort, mode: 'raw' }, control,
+    )
+    return rawPortForwardFromApi(raw)
   }
 
   async listPortForwards(signal?: AbortSignal): Promise<PortForwardResource[]> {
@@ -453,6 +477,16 @@ export class PortForwardsCollection {
     )
     return portForwardFromApi(raw)
   }
+  /** Allocates a durable public TCP address, suitable for SSH. */
+  async createRaw(
+    sandboxId: string, guestPort: number, control: RequestControl = {},
+  ): Promise<RawPortForwardResource> {
+    const raw = await this.transport.mutate<ApiPortForward>(
+      'POST', `/v1/sandboxes/${encodeURIComponent(sandboxId)}/port-forwards`,
+      { guest_port: guestPort, mode: 'raw' }, control,
+    )
+    return rawPortForwardFromApi(raw)
+  }
   async list(sandboxId: string, signal?: AbortSignal): Promise<PortForwardResource[]> {
     const page = await this.transport.get<{ port_forwards: ApiPortForward[] }>(
       `/v1/sandboxes/${encodeURIComponent(sandboxId)}/port-forwards`, {}, signal,
@@ -508,11 +542,27 @@ function portForwardFromApi(raw: ApiPortForward): PortForwardResource {
   if (raw.host_port !== undefined) out.hostPort = raw.host_port
   if (raw.url !== undefined) out.url = raw.url
   if (raw.public_port !== undefined) out.publicPort = raw.public_port
+  if (raw.public_host !== undefined) out.publicHost = raw.public_host
+  if (raw.public_host !== undefined && raw.public_port !== undefined) {
+    out.address = `${raw.public_host}:${raw.public_port}`
+  }
   return out
 }
 
-/** Builds the create body, omitting `host_port` so the worker default applies. */
+function rawPortForwardFromApi(raw: ApiPortForward): RawPortForwardResource {
+  const out = portForwardFromApi(raw)
+  if (out.mode !== 'raw' || out.publicHost === undefined || out.publicPort === undefined || out.address === undefined) {
+    throw new Error('Server returned an incomplete raw port-forward mapping')
+  }
+  return out as RawPortForwardResource
+}
+
+/** Builds an ordinary or raw port-forward request. */
 function portForwardBody(guestPort: number, opts: PortForwardCreateOptions): unknown {
+  if (opts.mode === 'raw') {
+    if (opts.hostPort !== undefined) throw new TypeError('mode raw cannot be combined with hostPort')
+    return { guest_port: guestPort, mode: 'raw' }
+  }
   if (opts.hostPort === undefined) return { guest_port: guestPort }
   return { guest_port: guestPort, host_port: opts.hostPort }
 }

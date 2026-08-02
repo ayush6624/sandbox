@@ -136,6 +136,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       id: 'port-1', sandbox_id: portMatch[1], guest_port: input.guest_port, status: 'active',
       url: `https://${input.guest_port}-${portMatch[1]}.sandboxes.example.com`,
     }
+    if (input.mode === 'raw') {
+      json(res, 201, {
+        id: 'port-raw', sandbox_id: portMatch[1], guest_port: input.guest_port,
+        mode: 'raw', public_host: 'sbx.example.com', public_port: 20002, status: 'active',
+      })
+      return
+    }
     // A URL-only exposure has no worker-local host port, and the server omits
     // the field rather than reporting an undialable 0.
     json(res, 201, input.host_port === false
@@ -152,6 +159,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       {
         id: 'port-2', sandbox_id: portMatch[1], guest_port: 8080,
         mode: 'url', url: `https://8080-${portMatch[1]}.sandboxes.example.com`, status: 'active',
+      },
+      {
+        id: 'port-raw', sandbox_id: portMatch[1], guest_port: 22,
+        mode: 'raw', public_host: 'sbx.example.com', public_port: 20002, status: 'active',
       },
     ] })
     return
@@ -225,10 +236,25 @@ test('configured client exposes standard resources and lifecycle methods', async
   assert.equal(urlOnly.hostPort, undefined)
   assert.equal(urlOnly.url, 'https://8080-sandbox-1.sandboxes.example.com')
 
+  const raw = await first.createRawPortForward(22)
+  assert.equal(raw.mode, 'raw')
+  assert.equal(raw.publicHost, 'sbx.example.com')
+  assert.equal(raw.publicPort, 20002)
+  assert.equal(raw.address, 'sbx.example.com:20002')
+  const rawFromCollection = await client.portForwards.createRaw('sandbox-1', 22)
+  assert.equal(rawFromCollection.address, 'sbx.example.com:20002')
+  const rawFromGeneric = await client.portForwards.create('sandbox-1', 22, { mode: 'raw' })
+  assert.equal(rawFromGeneric.address, 'sbx.example.com:20002')
+  await assert.rejects(
+    first.createPortForward(22, { mode: 'raw', hostPort: true }),
+    (error: unknown) => error instanceof TypeError && error.message.includes('cannot be combined'),
+  )
+
   const listed = await first.listPortForwards()
   assert.equal(listed[1]?.mode, 'url')
   assert.equal(listed[1]?.hostPort, undefined)
   assert.equal(listed[1]?.url, 'https://8080-sandbox-1.sandboxes.example.com')
+  assert.equal(listed[2]?.address, 'sbx.example.com:20002')
   await first.terminate()
   assert.ok(mutationKeys.every(Boolean))
 })

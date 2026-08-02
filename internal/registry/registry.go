@@ -102,6 +102,7 @@ type Sandbox struct {
 type PortMapping struct {
 	GuestPort  int    `json:"guest_port"`
 	HostPort   int    `json:"host_port,omitempty"`
+	PublicHost string `json:"public_host,omitempty"`
 	PublicPort int    `json:"public_port,omitempty"`
 	Mode       string `json:"mode"`
 	URL        string `json:"url,omitempty"`

@@ -294,7 +294,9 @@ export interface components {
          *     ingress URL only, `both` is a host port that ingress also fronts, and
          *     `raw` is a fleet-wide public TCP address (`public_port`). `host_port`
          *     is therefore ABSENT for a URL-only exposure — read `mode` first rather
-         *     than assuming a host port exists.
+         *     than assuming a host port exists. Address types can accumulate: a
+         *     mapping that already has HTTP/host access may also carry
+         *     `public_host` and `public_port`, even when its mode remains `both`.
          */
         PortForward: {
             id: string;
@@ -309,6 +311,8 @@ export interface components {
              */
             url?: string;
             public_port?: number;
+            /** @description Fleet-wide public hostname; present when a raw TCP address is allocated. */
+            public_host?: string;
             /** @constant */
             status: "active";
         };
@@ -644,6 +648,14 @@ export interface operations {
             content: {
                 "application/json": {
                     guest_port: number;
+                    /**
+                     * @description Set to `raw` for a durable fleet-wide public TCP endpoint,
+                     *     suitable for SSH and other non-HTTP protocols. Mutually
+                     *     exclusive with `host_port`. Omit for HTTP ingress or a
+                     *     worker-local host port.
+                     * @enum {string}
+                     */
+                    mode?: "raw";
                     /**
                      * @description Whether to also reserve a worker-local host port. `true`
                      *     gives `host:port` plus an ingress URL, `false` is URL-only

@@ -1397,6 +1397,8 @@ func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReversePr
 	//    wrong host.
 	//  - plain GET /sandboxes/{id} (the SDK connect path): annotate the
 	//    response with the owning host's address, like create/list do.
+	//  - GET .../ports: attach the fleet-wide raw public hostname to mappings
+	//    whose worker-persisted state contains only the allocated public port.
 	// Everything else — exec streams, file bytes, WebSockets — passes through
 	// untouched.
 	proxy.ModifyResponse = func(resp *http.Response) error {
@@ -1437,6 +1439,21 @@ func (g *Gateway) buildHostProxy(hostID, addr, token string) *httputil.ReversePr
 				}
 			}
 			return nil
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/ports"):
+			if resp.StatusCode != http.StatusOK || g.raw == nil {
+				return nil
+			}
+			var ports []registry.PortMapping
+			if err := json.NewDecoder(resp.Body).Decode(&ports); err != nil {
+				return err
+			}
+			resp.Body.Close()
+			for i := range ports {
+				if ports[i].PublicPort != 0 {
+					ports[i].PublicHost = g.raw.cfg.PublicHost
+				}
+			}
+			return replaceJSONBody(resp, ports)
 		case req.Method == http.MethodGet && isPlainSandboxGet(req.URL.Path):
 			if resp.StatusCode != http.StatusOK {
 				return nil

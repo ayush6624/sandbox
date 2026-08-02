@@ -17,8 +17,8 @@ import (
 )
 
 // SSH into a sandbox lands on the unprivileged guest account over the userspace
-// port proxy; guest 22 must be forwarded to a host port first (the commands here
-// forward it on demand).
+// port proxy. Fleet sandboxes get a public raw-TCP endpoint; single-host
+// sandboxes get a host-local forwarded port. Both are allocated on demand.
 const (
 	sshGuestPort = 22
 	sshGuestUser = "sandbox"
@@ -134,29 +134,57 @@ func ensureSSHPort(ctx context.Context, c *client.Client, id string) (int, error
 	return pm.HostPort, nil
 }
 
-// resolveSSHDestination gathers everything both commands need: the sandbox (for
-// its owning host) and the host port reaching its sshd.
-func resolveSSHDestination(ctx context.Context, c *client.Client, id string) (string, int, string, error) {
+// ensurePublicSSHPort returns the public raw-TCP endpoint forwarding guest 22.
+// Raw allocation is idempotent, so calling it on every SSH connection both
+// creates the endpoint on first use and retrieves the stable endpoint later.
+func ensurePublicSSHPort(ctx context.Context, c *client.Client, id string) (string, int, error) {
+	pm, err := c.ExposeRawPort(ctx, id, sshGuestPort)
+	if err != nil {
+		return "", 0, fmt.Errorf("allocate public SSH endpoint: %w", err)
+	}
+	if pm.PublicHost == "" || pm.PublicPort == 0 {
+		return "", 0, fmt.Errorf(
+			"allocate public SSH endpoint: gateway returned incomplete raw mapping (host %q, port %d, mode %q)",
+			pm.PublicHost, pm.PublicPort, pm.Mode,
+		)
+	}
+	return pm.PublicHost, pm.PublicPort, nil
+}
+
+// resolveSSHDestination gathers everything both commands need. HostAddr is set
+// only by the fleet gateway, where users must connect through public raw TCP
+// ingress rather than dialing a private worker. A single-host server omits it,
+// so that deployment keeps using its local host-port proxy. An explicit jump
+// host opts operators into the private worker path for break-glass debugging.
+func resolveSSHDestination(ctx context.Context, c *client.Client, id, apiAddr string, private bool) (string, int, string, error) {
 	sb, err := c.Get(ctx, id)
 	if err != nil {
 		return "", 0, "", err
+	}
+	if sb.HostAddr != "" && !private {
+		host, publicPort, err := ensurePublicSSHPort(ctx, c, id)
+		if err != nil {
+			return "", 0, "", err
+		}
+		return host, publicPort, sshHostKeyAlias(sb.ID), nil
 	}
 	hostPort, err := ensureSSHPort(ctx, c, id)
 	if err != nil {
 		return "", 0, "", err
 	}
-	return sshTarget(sb, gwAddr), hostPort, sshHostKeyAlias(sb.ID), nil
+	return sshTarget(sb, apiAddr), hostPort, sshHostKeyAlias(sb.ID), nil
 }
 
 func sshCmd() *cobra.Command {
 	var jump string
 	cmd := &cobra.Command{
 		Use:   "ssh <id> [-- <command...>]",
-		Short: "SSH into a sandbox (forwards guest port 22 on first use)",
+		Short: "SSH into a sandbox (exposes guest port 22 on first use)",
 		Long: "SSH into a sandbox as the unprivileged " + sshGuestUser + " user.\n\n" +
-			"Guest port 22 is forwarded to a host port on first use, and the sandbox's\n" +
+			"Fleet sandboxes receive a public raw-TCP endpoint on first use; single-host\n" +
+			"sandboxes receive a host-local forwarded port. The sandbox's\n" +
 			"host key is recorded in known_hosts under a per-sandbox alias so recycled\n" +
-			"host ports never look like a changed host key. Requires the sandbox to have\n" +
+			"ports never look like a changed host key. Requires the sandbox to have\n" +
 			"been created with an SSH key (sandbox up --ssh-key ...).",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -165,14 +193,14 @@ func sshCmd() *cobra.Command {
 				return err
 			}
 			cmd.SilenceUsage = true
-			host, hostPort, alias, err := resolveSSHDestination(context.Background(), c, args[0])
+			host, hostPort, alias, err := resolveSSHDestination(context.Background(), c, args[0], gwAddr, jump != "")
 			if err != nil {
 				return err
 			}
 			return runSSH(sshArgs(host, hostPort, alias, jump, args[1:]))
 		},
 	}
-	cmd.Flags().StringVar(&jump, "jump", "", "ProxyJump host, e.g. a bastion reaching a private fleet worker")
+	cmd.Flags().StringVar(&jump, "jump", "", "use a ProxyJump host and the private worker route (operator fallback)")
 	addClientFlags(cmd)
 	return cmd
 }
@@ -189,7 +217,7 @@ func sshConfigCmd() *cobra.Command {
 				return err
 			}
 			cmd.SilenceUsage = true
-			host, hostPort, alias, err := resolveSSHDestination(context.Background(), c, args[0])
+			host, hostPort, alias, err := resolveSSHDestination(context.Background(), c, args[0], gwAddr, jump != "")
 			if err != nil {
 				return err
 			}
@@ -197,7 +225,7 @@ func sshConfigCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&jump, "jump", "", "emit a ProxyJump line, e.g. a bastion reaching a private fleet worker")
+	cmd.Flags().StringVar(&jump, "jump", "", "emit a ProxyJump line using the private worker route (operator fallback)")
 	addClientFlags(cmd)
 	return cmd
 }

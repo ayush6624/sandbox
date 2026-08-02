@@ -132,7 +132,10 @@ sandbox read <id> <path>     Read a file from a sandbox to stdout
 sandbox write <id> <path>    Write stdin (or --from file) into a sandbox
 sandbox ls <id> [path]       List a directory inside a sandbox
 sandbox expose <id> <port>   Forward an extra guest port to a host port
+sandbox expose --raw <id> <port>  Allocate a public raw-TCP endpoint
 sandbox ports <id>           List a sandbox's forwarded ports
+sandbox ssh <id>             SSH through public raw ingress (fleet) or a host port (single host)
+sandbox ssh-config <id>      Print an ssh_config stanza for SSH tools and editors
 sandbox gateway        Run the multi-host gateway (control plane, no root needed)
 sandbox install-agent  Bake/refresh sandboxd inside the base rootfs
 sandbox stop-server    Stop the server (SIGTERM; --force for SIGKILL)
@@ -140,6 +143,21 @@ sandbox doctor         Validate the environment
 ```
 
 `up`, `down`, `list`, `exec`, `read`, `write`, and `ls` are thin HTTP clients over the server's Unix socket. Add `--gateway <addr:port> --gateway-token <tok>` to any of them to drive a fleet gateway over TCP instead (no sudo needed).
+
+### SSH
+
+Create the sandbox with the user's public key, then connect by sandbox ID:
+
+```bash
+sandbox up --ssh-key ~/.ssh/id_ed25519.pub --gateway <addr> --gateway-token <token>
+sandbox ssh <id> --gateway <addr> --gateway-token <token>
+```
+
+On a fleet, `sandbox ssh` idempotently allocates a durable public raw-TCP
+mapping for guest port 22 and invokes OpenSSH against the returned public host
+and port. Users never connect to a worker or guest private IP. On a single-host
+server it retains the host-local port-forwarding path. `sandbox ssh-config`
+prints the equivalent stanza for `scp`, `rsync`, and editor integrations.
 
 ## HTTP API
 

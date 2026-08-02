@@ -3,6 +3,8 @@ package gateway
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/management"
+	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/wsutil"
 )
 
@@ -295,6 +298,36 @@ func TestHostProxyStripsSubprotocolCredential(t *testing.T) {
 	}
 	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != wsutil.SubprotocolShell {
 		t.Fatalf("echoed subprotocol = %q, want %q", got, wsutil.SubprotocolShell)
+	}
+}
+
+func TestHostProxyDecoratesRawPortListsWithPublicHost(t *testing.T) {
+	g := secureTestGateway(t)
+	g.raw = &rawAllocator{cfg: RawConfig{PublicHost: "tcp.sandboxes.example.com"}}
+	proxy := g.buildHostProxy("host-1", "10.0.0.5:8080", "worker-token")
+
+	req := httptest.NewRequest(http.MethodGet, "http://gw/sandboxes/x/ports", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Request:    req,
+		Body: io.NopCloser(bytes.NewBufferString(
+			`[{"guest_port":22,"public_port":20000,"mode":"raw"},` +
+				`{"guest_port":3000,"url":"https://3000-x.example.com","mode":"url"}]`,
+		)),
+	}
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatalf("ModifyResponse: %v", err)
+	}
+	var ports []registry.PortMapping
+	if err := json.NewDecoder(resp.Body).Decode(&ports); err != nil {
+		t.Fatal(err)
+	}
+	if len(ports) != 2 || ports[0].PublicHost != "tcp.sandboxes.example.com" {
+		t.Fatalf("raw mapping was not decorated: %+v", ports)
+	}
+	if ports[1].PublicHost != "" {
+		t.Fatalf("non-raw mapping gained a public host: %+v", ports[1])
 	}
 }
 

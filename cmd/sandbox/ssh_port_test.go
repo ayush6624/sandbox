@@ -136,3 +136,144 @@ func TestEnsureSSHPortErrorsRatherThanReturningZero(t *testing.T) {
 		t.Fatalf("port = %d on error path", port)
 	}
 }
+
+// A gateway annotates sandboxes with their owning worker's private HostAddr.
+// That address is routing metadata, not a customer endpoint: SSH must allocate
+// raw public ingress and never reserve or return the worker-local host port.
+func TestResolveSSHDestinationFleetUsesPublicRawEndpoint(t *testing.T) {
+	rawCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/abc":
+			_ = json.NewEncoder(w).Encode(registry.Sandbox{
+				ID:       "abc",
+				HostAddr: "10.160.0.55",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/abc/raw-ports":
+			rawCalls++
+			var body map[string]int
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["guest_port"] != sshGuestPort {
+				t.Errorf("raw expose guest_port = %d, want %d", body["guest_port"], sshGuestPort)
+			}
+			_ = json.NewEncoder(w).Encode(registry.RawPortMapping{
+				GuestPort:  sshGuestPort,
+				Mode:       "raw",
+				PublicHost: "sbx.example.com",
+				PublicPort: 20481,
+			})
+		case strings.HasSuffix(r.URL.Path, "/ports"):
+			t.Error("fleet SSH attempted to allocate a private worker host port")
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := client.NewHTTP(strings.TrimPrefix(srv.URL, "http://"), "")
+	host, port, alias, err := resolveSSHDestination(
+		context.Background(), c, "abc", "10.160.0.100:9090", false,
+	)
+	if err != nil {
+		t.Fatalf("resolveSSHDestination: %v", err)
+	}
+	if host != "sbx.example.com" || port != 20481 {
+		t.Fatalf("destination = %s:%d, want sbx.example.com:20481", host, port)
+	}
+	if alias != "sandbox-abc" {
+		t.Fatalf("alias = %q, want sandbox-abc", alias)
+	}
+	if rawCalls != 1 {
+		t.Fatalf("raw expose calls = %d, want 1", rawCalls)
+	}
+}
+
+func TestResolveSSHDestinationSingleHostUsesLocalForward(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/abc":
+			_ = json.NewEncoder(w).Encode(registry.Sandbox{ID: "abc"})
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/abc/ports":
+			_ = json.NewEncoder(w).Encode([]registry.PortMapping{{
+				GuestPort: sshGuestPort,
+				HostPort:  5233,
+				Mode:      "host_port",
+			}})
+		case strings.HasSuffix(r.URL.Path, "/raw-ports"):
+			t.Error("single-host SSH attempted to allocate public raw ingress")
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := client.NewHTTP(strings.TrimPrefix(srv.URL, "http://"), "")
+	host, port, alias, err := resolveSSHDestination(
+		context.Background(), c, "abc", "worker.example.com:8080", false,
+	)
+	if err != nil {
+		t.Fatalf("resolveSSHDestination: %v", err)
+	}
+	if host != "worker.example.com" || port != 5233 {
+		t.Fatalf("destination = %s:%d, want worker.example.com:5233", host, port)
+	}
+	if alias != "sandbox-abc" {
+		t.Fatalf("alias = %q, want sandbox-abc", alias)
+	}
+}
+
+func TestResolveSSHDestinationJumpUsesPrivateOperatorFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/abc":
+			_ = json.NewEncoder(w).Encode(registry.Sandbox{
+				ID:       "abc",
+				HostAddr: "10.160.0.55",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/abc/ports":
+			_ = json.NewEncoder(w).Encode([]registry.PortMapping{{
+				GuestPort: sshGuestPort,
+				HostPort:  5233,
+				Mode:      "host_port",
+			}})
+		case strings.HasSuffix(r.URL.Path, "/raw-ports"):
+			t.Error("operator fallback attempted to allocate public raw ingress")
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := client.NewHTTP(strings.TrimPrefix(srv.URL, "http://"), "")
+	host, port, _, err := resolveSSHDestination(
+		context.Background(), c, "abc", "10.160.0.100:9090", true,
+	)
+	if err != nil {
+		t.Fatalf("resolveSSHDestination: %v", err)
+	}
+	if host != "10.160.0.55" || port != 5233 {
+		t.Fatalf("destination = %s:%d, want private operator route 10.160.0.55:5233", host, port)
+	}
+}
+
+func TestEnsurePublicSSHPortRejectsIncompleteMapping(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(registry.RawPortMapping{
+			GuestPort: sshGuestPort,
+			Mode:      "raw",
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewHTTP(strings.TrimPrefix(srv.URL, "http://"), "")
+	host, port, err := ensurePublicSSHPort(context.Background(), c, "abc")
+	if err == nil {
+		t.Fatalf("expected an error, got %s:%d", host, port)
+	}
+	if !strings.Contains(err.Error(), "incomplete raw mapping") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

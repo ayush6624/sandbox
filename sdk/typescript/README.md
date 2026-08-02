@@ -100,9 +100,9 @@ for await (const sandbox of client.sandboxes.list({ status: 'running' })) {
 }
 ```
 
-Port forwards carry the same addressability as the facade — a worker-local host
-port, a public ingress URL, or both. Read `mode` rather than assuming a host
-port exists: `hostPort` is `undefined` for a URL-only exposure.
+Port forwards can be a worker-local host port, a public HTTP URL, or a durable
+public raw-TCP address. Address types can accumulate on one mapping, so inspect
+the address field you intend to use rather than assuming only one is present.
 
 ```ts
 const forward = await sandbox.createPortForward(3000)
@@ -114,6 +114,12 @@ forward.url         // 'https://3000-<id>.sandboxes.example.com'
 const urlOnly = await sandbox.createPortForward(8080, { hostPort: false })
 urlOnly.url         // the only way to reach it
 urlOnly.hostPort    // undefined
+
+// Raw TCP — suitable for SSH; no worker or guest private IP is exposed.
+const ssh = await sandbox.createRawPortForward(22)
+ssh.address         // 'sbx.example.com:20002'
+ssh.publicHost      // 'sbx.example.com'
+ssh.publicPort      // 20002
 
 await sandbox.listPortForwards()
 ```
@@ -399,25 +405,26 @@ Pass an OpenSSH public key at create time and expose guest port 22:
 
 ```ts
 import { readFile } from 'node:fs/promises'
+import { SandboxClient } from 'sandbox'
 
-const sbx = await Sandbox.create({
-  sshPubkey: await readFile(`${process.env.HOME}/.ssh/id_ed25519.pub`, 'utf8'),
+const client = new SandboxClient()
+const sbx = await client.sandboxes.create({
+  sshPublicKey: await readFile(`${process.env.HOME}/.ssh/id_ed25519.pub`, 'utf8'),
 })
-const addr = await sbx.exposePort(22)     // e.g. "100.75.186.35:5200"
-const [host, port] = addr.split(':')
-console.log(`ssh -p ${port} sandbox@${host}`)
+const ssh = await sbx.createRawPortForward(22)
+console.log(`ssh -p ${ssh.publicPort} sandbox@${ssh.publicHost}`)
 ```
 
 Key-only login as the unprivileged `sandbox` user; the key lands in
 `/home/sandbox/.ssh/authorized_keys` and survives hibernation and wake.
 Independent creates rotate SSH host keys and clear inherited login keys. If
 the key can't be installed the create fails outright rather than handing back
-an unreachable sandbox.
+an unreachable sandbox. The raw endpoint is public, so users never route to a
+worker or guest private IP.
 
 Because the forwarded port carries wake-on-connect, an incoming SSH connection
-wakes a hibernated sandbox and pins it for the session. In fleet mode the
-gateway proxies HTTP only, so SSH needs a `ProxyJump` through the owning
-worker (`sbx.info.hostAddr` names it).
+wakes a hibernated sandbox and pins it for the session. The public edge tunnels
+the TCP stream to the owning worker without terminating SSH.
 
 ### Fleet capacity (operator API)
 
@@ -512,7 +519,7 @@ try {
 | — | `Sandbox.fanout(snapshotId, n)` — N live clones of one snapshot |
 | `sbx.pty.create({ onData, cols, rows })` | `sbx.pty.create({ onData, cols, rows, cwd })` — `sendInput` / `resize` / `kill` / `await pty.exited` |
 | `sbx.getInfo()` | `sbx.info` (a live object) + `await sbx.refresh()` to re-read it; `sbx.info.vcpus` / `memMib` are always the effective values, and `Sandbox.hostInfo()` gives defaults/limits |
-| — | `Sandbox.create({ sshPubkey })` + `exposePort(22)` — key-only SSH as `sandbox` |
+| — | `client.sandboxes.create({ sshPublicKey })` + `sandbox.createRawPortForward(22)` — public key-only SSH as `sandbox` |
 | — | `new FleetClient().hosts.list()` — fleet capacity behind a gateway (operator credential, not the tenant API key) |
 | rate-limit errors | `CapacityError` (429/503) with `retryAfterMs` — distinguishes "fleet full" from "broken" |
 

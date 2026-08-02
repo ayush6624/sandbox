@@ -589,6 +589,9 @@ func (h *Handler) listOperations(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) createPortForward(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		GuestPort int `json:"guest_port"`
+		// Raw asks the fleet gateway for a durable public TCP endpoint. Empty
+		// retains the ordinary HTTP/worker-port exposure behavior below.
+		Mode string `json:"mode,omitempty"`
 		// Tri-state, forwarded verbatim: true reserves a worker-local host
 		// port, false is URL-only, and absent defers to the worker default.
 		HostPort *bool `json:"host_port,omitempty"`
@@ -598,6 +601,32 @@ func (h *Handler) createPortForward(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.GuestPort < 1 || body.GuestPort > 65535 {
 		httpapi.WriteProblem(w, r, 400, "invalid_request", "guest_port must be between 1 and 65535")
+		return
+	}
+	if body.Mode == "raw" {
+		if body.HostPort != nil {
+			httpapi.WriteProblem(w, r, 400, "invalid_request", "host_port cannot be combined with mode raw")
+			return
+		}
+		rec := h.call(r, http.MethodPost, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/raw-ports", map[string]int{
+			"guest_port": body.GuestPort,
+		})
+		if !translateError(w, r, rec) {
+			return
+		}
+		var raw registry.RawPortMapping
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
+			return
+		}
+		writeJSON(w, 201, publicPort(r.PathValue("id"), registry.PortMapping{
+			GuestPort: raw.GuestPort, PublicHost: raw.PublicHost,
+			PublicPort: raw.PublicPort, Mode: "raw",
+		}))
+		return
+	}
+	if body.Mode != "" {
+		httpapi.WriteProblem(w, r, 400, "invalid_request", "mode must be raw when provided")
 		return
 	}
 	rec := h.call(r, http.MethodPost, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/ports", body)
@@ -688,10 +717,9 @@ func publicSnapshot(s registry.Snapshot) Snapshot {
 	}
 }
 
-// publicPort renders one exposure in the /v1 shape. host_port, public_port and
-// url are omitted rather than zero-valued: a URL-only exposure genuinely has no
-// host port, and reporting 0 gave v1 clients a port they could not dial (and
-// violated the contract's own `minimum: 1`). Clients switch on mode.
+// publicPort renders one exposure in the /v1 shape. Address fields are omitted
+// rather than zero-valued when that transport does not apply. Transports can
+// accumulate, so clients inspect the address field they intend to use.
 func publicPort(sandboxID string, p registry.PortMapping) map[string]any {
 	out := map[string]any{
 		"id": fmt.Sprintf("%s:%d", sandboxID, p.GuestPort), "sandbox_id": sandboxID,
@@ -702,6 +730,9 @@ func publicPort(sandboxID string, p registry.PortMapping) map[string]any {
 	}
 	if p.PublicPort != 0 {
 		out["public_port"] = p.PublicPort
+	}
+	if p.PublicHost != "" {
+		out["public_host"] = p.PublicHost
 	}
 	if p.URL != "" {
 		out["url"] = p.URL

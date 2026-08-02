@@ -130,6 +130,20 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out = append(out, snap)
 		}
 		_ = json.NewEncoder(w).Encode(out)
+	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/raw-ports"):
+		var body struct {
+			GuestPort int `json:"guest_port"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		pm := registry.PortMapping{
+			GuestPort: body.GuestPort, PublicHost: "tcp.sandboxes.example.com",
+			PublicPort: 20000, Mode: "raw",
+		}
+		f.exposed = append(f.exposed, pm)
+		_ = json.NewEncoder(w).Encode(registry.RawPortMapping{
+			GuestPort: body.GuestPort, Mode: "raw",
+			PublicHost: pm.PublicHost, PublicPort: pm.PublicPort,
+		})
 	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/ports"):
 		// Mirror a worker with an ingress domain configured: every exposure
 		// carries a URL, and host_port decides whether a host port comes too.
@@ -311,6 +325,15 @@ func TestPortForwardsCarryIngressURLAndOmitAbsentHostPort(t *testing.T) {
 		t.Fatalf("URL-only exposure lost fields: %#v", urlOnly)
 	}
 
+	raw := call(`{"guest_port":22,"mode":"raw"}`, "raw")
+	if raw["mode"] != "raw" || raw["public_host"] != "tcp.sandboxes.example.com" ||
+		raw["public_port"] != float64(20000) {
+		t.Fatalf("raw exposure lost its public address: %#v", raw)
+	}
+	if _, ok := raw["host_port"]; ok {
+		t.Fatalf("raw exposure must not report a worker host port: %#v", raw)
+	}
+
 	// The same shape must survive the list path, not just the create response.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/v1/sandboxes/existing/port-forwards", nil))
@@ -323,14 +346,34 @@ func TestPortForwardsCarryIngressURLAndOmitAbsentHostPort(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.PortForwards) != 2 {
-		t.Fatalf("want 2 port forwards, got %#v", list.PortForwards)
+	if len(list.PortForwards) != 3 {
+		t.Fatalf("want 3 port forwards, got %#v", list.PortForwards)
 	}
 	if _, ok := list.PortForwards[1]["host_port"]; ok {
 		t.Fatalf("listed URL-only exposure must omit host_port, got %#v", list.PortForwards[1])
 	}
 	if list.PortForwards[1]["url"] != "https://3000-existing.sandboxes.example.com" {
 		t.Fatalf("listed URL-only exposure lost its url: %#v", list.PortForwards[1])
+	}
+	if list.PortForwards[2]["public_host"] != "tcp.sandboxes.example.com" ||
+		list.PortForwards[2]["public_port"] != float64(20000) {
+		t.Fatalf("listed raw exposure lost its public address: %#v", list.PortForwards[2])
+	}
+}
+
+func TestRawPortForwardRejectsConflictingAddressMode(t *testing.T) {
+	h := testHandler(t, newFakeLegacy())
+	for _, body := range []string{
+		`{"guest_port":22,"mode":"raw","host_port":true}`,
+		`{"guest_port":22,"mode":"private"}`,
+	} {
+		req := httptest.NewRequest("POST", "/v1/sandboxes/existing/port-forwards", strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", body)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status=%d response=%s", body, w.Code, w.Body.String())
+		}
 	}
 }
 

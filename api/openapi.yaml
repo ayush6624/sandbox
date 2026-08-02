@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Sandbox API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Versioned public contract for creating and operating isolated development
     sandboxes. Routes outside `/v1` are deprecated compatibility endpoints.
@@ -125,6 +125,14 @@ paths:
               required: [guest_port]
               properties:
                 guest_port: {type: integer, minimum: 1, maximum: 65535}
+                mode:
+                  type: string
+                  enum: [raw]
+                  description: |
+                    Set to `raw` for a durable fleet-wide public TCP endpoint,
+                    suitable for SSH and other non-HTTP protocols. Mutually
+                    exclusive with `host_port`. Omit for HTTP ingress or a
+                    worker-local host port.
                 host_port:
                   type: boolean
                   description: |
@@ -302,7 +310,9 @@ components:
         ingress URL only, `both` is a host port that ingress also fronts, and
         `raw` is a fleet-wide public TCP address (`public_port`). `host_port`
         is therefore ABSENT for a URL-only exposure — read `mode` first rather
-        than assuming a host port exists.
+        than assuming a host port exists. Address types can accumulate: a
+        mapping that already has HTTP/host access may also carry
+        `public_host` and `public_port`, even when its mode remains `both`.
       required: [id, sandbox_id, guest_port, mode, status]
       properties:
         id: {type: string}
@@ -315,6 +325,9 @@ components:
           format: uri
           description: Public ingress URL; present only when the worker is configured with an ingress domain.
         public_port: {type: integer, minimum: 1, maximum: 65535}
+        public_host:
+          type: string
+          description: Fleet-wide public hostname; present when a raw TCP address is allocated.
         status: {const: active}
     BatchItem:
       type: object
