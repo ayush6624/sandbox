@@ -83,21 +83,100 @@ in `/etc/sudoers.d/sandbox` with mode `0440`.
 
 ## Deploying to the production GCP fleet
 
-**Use the one command. Do not hand-run the individual steps.**
+**Use the one command. Do not hand-run the individual steps. Every deployment
+runs ON THE CONTROL VM — never from a laptop.**
 
 ```bash
 make fleet-rollout                     # roll HEAD onto the fleet, then verify it landed
-infra/gcp/rollout.sh --fast            # rapid dev iteration (~15 MiB egress, gateway-only)
 make fleet-status                      # where the fleet is right now (read-only)
-infra/gcp/rollout.sh --dry-run         # what's stale + what would happen
-infra/gcp/rollout.sh <sha>             # roll a previously published release (rollback)
+infra/gcp/rollout-remote.sh --fast     # rapid dev iteration (~15 MiB egress, gateway-only)
+infra/gcp/rollout-remote.sh --dry-run  # what's stale + what would happen
+infra/gcp/rollout-remote.sh <sha>      # roll a previously published release (rollback)
 make fleet-rollout SHA=<sha> ROLLOUT_ARGS=--skip-smoke
 ```
+
+`make fleet-rollout`/`fleet-status` now go through `rollout-remote.sh`, which
+rsyncs the working tree to the control VM and runs `rollout.sh` **there**, so
+this machine needs only ssh — no gcloud credentials at all. Don't invoke
+`infra/gcp/rollout.sh` directly from a laptop: it **refuses to run off-GCE**
+(`require-control-vm.sh`), as does `make gcs-release`.
 
 `rollout.sh` builds + uploads, deploys **only** the components whose *running*
 release is stale, waits for convergence, and smoke-tests REST + the WebSocket
 pty. It is idempotent — re-running on a converged fleet deploys nothing and
 just re-verifies. Read its final summary; don't wrap it in extra polling.
+
+**Never run a deployment from a laptop, and never try to fix expired credentials
+with a service-account key.** `gcloud auth login` is not part of any deployment
+path anymore; if you find yourself wanting it, you are on the wrong path.
+
+A laptop SA key is not merely inconvenient, it is **impossible in this org**:
+`constraints/iam.disableServiceAccountKeyCreation` AND
+`...disableServiceAccountKeyUpload` are both enforced org-wide with no project
+override, so no JSON key can be created or brought; and `ayush.goyal@aion.xyz`
+lacks `resourcemanager.projects.setIamPolicy`, so a freshly created SA could not
+be granted project roles anyway (`control.sh` cmd_up already anticipates this and
+prints an admin-required message). The reauth-every-session itself is Workspace
+Cloud session control expiring the refresh token — no local ADC arrangement
+fixes it for user credentials.
+
+The control VM has none of these problems: it runs as `sandbox-control-sa` with
+`cloud-platform` scope, so `gcloud`/`gsutil` there take credentials from the GCE
+**metadata server**, which never expire and never prompt. The only grant it
+needed was bucket-scoped `roles/storage.objectAdmin` on `$RELEASE_BUCKET` —
+bucket IAM, settable with the `roles/storage.admin` we already hold, so no
+project admin was involved.
+
+This needs no change to `rollout.sh`'s fleet logic: it reaches the fleet purely
+over `ssh $CONTROL_NAME` + `gsutil`, and the control host can ssh to **itself**,
+so `CONTROL_SSH_HOST` resolves correctly there unmodified. That self-ssh is a
+requirement, not an accident — without a self-authorized key it fails
+`Permission denied (publickey)`, and note `startup-control.sh` step 2 rewrites
+`authorized_keys` wholesale from metadata on every boot, so step 4 **appends**
+the self key rather than truncating.
+
+`rollout-remote.sh` rsyncs the **working tree** (not a git fetch — that keeps
+GitHub credentials off the VM) to `~/sandbox-src`, deliberately NOT
+`~/web-sandbox`, which the test suites use. It excludes `node_modules`/`bin/`
+(~430 MiB of the 473 MiB tree) but deliberately **includes** the gitignored
+`fleet-secrets.env`, without which rollout preflight-fails on an unset
+`GATEWAY_TOKEN`.
+
+Go and `make` are **not** in the stock control VM image. `startup-control.sh`
+step 4 now installs them (Go pinned to `GO_VERSION`, keep in sync with `go.mod`)
+so a VM rebuild can't silently break deploys, and `rollout-remote.sh` also checks
+up front and prints the install commands rather than letting a rollout die
+mid-flight in `make build-linux`.
+
+**Any dev machine can deploy — including one with no gcloud installed.** The full
+requirement list is: `ssh` (with a key authorized on the control VM), `rsync`,
+`bash`, `make`, this repo including `.git` and the gitignored
+`fleet-secrets.env`, and a network path to the control VM. No gcloud, no gsutil,
+and no *local* git invocation (the release sha is derived on the VM from the
+rsynced `.git`). The one gotcha is reachability: `sandbox-control` is a
+**Tailscale** name, so off the tailnet set `CONTROL_SSH_HOST=<reachable addr>`.
+Keep the wrapper **bash-3.2 clean** — that's still `/bin/bash` on macOS, and
+expanding an empty array under `set -u` is an unbound-variable error there (it
+broke the tty-detection path once already).
+
+Enforcement is real, not advisory: `require-control-vm.sh` detects GCE via DMI
+(`/sys/class/dmi/id/product_name`, no network call, absent on macOS) and both
+`rollout.sh` and `make gcs-release` exit 2 off-GCE. `make fleet-rollout-local` /
+`ROLLOUT_ALLOW_LOCAL=1` is the deliberate escape hatch and still needs a live
+`gcloud auth login`. Verified with `CLOUDSDK_CONFIG` pointed at an empty dir: the
+fleet reports fine with zero local credentials.
+
+**Still laptop-bound (NOT deployments):** `edge.sh` and `control.sh up` need
+project-level roles (`compute.loadBalancerAdmin`, `compute.securityAdmin`,
+`secretmanager.admin`, `serviceusage`, `setIamPolicy`) that `sandbox-control-sa`
+does not have and that we cannot grant ourselves. `mig.sh` and `bake-image.sh`
+are *nearly* delegable — `roles/compute.instanceAdmin.v1` (which the control SA
+has) already covers `images.create`/`disks.create`/`instanceGroupManagers.*`, and
+`bake-image.sh` creates its VMs with `--no-service-account`, so it needs no
+`actAs` at all; `mig.sh` line 108 attaches `sandbox-fleet-sa`, so it needs
+`roles/iam.serviceAccountUser` on that SA (an SA-resource-scoped binding, which
+`iam.serviceAccountAdmin` can set — not yet applied). These are rare
+provisioning one-offs, not code deploys.
 
 Why this exists rather than the three steps it wraps: the previously documented
 path (`make gcs-release && infra/gcp/deploy-job.sh`) rolls the **workers only**,

@@ -63,6 +63,14 @@ for arg in "$@"; do
 done
 case "$SMOKE" in full|http|none) ;; *) echo "--smoke must be full|http|none" >&2; exit 2 ;; esac
 
+# Deployments run ON the control VM, never from a laptop — enforced, not just
+# documented, because the failure mode is a half-deployed fleet. See
+# require-control-vm.sh for the full reasoning. Exported so the `make
+# gcs-release` sub-invocation below inherits a deliberate local override instead
+# of tripping the same guard mid-rollout.
+bash "$DIR/require-control-vm.sh" "rollout.sh"
+export ROLLOUT_ALLOW_LOCAL="${ROLLOUT_ALLOW_LOCAL:-0}"
+
 # --fast is the rapid dev-iteration path. The fleet side of a rollout is already
 # fast (golden is ADOPTED not rebuilt, and the ready pool refills at ~1.5s per
 # VM in parallel) — the cost is almost entirely bytes crossing the network from
@@ -382,8 +390,12 @@ if [ "$SMOKE" != none ]; then
     # (the 10.160.0.0/20 subnet route is not always approved).
     SMOKE_URL="$(client_url)" || fail "no gateway URL reachable from this machine"
     info "via ${SMOKE_URL}"
+    # npm's update-notifier is muted because this output is routinely read by
+    # agents, where five lines of "new major version of npm available" is pure
+    # token cost attached to a deploy log that should be all signal.
     if ! ( cd "$REPO/sdk/typescript" && \
            SANDBOX_API_URL="$SMOKE_URL" SANDBOX_API_KEY="$GATEWAY_TOKEN" \
+           NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false \
            SMOKE_MODE="$SMOKE" npx --yes tsx "$DIR/rollout-smoke.mts" ); then
       fail "smoke test"
     fi

@@ -50,4 +50,35 @@ else
   echo "No tailscale-authkey metadata — skipping Tailscale."
 fi
 
+# 4. Deploy toolchain. ALL fleet deployments run HERE, not on a laptop, because
+# this VM's SA gets non-expiring credentials from the metadata server while a
+# laptop's `gcloud auth login` dies every session (Workspace session control) and
+# an SA key is impossible (org enforces iam.disableServiceAccountKeyCreation).
+# See rollout-remote.sh. So git/make/Go and self-ssh are part of the VM's
+# contract, not manual setup — without them a rollout dies in `make build-linux`.
+GO_VERSION="1.25.3"   # keep in sync with go.mod
+if ! command -v make &>/dev/null || ! command -v git &>/dev/null || ! command -v rsync &>/dev/null; then
+  apt-get update -qq && apt-get install -y -qq build-essential git rsync
+fi
+if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION}"; then
+  curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+  rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
+fi
+grep -q '/usr/local/go/bin' /etc/profile.d/golang.sh 2>/dev/null || \
+  echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/golang.sh
+
+# rollout.sh/control.sh/deploy-job.sh all ssh to $CONTROL_NAME to reach the
+# fleet. Run ON that host they ssh to THEMSELVES, so the VM needs its own key
+# authorized. Appended (not truncated) because step 2 above rewrites
+# authorized_keys wholesale from metadata on every boot.
+SSH_DIR="/home/$SSH_USER/.ssh"
+install -d -m 700 -o "$SSH_USER" -g "$SSH_USER" "$SSH_DIR"
+[ -f "$SSH_DIR/id_ed25519" ] || \
+  sudo -u "$SSH_USER" ssh-keygen -t ed25519 -N "" -f "$SSH_DIR/id_ed25519" -C "$INSTANCE_NAME self"
+if ! grep -qF "$(cat "$SSH_DIR/id_ed25519.pub")" "$SSH_DIR/authorized_keys" 2>/dev/null; then
+  cat "$SSH_DIR/id_ed25519.pub" >> "$SSH_DIR/authorized_keys"
+fi
+chmod 600 "$SSH_DIR/authorized_keys"
+chown "$SSH_USER:$SSH_USER" "$SSH_DIR/authorized_keys"
+
 echo "startup-control finished OK"
