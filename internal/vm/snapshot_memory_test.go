@@ -84,24 +84,50 @@ func TestArmSnapshotMemoryHighStaysAboveCurrentFootprint(t *testing.T) {
 	}
 }
 
-// Fail closed: with less than one margin of headroom there is no band in which
-// to throttle, so the write would charge straight into memory.max. Refusing
-// here happens while the VMM is alive and paused, so the caller resumes it and
-// the sandbox survives.
-func TestArmSnapshotMemoryHighRefusesWithoutHeadroom(t *testing.T) {
-	limit := int64(1180 << 20)
+// Without room for a full margin the ceiling CLAMPS to just under the fence
+// rather than refusing. A narrow band still makes the kernel reclaim before
+// memory.max, and refusing would break small sandboxes that already worked: a
+// 128 MiB guest sits close to its own limit precisely because that limit is
+// small. Refusing here was a regression caught in fleet verification.
+func TestArmSnapshotMemoryHighClampsWhenMarginDoesNotFit(t *testing.T) {
+	limit := int64(284 << 20) // a 128 MiB guest's leaf
+	current := limit - (8 << 20)
 	leaf := fakeLeaf(t, map[string]string{
 		"memory.max":     strconv.FormatInt(limit, 10),
-		"memory.current": strconv.FormatInt(limit-(8<<20), 10),
+		"memory.current": strconv.FormatInt(current, 10),
 		"memory.high":    "max",
 	})
 
-	_, err := armSnapshotMemoryHigh(leaf)
-	if err == nil {
-		t.Fatal("expected a refusal when the cgroup has no headroom to throttle in")
+	if _, err := armSnapshotMemoryHigh(leaf); err != nil {
+		t.Fatalf("a tight cgroup must still be protected, not refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "headroom") {
-		t.Fatalf("error should explain the headroom problem, got: %v", err)
+	high, err := strconv.ParseInt(readLeaf(t, leaf, "memory.high"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if high >= limit {
+		t.Fatalf("memory.high %d must stay below memory.max %d to engage first", high, limit)
+	}
+	if high < current {
+		t.Fatalf("memory.high %d must not sit below the unreclaimable footprint %d", high, current)
+	}
+}
+
+// Only a VM already at its limit is refused: there is nowhere to put a ceiling,
+// so nothing stands between the write and an OOM kill. The refusal happens while
+// the VMM is alive and paused, so the caller resumes it and the sandbox survives.
+func TestArmSnapshotMemoryHighRefusesAtTheFence(t *testing.T) {
+	limit := int64(1180 << 20)
+	leaf := fakeLeaf(t, map[string]string{
+		"memory.max":     strconv.FormatInt(limit, 10),
+		"memory.current": strconv.FormatInt(limit, 10),
+		"memory.high":    "max",
+	})
+
+	if _, err := armSnapshotMemoryHigh(leaf); err == nil {
+		t.Fatal("expected a refusal for a VM already at its memory limit")
+	} else if !strings.Contains(err.Error(), "already using") {
+		t.Fatalf("error should say the VM is already at its limit, got: %v", err)
 	}
 	// The refusal must not leave a ceiling behind on a VM that keeps running.
 	if got := readLeaf(t, leaf, "memory.high"); got != "max" {
@@ -215,7 +241,7 @@ func TestSnapshotWriteWindowRestoresIOWhenMemoryGuardFails(t *testing.T) {
 	limit := int64(1180 << 20)
 	for name, value := range map[string]string{
 		"memory.max":     strconv.FormatInt(limit, 10),
-		"memory.current": strconv.FormatInt(limit-(8<<20), 10), // no headroom
+		"memory.current": strconv.FormatInt(limit, 10), // at the fence: refused
 		"memory.high":    "max",
 		"io.max":         ioMaxValue(cfg, false),
 	} {
@@ -225,7 +251,7 @@ func TestSnapshotWriteWindowRestoresIOWhenMemoryGuardFails(t *testing.T) {
 	}
 
 	if _, err := snapshotWriteWindow(cfg, "vm-1")(); err == nil {
-		t.Fatal("expected the window to refuse without memory headroom")
+		t.Fatal("expected the window to refuse for a VM at its memory limit")
 	}
 	if got, want := readLeaf(t, leafPath, "io.max"), ioMaxValue(cfg, false); got != want {
 		t.Fatalf("io.max = %q after a refused window, want the throttled value %q", got, want)

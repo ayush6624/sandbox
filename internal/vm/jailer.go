@@ -606,6 +606,11 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string) func() (func() error, er
 // which is the failure this prevents.
 const snapshotMemoryHighMargin = int64(64 << 20)
 
+// snapshotMemoryHighReserve keeps the ceiling strictly below memory.max when
+// there is not room for a full margin, so throttling still engages before the
+// kernel's hard limit does.
+const snapshotMemoryHighReserve = int64(1 << 20)
+
 // armSnapshotMemoryHigh installs a reclaim ceiling just above the VM's current
 // footprint and returns the restore callback.
 //
@@ -647,13 +652,29 @@ func armSnapshotMemoryHigh(leaf string) (func() error, error) {
 		return nil, fmt.Errorf("read VM memory usage: %w", err)
 	}
 
+	if current >= limit {
+		// Already at the fence: there is nowhere to put a ceiling, so the
+		// kernel is the only thing standing between this write and an OOM kill.
+		// Refuse while the VMM is alive and resumable.
+		return nil, fmt.Errorf("snapshot cannot proceed safely: the VM is already using %d of its %d MiB limit (see docs/cold-boot-snapshot-oom.md)",
+			current>>20, limit>>20)
+	}
+
+	// Prefer a full margin to throttle in. When there isn't room for one, clamp
+	// to just under the fence rather than refusing: a narrow band still makes
+	// the kernel reclaim and throttle BEFORE memory.max, which is strictly
+	// better than the unprotected write that used to happen here. Refusing
+	// instead would break small sandboxes that already worked — a 128 MiB guest
+	// sits close to its own limit precisely because the limit is small.
 	high := current + snapshotMemoryHighMargin
 	if high >= limit {
-		// Less than one margin of headroom under the hard limit: there is no
-		// band in which to throttle, so the write would charge straight into
-		// memory.max. Refuse while the VMM is still alive and resumable.
-		return nil, fmt.Errorf("snapshot needs at least %d MiB of cgroup headroom but the VM is using %d of %d MiB: raise jailer_memory_overhead_mib (see docs/cold-boot-snapshot-oom.md)",
-			snapshotMemoryHighMargin>>20, current>>20, limit>>20)
+		high = limit - snapshotMemoryHighReserve
+	}
+	if high < current {
+		// Never place the ceiling below the current footprint: with no swap the
+		// guest's anonymous pages cannot be reclaimed, so that would throttle
+		// against memory which can never be freed.
+		high = current
 	}
 	if err := os.WriteFile(highPath, []byte(strconv.FormatInt(high, 10)), 0600); err != nil {
 		return nil, fmt.Errorf("arm snapshot memory ceiling (snapshot would risk OOM-killing the VMM): %w", err)
