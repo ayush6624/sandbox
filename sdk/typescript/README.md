@@ -115,11 +115,11 @@ const urlOnly = await sandbox.createPortForward(8080, { hostPort: false })
 urlOnly.url         // the only way to reach it
 urlOnly.hostPort    // undefined
 
-// Raw TCP — suitable for SSH; no worker or guest private IP is exposed.
-const ssh = await sandbox.createRawPortForward(22)
-ssh.address         // 'sbx.example.com:20002'
-ssh.publicHost      // 'sbx.example.com'
-ssh.publicPort      // 20002
+// Raw TCP for a non-HTTP service.
+const database = await sandbox.createRawPortForward(5432)
+database.address         // 'sbx.example.com:20002'
+database.publicHost      // 'sbx.example.com'
+database.publicPort      // 20002
 
 await sandbox.listPortForwards()
 ```
@@ -226,11 +226,11 @@ for (const p of await sbx.listPorts()) {
 }
 ```
 
-Ingress terminates TLS and speaks HTTP, so it cannot carry SSH. For a
-fleet-wide **raw TCP** address, use `exposeRawPort()`:
+Ingress terminates TLS and speaks HTTP. For a fleet-wide **raw TCP** address
+for a non-HTTP service, use `exposeRawPort()`:
 
 ```ts
-const raw = await sbx.exposeRawPort(22)   // { publicHost, publicPort, address }
+const raw = await sbx.exposeRawPort(5432)   // { publicHost, publicPort, address }
 ```
 
 `unexposePort(guestPort)` removes an exposure and releases both its
@@ -401,30 +401,23 @@ durability configured, to any live host if the owner is gone).
 
 ### SSH into a sandbox
 
-Pass an OpenSSH public key at create time and expose guest port 22:
+SSH is a CLI capability. SDK and web applications should display the provided
+command instead of handling keys or constructing a public SSH address:
 
 ```ts
-import { readFile } from 'node:fs/promises'
 import { SandboxClient } from 'sandbox'
 
 const client = new SandboxClient()
-const sbx = await client.sandboxes.create({
-  sshPublicKey: await readFile(`${process.env.HOME}/.ssh/id_ed25519.pub`, 'utf8'),
-})
-const ssh = await sbx.createRawPortForward(22)
-console.log(`ssh -p ${ssh.publicPort} sandbox@${ssh.publicHost}`)
+const sbx = await client.sandboxes.create()
+console.log(sbx.sshInstructions.command) // sandbox ssh <sandbox-id>
 ```
 
-Key-only login as the unprivileged `sandbox` user; the key lands in
-`/home/sandbox/.ssh/authorized_keys` and survives hibernation and wake.
-Independent creates rotate SSH host keys and clear inherited login keys. If
-the key can't be installed the create fails outright rather than handing back
-an unreachable sandbox. The raw endpoint is public, so users never route to a
-worker or guest private IP.
-
-Because the forwarded port carries wake-on-connect, an incoming SSH connection
-wakes a hibernated sandbox and pins it for the session. The public edge tunnels
-the TCP stream to the owning worker without terminating SSH.
+The user installs the `sandbox` CLI, sets `SANDBOX_API_URL` and
+`SANDBOX_API_KEY`, then runs that command. The CLI selects or creates a local
+Ed25519 key, authorizes it for the unprivileged `sandbox` user, and carries the
+SSH stream through the authenticated API. It exposes no durable public port or
+private worker address. A connection wakes a paused sandbox and pins it for the
+session.
 
 ### Fleet capacity (operator API)
 
@@ -519,7 +512,7 @@ try {
 | — | `Sandbox.fanout(snapshotId, n)` — N live clones of one snapshot |
 | `sbx.pty.create({ onData, cols, rows })` | `sbx.pty.create({ onData, cols, rows, cwd })` — `sendInput` / `resize` / `kill` / `await pty.exited` |
 | `sbx.getInfo()` | `sbx.info` (a live object) + `await sbx.refresh()` to re-read it; `sbx.info.vcpus` / `memMib` are always the effective values, and `Sandbox.hostInfo()` gives defaults/limits |
-| — | `client.sandboxes.create({ sshPublicKey })` + `sandbox.createRawPortForward(22)` — public key-only SSH as `sandbox` |
+| — | `sandbox.sshInstructions.command` — display the CLI-owned SSH command; applications do not manage keys or SSH endpoints |
 | — | `new FleetClient().hosts.list()` — fleet capacity behind a gateway (operator credential, not the tenant API key) |
 | rate-limit errors | `CapacityError` (429/503) with `retryAfterMs` — distinguishes "fleet full" from "broken" |
 

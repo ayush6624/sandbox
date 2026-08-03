@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- SSH is now CLI-owned. `ClientSandbox.sshInstructions` returns the command a
+  web UI or SDK integration should show (`sandbox ssh <id>`); the CLI handles
+  key authorization, wake-on-connect, host-key safety, and the authenticated
+  byte stream without allocating a public SSH port.
+- Removed `sshPublicKey` / `sshPubkey` from SDK create options. Applications no
+  longer manage user SSH keys or build `ssh -p ...` commands.
+- Raw TCP forwarding remains available for non-HTTP services, independent of
+  the SSH workflow.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.3.0`).
+
 ## 2.2.0 - 2026-08-02
 
 ### Added

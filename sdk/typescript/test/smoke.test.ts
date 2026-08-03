@@ -918,20 +918,6 @@ test('missing apiUrl/apiKey fail fast with helpful messages', async () => {
   }
 })
 
-test('create with sshPubkey sends ssh_pubkey', async () => {
-  const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample me@laptop'
-  const sbx = await Sandbox.create({ ...opts(), sshPubkey: key })
-  assert.equal(lastCreateBody?.ssh_pubkey, key)
-  // The key is only useful once :22 is forwarded out.
-  const addr = await sbx.exposePort(22)
-  assert.match(addr, /^127\.0\.0\.1:\d+$/)
-  await sbx.kill()
-
-  const plain = await Sandbox.create(opts())
-  assert.equal(lastCreateBody, undefined)
-  await plain.kill()
-})
-
 test('create surfaces baseSnapshotId for golden clones', async () => {
   const sbx = await Sandbox.create(opts())
   assert.equal(sbx.info.baseSnapshotId, GOLDEN_SNAPSHOT_ID)

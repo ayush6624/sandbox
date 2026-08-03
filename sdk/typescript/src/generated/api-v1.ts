@@ -102,6 +102,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sandboxes/{sandbox_id}/ssh-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * @description CLI support endpoint. Applications should direct users to
+         *     `sandbox ssh <sandbox_id>` instead of calling this endpoint or
+         *     constructing a public SSH address themselves.
+         */
+        put: operations["prepareSandboxSshAccess"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sandbox-batches": {
         parameters: {
             query?: never;
@@ -246,8 +267,6 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
-            /** @description OpenSSH public key installed for the unprivileged sandbox user after rotating independent guest host identity. */
-            ssh_public_key?: string;
         };
         UpdateSandboxRequest: {
             name?: string;
@@ -650,9 +669,10 @@ export interface operations {
                     guest_port: number;
                     /**
                      * @description Set to `raw` for a durable fleet-wide public TCP endpoint,
-                     *     suitable for SSH and other non-HTTP protocols. Mutually
-                     *     exclusive with `host_port`. Omit for HTTP ingress or a
-                     *     worker-local host port.
+                     *     suitable for non-HTTP protocols. SSH access is owned by the
+                     *     CLI and does not require callers to allocate a raw endpoint.
+                     *     Mutually exclusive with `host_port`. Omit for HTTP ingress
+                     *     or a worker-local host port.
                      * @enum {string}
                      */
                     mode?: "raw";
@@ -676,6 +696,36 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PortForward"];
                 };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    prepareSandboxSshAccess: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                sandbox_id: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description One OpenSSH public key line. */
+                    public_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Key authorized and the authenticated SSH tunnel enabled. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             default: components["responses"]["Problem"];
         };

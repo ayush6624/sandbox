@@ -397,7 +397,7 @@ scripts/              Host setup shell scripts
   should still serve. The guest also sets `tcp_mtu_probing=1` as a black-hole
   backstop. Don't "fix" the MTU by setting the tap/bridge instead — virtio-net won't
   propagate it to the guest.
-- **SSH into a sandbox rides the existing port proxy.** The base rootfs bakes
+- **SSH into a sandbox is CLI-owned and rides the authenticated API tunnel.** The base rootfs bakes
   `openssh-server` (key-only login as the unprivileged **`sandbox` user**, uid
   1000: `PermitRootLogin no`, `PasswordAuthentication no`, `AllowUsers sandbox`,
   in `sshd_config.d/sandbox.conf`), and `ssh.service` is enabled (socket
@@ -413,24 +413,18 @@ scripts/              Host setup shell scripts
   RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
   2-vCPU guest and was essentially the entire `/identity` call. That config is
   written by both `build-devbox-rootfs.sh` and `install-agent` (the latter
-  repairs an older base image) — keep the two in sync. `POST /sandboxes` takes
-  an optional `ssh_pubkey` (one OpenSSH key line, `validateSSHPubkey` in
-  server.go — rejects multi-line/unknown-type); after the create readiness gate
-  (both cold and hot paths), `installSSHKey` (proxy.go) posts it to sandboxd's
-  `POST /ssh-key`, which writes `/home/sandbox/.ssh/authorized_keys` — under
-  `withGuestFilesystem`, so the dir and file land owned by `sandbox:sandbox`
-  (0700/0600) as sshd demands. It is NOT best-effort like `syncGuestClock`: a
-  key-install failure destroys the sandbox and fails the create, so a box handed
-  back with SSH requested is always reachable. The key lives in the rootfs, so
-  it survives hibernation/wake with no re-push. Reach it by exposing guest :22
-  as a host port — the userspace TCP proxy forwards it with wake-on-connect, so
-  an incoming SSH connection wakes a hibernated sandbox and pins it for the
-  session, exactly like a forwarded HTTP port. Old baked sandboxd 404s
-  `/ssh-key` (re-run `install-agent`; rebuild the base for openssh first).
-  CLI: `sandbox up --ssh-key ~/.ssh/id_ed25519.pub` (file path or key literal),
-  then `sandbox ssh <id>` (forwards :22 on first use) or
-  `sandbox ssh-config <id>` to drive plain ssh/scp/rsync/editors. Both take
-  `--jump <bastion>`.
+  repairs an older base image) — keep the two in sync. `sandbox ssh <id>` picks
+  the user's `~/.ssh/id_ed25519` or creates `~/.ssh/sandbox_ed25519`, then calls
+  `PUT /v1/sandboxes/{id}/ssh-access`. The worker wakes the sandbox, pushes that
+  key through sandboxd's `POST /ssh-key`, and records a port-22 tunnel
+  permission with no host port or public URL. OpenSSH runs a hidden
+  `sandbox ssh-proxy` ProxyCommand, which opens an authenticated WebSocket at
+  `GET /v1/sandboxes/{id}/connect/22`; the gateway's established upgrade proxy
+  routes that stream to the owning worker. No public raw port, worker address, guest IP, or
+  jump host reaches the user. The key lives in the rootfs, so it survives
+  hibernation/wake. The CONNECT path retains wake-on-connect and pins the
+  sandbox for the full SSH session. Old baked sandboxd 404s `/ssh-key`
+  (re-run `install-agent`; rebuild the base for openssh first).
 - **Current jailed production benchmark result (2026-08-01, release `c0d0c0f`;
   pool hardening landed in `f12c004`):** the production pool is **8 ready VMs per active worker**
   (`warm_pool_size: 8`). The full matrix passes with **no failures in any run** —
@@ -498,11 +492,9 @@ scripts/              Host setup shell scripts
   to an ordinary secure clone (~734 ms end-to-end in the production probe).
   Size the pool for the latency-critical arrival burst; do not weaken or bypass
   the jailer/network/identity gates to make the fallback look faster.
-- **known_hosts is keyed on the sandbox ID, not host:port**
-  (`cmd/sandbox/ssh.go`). Host keys are unique per sandbox but host ports are
-  recycled from a pool, so OpenSSH's default identity — `[host]:port` — makes
-  the *second* sandbox handed port N look like a compromise of the first:
-  `REMOTE HOST IDENTIFICATION HAS CHANGED!` and a refused connection. The fix is
+- **known_hosts is keyed on the sandbox ID, not the API tunnel**
+  (`cmd/sandbox/ssh.go`). Host keys are unique per sandbox while transports are
+  disposable. The fix is
   `HostKeyAlias=sandbox-<id>` (a UUID, never reused), which both `sandbox ssh`
   and the generated stanza set, plus `CheckHostIP=no` (when on, OpenSSH *also*
   stores an address-keyed entry and the collision returns; it only defaults off
@@ -512,10 +504,9 @@ scripts/              Host setup shell scripts
   `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — that disables
   the check instead of scoping it, and it's why `tests/security-gate.sh` needs
   those flags. `sshOptions` is the single source for the set; a test asserts the
-  wrapper and the stanza can't drift. **Fleet caveat:** the gateway is an HTTP
-  reverse-proxy and does NOT forward raw TCP, so fleet SSH needs a ProxyJump to
-  the owning worker (`--jump`; the sandbox's `host_addr` names that worker) or a
-  WS tunnel — the gateway itself will never route it.
+  wrapper and generated stanza can't drift. The gateway's WebSocket upgrade
+  proxy uses tenant auth externally and replaces it with the owning worker
+  credential; clients never receive that credential.
 - **404 from the gateway means a PROVEN absence; anything indeterminate is 503.**
   An id the gateway cannot resolve is not the same as an id that does not exist:
   answering 404 when a host is merely throttled, at capacity, or mid-adopt tells

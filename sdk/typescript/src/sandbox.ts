@@ -105,8 +105,7 @@ export class Sandbox {
    *             `SANDBOX_API_KEY` environment variables) plus an optional
    *             `timeoutMs` after which the sandbox is auto-destroyed, an
    *             optional `hibernateAfterMs` idle-hibernation override,
-   *             optional `vcpus`/`memMib` resource overrides, and an optional
-   *             `sshPubkey` to authorize SSH as the sandbox user.
+   *             optional `vcpus`/`memMib` resource overrides.
    * @throws {CapacityError} when the fleet has no free slot (retryable).
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
@@ -120,9 +119,6 @@ export class Sandbox {
     }
     if (opts.memMib !== undefined) {
       body.mem_mib = opts.memMib
-    }
-    if (opts.sshPubkey !== undefined) {
-      body.ssh_pubkey = opts.sshPubkey
     }
     const res = await client.request('POST', '/sandboxes', {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
@@ -432,7 +428,7 @@ export class Sandbox {
     throw new SandboxError('Server created a URL-only exposure without returning its public URL')
   }
 
-  /** Allocates a fleet-wide public raw TCP address, suitable for SSH. */
+  /** Allocates a fleet-wide public raw TCP address for a non-HTTP service. SSH is CLI-owned. */
   async exposeRawPort(guestPort: number): Promise<RawPortMapping> {
     const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/raw-ports`, {
       json: { guest_port: guestPort },

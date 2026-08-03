@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
 	"github.com/ayush6624/sandbox/internal/registry"
@@ -359,6 +360,43 @@ func (c *Client) ExposeRawPort(ctx context.Context, id string, guestPort int) (r
 	return pm, nil
 }
 
+// PrepareSSHTunnel authorizes one public key in the guest and makes port 22
+// reachable through the authenticated API tunnel. The server records only a
+// tunnel permission: SSH needs neither a worker-local host port nor a durable
+// public raw-TCP allocation.
+func (c *Client) PrepareSSHTunnel(ctx context.Context, id, publicKey string) error {
+	keyPath := "/v1/sandboxes/" + url.PathEscape(id) + "/ssh-access"
+	if err := c.do(ctx, http.MethodPut, keyPath, map[string]string{"public_key": publicKey}, nil); err != nil {
+		return fmt.Errorf("authorize SSH key: %w", err)
+	}
+	return nil
+}
+
+// DialSandboxPort opens an opaque WebSocket tunnel through the authenticated
+// API. WebSocket framing survives normal HTTPS reverse proxies; NetConn exposes
+// it to the CLI's SSH ProxyCommand as one continuous byte stream.
+func (c *Client) DialSandboxPort(ctx context.Context, id string, guestPort int) (net.Conn, error) {
+	if guestPort < 1 || guestPort > 65535 {
+		return nil, fmt.Errorf("invalid guest port %d", guestPort)
+	}
+	u := fmt.Sprintf("%s/v1/sandboxes/%s/connect/%d", c.wsURL, url.PathEscape(id), guestPort)
+	opts := &websocket.DialOptions{HTTPClient: c.http}
+	if c.token != "" {
+		opts.HTTPHeader = http.Header{"Authorization": {"Bearer " + c.token}}
+	}
+	ws, resp, err := websocket.Dial(ctx, u, opts)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			return nil, fmt.Errorf("dial API tunnel: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+		}
+		return nil, fmt.Errorf("dial API tunnel: %w", err)
+	}
+	ws.SetReadLimit(1 << 20)
+	return websocket.NetConn(ctx, ws, websocket.MessageBinary), nil
+}
+
 // ReadFile streams a file out of the sandbox. The caller must Close the reader.
 func (c *Client) ReadFile(ctx context.Context, id, path string) (io.ReadCloser, error) {
 	resp, err := c.doRaw(ctx, "GET", filePath(id, "files", path), nil)
@@ -411,9 +449,13 @@ func (e *APIError) Error() string { return fmt.Sprintf("server: %s", e.Msg) }
 // apiError builds an *APIError from a non-2xx response, draining the body.
 func apiError(resp *http.Response) *APIError {
 	var e struct {
-		Error string `json:"error"`
+		Error  string `json:"error"`
+		Detail string `json:"detail"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&e)
+	if e.Error == "" {
+		e.Error = e.Detail
+	}
 	if e.Error == "" {
 		e.Error = resp.Status
 	}
@@ -432,6 +474,9 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body io.Reader)
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if strings.HasPrefix(path, "/v1/") && method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("Idempotency-Key", uuid.NewString())
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -459,6 +504,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if strings.HasPrefix(path, "/v1/") && method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("Idempotency-Key", uuid.NewString())
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

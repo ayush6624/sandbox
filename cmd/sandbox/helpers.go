@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 
 	"github.com/ayush6624/sandbox/internal/client"
@@ -8,38 +10,29 @@ import (
 )
 
 var (
-	cfgPath     string
-	socket      string
-	gwAddr      string
-	gwAddrToken string
+	cfgPath string
+	socket  string
+	apiURL  string
+	apiKey  string
 )
 
 // addClientFlags registers flags for commands that talk to the server.
 func addClientFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&cfgPath, "config", "configs/devbox.json", "path to JSON config")
 	cmd.Flags().StringVar(&socket, "socket", "", "override server socket path (defaults to config.socket_path)")
-	cmd.Flags().StringVar(&gwAddr, "gateway", "", "talk to a gateway at this addr (host:port) over TCP instead of the local socket")
-	cmd.Flags().StringVar(&gwAddrToken, "gateway-token", "", "bearer token for the gateway (defaults to config.gateway_token)")
+	cmd.Flags().StringVar(&apiURL, "api-url", os.Getenv("SANDBOX_API_URL"), "sandbox API URL (defaults to SANDBOX_API_URL)")
+	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("SANDBOX_API_KEY"), "sandbox API key (defaults to SANDBOX_API_KEY)")
 }
 
-// dialClient loads the config and returns a Client. With --gateway set it talks
-// to that gateway over TCP with a bearer token (defaulting from config); else it
-// dials the local Unix socket. We don't auto-default to config.gateway_url so
-// host-local flows (e.g. make remote-down) keep using the socket.
+// dialClient uses the same SANDBOX_API_URL/SANDBOX_API_KEY environment as the
+// SDK. With no API URL it retains the host-operator Unix socket path.
 func dialClient() (*config.Config, *client.Client, error) {
+	if apiURL != "" {
+		return nil, client.NewHTTP(apiURL, apiKey), nil
+	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return nil, nil, err
-	}
-	if gwAddr != "" {
-		token := gwAddrToken
-		if token == "" {
-			token = cfg.GatewayAPIToken
-			if token == "" && cfg.ManagementTransport == "development" {
-				token = cfg.GatewayToken
-			}
-		}
-		return cfg, client.NewHTTP(gwAddr, token), nil
 	}
 	sock := cfg.SocketPath
 	if socket != "" {

@@ -41,7 +41,6 @@ export interface CreateSandboxOptions {
   idleTimeoutMs?: number
   resources?: SandboxResources
   metadata?: Record<string, string>
-  sshPublicKey?: string
   requestTimeoutMs?: number
   idempotencyKey?: string
   signal?: AbortSignal
@@ -161,6 +160,13 @@ export interface OperationState<T> {
   completedAt?: Date
 }
 
+export interface SshInstructions {
+  /** The only supported user-facing SSH command. */
+  command: string
+  /** Short copy suitable for a web UI, terminal hint, or documentation. */
+  description: string
+}
+
 interface Page<T> {
   items: T[]
   nextPageToken?: string
@@ -240,6 +246,17 @@ export class ClientSandbox {
   get createdAt(): Date { return new Date(this.raw.created_at) }
   get expiresAt(): Date | undefined { return this.raw.expires_at ? new Date(this.raw.expires_at) : undefined }
 
+  /**
+   * User-facing SSH guidance. Endpoint allocation, key authorization, and
+   * host-key handling belong to the CLI rather than the SDK.
+   */
+  get sshInstructions(): SshInstructions {
+    return {
+      command: `sandbox ssh ${this.id}`,
+      description: 'Install the sandbox CLI, set SANDBOX_API_URL and SANDBOX_API_KEY, then run this command.',
+    }
+  }
+
   async refresh(signal?: AbortSignal): Promise<this> {
     this.raw = await this.transport.get<ApiSandbox>(`/v1/sandboxes/${encodeURIComponent(this.id)}`, {}, signal)
     return this
@@ -300,7 +317,7 @@ export class ClientSandbox {
     return portForwardFromApi(raw)
   }
 
-  /** Allocates a durable public TCP address, suitable for SSH. */
+  /** Allocates a durable public TCP address for a non-HTTP service. SSH is CLI-owned. */
   async createRawPortForward(
     guestPort: number, control: RequestControl = {},
   ): Promise<RawPortForwardResource> {
@@ -477,7 +494,7 @@ export class PortForwardsCollection {
     )
     return portForwardFromApi(raw)
   }
-  /** Allocates a durable public TCP address, suitable for SSH. */
+  /** Allocates a durable public TCP address for a non-HTTP service. SSH is CLI-owned. */
   async createRaw(
     sandboxId: string, guestPort: number, control: RequestControl = {},
   ): Promise<RawPortForwardResource> {
@@ -500,7 +517,6 @@ function createBody(options: CreateSandboxOptions): ApiCreate {
   if (options.name !== undefined) body.name = options.name
   if (options.source !== undefined) body.source = sourceToApi(options.source)
   if (options.metadata !== undefined) body.metadata = options.metadata
-  if (options.sshPublicKey !== undefined) body.ssh_public_key = options.sshPublicKey
   if (options.resources !== undefined) {
     body.resources = { vcpu: options.resources.vcpus, memory_mib: options.resources.memoryMib }
   }

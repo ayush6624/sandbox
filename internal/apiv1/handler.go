@@ -57,6 +57,27 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/operations/{id}", h.getOperation)
 	mux.Handle("POST /v1/sandboxes/{id}/port-forwards", h.idem.Wrap(http.HandlerFunc(h.createPortForward)))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/port-forwards", h.listPortForwards)
+	mux.Handle("PUT /v1/sandboxes/{id}/ssh-access", h.idem.Wrap(http.HandlerFunc(h.prepareSSHAccess)))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/connect/{port}", h.connectPort)
+}
+
+// prepareSSHAccess and connectPort are CLI data-plane adapters. Keeping their
+// implementation on the established worker routes means both a direct worker
+// and a fleet gateway apply the same wake, activity, and authorization rules.
+func (h *Handler) prepareSSHAccess(w http.ResponseWriter, r *http.Request) {
+	h.forwardCLIPath(w, r, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/ssh-key")
+}
+
+func (h *Handler) connectPort(w http.ResponseWriter, r *http.Request) {
+	h.forwardCLIPath(w, r, "/sandboxes/"+url.PathEscape(r.PathValue("id"))+"/connect/"+url.PathEscape(r.PathValue("port")))
+}
+
+func (h *Handler) forwardCLIPath(w http.ResponseWriter, r *http.Request, path string) {
+	forwarded := r.Clone(r.Context())
+	forwarded.URL.Path = path
+	forwarded.URL.RawPath = ""
+	forwarded.RequestURI = path
+	h.legacy.ServeHTTP(w, forwarded)
 }
 
 func (h *Handler) sandboxAction(w http.ResponseWriter, r *http.Request) {
@@ -114,12 +135,11 @@ type Snapshot struct {
 }
 
 type createRequest struct {
-	Name         string            `json:"name"`
-	Source       Source            `json:"source"`
-	Lifecycle    Lifecycle         `json:"lifecycle"`
-	Resources    *Resources        `json:"resources"`
-	Metadata     map[string]string `json:"metadata"`
-	SSHPublicKey string            `json:"ssh_public_key"`
+	Name      string            `json:"name"`
+	Source    Source            `json:"source"`
+	Lifecycle Lifecycle         `json:"lifecycle"`
+	Resources *Resources        `json:"resources"`
+	Metadata  map[string]string `json:"metadata"`
 }
 
 type updateRequest struct {
@@ -183,7 +203,6 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 		"name":                body.Name,
 		"timeout_sec":         body.Lifecycle.TTLSeconds,
 		"hibernate_after_sec": body.Lifecycle.IdleTimeoutSeconds,
-		"ssh_pubkey":          body.SSHPublicKey,
 	}
 	if body.Resources != nil {
 		legacyBody["vcpus"] = body.Resources.VCPU
@@ -193,7 +212,6 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 	if source.Type == "snapshot" {
 		path = "/snapshots/" + url.PathEscape(source.ID) + "/fanout"
 		legacyBody["count"] = 1
-		delete(legacyBody, "ssh_pubkey") // legacy fanout does not provision keys
 	}
 	rec := h.call(r, http.MethodPost, path, legacyBody)
 	if rec.Code < 200 || rec.Code >= 300 {

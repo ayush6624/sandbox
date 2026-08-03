@@ -420,7 +420,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /sandboxes/{id}/ports", s.handleListPorts)
 	mux.HandleFunc("DELETE /sandboxes/{id}/ports/{port}", s.handleDeletePort)
 	mux.HandleFunc("PUT /sandboxes/{id}/ports/{port}/public", s.handleSetPublicPort)
+	mux.HandleFunc("PUT /sandboxes/{id}/ssh-key", s.handleAuthorizeSSHKey)
 	mux.HandleFunc("CONNECT /sandboxes/{id}/connect/{port}", s.handleConnectPort)
+	mux.HandleFunc("GET /sandboxes/{id}/connect/{port}", s.handleConnectPortWebSocket)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.handleAgentProxy("exec"))
 	mux.HandleFunc("POST /sandboxes/{id}/exec/stream", s.handleAgentProxy("exec/stream"))
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.handleAgentProxy("files"))
@@ -791,6 +793,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // sshKeyPrefixes are the authorized_keys key-type tokens we accept.
+const sshPort = 22
+
 var sshKeyPrefixes = []string{
 	"ssh-ed25519 ", "ssh-rsa ", "ssh-dss ", "ecdsa-sha2-",
 	"sk-ecdsa-sha2-", "sk-ssh-ed25519@openssh.com ",
@@ -818,6 +822,60 @@ func validateSSHPubkey(key string) error {
 		}
 	}
 	return errors.New("ssh_pubkey must be an OpenSSH public key (ssh-ed25519, ssh-rsa, ecdsa-sha2-*, …)")
+}
+
+// handleAuthorizeSSHKey installs a key on an existing sandbox for the CLI SSH
+// flow. The request pins and wakes a hibernated sandbox before calling the same
+// guest operation used during creation.
+func (s *Server) handleAuthorizeSSHKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	body.PublicKey = strings.TrimSpace(body.PublicKey)
+	if body.PublicKey == "" {
+		httpError(w, http.StatusBadRequest, errors.New("public_key is required"))
+		return
+	}
+	if err := validateSSHPubkey(body.PublicKey); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := s.reg.Get(r.Context(), id); err != nil {
+		capacityOrHTTPError(w, statusFor(err), err)
+		return
+	}
+	done := s.act.begin(id)
+	defer done()
+	sb, err := s.ensureRunning(r.Context(), id)
+	if err != nil {
+		capacityOrHTTPError(w, statusFor(err), err)
+		return
+	}
+	if err := installSSHKey(r.Context(), sb.GuestIP, body.PublicKey); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	// CONNECT is authorized by the same registry row as every other forwarded
+	// stream. This row intentionally has no host port and needs no ingress
+	// domain: it is a tunnel permission consumed only through the authenticated
+	// API, not a public URL allocation.
+	lifecycle := s.wakeLock(id)
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	if _, err := s.reg.Get(r.Context(), id); err != nil {
+		capacityOrHTTPError(w, statusFor(err), err)
+		return
+	}
+	if _, err := s.reg.AddURLPort(r.Context(), id, sshPort); err != nil {
+		httpError(w, http.StatusInternalServerError, fmt.Errorf("authorize SSH tunnel: %w", err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // acquireCreate takes one bring-up slot, blocking until one frees or ctx ends.

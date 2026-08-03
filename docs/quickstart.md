@@ -92,10 +92,10 @@ curl -s -X DELETE -H "Authorization: Bearer $SANDBOX_API_KEY" \
   $SANDBOX_API_URL/sandboxes/$ID
 ```
 
-## Option C: CLI (on or near the server)
+## Option C: CLI
 
-The `sandbox` binary doubles as a client. On the host itself it talks over the
-local Unix socket (root required); from anywhere else, point it at a gateway:
+The same binary is the end-user client. From a laptop it uses the same API URL
+and key as the SDK; on the host it can still use the local Unix socket:
 
 ```bash
 sudo ./sandbox up                                  # create; prints JSON + URL
@@ -106,9 +106,16 @@ echo 'hello' | sudo ./sandbox write <id> /home/sandbox/hello.txt
 sudo ./sandbox read <id> /home/sandbox/hello.txt
 sudo ./sandbox down <id>
 
-# Against a fleet gateway (no sudo needed — plain TCP + token):
-./sandbox up --gateway 100.69.9.101:9090 --gateway-token $SANDBOX_API_KEY
+# From a user's machine (no private worker IP or jump host):
+export SANDBOX_API_URL=https://api.getaion.ai
+export SANDBOX_API_KEY=<token>
+sandbox list
+sandbox ssh <id>
 ```
+
+`sandbox ssh` selects or creates a local Ed25519 identity, authorizes it in the
+sandbox, and tunnels OpenSSH through the authenticated API. SDKs and web UIs
+should show this command rather than exposing an SSH hostname and port.
 
 ## Where to go next
 

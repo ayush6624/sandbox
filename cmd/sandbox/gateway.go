@@ -50,7 +50,8 @@ func gatewayCmd() *cobra.Command {
 Hosts register with separate worker-control and callback credentials:
 'serve --gateway <url> --gateway-token <worker-control-token> --listen <addr> --worker-token <callback-token>'.
 The gateway exposes the same API as a single server; point the CLI at it with
-'--gateway https://<addr> --gateway-token <client-token>'.
+'SANDBOX_API_URL=https://<addr> SANDBOX_API_KEY=<client-token>' or the
+equivalent '--api-url' and '--api-key' client flags.
 
 The public ingress edge is a third trust domain: '--edge-token' gates
 'GET /route/{id}' and 'GET /raw-route/{port}', which return a worker's control

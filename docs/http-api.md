@@ -189,8 +189,7 @@ Counters (reset only on restart): `sandbox_creates_ok_total`,
 Body (optional — empty body is fine):
 
 ```json
-{"name": "my devbox", "timeout_sec": 3600, "hibernate_after_sec": 600, "vcpus": 4, "mem_mib": 4096,
- "ssh_pubkey": "ssh-ed25519 AAAAC3Nza… me@laptop"}
+{"name": "my devbox", "timeout_sec": 3600, "hibernate_after_sec": 600, "vcpus": 4, "mem_mib": 4096}
 ```
 
 - `name` — display label, at most 64 bytes, no control characters;
@@ -201,22 +200,10 @@ Body (optional — empty body is fine):
 - `vcpus` / `mem_mib` — per-sandbox resource overrides; 0/omit = the host
   template's defaults. Bounds-checked (400 on negative, more vcpus than host
   cores, mem below 128 MiB or above host RAM).
-- `ssh_pubkey` — a single OpenSSH public key line, installed as
-  `/home/sandbox/.ssh/authorized_keys` for key-only SSH as `sandbox`
-  (`400` on multi-line input or an unknown key type). Unlike other
-  create-time extras this is **not** best-effort: if the key can't be
-  installed the sandbox is destroyed and the create fails, so a sandbox
-  handed back with SSH requested is always reachable. The key lives in the
-  rootfs, so it survives hibernation/wake with no re-push. On a fleet,
-  allocate public raw TCP for guest port 22
-  (`POST /sandboxes/{id}/raw-ports`) and connect to the returned
-  `public_host:public_port`; users never route to a private worker. A
-  single-host deployment can use `POST /sandboxes/{id}/ports` and its local
-  `host_port`. Both paths carry wake-on-connect.
-
-Every independent create rotates the guest's SSH host keys and clears login
-keys inherited from its image or snapshot before installing `ssh_pubkey`.
-Pause/resume preserves both identities.
+SSH is not configured through create. Applications display
+`sandbox ssh <id>`; the CLI authorizes its local key and opens an authenticated
+API tunnel without publishing port 22. Every independent create still rotates
+the guest host key and clears login keys inherited from its image or snapshot.
 
 Returns `201 Sandbox`. Blocks until the sandbox's in-guest agent is healthy,
 so the sandbox is usable the moment this returns. Served from a pre-booted

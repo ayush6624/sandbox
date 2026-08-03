@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/coder/websocket"
+
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -114,4 +116,45 @@ func TestConnectTunnelsOpaqueBytes(t *testing.T) {
 	}
 	_ = edgeConn.Close()
 	<-done
+}
+
+func TestConnectWebSocketTunnelsOpaqueBytes(t *testing.T) {
+	s := connectTestServer(t)
+	if _, err := s.reg.AddURLPort(context.Background(), "sandbox-id", 22); err != nil {
+		t.Fatal(err)
+	}
+	workerBackend, guest := net.Pipe()
+	s.pf.dial = func(context.Context, string, int) (net.Conn, error) {
+		return workerBackend, nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /sandboxes/{id}/connect/{port}", s.handleConnectPortWebSocket)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/sandboxes/sandbox-id/connect/22"
+	ws, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
+	defer front.Close()
+	go func() {
+		payload := make([]byte, 4)
+		_, _ = io.ReadFull(guest, payload)
+		if string(payload) == "ping" {
+			_, _ = guest.Write([]byte("pong"))
+		}
+		_ = guest.Close()
+	}()
+	if _, err := front.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 4)
+	if _, err := io.ReadFull(front, payload); err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "pong" {
+		t.Fatalf("websocket tunnel response = %q", payload)
+	}
 }

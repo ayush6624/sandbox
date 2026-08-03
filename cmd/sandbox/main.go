@@ -17,6 +17,6 @@ func rootCmd() *cobra.Command {
 		Use:   "sandbox",
 		Short: "Firecracker microVM sandboxes for Node/Python dev",
 	}
-	root.AddCommand(serveCmd(), gatewayCmd(), upCmd(), downCmd(), listCmd(), renameCmd(), doctorCmd(), execCmd(), shellCmd(), sshCmd(), sshConfigCmd(), readCmd(), writeCmd(), lsCmd(), exposeCmd(), unexposeCmd(), portsCmd(), hibernateCmd(), installAgentCmd(), stopServerCmd())
+	root.AddCommand(serveCmd(), gatewayCmd(), upCmd(), downCmd(), listCmd(), renameCmd(), doctorCmd(), execCmd(), shellCmd(), sshCmd(), sshProxyCmd(), sshConfigCmd(), readCmd(), writeCmd(), lsCmd(), exposeCmd(), unexposeCmd(), portsCmd(), hibernateCmd(), installAgentCmd(), stopServerCmd())
 	return root
 }

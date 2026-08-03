@@ -216,6 +216,10 @@ test('configured client exposes standard resources and lifecycle methods', async
   assert.equal(first.source.type, 'template')
   assert.equal(first.ttlMs, 11_000)
   assert.equal(first.resources.memoryMib, 1024)
+  assert.deepEqual(first.sshInstructions, {
+    command: 'sandbox ssh sandbox-1',
+    description: 'Install the sandbox CLI, set SANDBOX_API_URL and SANDBOX_API_KEY, then run this command.',
+  })
   await first.pause()
   assert.equal(first.status, 'paused')
   await first.resume()

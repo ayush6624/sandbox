@@ -33,6 +33,7 @@ export type {
   PortForwardCreateOptions,
   BatchResult,
   OperationState,
+  SshInstructions,
 } from './v1.js'
 export {
   SandboxError,

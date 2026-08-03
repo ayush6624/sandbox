@@ -39,6 +39,37 @@ func TestInternalDispatchPreservesNonNilEmptyBody(t *testing.T) {
 	}
 }
 
+func TestCLIPathsAreAdaptedToWorkerDataPlane(t *testing.T) {
+	seen := make(chan string, 2)
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Method + " " + r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := testHandler(t, legacy)
+
+	keyReq := httptest.NewRequest(http.MethodPut, "/v1/sandboxes/abc/ssh-access", strings.NewReader(`{"public_key":"ssh-ed25519 AAAA"}`))
+	keyReq.Header.Set("Idempotency-Key", "authorize-key")
+	keyOut := httptest.NewRecorder()
+	handler.ServeHTTP(keyOut, keyReq)
+	if keyOut.Code != http.StatusNoContent {
+		t.Fatalf("key status=%d body=%s", keyOut.Code, keyOut.Body.String())
+	}
+
+	connectReq := httptest.NewRequest(http.MethodGet, "/v1/sandboxes/abc/connect/22", nil)
+	connectOut := httptest.NewRecorder()
+	handler.ServeHTTP(connectOut, connectReq)
+	if connectOut.Code != http.StatusNoContent {
+		t.Fatalf("connect status=%d body=%s", connectOut.Code, connectOut.Body.String())
+	}
+
+	if got := <-seen; got != "PUT /sandboxes/abc/ssh-key" {
+		t.Fatalf("key dispatch = %q", got)
+	}
+	if got := <-seen; got != "GET /sandboxes/abc/connect/22" {
+		t.Fatalf("connect dispatch = %q", got)
+	}
+}
+
 type fakeLegacy struct {
 	mu      sync.Mutex
 	creates int

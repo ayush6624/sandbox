@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // handleConnectPort upgrades an authenticated worker API connection into an
@@ -88,6 +90,59 @@ func (s *Server) handleConnectPort(w http.ResponseWriter, r *http.Request) {
 	if rw.Reader.Buffered() > 0 {
 		front = &bufferedConn{Conn: client, r: rw.Reader}
 	}
+	pipeConns(front, backend)
+}
+
+// handleConnectPortWebSocket is the public CLI transport for opaque streams.
+// Unlike HTTP CONNECT, WebSocket upgrades traverse ordinary HTTPS reverse
+// proxies and CDNs. Binary frames are exposed as one continuous net.Conn to
+// the guest; the same exposure, wake, activity, and fan-in rules apply.
+func (s *Server) handleConnectPortWebSocket(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	guestPort, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil || guestPort < 1 || guestPort > 65535 {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("invalid guest port %q", r.PathValue("port")))
+		return
+	}
+	release, err := s.pf.limits.acquire(id)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		httpError(w, http.StatusTooManyRequests, err)
+		return
+	}
+	defer release()
+	exposed, err := s.portIsExposed(r.Context(), id, guestPort)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if !exposed {
+		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s does not expose guest port %d", id, guestPort))
+		return
+	}
+	done := s.act.begin(id)
+	defer done()
+	ctx, cancel := context.WithTimeout(r.Context(), portDialWakeTimeout)
+	backend, err := s.pf.dial(ctx, id, guestPort)
+	cancel()
+	if err != nil {
+		status := statusFor(err)
+		if status == http.StatusInternalServerError {
+			status = http.StatusBadGateway
+		}
+		capacityOrHTTPError(w, status, fmt.Errorf("dial guest port %d: %w", guestPort, err))
+		return
+	}
+	defer backend.Close()
+
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	defer ws.CloseNow()
+	ws.SetReadLimit(1 << 20)
+	front := websocket.NetConn(r.Context(), ws, websocket.MessageBinary)
+	defer front.Close()
 	pipeConns(front, backend)
 }
 
