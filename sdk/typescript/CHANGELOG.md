@@ -1,15 +1,18 @@
 # Changelog
 
-## Unreleased
+## 2.3.0 - 2026-08-03
 
 ### Changed
 
+- **Breaking at compile time (type-level only, no runtime behavior change):**
+  removed `sshPublicKey` / `sshPubkey` from SDK create options. Code passing
+  either field stops type-checking and must drop it; nothing silently changes
+  behavior at runtime. Applications no longer manage user SSH keys or build
+  `ssh -p ...` commands.
 - SSH is now CLI-owned. `ClientSandbox.sshInstructions` returns the command a
   web UI or SDK integration should show (`sandbox ssh <id>`); the CLI handles
   key authorization, wake-on-connect, host-key safety, and the authenticated
   byte stream without allocating a public SSH port.
-- Removed `sshPublicKey` / `sshPubkey` from SDK create options. Applications no
-  longer manage user SSH keys or build `ssh -p ...` commands.
 - Raw TCP forwarding remains available for non-HTTP services, independent of
   the SSH workflow.
 
