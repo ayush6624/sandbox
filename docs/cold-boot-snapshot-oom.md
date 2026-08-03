@@ -1,6 +1,8 @@
 # Full snapshots of jailed VMs are OOM-killed by their own cgroup
 
-Status: **root cause identified; fix implemented, pending fleet verification.**
+Status: **partially fixed and verified on the fleet.** 512 and 1024 MiB
+sandboxes now snapshot successfully; **256 MiB still dies and is still
+destructive.** See [Verification](#verification-what-works-and-what-does-not).
 Reproduced on the production fleet 2026-08-03 at release `860406d`. Pre-existing —
 see [Attribution](#attribution). For the underlying memory model in plain terms,
 see [cgroup-memory-model.md](cgroup-memory-model.md).
@@ -162,6 +164,64 @@ survives. An error instead of silent destruction is the point.
   it is slow snapshot vs destroyed sandbox.
 - Watch: a slower freeze eats more of `shutdownAll`'s 100 s drain budget. Worth
   re-measuring if full-snapshot sandboxes become common.
+
+### Verification: what works and what does not
+
+Rolled and swept on the fleet three times (`81ea99c`, `a58186f`, `ecb610b`):
+
+| `mem_mib` | before the fix | after |
+| --- | --- | --- |
+| 128 | OK | OK |
+| 256 | died | **still dies (`EOF`), sandbox still destroyed** |
+| 512 | died | **OK** (`format=full`) |
+| 1024 | died | **OK** (`format=full`) |
+
+A strict improvement, but incomplete. Two hypotheses were tested on the fleet and
+both were wrong, which is worth recording so they are not retried:
+
+1. **A fixed 64 MiB margin is enough** (`81ea99c`). It fixed 512/1024 but *broke*
+   128 and 256, because demanding a full margin under `memory.max` refuses a
+   small guest that sits close to its own small limit. Fixed in `a58186f` by
+   clamping rather than refusing.
+2. **The margin was too large for tight leaves** (`ecb610b`). Making it
+   `slack/4` (clamped to 4–64 MiB) restored 128 but did **not** fix 256.
+
+Why 256 is the stubborn case, and why the result is non-monotonic: `memory.high`
+can only help if there is something reclaimable *and* room to reclaim into. A
+guest whose footprint already sits near its own limit has neither — the anonymous
+guest pages cannot be reclaimed (swap is off) and there is no slack to absorb the
+write. `memory.high` then throttles without making progress, usage still climbs to
+`memory.max`, and the OOM happens anyway. 512 and 1024 escape because those
+guests do *not* fill their configured RAM, so they carry real slack; 128 escapes
+because its write is small.
+
+**The fail-closed guard does not catch this case**, which is the important
+shortfall: a ceiling *can* be placed (`current < limit`), so the window proceeds —
+it just does not help. The refusal predicate is too weak.
+
+### Completing the fix
+
+Two options, and they compose:
+
+- **Refuse on projected burst, not just on placeability.** The expected page-cache
+  burst is approximately the guest's memory size, which is available at
+  `Prepare` time (`LaunchRequest.MemMIB`) and can be captured in the window
+  closure. Refuse when `memory.max - memory.current` is too small a fraction of
+  it. On the four measured points the passing cases had a slack/write ratio of
+  roughly 0.72–0.94 and the failing one 0.61, so a threshold near 0.7 separates
+  them — but that is a curve fitted to four points, and it only converts
+  destruction into a clean error rather than making the snapshot work.
+- **Raise `memory.max` for the window, bounded by parent headroom.** The only
+  option that actually makes the stubborn case succeed, because it is the one that
+  manufactures the missing room. The jailer can read the parent task cgroup's
+  `memory.max`/`memory.current` directly, raise the leaf only when the parent has
+  the headroom, and fall back to refusing otherwise. This is the change whose
+  failure mode is "OOM serve and every VM at once", so it wants care, and
+  serializing snapshot windows per host.
+
+Recommended: both — the refusal first, since it stops the data loss immediately,
+then the `memory.max` window so overrides at every size can actually be
+snapshotted and hibernated.
 
 ### Options considered and rejected
 
