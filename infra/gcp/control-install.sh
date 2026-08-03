@@ -150,20 +150,91 @@ if [ "$SECTIONS" = gateway ]; then
 fi
 
 # --- 3. Prometheus ---
-if [ ! -x /usr/local/bin/prometheus ]; then
+# promtool ships in the same tarball and gates the rendered config below, so a
+# host that already has prometheus but not promtool must still re-fetch.
+if [ ! -x /usr/local/bin/prometheus ] || [ ! -x /usr/local/bin/promtool ]; then
   tmp="$(mktemp -d)"
   curl -fsSL -o "$tmp/p.tgz" "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
   tar xzf "$tmp/p.tgz" -C "$tmp" --strip-components=1
   install -m 0755 "$tmp/prometheus" /usr/local/bin/prometheus
+  install -m 0755 "$tmp/promtool" /usr/local/bin/promtool
   rm -rf "$tmp"
 fi
 mkdir -p /etc/prometheus /var/lib/prometheus
+
+# The edge job discovers a REGIONAL MIG, but gce_sd_config is zone-scoped
+# (`zone` is required and single-valued), so it needs one entry per zone in the
+# region. Enumerate the region's LIVE zone list rather than assuming the -a/-b/-c
+# suffixes, because regions disagree — us-central1 has an -f and no -d. gcloud
+# here runs on the control VM against the metadata server, so it never prompts.
+# No pipelines: this script runs under `set -o pipefail`, where `| head` can
+# SIGPIPE the producer and abort the install with no error (see the autoscaler
+# note below).
+#
+# The filter uses `:` (the "has" operator), NOT `=`. `tags` is a REPEATED field
+# and the GCE list-filter grammar rejects `=` against one: every `=` spelling
+# ('tags.items = sandbox-edge', quoted, or parenthesized) returns
+# 400 "Invalid list filter expression", which is only a per-job discovery error,
+# so the edge job silently discovers ZERO targets while Prometheus looks healthy.
+# This is NOT gcloud's --filter language, which does accept `=` here — that
+# difference is what made the original expression look correct when tested by
+# hand. Verified against compute.googleapis.com directly.
+edge_zone="${ZONE:-}"
+if [ -z "$edge_zone" ]; then
+  edge_zone="$(curl -sf -H 'Metadata-Flavor: Google' \
+    http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null)" || edge_zone=""
+  edge_zone="${edge_zone##*/}"   # projects/<num>/zones/<zone> -> <zone>
+fi
+EDGE_REGION="${edge_zone%-*}"
+edge_zones=""
+if [ -n "$EDGE_REGION" ]; then
+  edge_zones="$(gcloud compute zones list --project="$PROJECT" \
+    --filter="region:${EDGE_REGION}" --format='value(name)' 2>/dev/null)" || edge_zones=""
+  if [ -z "$edge_zones" ]; then
+    # No credentials or no network: fall back to the conventional suffixes. A
+    # zone that does not exist is only a per-job DISCOVERY error (logged, job
+    # shows unhealthy), never a fatal parse error — so the worst case is
+    # possibly-missing edge targets, not a dead Prometheus.
+    edge_zones="${EDGE_REGION}-a
+${EDGE_REGION}-b
+${EDGE_REGION}-c"
+  fi
+fi
+EDGE_GCE_SD=""
+while IFS= read -r z; do
+  [ -n "$z" ] || continue
+  EDGE_GCE_SD="${EDGE_GCE_SD}      - project: ${PROJECT}
+        zone: ${z}
+        port: 9091
+        filter: 'tags.items:"sandbox-edge"'
+"
+done <<EOF
+$edge_zones
+EOF
+if [ -z "$EDGE_GCE_SD" ]; then
+  # Never emit an empty `gce_sd_configs:` list — that is the zone-less config's
+  # failure mode all over again (fatal parse error, crash-loop). Drop the job.
+  echo ">> WARNING: could not determine edge zones; sandbox-edge scrape job disabled" >&2
+  EDGE_GCE_SD="      []"
+fi
+EDGE_GCE_SD="${EDGE_GCE_SD%$'\n'}"
+
 GATEWAY_TOKEN="$GW_TOKEN" CONTROL_IP="$CONTROL_IP" GW_PORT="$GW_PORT" PROJECT="$PROJECT" \
+  EDGE_GCE_SD="$EDGE_GCE_SD" \
   envsubst < "${REMOTE_DIR}/prometheus/prometheus.yml.tpl" > /etc/prometheus/prometheus.yml
 SLOTS_PER_HOST="$SLOTS_PER_HOST" HEADROOM_SLOTS="$HEADROOM_SLOTS" \
   LEAD_SECONDS="${LEAD_SECONDS:-90}" \
   RAW_PORT_CAPACITY="$((${RAW_PORT_MAX:-29999} - ${RAW_PORT_MIN:-20000} + 1))" \
   envsubst < "${REMOTE_DIR}/prometheus/rules.yml.tpl" > /etc/prometheus/rules.yml
+
+# Validate BEFORE the restart at the end of this script, and FAIL THE DEPLOY on a
+# bad render. `systemctl restart` is not a check: for a Type=simple unit it
+# returns 0 the moment the process forks, so a config prometheus rejects at
+# startup exits 2 milliseconds later and Restart=always crash-loops it while the
+# deploy reports success. A zone-less gce_sd_config did exactly that for three
+# days (restart counter 66773) with Grafana blank fleet-wide. `check config` also
+# validates the rule_files it references, so rules.yml is covered too.
+promtool check config /etc/prometheus/prometheus.yml
 cat >/etc/systemd/system/prometheus.service <<UNIT
 [Unit]
 Description=Prometheus
@@ -323,4 +394,21 @@ fi
 # restart (not enable --now): a redeploy must pick up new binaries/config on
 # already-running services. Gateway routes rebuild from heartbeats in <=5s.
 systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler grafana
+
+# `systemctl restart` proves nothing about a Type=simple unit: it returns 0 as
+# soon as the process forks. A service that rejects its config and exits, or
+# fails to bind, then crash-loops behind a green deploy — which is how a broken
+# prometheus stayed broken for three days. So settle briefly and assert each unit
+# is STILL up. Cheap, and it converts a silent control-plane outage into a failed
+# deploy.
+sleep 5
+install_failed=""
+for unit in nomad-server sandbox-gateway prometheus nomad-autoscaler grafana; do
+  if ! systemctl is-active --quiet "$unit"; then
+    echo "error: $unit is not active after restart" >&2
+    systemctl --no-pager --lines=15 status "$unit" >&2 || true
+    install_failed=1
+  fi
+done
+[ -z "$install_failed" ] || exit 1
 echo ">> control-install done"

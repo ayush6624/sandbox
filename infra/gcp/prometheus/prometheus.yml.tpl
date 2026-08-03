@@ -1,5 +1,13 @@
 # Rendered by control-install.sh (envsubst):
-# ${GATEWAY_TOKEN}, ${CONTROL_IP}, ${GW_PORT}, ${PROJECT}.
+# ${GATEWAY_TOKEN}, ${CONTROL_IP}, ${GW_PORT}, ${PROJECT}, and EDGE_GCE_SD.
+#
+# Write EDGE_GCE_SD as a BARE name everywhere except its one substitution site
+# below — never in the dollar-brace form, not even inside a comment. envsubst has
+# no idea what a YAML comment is, so a dollar-brace mention up here expands the
+# multi-line block into the middle of this very comment: the first line stays
+# commented, every line after it becomes top-level YAML, and the file dies with
+# "field zone not found in type config.plain". Single-line values like ${PROJECT}
+# are safe to mention this way; a multi-line one is not.
 # The gateway deliberately listens only on the private VPC address, so local
 # control-plane consumers must use that address rather than loopback.
 global:
@@ -42,12 +50,24 @@ scrape_configs:
   # Edge instances are a regional MIG, so discover them by their network tag.
   # The edge metrics listener is VPC-only; public forwarding rules never expose
   # 9091.
+  #
+  # gce_sd_config is ZONE-scoped: `zone` is REQUIRED and holds exactly one value,
+  # so a REGIONAL MIG needs one entry per zone in the region — an edge instance
+  # can land in any of them. control-install.sh renders EDGE_GCE_SD as that
+  # per-zone list from the region's live zone list.
+  #
+  # Omitting `zone` is NOT a soft failure that just yields no edge targets:
+  # Prometheus rejects the WHOLE FILE with "GCE SD configuration requires a
+  # zone" and exits 2, so the service crash-loops and every unrelated dashboard
+  # goes blank. That shipped in 24ee226 and silently held the fleet's entire
+  # metrics stack down for three days — nothing scraped, Grafana reading "No
+  # data" fleet-wide — because `systemctl restart` returns 0 for a Type=simple
+  # unit as soon as the process forks, long before it exits. `promtool check
+  # config` now gates the deploy so a bad render can never reach a restart.
   - job_name: sandbox-edge
     metrics_path: /metrics
     gce_sd_configs:
-      - project: ${PROJECT}
-        port: 9091
-        filter: 'tags.items = sandbox-edge'
+${EDGE_GCE_SD}
     relabel_configs:
       - source_labels: [__meta_gce_instance_name]
         target_label: instance_name
