@@ -1,0 +1,66 @@
+---
+title: Networking and port forwards
+description: Choose between worker-local host ports, public HTTP URLs, and durable raw TCP addresses.
+---
+
+# Networking and port forwards
+
+Guest ports are private until explicitly exposed. Port-forward methods are `/v1`
+resource calls; the command used to start a service is a current non-versioned
+execution call. Start the guest service first, then create a port forward and
+inspect the returned address type.
+
+```ts
+await sandbox.commands.run(
+  "nohup python3 -m http.server 3000 --directory /home/sandbox/app >/tmp/http-server.log 2>&1 </dev/null &",
+);
+const forward = await sandbox.createPortForward(3000);
+
+console.log(forward.mode, forward.hostPort, forward.url);
+```
+
+## Choose an access type
+
+| Need                        | Call                                              | Result                                | Important constraint                                          |
+| --------------------------- | ------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------- |
+| Worker-routable `host:port` | `createPortForward(port)` or `{ hostPort: true }` | `hostPort`; may also include `url`    | The worker host must be reachable to the caller.              |
+| Public HTTP ingress only    | `createPortForward(port, { hostPort: false })`    | `url`, no `hostPort`                  | Requires a worker ingress domain; consumes no host-port slot. |
+| Non-HTTP public TCP         | `createRawPortForward(port)`                      | `address`, `publicHost`, `publicPort` | Use for protocols such as databases; not SSH.                 |
+| List active mappings        | `listPortForwards()`                              | Array of mappings                     | Inspect each mapping's `mode` and fields.                     |
+
+<Note>
+  An address mapping can contain more than one address type. Do not infer a
+  single address from `mode` alone; use the specific field you need and test it
+  for presence. A URL-only mapping intentionally has no `hostPort`.
+</Note>
+
+## HTTP examples
+
+```ts
+// Ask the worker for its default HTTP/host exposure behavior.
+const normal = await sandbox.createPortForward(3000);
+if (normal.url) await fetch(normal.url);
+
+// Reserve no worker host port; use public HTTP ingress only.
+const urlOnly = await sandbox.createPortForward(8080, { hostPort: false });
+if (!urlOnly.url) throw new Error("server did not return an ingress URL");
+await fetch(urlOnly.url);
+```
+
+## Raw TCP example
+
+```ts
+const database = await sandbox.createRawPortForward(5432);
+console.log(`Connect your TCP client to ${database.address}`);
+```
+
+Raw TCP and HTTP ingress have different protocol purposes. Ingress terminates
+TLS and speaks HTTP; use raw TCP for a non-HTTP protocol. SSH remains a
+CLI-owned capability—show `sandbox.sshInstructions.command` rather than
+building an SSH integration.
+
+## Next steps
+
+- [Use files and commands to launch a service](files)
+- [Handle capacity and transport failures](errors-retries)
+- [Review the port-forward resource inventory](sdk-reference)

@@ -1,0 +1,72 @@
+---
+title: FleetClient operator API
+description: Read gateway host inventory with a separately authenticated operator client.
+---
+
+# FleetClient operator API
+
+`FleetClient` is for fleet owners and control-plane tooling, not tenant
+applications. Host inventory discloses worker addresses and live capacity, so
+it uses the gateway worker-control credential in a separate trust domain.
+
+<Warning>
+  Never provide `SANDBOX_CONTROL_KEY` to tenant applications. A tenant
+  `SANDBOX_API_KEY` cannot read fleet control routes, and `SandboxClient` cannot
+  express fleet inventory calls.
+</Warning>
+
+## Configure the operator client
+
+```bash
+export SANDBOX_CONTROL_URL=https://gateway.example.com
+export SANDBOX_CONTROL_KEY=replace-with-gateway-worker-control-token
+```
+
+`SANDBOX_CONTROL_URL` falls back to `SANDBOX_API_URL` when omitted. The control
+key does **not** fall back to `SANDBOX_API_KEY`.
+
+```ts
+import { FleetClient } from "sandbox";
+
+const fleet = new FleetClient();
+const hosts = await fleet.hosts.list();
+
+for (const host of hosts) {
+  console.log({
+    id: host.hostId,
+    free: host.free,
+    used: host.slotsUsed,
+    total: host.slotsTotal,
+    hibernated: host.hibernated,
+    alive: host.alive,
+  });
+}
+```
+
+## Host fields
+
+| Field                      | Meaning                                                                                 |
+| -------------------------- | --------------------------------------------------------------------------------------- |
+| `hostId` / `addr`          | Registered host identity and gateway-proxied address.                                   |
+| `slotsTotal` / `slotsUsed` | Advertised slot capacity and active use.                                                |
+| `hibernated`               | Paused sandboxes that remain addressable but hold no active slot.                       |
+| `free`                     | Placement capacity; can be lower than `slotsTotal - slotsUsed` due to memory admission. |
+| `alive` / `lastSeenMsAgo`  | Gateway heartbeat view.                                                                 |
+
+The inventory route is gateway-only. A URL that points to a standalone worker
+returns `NotFoundError`; an invalid control credential returns
+`AuthenticationError`.
+
+## Operator decisions
+
+| Signal                                              | Recommended use                                                                                                |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `free > 0` and a tenant create gets `CapacityError` | Retry with backoff and inspect gateway/worker health if failures persist.                                      |
+| `free === 0`                                        | Queue or retry tenant work; capacity may be constrained by memory even when arithmetic slots appear available. |
+| `alive === false`                                   | Treat host data as stale; investigate the control plane rather than routing directly to the address.           |
+
+## Next steps
+
+- [Tenant errors and capacity retry](errors-retries)
+- [Resource client configuration](configuration)
+- [SDK inventory](sdk-reference)

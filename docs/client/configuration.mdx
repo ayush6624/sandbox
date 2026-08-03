@@ -1,0 +1,79 @@
+---
+title: Authentication and configuration
+description: Configure tenant credentials, endpoint URLs, request timeouts, and cancellation.
+---
+
+# Authentication and configuration
+
+`SandboxClient` uses a tenant API URL and tenant API key. Its resource
+collections and lifecycle actions send that key to `/v1`; attached command,
+file, and PTY handles use the same credential on their current non-versioned
+execution routes.
+
+```bash
+export SANDBOX_API_URL=https://sandbox.example.com
+export SANDBOX_API_KEY=replace-with-a-tenant-api-key
+```
+
+```ts
+import { SandboxClient } from "sandbox";
+
+const client = new SandboxClient({
+  baseUrl: process.env.SANDBOX_API_URL,
+  apiKey: process.env.SANDBOX_API_KEY,
+  requestTimeoutMs: 45_000,
+  maxRetries: 2,
+});
+```
+
+## Client options
+
+| Option             | Default           | Purpose                                                                          |
+| ------------------ | ----------------- | -------------------------------------------------------------------------------- |
+| `baseUrl`          | `SANDBOX_API_URL` | API origin; trailing slashes are normalized.                                     |
+| `apiKey`           | `SANDBOX_API_KEY` | Tenant credential.                                                               |
+| `requestTimeoutMs` | 30,000 ms         | Default budget for ordinary HTTP calls.                                          |
+| `maxRetries`       | 2                 | Safe retries after the initial attempt for `/v1` reads and idempotent mutations. |
+
+`sandboxes.create()` and `sandboxes.createMany()` use a 300,000 ms default
+request budget rather than the ordinary 30,000 ms budget; each accepts a
+per-call `requestTimeoutMs` override. `createSnapshot()` also uses a fixed
+300,000 ms SDK request budget, but `SnapshotOptions` does not expose a timeout
+override.
+
+## Per-call controls
+
+Most `/v1` mutations accept an `idempotencyKey`. Sandbox creation and batch
+creation additionally accept a request timeout and cancellation signal.
+
+```ts
+const controller = new AbortController();
+
+const sandbox = await client.sandboxes.create({
+  source: { templateId: "default" },
+  requestTimeoutMs: 300_000,
+  idempotencyKey: "deploy-2026-08-03-shard-7",
+  signal: controller.signal,
+});
+```
+
+<Note>
+  When no key is supplied, `SandboxClient` generates one. For idempotency scope,
+  replay behavior, and durable workflow guidance, see [Errors, retries, and
+  idempotency](errors-retries).
+</Note>
+
+## Configuration decisions
+
+| Situation                                                | Recommendation                                                                                                                                                                                                       |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Service creates sandboxes in response to a durable job   | Store and reuse an explicit `idempotencyKey` for that job.                                                                                                                                                           |
+| Caller needs to stop waiting but preserve work elsewhere | Pass an `AbortSignal`. It aborts the client request and may cancel server work depending on timing; neither cancellation nor completion is proven. Reconcile with the stable key and known resource or operation ID. |
+| Create can queue during a fleet burst                    | Retain the 300,000 ms default or choose an appropriate higher per-create budget.                                                                                                                                     |
+| Calling an operator endpoint                             | Do not use this client or tenant key; use [FleetClient](fleet-operator).                                                                                                                                             |
+
+## Next steps
+
+- [Lifecycle states and timeout budgets](lifecycle-timeouts)
+- [Errors, retries, and idempotency](errors-retries)
+- [SDK collection inventory](sdk-reference)

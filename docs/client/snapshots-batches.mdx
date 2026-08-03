@@ -1,0 +1,106 @@
+---
+title: Snapshots and batch creation
+description: Capture prepared state, create many sandboxes, and reconcile partial success.
+---
+
+# Snapshots and batch creation
+
+Snapshots capture a running sandbox's state and can be selected as the source
+of new `/v1` resource creates. Use `createMany` when you need a bounded batch
+with an operation record and indexed results. The preparation command in the
+example uses the SDK's current non-versioned execution route.
+
+## Prepare once, create many
+
+```ts
+const prepared = await client.sandboxes.create({
+  source: { templateId: "default" },
+  ttlMs: 30 * 60_000,
+});
+
+try {
+  await prepared.commands.run("cd /home/sandbox/app && npm ci", {
+    timeoutMs: 120_000,
+  });
+
+  const snapshot = await prepared.createSnapshot({
+    name: "dependencies-ready",
+    retentionMs: 24 * 60 * 60_000,
+  });
+
+  const operation = await client.sandboxes.createMany({
+    count: 8,
+    source: { snapshotId: snapshot.id },
+    maxParallelism: 8,
+    ttlMs: 30 * 60_000,
+  });
+
+  const completed = await operation.wait();
+  for (const item of completed.results) {
+    if (item.value) console.log(item.index, item.value.id);
+    else console.error(item.index, item.error?.code, item.error?.request_id);
+  }
+} finally {
+  await prepared.terminate();
+}
+```
+
+## Batch limits and statuses
+
+| Setting or status     | Meaning                                                               |
+| --------------------- | --------------------------------------------------------------------- |
+| `count`               | Required integer from 1 through 100.                                  |
+| `maxParallelism`      | Optional concurrent-create limit from 1 through 32.                   |
+| `pending` / `running` | Server operation has not completed.                                   |
+| `succeeded`           | Every requested index succeeded.                                      |
+| `partially_succeeded` | Some indices have sandboxes and others have RFC 9457 problem details. |
+| `failed`              | The operation completed without successful entries.                   |
+
+<Warning>
+  Do not assume a successful HTTP `202` means every sandbox exists. Always
+  inspect `completed.results`; each requested index is represented by either
+  `value` or `error` when the operation completes.
+</Warning>
+
+## Continue polling after an application restart or local timeout
+
+Persist `operation.id` if a caller may stop waiting. You can create a new SDK
+client after an application restart and retrieve that operation only while the
+same API process is still alive and the operation is retained (up to 24 hours).
+Operation state is in-memory: an API process restart loses it, and a later
+`get()` returns `NotFoundError`.
+
+```ts
+const resumed = await client.operations.get(operation.id);
+const state = await resumed.wait({
+  pollIntervalMs: 1_000,
+  timeoutMs: 10 * 60_000,
+});
+console.log(state.status);
+```
+
+See [Lifecycle and timeout budgets](lifecycle-timeouts) for polling defaults,
+timeout behavior, and reconciliation guidance.
+
+## Snapshot lifecycle
+
+| Task                           | SDK call                                                  |
+| ------------------------------ | --------------------------------------------------------- |
+| Create snapshot of one sandbox | `sandbox.createSnapshot({ name, retentionMs })`           |
+| Get snapshot by ID             | `client.snapshots.get(id)`                                |
+| List snapshots                 | `for await (const snapshot of client.snapshots.list())`   |
+| Delete snapshot                | `client.snapshots.delete(id)`                             |
+| Create one sandbox from it     | `client.sandboxes.create({ source: { snapshotId: id } })` |
+
+<Note>
+  The `/v1` snapshot resource reports `local` or `durable` state. Design
+  cross-host or long-lived workflows around the returned state and your
+  deployment's durability configuration; do not assume a local snapshot is
+  universally portable.
+</Note>
+
+## Next steps
+
+- [Understand idempotency and retries](errors-retries)
+- [Review operations and snapshot SDK methods](sdk-reference)
+- [Migrate legacy restore and fanout calls](migration)

@@ -1,0 +1,87 @@
+---
+title: Quickstart
+description: Create a sandbox, run a command, and clean it up with SandboxClient.
+---
+
+# Quickstart
+
+This example creates a sandbox from the default source, runs a command, and
+always terminates the resource. It is intended for Node.js 18+.
+
+## 1. Install and configure
+
+Install the current published SDK artifact, then set a tenant API URL and key:
+
+```bash
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.3.0/sandbox-2.3.0.tgz
+```
+
+For a copied bundle, replace that release URL with the distribution URL used by
+the destination deployment.
+
+```bash
+export SANDBOX_API_URL=https://sandbox.example.com
+export SANDBOX_API_KEY=replace-with-a-tenant-api-key
+```
+
+<Tabs>
+  <Tab title="Environment variables">
+    ```ts
+    import { SandboxClient } from 'sandbox'
+
+    const client = new SandboxClient()
+    ```
+
+  </Tab>
+  <Tab title="Explicit configuration">
+    ```ts
+    import { SandboxClient } from 'sandbox'
+
+    const client = new SandboxClient({
+      baseUrl: 'https://sandbox.example.com',
+      apiKey: 'replace-with-a-tenant-api-key',
+    })
+    ```
+
+  </Tab>
+</Tabs>
+
+## 2. Create, use, and terminate
+
+```ts
+import { SandboxClient } from "sandbox";
+
+const client = new SandboxClient();
+const sandbox = await client.sandboxes.create({
+  name: "quickstart",
+  ttlMs: 10 * 60_000,
+  metadata: { tutorial: "quickstart" },
+});
+
+try {
+  const result = await sandbox.commands.run("node --version");
+  console.log(result.stdout.trim());
+} finally {
+  await sandbox.terminate();
+}
+```
+
+`create()` resolves once the sandbox is ready. The SDK uses a 300,000 ms
+(5-minute) request timeout for resource creation unless you pass
+`requestTimeoutMs`. `client.sandboxes.create()` is a `/v1` resource call;
+`sandbox.commands.run()` then uses the SDK's current non-versioned execution
+route rather than a path described in `api/openapi.yaml`.
+
+<Tip>
+  Set a `ttlMs` as a cleanup backstop, but still call `terminate()` when your
+  work finishes. TTL and command timeouts are separate controls.
+</Tip>
+
+## What to do next
+
+| Goal                                               | Next guide                                        |
+| -------------------------------------------------- | ------------------------------------------------- |
+| Set client-wide or per-call settings               | [Authentication and configuration](configuration) |
+| Run a build while receiving output as it arrives   | [Commands and streaming](commands-streaming)      |
+| Publish a local web service                        | [Networking](networking)                          |
+| Reuse installed dependencies across many sandboxes | [Snapshots and batch creation](snapshots-batches) |

@@ -1,0 +1,86 @@
+---
+title: Commands and streaming
+description: Execute shell commands, receive output incrementally, and handle failures.
+---
+
+# Commands and streaming
+
+`ClientSandbox.commands.run()` executes a command through `bash -lc`. The
+default working directory is server-defined; pass an absolute `cwd` when the
+location matters. Although the sandbox resource handle comes from `/v1`, this
+command capability currently uses a non-versioned execution route outside
+`api/openapi.yaml`.
+
+## Buffered commands
+
+Use a buffered command when output is modest and you need it only after exit.
+
+```ts
+const result = await sandbox.commands.run("npm test", {
+  cwd: "/home/sandbox/app",
+  envs: { CI: "true" },
+  timeoutMs: 120_000,
+});
+
+console.log(result.stdout);
+console.error(result.stderr);
+console.log(result.exitCode, result.durationMs);
+```
+
+The command budget defaults to 60,000 ms. The SDK gives the HTTP request an
+extra 15,000 ms of headroom beyond the command budget.
+
+Buffered stdout and stderr are each capped at **2 MiB** by the guest agent. If
+a stream exceeds that cap, its returned text ends with a truncation marker such
+as `... [123 bytes truncated]`. Use streaming for timely display, not as a
+memory cap.
+
+## Stream output
+
+Adding `onStdout` or `onStderr` selects the streaming endpoint. Callbacks
+receive chunks as NDJSON events arrive; the returned result still accumulates
+the full stdout and stderr in SDK strings. Callbacks therefore do **not** bound
+client memory for very large output.
+
+```ts
+const result = await sandbox.commands.run("npm run build", {
+  cwd: "/home/sandbox/app",
+  timeoutMs: 120_000,
+  onStdout: (chunk) => process.stdout.write(chunk),
+  onStderr: (chunk) => process.stderr.write(chunk),
+});
+
+console.log(`completed in ${result.durationMs} ms`);
+```
+
+## Command outcomes
+
+| Outcome                   | SDK behavior                                       | Handling                                                                         |
+| ------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Exit code `0`             | Resolves with `CommandResult`.                     | Use `stdout`, `stderr`, and `durationMs`.                                        |
+| Non-zero exit             | Throws `CommandExitError`.                         | Read `error.result`, `error.exitCode`, `error.stdout`, and `error.stderr`.       |
+| Guest timeout             | Throws `TimeoutError`.                             | The command was killed; choose an explicit longer timeout only when appropriate. |
+| Large buffered output     | Resolves or rejects with output capped per stream. | Check for the truncation marker; use streaming for incremental display.          |
+| Transport/request failure | Throws `SandboxError` subtype or `TimeoutError`.   | Use [error guidance](errors-retries).                                            |
+
+```ts
+import { CommandExitError, TimeoutError } from "sandbox";
+
+try {
+  await sandbox.commands.run("npm test", { timeoutMs: 120_000 });
+} catch (error) {
+  if (error instanceof CommandExitError) {
+    console.error(error.exitCode, error.stderr);
+  } else if (error instanceof TimeoutError) {
+    console.error("test command exceeded its time budget");
+  } else {
+    throw error;
+  }
+}
+```
+
+## Next steps
+
+- [Read and write guest files](files)
+- [Open an interactive PTY](pty)
+- [Understand every timeout budget](lifecycle-timeouts)

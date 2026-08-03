@@ -1,0 +1,58 @@
+---
+title: Files
+description: Write, read, and list files in a sandbox.
+---
+
+# Files
+
+Every `ClientSandbox` exposes `files` for simple guest file operations. Paths
+are absolute paths inside the sandbox. These handles currently use
+non-versioned execution routes outside `api/openapi.yaml`, even when the
+`ClientSandbox` itself was obtained from a `/v1` collection.
+
+```ts
+await sandbox.files.write(
+  "/home/sandbox/app/message.txt",
+  "Hello from Sandbox\n",
+);
+
+const text = await sandbox.files.read("/home/sandbox/app/message.txt");
+console.log(text);
+
+const entries = await sandbox.files.list("/home/sandbox/app");
+for (const entry of entries) {
+  console.log(entry.type, entry.name, entry.size, entry.modifiedAt);
+}
+```
+
+## Text and binary content
+
+| Task           | Method                                  | Result                                                                     |
+| -------------- | --------------------------------------- | -------------------------------------------------------------------------- |
+| Write text     | `files.write(path, string)`             | Creates parent directories as needed.                                      |
+| Write bytes    | `files.write(path, Uint8Array)`         | Sends raw bytes.                                                           |
+| Read text      | `files.read(path)`                      | UTF-8 decoded `string`.                                                    |
+| Read bytes     | `files.read(path, { format: 'bytes' })` | `Uint8Array`.                                                              |
+| List directory | `files.list(path)`                      | Entries with name, file/directory type, size, mode, and modification time. |
+
+```ts
+const logo = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+await sandbox.files.write("/home/sandbox/app/logo.bin", logo);
+
+const bytes = await sandbox.files.read("/home/sandbox/app/logo.bin", {
+  format: "bytes",
+});
+console.log(bytes.byteLength);
+```
+
+<Note>
+  Missing files map to `NotFoundError`. File calls can also wake a paused
+  sandbox, so they should be considered external activity when setting idle
+  policy.
+</Note>
+
+## Next steps
+
+- [Execute commands against files you wrote](commands-streaming)
+- [Publish a service started from those files](networking)
+- [Capture prepared state in a snapshot](snapshots-batches)
