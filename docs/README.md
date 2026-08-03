@@ -13,6 +13,7 @@ Self-hosted Firecracker microVM sandboxes with an e2b-style API. Start here:
 | [Ona-style devboxes](devboxes-roadmap.md) | Design roadmap for repository-aware, editor-accessible development environments |
 | [Production readiness plan](production-readiness-plan.md) | Runtime hardening plus the versioned HTTP API and TypeScript SDK migration |
 | [Usage metering plan](usage-metering-plan.md) | Design for per-sandbox CPU-hours and RAM-hours, durable enough to bill from |
+| [Cold-boot snapshot OOM](cold-boot-snapshot-oom.md) | **Open bug:** snapshotting a cold-booted (resource-override) sandbox destroys it |
 | [Audit log plan](audit-log-plan.md) | Design for a durable who-did-what record: forensics, dispute resolution, compliance |
 | [GCP validation — 2026-07-26](gcp-validation-20260726.md) | Latest production-readiness campaign, blockers, evidence, and rerun gate |
 | [P0.2 jailer design](p0-jailer-design.md) | Shared launcher, per-VM identity, chroot path translation, and cgroup v2 rollout |
