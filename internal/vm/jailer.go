@@ -599,17 +599,45 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string) func() (func() error, er
 	}
 }
 
-// snapshotMemoryHighMargin is the page-cache working room the snapshot write is
-// given above the VM's footprint when the window opens. The write proceeds as a
-// sawtooth: fill the margin, get throttled, writeback drains, reclaim frees,
-// continue. Too small thrashes; too large lets the burst approach memory.max,
-// which is the failure this prevents.
-const snapshotMemoryHighMargin = int64(64 << 20)
+// The ceiling sits a MARGIN above the VM's footprint, and the write then
+// proceeds as a sawtooth: fill the margin, get throttled, writeback drains,
+// reclaim frees, continue.
+//
+// The margin is a FRACTION of the available slack, not a fixed size, because it
+// trades two things off against each other:
+//
+//   - too small and the write thrashes against continuous reclaim;
+//   - too large and throttling starts late, leaving little room between the
+//     ceiling and memory.max to absorb the overshoot while writeback catches up.
+//
+// The second effect is what matters for a tight leaf. A guest that fills most of
+// its configured RAM has little slack in total, so most of that slack must stay
+// available as absorption room. A fixed 64 MiB margin got 512 and 1024 MiB
+// sandboxes working but still lost 256 MiB ones on the fleet, because at that
+// size the guest fills its RAM and the margin ate the buffer.
+const (
+	snapshotMemoryHighSlackDivisor = 4
+	snapshotMemoryHighMarginMin    = int64(4 << 20)
+	snapshotMemoryHighMarginMax    = int64(64 << 20)
+)
 
 // snapshotMemoryHighReserve keeps the ceiling strictly below memory.max when
-// there is not room for a full margin, so throttling still engages before the
+// even the minimum margin does not fit, so throttling still engages before the
 // kernel's hard limit does.
 const snapshotMemoryHighReserve = int64(1 << 20)
+
+// snapshotMemoryHighMargin sizes the throttling band for a leaf with `slack`
+// bytes between the VM's current footprint and its hard limit.
+func snapshotMemoryHighMargin(slack int64) int64 {
+	margin := slack / snapshotMemoryHighSlackDivisor
+	if margin > snapshotMemoryHighMarginMax {
+		margin = snapshotMemoryHighMarginMax
+	}
+	if margin < snapshotMemoryHighMarginMin {
+		margin = snapshotMemoryHighMarginMin
+	}
+	return margin
+}
 
 // armSnapshotMemoryHigh installs a reclaim ceiling just above the VM's current
 // footprint and returns the restore callback.
@@ -660,13 +688,13 @@ func armSnapshotMemoryHigh(leaf string) (func() error, error) {
 			current>>20, limit>>20)
 	}
 
-	// Prefer a full margin to throttle in. When there isn't room for one, clamp
-	// to just under the fence rather than refusing: a narrow band still makes
-	// the kernel reclaim and throttle BEFORE memory.max, which is strictly
-	// better than the unprotected write that used to happen here. Refusing
-	// instead would break small sandboxes that already worked — a 128 MiB guest
-	// sits close to its own limit precisely because the limit is small.
-	high := current + snapshotMemoryHighMargin
+	// Size the band from the slack actually available, then clamp under the
+	// fence rather than refusing when even the minimum does not fit: a narrow
+	// band still makes the kernel reclaim and throttle BEFORE memory.max, which
+	// is strictly better than the unprotected write that used to happen here.
+	// Refusing instead would break small sandboxes that already worked — a
+	// 128 MiB guest sits close to its own limit because that limit is small.
+	high := current + snapshotMemoryHighMargin(limit-current)
 	if high >= limit {
 		high = limit - snapshotMemoryHighReserve
 	}

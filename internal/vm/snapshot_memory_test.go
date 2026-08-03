@@ -45,7 +45,7 @@ func TestArmSnapshotMemoryHighUsesCurrentPlusMargin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("arm: %v", err)
 	}
-	want := strconv.FormatInt(current+snapshotMemoryHighMargin, 10)
+	want := strconv.FormatInt(current+snapshotMemoryHighMargin(1180<<20-current), 10)
 	if got := readLeaf(t, leaf, "memory.high"); got != want {
 		t.Fatalf("memory.high = %q, want %q", got, want)
 	}
@@ -210,7 +210,7 @@ func TestSnapshotWriteWindowGuardsMemoryWithoutIOLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open window: %v", err)
 	}
-	want := strconv.FormatInt(current+snapshotMemoryHighMargin, 10)
+	want := strconv.FormatInt(current+snapshotMemoryHighMargin(1180<<20-current), 10)
 	if got := readLeaf(t, leafPath, "memory.high"); got != want {
 		t.Fatalf("memory.high = %q, want %q", got, want)
 	}
@@ -276,5 +276,34 @@ func TestCgroupLimitBytes(t *testing.T) {
 	}
 	if _, err := cgroupLimitBytes(filepath.Join(leaf, "absent")); err == nil {
 		t.Fatal("absent file should error")
+	}
+}
+
+// The margin is a fraction of the available slack, capped at both ends. A tight
+// leaf must keep most of its slack as absorption room for writeback overshoot —
+// a fixed margin ate that buffer and lost 256 MiB sandboxes on the fleet.
+func TestSnapshotMemoryHighMarginScalesWithSlack(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		slack int64
+		want  int64
+	}{
+		{"roomy leaf caps at the maximum", 830 << 20, snapshotMemoryHighMarginMax},
+		{"tight leaf takes a quarter", 112 << 20, 28 << 20},
+		{"very tight leaf floors at the minimum", 8 << 20, snapshotMemoryHighMarginMin},
+		{"no slack still floors", 0, snapshotMemoryHighMarginMin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := snapshotMemoryHighMargin(tc.slack); got != tc.want {
+				t.Fatalf("margin(%d MiB slack) = %d MiB, want %d MiB",
+					tc.slack>>20, got>>20, tc.want>>20)
+			}
+		})
+	}
+	// However tight, the band must leave the majority of the slack free to
+	// absorb overshoot before the fence.
+	slack := int64(112 << 20)
+	if margin := snapshotMemoryHighMargin(slack); margin > slack/2 {
+		t.Fatalf("margin %d MiB consumes more than half of %d MiB of slack", margin>>20, slack>>20)
 	}
 }
