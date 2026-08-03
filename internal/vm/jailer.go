@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -494,7 +495,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		}
 		return "/snapshots/" + name, finalize, nil
 	}
-	beginSnapshotWrite := snapshotWriteWindow(cfg, req.VMID)
+	beginSnapshotWrite := snapshotWriteWindow(cfg, req.VMID, req.MemMIB)
 
 	return PreparedLaunch{
 		Command:            cmd,
@@ -561,21 +562,51 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 // an error and vm.Snapshot aborts before issuing /snapshot/create. The VMM is
 // still alive and paused at that point, so the caller's resume succeeds and the
 // sandbox survives — an error instead of silent destruction.
-func snapshotWriteWindow(cfg JailerConfig, vmID string) func() (func() error, error) {
+func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(bool) (func() error, error) {
 	leaf := jailerCgroupLeaf(cfg, vmID)
 	ioPath := filepath.Join(leaf, "io.max")
 	relaxIO := cfg.IODevice != "" && cfg.IOWriteBPS > 0
 	limited := ioMaxValue(cfg, false)
 	unlimitedWrite := ioMaxValue(cfg, true)
+	// A full snapshot writes the whole guest, so that is the page-cache burst to
+	// make room for. Captured here because only the launcher knows the guest's
+	// size; Snapshot only has to say which kind of snapshot it is taking.
+	burst := guestMemMIB << 20
 
-	return func() (func() error, error) {
-		restoreMem, err := armSnapshotMemoryHigh(leaf)
+	return func(full bool) (func() error, error) {
+		var (
+			unlock     func()
+			restoreMax = func() error { return nil }
+		)
+		if full {
+			// Serialize full-snapshot windows: each reserves parent-cgroup
+			// headroom, and two concurrent windows would each see the same
+			// headroom as free. Diff snapshots skip this entirely, so the
+			// 8-way-parallel shutdown freeze of golden clones is unaffected.
+			snapshotFullWindowMu.Lock()
+			unlock = snapshotFullWindowMu.Unlock
+			var err error
+			restoreMax, err = reserveSnapshotMemory(cfg, leaf, burst)
+			if err != nil {
+				unlock()
+				return nil, err
+			}
+		}
+		restoreHigh, err := armSnapshotMemoryHigh(leaf)
 		if err != nil {
+			_ = restoreMax()
+			if unlock != nil {
+				unlock()
+			}
 			return nil, err
 		}
 		if relaxIO {
 			if err := os.WriteFile(ioPath, []byte(unlimitedWrite), 0600); err != nil {
-				_ = restoreMem()
+				_ = restoreHigh()
+				_ = restoreMax()
+				if unlock != nil {
+					unlock()
+				}
 				return nil, fmt.Errorf("remove snapshot write throttle: %w", err)
 			}
 		}
@@ -589,14 +620,129 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string) func() (func() error, er
 						errs = append(errs, fmt.Errorf("restore snapshot write throttle: %w", err))
 					}
 				}
-				if err := restoreMem(); err != nil {
+				// memory.max comes back BEFORE memory.high is lifted: the
+				// ceiling has kept actual usage low throughout, so lowering the
+				// hard limit here reclaims nothing and cannot OOM. Lifting the
+				// ceiling first would remove that guarantee.
+				if err := restoreMax(); err != nil {
 					errs = append(errs, err)
+				}
+				if err := restoreHigh(); err != nil {
+					errs = append(errs, err)
+				}
+				if unlock != nil {
+					unlock()
 				}
 				restoreErr = errors.Join(errs...)
 			})
 			return restoreErr
 		}, nil
 	}
+}
+
+// snapshotFullWindowMu serializes full-snapshot memory reservations per process.
+var snapshotFullWindowMu sync.Mutex
+
+// serveMemoryReserve is what a host keeps for serve itself, mirroring the +2 GiB
+// deploy-job.sh adds to TASK_MEMORY on top of SLOTS × MEM_PER_SLOT_MIB. serve
+// runs in a sandbox-control leaf with no memory.max of its own, so its footprint
+// is not reserved by any leaf limit and must be subtracted explicitly.
+const serveMemoryReserve = int64(2 << 30)
+
+// reserveSnapshotMemory raises the VM's memory.max far enough that the whole
+// snapshot write could be dirty at once, and returns the restore callback.
+//
+// memory.high keeps real usage far below this, so the raise is insurance rather
+// than consumption — but it is a real reservation against the parent task
+// cgroup, so it is bounded by what is genuinely unreserved there. Overcommitting
+// the parent is the one failure mode worth refusing service over: it OOMs serve
+// and every VM on the host at once.
+func reserveSnapshotMemory(cfg JailerConfig, leaf string, burst int64) (func() error, error) {
+	limit, err := cgroupLimitBytes(filepath.Join(leaf, "memory.max"))
+	if err != nil {
+		return nil, fmt.Errorf("read VM memory limit: %w", err)
+	}
+	if limit <= 0 {
+		return func() error { return nil }, nil // unlimited: nothing to reserve
+	}
+	current, err := cgroupLimitBytes(filepath.Join(leaf, "memory.current"))
+	if err != nil {
+		return nil, fmt.Errorf("read VM memory usage: %w", err)
+	}
+
+	// Room for the guest's footprint plus a fully dirty copy of the write, plus
+	// one margin so memory.high has a band to work in above the footprint.
+	want := current + burst + snapshotMemoryHighMarginMax
+	if want <= limit {
+		return func() error { return nil }, nil // the leaf is already big enough
+	}
+	extra := want - limit
+
+	headroom, err := parentReservableBytes(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if extra > headroom {
+		return nil, fmt.Errorf("snapshot needs %d MiB beyond this VM's %d MiB limit but only %d MiB is unreserved in the host task cgroup: refusing rather than risking an OOM of serve and every VM (see docs/cold-boot-snapshot-oom.md)",
+			extra>>20, limit>>20, headroom>>20)
+	}
+
+	maxPath := filepath.Join(leaf, "memory.max")
+	if err := os.WriteFile(maxPath, []byte(strconv.FormatInt(want, 10)), 0600); err != nil {
+		return nil, fmt.Errorf("raise VM memory limit for snapshot: %w", err)
+	}
+	return func() error {
+		if err := os.WriteFile(maxPath, []byte(strconv.FormatInt(limit, 10)), 0600); err != nil {
+			return fmt.Errorf("restore VM memory limit after snapshot: %w", err)
+		}
+		return nil
+	}, nil
+}
+
+// parentReservableBytes reports how much of the task cgroup is committed to
+// nothing yet: its own memory.max, minus every per-VM leaf's memory.max, minus
+// serve's reserve.
+//
+// It deliberately subtracts the leaves' LIMITS rather than their current usage.
+// Admitted-but-idle VMs are entitled to their full allowance at any moment, so
+// counting only what they happen to be using today would hand out headroom that
+// is already promised — exactly the overcommitment CheckMemoryAdmission exists
+// to prevent.
+//
+// A sibling leaf with no finite limit cannot be accounted for and is skipped;
+// serveMemoryReserve is what covers serve's own unlimited control leaf.
+func parentReservableBytes(cfg JailerConfig) (int64, error) {
+	parent := filepath.Join(cfg.CgroupRoot, cfg.CgroupParent)
+	parentMax, err := cgroupLimitBytes(filepath.Join(parent, "memory.max"))
+	if err != nil {
+		return 0, fmt.Errorf("read task cgroup memory.max: %w", err)
+	}
+	if parentMax <= 0 {
+		// No aggregate limit: nothing to overcommit. Production refuses to start
+		// in this state (prepareCurrentCgroupDelegation), so this is a
+		// development or test host.
+		return math.MaxInt64, nil
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return 0, fmt.Errorf("list task cgroup children: %w", err)
+	}
+	var committed int64
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		leafMax, err := cgroupLimitBytes(filepath.Join(parent, entry.Name(), "memory.max"))
+		if err != nil || leafMax <= 0 {
+			continue
+		}
+		committed += leafMax
+	}
+	free := parentMax - committed - serveMemoryReserve
+	if free < 0 {
+		return 0, nil
+	}
+	return free, nil
 }
 
 // The ceiling sits a MARGIN above the VM's footprint, and the write then

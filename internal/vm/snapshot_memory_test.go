@@ -20,6 +20,20 @@ func fakeLeaf(t *testing.T, files map[string]string) string {
 	return leaf
 }
 
+// writeParentLimit gives the fake task cgroup the aggregate limit production
+// always has; the snapshot window reserves against it.
+func writeParentLimit(t *testing.T, cfg JailerConfig, bytes int64) {
+	t.Helper()
+	parent := filepath.Join(cfg.CgroupRoot, cfg.CgroupParent)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "memory.max"),
+		[]byte(strconv.FormatInt(bytes, 10)), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readLeaf(t *testing.T, leaf, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(leaf, name))
@@ -191,6 +205,7 @@ func TestSnapshotWriteWindowGuardsMemoryWithoutIOLimits(t *testing.T) {
 	if err := os.MkdirAll(leafPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeParentLimit(t, cfg, 57<<30)
 	const current = int64(200 << 20)
 	for name, value := range map[string]string{
 		"memory.max":     strconv.FormatInt(1180<<20, 10),
@@ -202,11 +217,11 @@ func TestSnapshotWriteWindowGuardsMemoryWithoutIOLimits(t *testing.T) {
 		}
 	}
 
-	window := snapshotWriteWindow(cfg, "vm-1")
+	window := snapshotWriteWindow(cfg, "vm-1", 1024)
 	if window == nil {
 		t.Fatal("jailed launch must always get a snapshot window: the memory guard is not optional")
 	}
-	restore, err := window()
+	restore, err := window(true)
 	if err != nil {
 		t.Fatalf("open window: %v", err)
 	}
@@ -227,9 +242,10 @@ func TestSnapshotWriteWindowGuardsMemoryWithoutIOLimits(t *testing.T) {
 	}
 }
 
-// If the memory guard fails, the window must not leave the VM's write bandwidth
-// cap lifted — a half-open window would outlive the snapshot that needed it.
-func TestSnapshotWriteWindowRestoresIOWhenMemoryGuardFails(t *testing.T) {
+// When the host task cgroup has nothing unreserved, a full snapshot is refused
+// and every limit is left exactly as it was. Overcommitting the parent is the one
+// failure mode worth refusing service over: it OOMs serve and every VM at once.
+func TestSnapshotWriteWindowRefusesWhenParentHasNoHeadroom(t *testing.T) {
 	cfg := JailerConfig{
 		CgroupRoot: t.TempDir(), CgroupParent: "task",
 		IODevice: "8:16", IOReadBPS: 10 << 20, IOWriteBPS: 5 << 20,
@@ -239,9 +255,11 @@ func TestSnapshotWriteWindowRestoresIOWhenMemoryGuardFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	limit := int64(1180 << 20)
+	// Parent sized so that this one leaf plus serve's reserve consumes all of it.
+	writeParentLimit(t, cfg, limit+serveMemoryReserve)
 	for name, value := range map[string]string{
 		"memory.max":     strconv.FormatInt(limit, 10),
-		"memory.current": strconv.FormatInt(limit, 10), // at the fence: refused
+		"memory.current": strconv.FormatInt(400<<20, 10),
 		"memory.high":    "max",
 		"io.max":         ioMaxValue(cfg, false),
 	} {
@@ -250,11 +268,188 @@ func TestSnapshotWriteWindowRestoresIOWhenMemoryGuardFails(t *testing.T) {
 		}
 	}
 
-	if _, err := snapshotWriteWindow(cfg, "vm-1")(); err == nil {
-		t.Fatal("expected the window to refuse for a VM at its memory limit")
+	_, err := snapshotWriteWindow(cfg, "vm-1", 1024)(true)
+	if err == nil {
+		t.Fatal("expected a refusal when the task cgroup has nothing unreserved")
 	}
-	if got, want := readLeaf(t, leafPath, "io.max"), ioMaxValue(cfg, false); got != want {
-		t.Fatalf("io.max = %q after a refused window, want the throttled value %q", got, want)
+	if !strings.Contains(err.Error(), "unreserved") {
+		t.Fatalf("error should explain the parent-cgroup shortfall, got: %v", err)
+	}
+	for name, want := range map[string]string{
+		"memory.max":  strconv.FormatInt(limit, 10),
+		"memory.high": "max",
+		"io.max":      ioMaxValue(cfg, false),
+	} {
+		if got := readLeaf(t, leafPath, name); got != want {
+			t.Fatalf("%s = %q after a refusal, want %q untouched", name, got, want)
+		}
+	}
+}
+
+// A DIFF snapshot writes only dirty pages, so it must take the cheap path: no
+// reservation and no serialization. That keeps the 8-way-parallel shutdown freeze
+// of golden-clone sandboxes exactly as fast as before.
+func TestSnapshotWriteWindowDiffDoesNotReserve(t *testing.T) {
+	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
+	leafPath := jailerCgroupLeaf(cfg, "vm-1")
+	if err := os.MkdirAll(leafPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	limit := int64(1180 << 20)
+	// Deliberately no parent memory.max: a diff window must not even look.
+	for name, value := range map[string]string{
+		"memory.max":     strconv.FormatInt(limit, 10),
+		"memory.current": strconv.FormatInt(900<<20, 10),
+		"memory.high":    "max",
+	} {
+		if err := os.WriteFile(filepath.Join(leafPath, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restore, err := snapshotWriteWindow(cfg, "vm-1", 1024)(false)
+	if err != nil {
+		t.Fatalf("a diff window must not need parent headroom: %v", err)
+	}
+	if got := readLeaf(t, leafPath, "memory.max"); got != strconv.FormatInt(limit, 10) {
+		t.Fatalf("diff snapshot raised memory.max to %q; it should not reserve at all", got)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+}
+
+// The reservation must be big enough that the entire write could be dirty at
+// once, and must be handed back afterwards.
+func TestReserveSnapshotMemoryRaisesAndRestores(t *testing.T) {
+	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
+	leafPath := jailerCgroupLeaf(cfg, "vm-1")
+	if err := os.MkdirAll(leafPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeParentLimit(t, cfg, 57<<30)
+	limit := int64(412 << 20) // a 256 MiB guest's leaf — the stubborn fleet case
+	current := int64(370 << 20)
+	burst := int64(256 << 20)
+	for name, value := range map[string]string{
+		"memory.max":     strconv.FormatInt(limit, 10),
+		"memory.current": strconv.FormatInt(current, 10),
+	} {
+		if err := os.WriteFile(filepath.Join(leafPath, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restore, err := reserveSnapshotMemory(cfg, leafPath, burst)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	raised, err := strconv.ParseInt(readLeaf(t, leafPath, "memory.max"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raised < current+burst {
+		t.Fatalf("memory.max raised to %d MiB, too small for a %d MiB footprint plus a %d MiB write",
+			raised>>20, current>>20, burst>>20)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := readLeaf(t, leafPath, "memory.max"); got != strconv.FormatInt(limit, 10) {
+		t.Fatalf("memory.max = %q after restore, want the original %d", got, limit)
+	}
+}
+
+// A leaf already large enough is left alone: no write, nothing to restore.
+func TestReserveSnapshotMemoryNoOpWhenLeafIsBigEnough(t *testing.T) {
+	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
+	leafPath := jailerCgroupLeaf(cfg, "vm-1")
+	if err := os.MkdirAll(leafPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeParentLimit(t, cfg, 57<<30)
+	limit := int64(8 << 30)
+	for name, value := range map[string]string{
+		"memory.max":     strconv.FormatInt(limit, 10),
+		"memory.current": strconv.FormatInt(300<<20, 10),
+	} {
+		if err := os.WriteFile(filepath.Join(leafPath, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := reserveSnapshotMemory(cfg, leafPath, 1024<<20); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if got := readLeaf(t, leafPath, "memory.max"); got != strconv.FormatInt(limit, 10) {
+		t.Fatalf("memory.max = %q, want it untouched at %d", got, limit)
+	}
+}
+
+// Headroom subtracts sibling leaves' LIMITS, not their usage: an admitted but
+// idle VM is entitled to its full allowance at any moment, so counting only
+// current usage would hand out room that is already promised.
+func TestParentReservableBytesSubtractsCommittedLimits(t *testing.T) {
+	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
+	parent := filepath.Join(cfg.CgroupRoot, cfg.CgroupParent)
+	parentMax := int64(10 << 30)
+	writeParentLimit(t, cfg, parentMax)
+
+	leafMax := int64(1180 << 20)
+	for _, name := range []string{"vm-1", "vm-2", "vm-3"} {
+		dir := filepath.Join(parent, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"),
+			[]byte(strconv.FormatInt(leafMax, 10)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		// Barely used — must not increase the reported headroom.
+		if err := os.WriteFile(filepath.Join(dir, "memory.current"),
+			[]byte(strconv.FormatInt(4<<20, 10)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// serve's control leaf has no finite limit; serveMemoryReserve covers it.
+	control := filepath.Join(parent, "sandbox-control")
+	if err := os.MkdirAll(control, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(control, "memory.max"), []byte("max"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := parentReservableBytes(cfg)
+	if err != nil {
+		t.Fatalf("headroom: %v", err)
+	}
+	want := parentMax - 3*leafMax - serveMemoryReserve
+	if got != want {
+		t.Fatalf("headroom = %d MiB, want %d MiB", got>>20, want>>20)
+	}
+}
+
+// An over-committed parent reports zero rather than a negative number, so a
+// caller can never read it as available room.
+func TestParentReservableBytesFloorsAtZero(t *testing.T) {
+	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
+	writeParentLimit(t, cfg, 1<<30)
+	dir := filepath.Join(cfg.CgroupRoot, cfg.CgroupParent, "vm-1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "memory.max"),
+		[]byte(strconv.FormatInt(4<<30, 10)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := parentReservableBytes(cfg)
+	if err != nil {
+		t.Fatalf("headroom: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("headroom = %d, want 0 for an over-committed parent", got)
 	}
 }
 

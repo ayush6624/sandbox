@@ -40,7 +40,7 @@ type Machine struct {
 	launchCleanup      func()
 	processPID         func() (int, error)
 	prepareOutput      func(string) (string, func() error, error)
-	beginSnapshotWrite func() (func() error, error)
+	beginSnapshotWrite func(bool) (func() error, error)
 	// cgroupLeaf is this VM's cgroup v2 leaf; "" for an unjailed launch. Read
 	// by SampleUsage for consumed-CPU accounting.
 	cgroupLeaf  string
@@ -99,7 +99,7 @@ type rawMachine struct {
 	launchCleanup      func()
 	processPID         func() (int, error)
 	prepareOutput      func(string) (string, func() error, error)
-	beginSnapshotWrite func() (func() error, error)
+	beginSnapshotWrite func(bool) (func() error, error)
 	cgroupLeaf         string
 	cleanupOnce        sync.Once
 }
@@ -573,7 +573,9 @@ func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType stri
 		beginSnapshotWrite = m.raw.beginSnapshotWrite
 	}
 	if beginSnapshotWrite != nil {
-		restore, err := beginSnapshotWrite()
+		// A full snapshot writes the whole guest, so the window must reserve
+		// room for that page-cache burst; a diff writes only dirty pages.
+		restore, err := beginSnapshotWrite(snapType != SnapshotDiff)
 		if err != nil {
 			return err
 		}

@@ -67,11 +67,18 @@ type PreparedLaunch struct {
 	OwnsValidation bool
 	// ProcessPID returns the Firecracker child PID (not the jailer parent).
 	ProcessPID func() (int, error)
-	// BeginSnapshotWrite temporarily removes only the jailed VMM's write
-	// bandwidth cap while Firecracker writes a host-requested snapshot. The
-	// caller must have paused the guest first and must invoke the returned
-	// restore callback before resuming it. Direct launches leave this nil.
-	BeginSnapshotWrite func() (restore func() error, err error)
+	// BeginSnapshotWrite relaxes the jailed VMM's write constraints while
+	// Firecracker writes a host-requested snapshot: its I/O bandwidth cap, and
+	// the memory limits that would otherwise let the write's page cache
+	// OOM-kill it. The caller must have paused the guest first and must invoke
+	// the returned restore callback before resuming it. Direct launches leave
+	// this nil.
+	//
+	// full reports whether this is a FULL snapshot, which writes the entire
+	// guest and therefore needs room reserved for it. A diff snapshot writes
+	// only dirty pages and takes the cheap path — no reservation, no
+	// serialization.
+	BeginSnapshotWrite func(full bool) (restore func() error, err error)
 	// CgroupLeaf is the absolute path of this VM's cgroup v2 leaf, the source
 	// of its consumed-CPU accounting (see SampleUsage). Empty for direct
 	// launches, which install no cgroup — those fall back to /proc.

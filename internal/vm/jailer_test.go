@@ -56,6 +56,12 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cgroupRoot, "cgroup.controllers"), []byte("cpu memory pids io"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The task cgroup's aggregate limit, as production always has it: the
+	// snapshot window reserves against it and refuses when it cannot be read.
+	if err := os.WriteFile(filepath.Join(cgroupRoot, "nomad", "task", "memory.max"),
+		[]byte(strconv.FormatInt(57<<30, 10)), 0644); err != nil {
+		t.Fatal(err)
+	}
 	jailUID, jailGID := os.Geteuid(), os.Getegid()
 	if jailUID == 0 {
 		jailUID, jailGID = 200000, 200000
@@ -178,7 +184,7 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 		[]byte(strconv.FormatInt(memCurrent, 10)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	restoreWriteLimit, err := prepared.BeginSnapshotWrite()
+	restoreWriteLimit, err := prepared.BeginSnapshotWrite(true)
 	if err != nil {
 		t.Fatalf("begin snapshot write: %v", err)
 	}
