@@ -1,0 +1,85 @@
+---
+title: Errors, retries, and idempotency
+description: Use typed SDK errors, RFC 9457 problem details, and stable mutation keys safely.
+---
+
+# Errors, retries, and idempotency
+
+The `/v1` resource API returns RFC 9457 `application/problem+json` responses.
+SDK errors from resource calls, and matching errors mapped from current
+non-versioned command/file/PTY routes, extend `SandboxError` and preserve the
+HTTP status plus, where supplied, the stable problem `code`, `requestId`, and
+full `problem` object.
+
+## Error reference
+
+| Error                 | Typical status | Meaning                                                                                                  | Default response                                                  |
+| --------------------- | -------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `AuthenticationError` | 401, 403       | Missing, invalid, or unauthorized credential.                                                            | Correct credentials; do not retry blindly.                        |
+| `NotFoundError`       | 404            | Unknown resource or missing guest file.                                                                  | Reconcile ID/path; normally do not retry.                         |
+| `ConflictError`       | 409            | Current resource state does not allow the action; also used for idempotency key reuse with another body. | Refresh state or use a new key for a different request.           |
+| `CapacityError`       | 429, 503       | Capacity admission failed or fleet is full.                                                              | Retry with backoff; honor `retryAfterMs` when present.            |
+| `TimeoutError`        | client-side    | Command or HTTP request exceeded its SDK budget.                                                         | Determine whether server work may have completed before retrying. |
+| `CommandExitError`    | n/a            | Guest command returned a non-zero exit code.                                                             | Inspect `result`.                                                 |
+| `SandboxError`        | other / local  | Other API, network, or protocol error.                                                                   | Branch on `code` or `status`, not message text.                   |
+
+```ts
+import { CapacityError, SandboxError } from "sandbox";
+
+async function createWithCapacityRetry() {
+  const idempotencyKey = "job-42-create-worker";
+  const options = { name: "worker", idempotencyKey };
+
+  try {
+    return await client.sandboxes.create(options);
+  } catch (error) {
+    if (error instanceof CapacityError) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, error.retryAfterMs ?? 5_000),
+      );
+      return client.sandboxes.create(options);
+    }
+    if (error instanceof SandboxError) {
+      console.error(error.code, error.requestId, error.status);
+    }
+    throw error;
+  }
+}
+```
+
+## Idempotency rules
+
+Every `/v1` mutation requires `Idempotency-Key`. `SandboxClient` automatically
+generates a UUID and reuses it across its own retry attempts. The server scopes
+the key to HTTP method and resource path. Replay exists only while the serving
+API process retains the completed entry.
+
+| Situation                                               | Server behavior                                                                              | Client action                                                                                      |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Same key, same method/path/body, retained non-5xx entry | Replays original status, headers, and body; adds `Idempotency-Replayed: true`.               | Treat as the same mutation outcome.                                                                |
+| Same retained key, different body                       | `409` with `idempotency_key_reused`.                                                         | Generate a new key for a genuinely new intent.                                                     |
+| New mutation with no supplied key                       | SDK generates a key.                                                                         | Fine for a single process; persist an explicit key for durable workflows.                          |
+| Completed response is 5xx                               | The server discards the completed entry. A retry with the same key re-executes the mutation. | Reconcile if possible; do not expect a replay for 5xx.                                             |
+| Entry expires or serving API process restarts           | The in-process replay state is gone (entries are retained up to 24 hours).                   | Reconcile by resource/operation ID; do not rely on replay after expiry or any serving API restart. |
+
+## Retry safely
+
+The resource client defaults to two retries after the initial attempt for reads
+and idempotent mutations. It retries 429/503 using `Retry-After` when supplied,
+otherwise exponential delays capped at 2 seconds; transport failures can also
+be retried. Set `maxRetries: 0` to disable this behavior.
+
+<Warning>
+  An HTTP timeout does not prove the mutation failed. Reusing the same
+  idempotency key is the safe way to repeat the same request only while a
+  retained non-5xx entry is available. For batch creation, also persist the
+  returned operation ID and follow the [operation recovery
+  limits](snapshots-batches#continue-polling-after-an-application-restart-or-local-timeout)
+  rather than submitting a new batch blindly.
+</Warning>
+
+## Next steps
+
+- [Configure retry count and cancellation](configuration)
+- [Reconcile batch results](snapshots-batches)
+- [View the typed SDK inventory](sdk-reference)

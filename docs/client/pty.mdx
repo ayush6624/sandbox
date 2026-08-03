@@ -1,0 +1,67 @@
+---
+title: Interactive PTY
+description: Open and control an interactive shell over the Sandbox WebSocket protocol.
+---
+
+# Interactive PTY
+
+`sandbox.pty.create()` opens a login shell over the sandbox shell WebSocket.
+Use it for an interactive terminal experience; use
+[commands](commands-streaming) for scriptable, bounded execution. The PTY
+WebSocket is currently a non-versioned execution route outside
+`api/openapi.yaml`, even when its `ClientSandbox` came from `/v1`.
+
+<Warning>
+  PTY requires a global `WebSocket`: Node.js 22+ provides one, or a caller must
+  provide a standards-compatible global implementation. The TypeScript SDK as a
+  whole is documented for Node.js 18+; this PTY requirement is stricter.
+</Warning>
+
+```ts
+const decoder = new TextDecoder();
+const pty = await sandbox.pty.create({
+  cols: 120,
+  rows: 30,
+  cwd: "/home/sandbox/app",
+  onData: (bytes) =>
+    process.stdout.write(decoder.decode(bytes, { stream: true })),
+});
+
+pty.sendInput("pwd\n");
+pty.resize({ cols: 160, rows: 40 });
+pty.sendInput("exit\n");
+console.log("shell exit code:", await pty.exited);
+```
+
+## PTY controls
+
+| Need                   | Method                                | Notes                                                           |
+| ---------------------- | ------------------------------------- | --------------------------------------------------------------- |
+| Send stdin             | `pty.sendInput(string \| Uint8Array)` | Strings are UTF-8 encoded.                                      |
+| Resize terminal        | `pty.resize({ cols, rows })`          | Sends a resize protocol message.                                |
+| End session            | `pty.kill()`                          | Closes the connection and ends the shell process group.         |
+| Wait for exit          | `await pty.exited`                    | Resolves with the shell exit code or rejects on abnormal close. |
+| Limit connection setup | `connectTimeoutMs`                    | Defaults to 30,000 ms.                                          |
+
+Authentication rides in the WebSocket subprotocol list rather than the URL.
+The SDK maps server close codes for authorization, missing resources, conflicts,
+and capacity back to the corresponding typed SDK errors.
+
+## SSH is not an SDK transport
+
+Do not construct an SSH endpoint, allocate raw TCP for SSH, or call an SSH
+setup endpoint from application code. Display the CLI instruction instead:
+
+```ts
+console.log(sandbox.sshInstructions.command);
+// sandbox ssh <sandbox-id>
+```
+
+The user installs the CLI and runs that command with their tenant API URL and
+key configured.
+
+## Next steps
+
+- [Run non-interactive commands](commands-streaming)
+- [Expose HTTP or raw TCP services](networking)
+- [Use the compatibility facade only while migrating](migration)

@@ -1,0 +1,136 @@
+---
+title: Migrate from the compatibility Sandbox facade
+description: Move existing static Sandbox calls to the recommended resource-oriented SandboxClient.
+---
+
+# Migrate from the compatibility Sandbox facade
+
+The static `Sandbox` facade remains available for compatibility with existing
+applications, but it targets legacy/non-versioned routes for much of its
+surface. New code should use `SandboxClient` for `/v1` resources and lifecycle
+methods. Commands, files, and PTY on the resulting resource handle currently
+remain non-versioned execution routes.
+
+<Warning>
+  Treat the facade as deprecated compatibility surface. Do not start a new
+  integration with `Sandbox`, `restore`, `fanout`, `hibernate`, or `kill`.
+</Warning>
+
+## Convert options explicitly
+
+Do not spread legacy `opts` into a resource call: several names and shapes
+changed. Build `SandboxClient` options separately from sandbox-create options.
+
+| Legacy option              | Current destination                                                      | Conversion                                                                                                                                                                                                                      |
+| -------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiUrl`                   | `new SandboxClient({ baseUrl })`                                         | `baseUrl: legacy.apiUrl`                                                                                                                                                                                                        |
+| `apiKey`                   | `new SandboxClient({ apiKey })`                                          | `apiKey: legacy.apiKey`                                                                                                                                                                                                         |
+| `requestTimeoutMs`         | `new SandboxClient({ requestTimeoutMs })` or supported create/batch call | Preserve the same milliseconds value. Put it on `create`/`createMany` when it was a per-call legacy override; otherwise use the client default.                                                                                 |
+| `name`                     | `CreateSandboxOptions.name`                                              | Preserve it explicitly: `name: legacy.name`.                                                                                                                                                                                    |
+| `timeoutMs`                | `CreateSandboxOptions.ttlMs`                                             | `ttlMs: legacy.timeoutMs`                                                                                                                                                                                                       |
+| `hibernateAfterMs`         | `CreateSandboxOptions.idleTimeoutMs`                                     | `idleTimeoutMs: legacy.hibernateAfterMs` only when non-negative. Legacy `-1` has no direct `/v1` equivalent; review the deployment's idle policy.                                                                               |
+| `vcpus`, `memMib`          | `CreateSandboxOptions.resources`                                         | `resources` requires **both** `vcpus` and `memoryMib`. Pass it only when both legacy values exist. When only one exists, resolve the other from the selected template or deployment defaults first; otherwise omit `resources`. |
+| Legacy restore snapshot ID | `CreateSandboxOptions.source`                                            | `source: { snapshotId }`                                                                                                                                                                                                        |
+
+## Migration map
+
+| Compatibility call                        | Current replacement                                                                                      | Migration note                                                                                 |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `Sandbox.create(opts)`                    | `client.sandboxes.create(currentCreateOptions)`                                                          | Convert options using the preceding table, including `name` and a per-call `requestTimeoutMs`. |
+| `Sandbox.connect(id)`                     | `client.sandboxes.get(id)`                                                                               | Use `refresh()` to refresh an existing handle.                                                 |
+| `Sandbox.list()`                          | `for await (const s of client.sandboxes.list())`                                                         | `/v1` pagination is asynchronous iteration.                                                    |
+| `sandbox.hibernate()`                     | `sandbox.pause()`                                                                                        | `hibernate()` is deprecated alias.                                                             |
+| `sandbox.kill()`                          | `handle.terminate()`                                                                                     | Instance-to-instance mapping: the handle already exists.                                       |
+| `Sandbox.kill(id)`                        | `const handle = await client.sandboxes.get(id); await handle.terminate()`                                | Static kill must first fetch the `/v1` resource handle.                                        |
+| `Sandbox.restore(snapshotId, opts)`       | `client.sandboxes.create({ source: { snapshotId }, name, ttlMs, idleTimeoutMs, requestTimeoutMs })`      | Write each converted option explicitly; do not spread legacy options.                          |
+| `Sandbox.fanout(snapshotId, count, opts)` | `client.sandboxes.createMany({ count, source: { snapshotId }, ttlMs, idleTimeoutMs, requestTimeoutMs })` | Write each converted option explicitly and inspect indexed results.                            |
+| `Sandbox.listSnapshots()`                 | `client.snapshots.list()`                                                                                | `/v1` is paginated.                                                                            |
+| `Sandbox.deleteSnapshot(id)`              | `client.snapshots.delete(id)`                                                                            | Same lifecycle intent.                                                                         |
+| `Sandbox.hosts()`                         | `new FleetClient().hosts.list()`                                                                         | Operator-only API and credential.                                                              |
+
+## Before and after
+
+<Tabs>
+  <Tab title="Compatibility facade">
+    ```ts
+    import { Sandbox } from 'sandbox'
+
+    const sandbox = await Sandbox.create({
+      apiUrl: "https://sandbox.example.com",
+      name: "test-worker",
+      requestTimeoutMs: 300_000,
+      timeoutMs: 600_000,
+      hibernateAfterMs: 300_000,
+      vcpus: 2,
+      memMib: 1024,
+    })
+    await sandbox.commands.run('npm test')
+    await sandbox.kill()
+    ```
+
+  </Tab>
+  <Tab title="Recommended resource client">
+    ```ts
+    import { SandboxClient } from 'sandbox'
+
+    const client = new SandboxClient({
+      baseUrl: "https://sandbox.example.com", // legacy apiUrl
+    })
+    const sandbox = await client.sandboxes.create({
+      name: "test-worker", // legacy name
+      requestTimeoutMs: 300_000, // legacy per-call requestTimeoutMs
+      ttlMs: 600_000, // legacy timeoutMs
+      idleTimeoutMs: 300_000, // legacy hibernateAfterMs
+      resources: { vcpus: 2, memoryMib: 1024 }, // legacy vcpus/memMib
+    })
+    try {
+      await sandbox.commands.run('npm test')
+    } finally {
+      await sandbox.terminate()
+    }
+    ```
+
+  </Tab>
+</Tabs>
+
+<Note>
+  Do not build a partial `resources` object. `SandboxResources` requires both
+  fields, and `SandboxClient` has no compatibility equivalent of
+  `Sandbox.hostInfo()` for deriving a missing value. Obtain the selected
+  template's or deployment's effective default by your own configuration or
+  deployment-specific discovery before setting `resources`; omit it if neither
+  legacy override existed.
+</Note>
+
+## Batch migration
+
+```ts
+const operation = await client.sandboxes.createMany({
+  count: 16,
+  source: { snapshotId: "snap_123" },
+  maxParallelism: 16,
+  name: "fanout-worker",
+  requestTimeoutMs: 300_000,
+  ttlMs: 600_000,
+  idleTimeoutMs: 300_000,
+});
+
+const result = await operation.wait();
+for (const item of result.results) {
+  if (item.value) {
+    console.log("created", item.value.id);
+  } else {
+    console.error("failed index", item.index, item.error?.code);
+  }
+}
+```
+
+The facade's legacy `fanout` method can return fewer sandboxes than requested
+on partial success. The resource operation instead preserves an outcome for
+each index, making reconciliation explicit.
+
+## Next steps
+
+- [Configure the resource client](configuration)
+- [Use snapshots and indexed batches](snapshots-batches)
+- [Learn operator API separation](fleet-operator)

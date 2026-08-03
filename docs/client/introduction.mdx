@@ -1,0 +1,67 @@
+---
+title: Sandbox client overview
+description: Create and operate isolated sandbox resources with the TypeScript SDK.
+---
+
+# Sandbox client overview
+
+Sandbox provides isolated development environments through a versioned,
+resource-oriented `/v1` HTTP API. `SandboxClient` exposes `/v1` resource
+collections and lifecycle actions, then attaches command, file, and PTY handles
+to each `ClientSandbox`. Those execution handles currently use established
+non-versioned routes, which are outside `api/openapi.yaml`.
+
+```ts
+import { SandboxClient } from "sandbox";
+
+const client = new SandboxClient();
+const sandbox = await client.sandboxes.create();
+await sandbox.terminate();
+```
+
+## Choose the right surface
+
+| You are building                                   | Use                   | Why                                                                          |
+| -------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------- |
+| A new tenant application or service                | `SandboxClient`       | Typed `/v1` resources, pagination, idempotent mutations, and retry controls. |
+| Existing code using static `Sandbox` calls         | `Sandbox` temporarily | Compatibility facade for non-versioned routes; migrate incrementally.        |
+| Fleet capacity dashboards or control-plane tooling | `FleetClient`         | Separate operator client and worker-control credential.                      |
+| An interactive human SSH session                   | `sandbox ssh <id>`    | SSH is CLI-owned; the SDK only exposes `sshInstructions`.                    |
+
+<Warning>
+  `Sandbox` is a compatibility/deprecated facade, not the recommended starting
+  point. Its `hibernate`, `kill`, `restore`, and `fanout` names are deprecated
+  in favor of `/v1` `pause`, `terminate`, source creation, and `createMany`.
+</Warning>
+
+## Core resources
+
+| Resource     | Meaning                                                                      | Primary SDK entry point                               |
+| ------------ | ---------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Sandbox      | One isolated environment with lifecycle, files, commands, PTY, and forwards. | `client.sandboxes`                                    |
+| Template     | Reproducible base environment.                                               | `client.templates`                                    |
+| Snapshot     | Immutable capture of a sandbox's state.                                      | `client.snapshots` / `sandbox.createSnapshot()`       |
+| Operation    | Asynchronous result of batch creation.                                       | `client.operations` / `operation.wait()`              |
+| Port forward | Explicitly published guest port.                                             | `client.portForwards` / `sandbox.createPortForward()` |
+
+<Note>
+  The `/v1` boundary covers sandbox, snapshot, template, operation, and port
+  forward resources. It does not yet cover `sandbox.commands`, `sandbox.files`,
+  or `sandbox.pty`; use the SDK for those capabilities, but do not infer their
+  paths or schemas from the `/v1` OpenAPI contract.
+</Note>
+
+## Runtime support
+
+Use the SDK from **Node.js 18 or later**. The full resource client imports
+`node:crypto` to generate idempotency keys, so this bundle does not claim
+general browser SDK support. PTY has an additional global `WebSocket`
+requirement; see [Interactive PTY](pty).
+
+## Next steps
+
+- [Create your first sandbox](quickstart)
+- [Configure URLs and credentials](configuration)
+- [Understand lifecycle states and independent timeouts](lifecycle-timeouts)
+- Configure the destination site's own OpenAPI reference route if it publishes
+  `api/openapi.yaml` alongside this portable bundle.

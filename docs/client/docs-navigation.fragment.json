@@ -1,0 +1,29 @@
+{
+  "navigation": {
+    "groups": [
+      {
+        "group": "Sandbox client",
+        "pages": [
+          "client/introduction",
+          "client/quickstart",
+          "client/configuration",
+          "client/lifecycle-timeouts",
+          "client/commands-streaming",
+          "client/files",
+          "client/pty",
+          "client/networking",
+          "client/snapshots-batches",
+          "client/errors-retries"
+        ]
+      },
+      {
+        "group": "Reference and migration",
+        "pages": ["client/sdk-reference", "client/migration"]
+      },
+      {
+        "group": "Operators",
+        "pages": ["client/fleet-operator"]
+      }
+    ]
+  }
+}

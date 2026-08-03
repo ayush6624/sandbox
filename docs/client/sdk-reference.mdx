@@ -1,0 +1,95 @@
+---
+title: TypeScript SDK reference
+description: Inventory of the recommended SandboxClient resources, handles, options, and error exports.
+---
+
+# TypeScript SDK reference
+
+Import from the `sandbox` package. This page is an inventory of the current
+TypeScript surface. `api/openapi.yaml` is the contract source for `/v1`
+resources; command, file, and PTY handle routes are currently non-versioned and
+are not described by that OpenAPI document.
+
+```ts
+import {
+  SandboxClient,
+  CapacityError,
+  CommandExitError,
+  TimeoutError,
+} from "sandbox";
+```
+
+## Client and collections
+
+| Surface                      | Methods                               | Notes                                                       |
+| ---------------------------- | ------------------------------------- | ----------------------------------------------------------- |
+| `new SandboxClient(options)` | —                                     | Primary tenant client; collections and lifecycle use `/v1`. |
+| `client.sandboxes`           | `create`, `get`, `list`, `createMany` | `list` is an `AsyncIterable`.                               |
+| `client.snapshots`           | `get`, `list`, `delete`               | `list` is an `AsyncIterable`.                               |
+| `client.templates`           | `get`, `list`                         | `list` is an `AsyncIterable`.                               |
+| `client.operations`          | `get`, `list`                         | Retrieve or list batch operations.                          |
+| `client.portForwards`        | `create`, `createRaw`, `list`         | Collection form for forward operations by sandbox ID.       |
+
+`list` accepts `pageSize` (the server maximum is 100) and follows opaque page
+tokens internally. Sandbox lists support documented `status`, `sourceType`,
+`createdAfter`, and `createdBefore` options. The SDK also serializes a
+`metadata` option as `metadata.<key>` query parameters, but that filter is not
+listed in the current OpenAPI contract; use it only after verifying support in
+your deployed API version.
+
+## ClientSandbox handle
+
+| Member                                                                  | Purpose                                                             |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `id`, `sandboxId`, `name`, `status`, `source`, `metadata`, `resources`  | Current resource properties.                                        |
+| `ttlMs`, `idleTimeoutMs`, `createdAt`, `expiresAt`                      | Lifecycle and timestamp properties.                                 |
+| `commands`, `files`, `pty`                                              | Guest capability handles on current non-versioned execution routes. |
+| `refresh(signal?)`                                                      | Refresh resource data in the handle.                                |
+| `update(options)`                                                       | Update name, metadata, TTL, or idle timeout.                        |
+| `pause()` / `resume()` / `terminate()`                                  | Standard lifecycle actions.                                         |
+| `createSnapshot(options?)`                                              | Capture a snapshot.                                                 |
+| `createPortForward()` / `createRawPortForward()` / `listPortForwards()` | Manage explicit connectivity.                                       |
+| `sshInstructions`                                                       | CLI command and copy for user-facing SSH guidance.                  |
+
+`hibernate()` and `kill()` are deprecated aliases on this handle. Use the
+standard methods above for new code.
+
+`createSnapshot()` accepts `name`, `retentionMs`, `idempotencyKey`, and
+`signal`; it uses a fixed 300,000 ms request budget and has no
+`requestTimeoutMs` option.
+
+## Important option shapes
+
+```ts
+await client.sandboxes.create({
+  name: "build",
+  source: { templateId: "default" }, // or { snapshotId: 'snap_123' }
+  ttlMs: 600_000,
+  idleTimeoutMs: 300_000,
+  resources: { vcpus: 2, memoryMib: 1024 },
+  metadata: { project: "docs" },
+  requestTimeoutMs: 300_000,
+  idempotencyKey: "build-42",
+  signal: AbortSignal.timeout(310_000),
+});
+```
+
+Supported source forms are `{ type: 'default' }`, `{ templateId }`,
+`{ snapshotId }`, or `{ type: 'template' | 'snapshot', id }`.
+
+## Result and error types
+
+| Type                            | Key fields                                                                                                                   |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `CommandResult`                 | `stdout`, `stderr`, `exitCode`, `durationMs`                                                                                 |
+| `SnapshotResource`              | `id`, `name`, `sourceSandboxId`, `state`, `createdAt`, `expiresAt`                                                           |
+| `PortForwardResource`           | `guestPort`, `mode`, plus optional host, URL, or raw-TCP fields                                                              |
+| `OperationState<ClientSandbox>` | counts, status, indexed `results`, timestamps                                                                                |
+| `ProblemDetails`                | RFC 9457 fields plus stable `code`, `request_id`, and optional violations                                                    |
+| Error exports                   | `SandboxError`, `AuthenticationError`, `NotFoundError`, `ConflictError`, `CapacityError`, `TimeoutError`, `CommandExitError` |
+
+## Next steps
+
+- [See method-focused guides](quickstart)
+- [Migrate compatibility facade calls](migration)
+- [Use the operator-only FleetClient](fleet-operator)
