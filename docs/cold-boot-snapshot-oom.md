@@ -1,7 +1,9 @@
 # Full snapshots of jailed VMs are OOM-killed by their own cgroup
 
-Status: **root cause identified, not fixed.** Reproduced on the production fleet
-2026-08-03 at release `860406d`. Pre-existing — see [Attribution](#attribution).
+Status: **root cause identified; fix implemented, pending fleet verification.**
+Reproduced on the production fleet 2026-08-03 at release `860406d`. Pre-existing —
+see [Attribution](#attribution). For the underlying memory model in plain terms,
+see [cgroup-memory-model.md](cgroup-memory-model.md).
 
 ## Symptom
 
@@ -33,32 +35,46 @@ vcpus/mem into snapshots) and always takes the cold path.
 
 ## Root cause
 
-A **full** snapshot needs roughly **2× the guest's memory** inside the per-VM
-cgroup: Firecracker reads the entire guest (making all of it resident) *and*
-writes an equal-sized mem file, whose dirty page cache is charged to the same
-cgroup. The jailer's leaf allows only:
+Firecracker writes the guest's memory into a file, and cgroup v2 charges that
+file's **page cache to the writer's cgroup** — the same leaf that already holds
+the guest. The leaf allows only:
 
 ```
 memory.max = mem_mib + jailer_memory_overhead_mib     (156 on the fleet)
 ```
 
-So the snapshot fails whenever `2 × mem_mib > mem_mib + 156`, i.e. whenever
-**`mem_mib > 156`**. The cgroup OOM-kills Firecracker, and the API connection
-closes as `EOF`.
+So the snapshot dies whenever
+
+```
+guest_touched_memory + dirty_page_cache_burst   >   mem_mib + 156
+```
+
+`memory.max` is a hard limit and dirty pages cannot be reclaimed until they are
+written back, so the kernel invokes the cgroup OOM killer. Firecracker is the
+largest process in the box, so it dies and the API connection closes as `EOF`.
+The disk was never the constraint — RAM in transit was.
+
+**Correction to an earlier reading of this:** it is *not* "a full snapshot needs
+2× `mem_mib`". Untouched guest pages map to the shared zero page and are never
+charged, so the guest contributes what it has *touched*, not its configured size.
+The distinction matters for sizing a mitigation: the headroom needed is above the
+guest's touched set (a few hundred MiB), not double the guest.
 
 ### Evidence
 
 Sweeping `mem_mib` on the fleet, everything else fixed:
 
-| `mem_mib` | leaf `memory.max` | needs ≈2× | result |
+| `mem_mib` | leaf `memory.max` | headroom above the guest | result |
 | --- | --- | --- | --- |
-| 128 | 284 | 256 | **OK** (`format=full`) |
-| 256 | 412 | 512 | FAIL (`EOF`) |
-| 512 | 668 | 1024 | FAIL (`EOF`) |
-| 1024 | 1180 | 2048 | FAIL (`EOF`) |
+| 128 | 284 MiB | 156 MiB, but the guest can touch at most 128 | **OK** (`format=full`) |
+| 256 | 412 MiB | 156 MiB | FAIL (`EOF`) |
+| 512 | 668 MiB | 156 MiB | FAIL (`EOF`) |
+| 1024 | 1180 MiB | 156 MiB | FAIL (`EOF`) |
 
-The boundary sits exactly where the model predicts, between 128 and 256 —
-`mem_mib` crossing `jailer_memory_overhead_mib`, not any absolute size.
+The headroom is a constant 156 MiB in every row, so the boundary is not about
+absolute size. 128 MiB survives structurally: a 128 MiB guest **cannot touch more
+than 128 MiB**, so its footprint can never consume the headroom above its own
+size. Every larger guest can, and does.
 
 **Why default sandboxes are unaffected:** they are golden-snapshot clones, so
 `Server.diffBase` has an entry and their snapshots are **diff** — a few MiB of
@@ -102,41 +118,72 @@ serve every create on the slow cold path forever. It also suggests
 `bake-image.sh golden` itself may be broken since the jailer landed. Both are
 cheap to check and would be bad to discover during a scale-up.
 
-## Fix options
+## Fix (implemented)
 
-**A. Fail closed (safe, stops the data loss).** Pre-flight the snapshot: if the
-VM's cgroup cannot absorb another `mem_mib` of page cache, refuse *before*
-pausing, so the VM is never put at risk. Converts silent destruction into a
-clear error.
-- User snapshot → 4xx, sandbox untouched and still running.
-- Idle hibernation → freeze skipped, sandbox keeps running.
-- Shutdown → still destroys (the existing designed fallback), but knowingly.
+**`memory.high` for the duration of the snapshot, plus fail-closed.**
+`snapshotWriteWindow` (`internal/vm/jailer.go`) already relaxed the leaf's
+`io.max` write cap for exactly this operation; it now also installs a reclaim
+ceiling at `memory.current + 64 MiB` and restores it afterwards.
 
-Cost, and it is a real product decision: override sandboxes then can never be
-snapshotted or hibernated, so an idle one holds its slot until TTL or an explicit
-delete instead of freeing capacity.
+Why this works: `memory.high` throttles and reclaims instead of killing, and
+because `memory.swap.max` is `0` the guest's anonymous pages are unreclaimable —
+so reclaim can only target the snapshot file's page cache, which is exactly the
+intent. The write proceeds as a sawtooth: fill the margin, throttle, writeback
+drains, clean pages drop, continue.
 
-**B. Relax the cgroup for the snapshot window (the real fix).** The mechanism
-already exists in the right shape: `snapshotWriteWindow`
-(`internal/vm/jailer.go:542`) temporarily lifts the leaf's `io.max` for a
-host-requested snapshot and restores it after. Extend that window to also raise
-`memory.max`, since it is the same "this VM is doing one big privileged write"
-moment.
+Three deliberate properties:
 
-The danger is explicit in the code's own comments: per-VM allowances are sized so
-a fully admitted host cannot overcommit the parent task cgroup, because the
-failure mode there is "OOM serve and every VM on the host at once". So this needs
-bounding — serialize snapshot windows per host, require parent headroom ≥ the
-guest size before granting one, and fall back to (A) when it is unavailable.
+- **Derived from `memory.current`, not `mem_mib`** — what matters is the touched
+  set, and this needs no knowledge of the guest's configuration.
+- **Above the current footprint, always.** A ceiling below the guest's own pages
+  would throttle against memory that can never be freed: a hard stall, then the
+  OOM being prevented.
+- **Installed per snapshot, never permanent.** A standing `memory.high` would
+  throttle any guest legitimately using all of its RAM — a worse bug than this
+  one. `prepareVMMCgroup` writes `memory.high = max` as the explicit baseline, so
+  the file's absence is a hard error rather than a silently skipped guard.
 
-**C. Raise `jailer_memory_overhead_mib` ≥ the largest allowed `mem_mib`**
-(config-only, immediate). Makes `memory.max` ≈ 2× guest so full snapshots fit.
-Cost: admission charges the overhead per VM, so committed memory per slot goes
-1180 → ~2048 MiB and density drops ~43% fleet-wide. Viable as an emergency
-mitigation, not as the fix.
+**Fail-closed backstop.** `memory.high` makes the OOM far less likely but is not a
+proof: if writeback cannot keep up, usage can still reach `memory.max`. So the
+window refuses — before Firecracker is asked to do anything — when the guard
+cannot be installed or there is less than one margin of headroom. The VMM is
+alive and paused at that point, so the caller's resume succeeds and the sandbox
+survives. An error instead of silent destruction is the point.
 
-Recommended: **A now**, then **B** designed properly. Add a regression test that
-snapshots a cold-booted VM at template memory — the gap that let this ship.
+### Performance
+
+- Guest while running, and during the snapshot: **no effect** (the ceiling exists
+  only inside the window, and the guest is paused anyway).
+- Default sandboxes: **no effect** — diff snapshots of a few MiB never reach the
+  ceiling; freeze stays ~178 ms.
+- Full snapshots: slower, becoming disk-bound rather than RAM-bound — roughly the
+  time to genuinely write the file (order 1–3 s per GiB on the local XFS SSD)
+  instead of "instant, flush later". The comparison is not fast-vs-slow snapshot;
+  it is slow snapshot vs destroyed sandbox.
+- Watch: a slower freeze eats more of `shutdownAll`'s 100 s drain budget. Worth
+  re-measuring if full-snapshot sandboxes become common.
+
+### Options considered and rejected
+
+- **Raise `jailer_memory_overhead_mib`** above the guest's touched set
+  (config-only, immediate). Works, but admission charges it per VM, so density
+  drops proportionally fleet-wide. Kept as an emergency lever, not the fix.
+- **Temporarily raise `memory.max`** instead of adding `memory.high`. Also works,
+  but it must be bounded against the parent task cgroup, where overcommitment
+  OOMs `serve` and every VM at once. `memory.high` needs no extra budget and
+  carries none of that risk.
+- **`O_DIRECT` or periodic fsync during the write** — both live inside
+  Firecracker's code, so unavailable to us.
+
+### Still to do
+
+- Regression coverage on Linux that actually snapshots a cold-booted VM at
+  template memory — the gap that let this ship. Current tests cover the guard's
+  logic against a fake cgroup leaf, not a live VMM.
+- Set `LogDir` (unset today, so VMM logs land in `/tmp`, outside the Nomad alloc
+  directory and unreachable via `nomad alloc fs`). This would have made the
+  diagnosis one command instead of an inference.
+- Verify the `buildGolden` hypothesis above.
 
 ## Attribution
 

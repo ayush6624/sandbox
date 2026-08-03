@@ -536,28 +536,142 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 // VMM's io.max while Firecracker writes a host-controlled snapshot. Snapshot
 // callers pause the guest before entering this window, so tenant disk I/O
 // cannot escape its normal limit. rbps remains capped throughout.
+// snapshotWriteWindow relaxes the jailed VMM's write constraints for the
+// duration of one host-requested snapshot, and restores them afterwards.
+//
+// It covers BOTH sides of the same burst:
+//
+//   - io.max wbps, so writeback is not bandwidth-throttled. A throttled write
+//     makes dirty pages accumulate faster than they drain, which is the memory
+//     problem below arriving from the I/O side.
+//   - memory.high, so the page cache the write creates is reclaimed under
+//     pressure instead of charging up to the hard memory.max. Without this a
+//     FULL snapshot kills the VMM: Firecracker writes the guest's whole memory
+//     into a file, and cgroup v2 charges that page cache to the same leaf that
+//     already holds the guest — a leaf sized at mem_mib + jailer overhead. The
+//     kernel's answer at memory.max is the OOM killer, so the VMM died and the
+//     sandbox was lost (docs/cold-boot-snapshot-oom.md). memory.high makes the
+//     kernel throttle and reclaim instead, which is what it exists for.
+//
+// Diff snapshots never hit this (a few MiB of dirty pages), which is why only
+// cold-booted sandboxes — the ones with no golden base to diff against — were
+// affected.
+//
+// It FAILS CLOSED: if the memory guard cannot be installed, the window returns
+// an error and vm.Snapshot aborts before issuing /snapshot/create. The VMM is
+// still alive and paused at that point, so the caller's resume succeeds and the
+// sandbox survives — an error instead of silent destruction.
 func snapshotWriteWindow(cfg JailerConfig, vmID string) func() (func() error, error) {
-	if cfg.IODevice == "" || cfg.IOWriteBPS <= 0 {
-		return nil
-	}
-	path := filepath.Join(jailerCgroupLeaf(cfg, vmID), "io.max")
+	leaf := jailerCgroupLeaf(cfg, vmID)
+	ioPath := filepath.Join(leaf, "io.max")
+	relaxIO := cfg.IODevice != "" && cfg.IOWriteBPS > 0
 	limited := ioMaxValue(cfg, false)
 	unlimitedWrite := ioMaxValue(cfg, true)
+
 	return func() (func() error, error) {
-		if err := os.WriteFile(path, []byte(unlimitedWrite), 0600); err != nil {
-			return nil, fmt.Errorf("remove snapshot write throttle: %w", err)
+		restoreMem, err := armSnapshotMemoryHigh(leaf)
+		if err != nil {
+			return nil, err
+		}
+		if relaxIO {
+			if err := os.WriteFile(ioPath, []byte(unlimitedWrite), 0600); err != nil {
+				_ = restoreMem()
+				return nil, fmt.Errorf("remove snapshot write throttle: %w", err)
+			}
 		}
 		var once sync.Once
 		var restoreErr error
 		return func() error {
 			once.Do(func() {
-				if err := os.WriteFile(path, []byte(limited), 0600); err != nil {
-					restoreErr = fmt.Errorf("restore snapshot write throttle: %w", err)
+				var errs []error
+				if relaxIO {
+					if err := os.WriteFile(ioPath, []byte(limited), 0600); err != nil {
+						errs = append(errs, fmt.Errorf("restore snapshot write throttle: %w", err))
+					}
 				}
+				if err := restoreMem(); err != nil {
+					errs = append(errs, err)
+				}
+				restoreErr = errors.Join(errs...)
 			})
 			return restoreErr
 		}, nil
 	}
+}
+
+// snapshotMemoryHighMargin is the page-cache working room the snapshot write is
+// given above the VM's footprint when the window opens. The write proceeds as a
+// sawtooth: fill the margin, get throttled, writeback drains, reclaim frees,
+// continue. Too small thrashes; too large lets the burst approach memory.max,
+// which is the failure this prevents.
+const snapshotMemoryHighMargin = int64(64 << 20)
+
+// armSnapshotMemoryHigh installs a reclaim ceiling just above the VM's current
+// footprint and returns the restore callback.
+//
+// The ceiling is derived from memory.current rather than from mem_mib because
+// what matters is what the guest has actually TOUCHED: untouched guest pages map
+// to the shared zero page and are never charged, so a configured size tells us
+// nothing about the real headroom. Deriving it also means this needs no
+// knowledge of the guest's configuration.
+//
+// It must land ABOVE the current footprint: memory.swap.max is 0, so guest
+// anonymous pages cannot be reclaimed at all. A ceiling below them would throttle
+// against memory that can never be freed — a hard stall, then the OOM this is
+// meant to avoid. Reclaim can only target the snapshot file's page cache, which
+// is precisely the intent.
+func armSnapshotMemoryHigh(leaf string) (func() error, error) {
+	highPath := filepath.Join(leaf, "memory.high")
+	previous, err := os.ReadFile(highPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s (snapshot would risk OOM-killing the VMM): %w", highPath, err)
+	}
+	restore := func() error {
+		if err := os.WriteFile(highPath, previous, 0600); err != nil {
+			return fmt.Errorf("restore snapshot memory ceiling: %w", err)
+		}
+		return nil
+	}
+
+	limit, err := cgroupLimitBytes(filepath.Join(leaf, "memory.max"))
+	if err != nil {
+		return nil, fmt.Errorf("read VM memory limit: %w", err)
+	}
+	if limit <= 0 {
+		// Unlimited memory.max: nothing can OOM-kill the VMM here, so adding a
+		// throttle would only slow the snapshot down for no benefit.
+		return func() error { return nil }, nil
+	}
+	current, err := cgroupLimitBytes(filepath.Join(leaf, "memory.current"))
+	if err != nil {
+		return nil, fmt.Errorf("read VM memory usage: %w", err)
+	}
+
+	high := current + snapshotMemoryHighMargin
+	if high >= limit {
+		// Less than one margin of headroom under the hard limit: there is no
+		// band in which to throttle, so the write would charge straight into
+		// memory.max. Refuse while the VMM is still alive and resumable.
+		return nil, fmt.Errorf("snapshot needs at least %d MiB of cgroup headroom but the VM is using %d of %d MiB: raise jailer_memory_overhead_mib (see docs/cold-boot-snapshot-oom.md)",
+			snapshotMemoryHighMargin>>20, current>>20, limit>>20)
+	}
+	if err := os.WriteFile(highPath, []byte(strconv.FormatInt(high, 10)), 0600); err != nil {
+		return nil, fmt.Errorf("arm snapshot memory ceiling (snapshot would risk OOM-killing the VMM): %w", err)
+	}
+	return restore, nil
+}
+
+// cgroupLimitBytes reads a cgroup v2 byte value, returning 0 for "max".
+func cgroupLimitBytes(path string) (int64, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "max" {
+		return 0, nil
+	}
+	return strconv.ParseInt(value, 10, 64)
 }
 
 func ioMaxValue(cfg JailerConfig, unlimitedWrite bool) string {
@@ -987,6 +1101,12 @@ func prepareVMMCgroup(cfg JailerConfig, req LaunchRequest) (retErr error) {
 	}{
 		{"memory.max", strconv.FormatInt(memoryMax, 10)},
 		{"memory.swap.max", "0"},
+		// A running VM is deliberately NOT throttled: it may legitimately use
+		// all of mem_mib. This states the baseline explicitly so the snapshot
+		// window has a known value to restore, and so the absence of the file
+		// is a real error rather than a silently skipped guard — see
+		// armSnapshotMemoryHigh.
+		{"memory.high", "max"},
 		{"pids.max", strconv.FormatInt(cfg.PIDsMax, 10)},
 		{"cpu.max", fmt.Sprintf("%d %d", cpuMax, cfg.CPUPeriodUS)},
 		{"cpu.weight", strconv.FormatInt(cfg.CPUWeight, 10)},

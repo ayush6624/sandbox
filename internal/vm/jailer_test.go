@@ -152,10 +152,13 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 		// see CheckMemoryAdmission.
 		"memory.max":      "1237319680",
 		"memory.swap.max": "0",
-		"pids.max":        "64",
-		"cpu.max":         "200000 100000",
-		"cpu.weight":      "100",
-		"io.max":          "8:16 rbps=10485760 wbps=5242880",
+		// A running VM is never throttled; the snapshot window installs a
+		// ceiling only for the duration of a snapshot.
+		"memory.high": "max",
+		"pids.max":    "64",
+		"cpu.max":     "200000 100000",
+		"cpu.weight":  "100",
+		"io.max":      "8:16 rbps=10485760 wbps=5242880",
 	} {
 		got, err := os.ReadFile(filepath.Join(leaf, file))
 		if err != nil {
@@ -168,9 +171,24 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	if prepared.BeginSnapshotWrite == nil {
 		t.Fatal("jailed launch omitted snapshot write window")
 	}
+	// memory.current is kernel-provided in a real cgroup; the fake leaf must
+	// supply it. 300 MiB stands in for a guest that has touched some of its RAM.
+	memCurrent := int64(300 << 20)
+	if err := os.WriteFile(filepath.Join(leaf, "memory.current"),
+		[]byte(strconv.FormatInt(memCurrent, 10)), 0600); err != nil {
+		t.Fatal(err)
+	}
 	restoreWriteLimit, err := prepared.BeginSnapshotWrite()
 	if err != nil {
 		t.Fatalf("begin snapshot write: %v", err)
+	}
+	// The window must also cap page-cache growth, or a full snapshot's write
+	// charges into memory.max and the kernel OOM-kills the VMM.
+	memHighPath := filepath.Join(leaf, "memory.high")
+	if got, err := os.ReadFile(memHighPath); err != nil {
+		t.Fatal(err)
+	} else if want := strconv.FormatInt(memCurrent+snapshotMemoryHighMargin, 10); string(got) != want {
+		t.Fatalf("snapshot memory.high = %q, want %q (current + margin)", got, want)
 	}
 	ioMaxPath := filepath.Join(leaf, "io.max")
 	if got, err := os.ReadFile(ioMaxPath); err != nil {
@@ -190,6 +208,12 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 		t.Fatal(err)
 	} else if want := "8:16 rbps=10485760 wbps=5242880"; string(got) != want {
 		t.Fatalf("restored io.max = %q, want %q", got, want)
+	}
+	// A running VM must never be left throttled.
+	if got, err := os.ReadFile(memHighPath); err != nil {
+		t.Fatal(err)
+	} else if string(got) != "max" {
+		t.Fatalf("restored memory.high = %q, want %q", got, "max")
 	}
 
 	hostOutput := filepath.Join(base, "published", "snapshot.mem")
