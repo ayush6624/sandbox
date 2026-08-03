@@ -84,6 +84,10 @@ func (s *Server) claimWarm(ctx context.Context, name string, expiresAt *time.Tim
 	}
 	s.met.warmClaims.Add(1)
 	s.act.touch(sb.ID)
+	// A ready VM has been running at our expense since the pool built it.
+	// Billing starts at the claim — ClaimWarm also resets created_at to this
+	// moment, so the row and the ledger agree on when the customer got it.
+	s.meterStart(ctx, sb)
 	s.kickWarmPool()
 	return sb, true
 }

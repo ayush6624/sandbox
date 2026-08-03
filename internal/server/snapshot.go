@@ -598,6 +598,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
 	sb.Status = registry.StatusRunning
+	s.meterStart(ctx, sb)
 	writeJSON(w, 201, s.effectiveResources(sb))
 }
 
@@ -1029,6 +1030,12 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 			return fmt.Errorf("publish running clone: %w", err)
 		}
 		c.sb.Status = registry.StatusRunning
+		// A warm-pool clone stays 'preparing'/'warming' and is deliberately
+		// NOT metered here: its runtime before a claim is platform overhead.
+		// claimWarm opens the interval at the moment a customer gets it.
+		metered := c.sb
+		metered.VMID = c.vmID // the row's vm_id; c.sb carries the pre-launch copy
+		s.meterStart(ctx, metered)
 	}
 	launch := c.launchTime
 	fmt.Fprintf(os.Stderr,

@@ -32,6 +32,13 @@ func (s *Server) reconcile(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "reconcile: list snapshot directory for private lineage cleanup: %v\n", err)
 		}
 	}
+	// Billable intervals exist only while a VM does, and VMs live only inside a
+	// running server — so every interval still open at startup was abandoned by
+	// the previous process. Close them at their last heartbeat, never at now:
+	// the host was down, and billing that span is the one error in the ledger a
+	// customer would certainly notice.
+	s.recoverUsageIntervals(ctx)
+
 	rows, err := s.reg.All(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reconcile: list registry: %v\n", err)

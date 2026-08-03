@@ -72,7 +72,14 @@ type PreparedLaunch struct {
 	// caller must have paused the guest first and must invoke the returned
 	// restore callback before resuming it. Direct launches leave this nil.
 	BeginSnapshotWrite func() (restore func() error, err error)
-	Cleanup            func()
+	// CgroupLeaf is the absolute path of this VM's cgroup v2 leaf, the source
+	// of its consumed-CPU accounting (see SampleUsage). Empty for direct
+	// launches, which install no cgroup — those fall back to /proc.
+	//
+	// Cleanup removes the leaf, so a final sample must be taken before the VMM
+	// exits.
+	CgroupLeaf string
+	Cleanup    func()
 }
 
 // ProcessLauncher prepares the Firecracker process for every lifecycle mode.

@@ -235,6 +235,12 @@ type Server struct {
 	// the autoscale "host becomes usable" span is attributable per stage
 	// instead of one opaque block.
 	phases *phaseRecorder
+
+	// shuttingDown marks the shutdownAll drain. Billing reads it so a freeze
+	// driven by SIGTERM is recorded as a platform event rather than an ordinary
+	// idle hibernation — otherwise a fleet-wide roll looks, on an invoice, like
+	// every customer's sandbox happening to go idle at the same instant.
+	shuttingDown atomic.Bool
 }
 
 type backgroundUpload struct {
@@ -368,6 +374,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	// listeners or wake-on-connect breaks after a server restart.
 	s.reopenPortListeners(ctx)
 	go s.reapExpired(ctx)
+	// Advances every open billable interval's heartbeat, bounding what a host
+	// crash can lose to one tick.
+	go s.usageSampler(ctx)
 	if s.cfg.HotCreate {
 		go s.ensureGolden(ctx)
 	}
@@ -633,6 +642,11 @@ func secureUnixSocket(path string) error {
 // Bounded parallelism: the mem writes all hit one disk. A sandbox that can't
 // be frozen in the window is destroyed, as before.
 func (s *Server) shutdownAll() {
+	// Every interval closed from here on is a platform event, not a customer
+	// one: a fleet roll must not read on an invoice as every sandbox happening
+	// to go idle at the same instant.
+	s.shuttingDown.Store(true)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
 	sem := make(chan struct{}, 8)
@@ -992,6 +1006,9 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	sb.VMID = rt.VMID
 	sb.SocketPath = rt.SocketPath
 	sb.Status = registry.StatusRunning
+	// Billing starts HERE, not at create acceptance: everything above — the
+	// clone or cold boot, the agent gate, identity rotation — is our latency.
+	s.meterStart(ctx, sb)
 	return sb, nil
 }
 
@@ -1294,10 +1311,19 @@ func (s *Server) destroyLocked(ctx context.Context, id string) error {
 
 	if v, ok := s.machines.Load(id); ok {
 		m := v.(*vm.Machine)
+		// Close the interval before the VMM exits and takes its cgroup leaf —
+		// and therefore its consumed-CPU total — with it. The few hundred ms of
+		// teardown CPU this misses is not worth a hook inside vm's cleanup.
+		s.meterStop(ctx, id, registry.EndDestroy)
 		if err := stopMachineBounded(m); err != nil {
 			return fmt.Errorf("stop VM: %w", err)
 		}
 		s.machines.Delete(id)
+	} else {
+		// No live VM (a hibernated sandbox being deleted, or one whose VMM
+		// already died). Any open interval is closed defensively; for a
+		// hibernated row the freeze already closed it and this is a no-op.
+		s.meterStop(ctx, id, registry.EndDestroy)
 	}
 
 	s.pf.CloseSandbox(id)

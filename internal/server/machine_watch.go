@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
 )
 
@@ -44,6 +45,10 @@ func (s *Server) cleanupExitedMachine(id string, exited *vm.Machine) error {
 	s.clearHibernationLineage(id)
 
 	ctx := context.Background()
+	// The VMM died on its own, so its cgroup leaf is already gone: the close
+	// keeps whatever the sampler last recorded rather than sampling now. This is
+	// exactly what bounds the loss to one sampling tick.
+	s.meterStop(ctx, id, registry.EndVMExit)
 	sb, err := s.reg.Get(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil

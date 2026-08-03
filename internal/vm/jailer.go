@@ -503,6 +503,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		Paths:              paths,
 		PrepareOutput:      prepareOutput,
 		BeginSnapshotWrite: beginSnapshotWrite,
+		CgroupLeaf:         jailerCgroupLeaf(cfg, req.VMID),
 		ConfigureSocket: func(hostPath string) error {
 			if filepath.Clean(hostPath) != filepath.Join(rootDir, "run", "uffd.socket") {
 				return fmt.Errorf("refusing to configure unexpected jail socket %s", hostPath)

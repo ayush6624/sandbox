@@ -666,6 +666,11 @@ func (r *Registry) migrate() error {
 		 WHERE status = 'hibernated' AND (tap_device <> '' OR guest_ip <> '')`); err != nil {
 		return err
 	}
+	// The billable-usage ledger is a separate table on purpose: Destroy deletes
+	// the sandboxes row, so usage kept there would vanish with every sandbox.
+	if err := r.migrateUsage(); err != nil {
+		return fmt.Errorf("migrate usage ledger: %w", err)
+	}
 	return nil
 }
 
@@ -1825,6 +1830,12 @@ var (
 	ErrPoolExhausted = errors.New("pool exhausted")
 	ErrSnapshotInUse = errors.New("snapshot in use")
 )
+
+// ErrUsageOpen marks an attempt to open a second billable interval for a
+// sandbox that already has one open. It is a bug signal, not a capacity
+// condition: two open intervals would double-bill one VM, so the ledger's
+// partial unique index refuses it and callers log rather than retry.
+var ErrUsageOpen = errors.New("usage interval already open")
 
 // ErrMemExhausted marks a memory-budget admission rejection. It wraps
 // ErrPoolExhausted so every existing capacity path (503 + Retry-After,

@@ -41,7 +41,10 @@ type Machine struct {
 	processPID         func() (int, error)
 	prepareOutput      func(string) (string, func() error, error)
 	beginSnapshotWrite func() (func() error, error)
-	cleanupOnce        sync.Once
+	// cgroupLeaf is this VM's cgroup v2 leaf; "" for an unjailed launch. Read
+	// by SampleUsage for consumed-CPU accounting.
+	cgroupLeaf  string
+	cleanupOnce sync.Once
 	// SDK-backed machines get one process waiter shared by every Wait caller.
 	// It also finalizes the log even when startup fails after the VMM launched
 	// and the caller never reaches its normal lifecycle goroutine.
@@ -97,6 +100,7 @@ type rawMachine struct {
 	processPID         func() (int, error)
 	prepareOutput      func(string) (string, func() error, error)
 	beginSnapshotWrite func() (func() error, error)
+	cgroupLeaf         string
 	cleanupOnce        sync.Once
 }
 
@@ -302,6 +306,7 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 		processPID:         prepared.ProcessPID,
 		prepareOutput:      prepared.PrepareOutput,
 		beginSnapshotWrite: prepared.BeginSnapshotWrite,
+		cgroupLeaf:         prepared.CgroupLeaf,
 		waitDone:           make(chan struct{}),
 	}, rt, nil
 }
@@ -357,6 +362,7 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 		processPID:         prepared.ProcessPID,
 		prepareOutput:      prepared.PrepareOutput,
 		beginSnapshotWrite: prepared.BeginSnapshotWrite,
+		cgroupLeaf:         prepared.CgroupLeaf,
 		waitDone:           make(chan struct{}),
 		diffCapable:        true,
 	}, rt, nil
@@ -697,6 +703,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		processPID:         prepared.ProcessPID,
 		prepareOutput:      prepared.PrepareOutput,
 		beginSnapshotWrite: prepared.BeginSnapshotWrite,
+		cgroupLeaf:         prepared.CgroupLeaf,
 	}
 	go func() {
 		rm.waitErr = cmd.Wait()
@@ -765,7 +772,7 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	}
 	timings.Resume = time.Since(phaseStarted)
 
-	return &Machine{raw: rm, diffCapable: true}, RuntimeConfig{
+	return &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf, diffCapable: true}, RuntimeConfig{
 		SocketPath: opts.SocketPath, VMID: vmID, LaunchTimings: timings,
 	}, nil
 }
@@ -843,6 +850,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		processPID:         prepared.ProcessPID,
 		prepareOutput:      prepared.PrepareOutput,
 		beginSnapshotWrite: prepared.BeginSnapshotWrite,
+		cgroupLeaf:         prepared.CgroupLeaf,
 	}
 	// If the page source can't serve a fault (e.g. a GCS chunk fetch fails after
 	// retries), Firecracker would hang forever on the unserved page. Kill it
@@ -888,7 +896,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	// at high concurrency (roadmap B3). Post-resume it races only the guest's own
 	// faults, exactly like fault-ahead prefetch (which is safe at high concurrency).
 	h.startPrewarm()
-	return &Machine{raw: rm, diffCapable: false}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+	return &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf, diffCapable: false}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
 }
 
 func killLaunchProcess(cmd *exec.Cmd) {

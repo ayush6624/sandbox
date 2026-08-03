@@ -496,6 +496,11 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, mode hibernat
 		return fmt.Errorf("snapshot: %w", err)
 	}
 
+	// Close the billable interval BEFORE the VMM dies: the final consumed-CPU
+	// reading lives in a cgroup leaf that the launch cleanup removes on exit.
+	// The guest is already paused, so this reading is final.
+	s.meterStop(context.Background(), id, registry.EndHibernate)
+
 	// Frozen state is on disk; the VM process is now redundant. Kill it — no
 	// guest shutdown, the guest must not observe anything.
 	s.machines.Delete(id)
@@ -624,6 +629,16 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 		return sb, fmt.Errorf("wake %s: %w", id, err)
 	}
 	s.met.wakes.Add(1)
+
+	// A wake is a new VMM, so it is a new billable interval (seq+1) — the frozen
+	// span in between billed nothing. Re-read the row: reg.Wake returns the
+	// pre-launch copy, and the vm_id the restore just recorded is what ties the
+	// interval to the process whose cgroup we sample.
+	if woken, err := s.reg.Get(ctx, id); err == nil {
+		s.meterStart(ctx, woken)
+	} else {
+		s.meterStart(ctx, sb)
+	}
 
 	// The port listeners persisted through hibernation (that's what routed the
 	// waking connection here); this re-sync only repairs drift, e.g. a bind

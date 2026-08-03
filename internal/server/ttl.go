@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // handleSetTimeout updates a sandbox's auto-destroy deadline:
@@ -98,5 +100,11 @@ func (s *Server) destroyExpired(ctx context.Context, id string, cutoff time.Time
 	if sb.ExpiresAt == nil || !sb.ExpiresAt.Before(cutoff) {
 		return nil
 	}
+	// Attribute the close to the TTL before the generic destroy path claims it.
+	// The VM is still live, so this also takes the final CPU sample; the close
+	// inside destroyLocked is then a no-op. Worth the extra call: "expire" is
+	// the answer to a customer asking why a sandbox vanished, and a bare
+	// "destroy" would imply someone deleted it.
+	s.meterStop(ctx, id, registry.EndExpire)
 	return s.destroyLocked(ctx, id)
 }
