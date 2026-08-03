@@ -99,6 +99,9 @@ type Config struct {
 	// in the background and restore/fanout pull missing snapshots down from
 	// the bucket, so any host can serve them. Empty = host-local only.
 	SnapshotBucket string
+	// UsageBucket receives the billing spool; defaults to SnapshotBucket.
+	// Empty (with no SnapshotBucket) keeps the usage ledger host-local.
+	UsageBucket string
 
 	// --- Gateway registration (optional; Phase-1 multi-host) ---
 	// When GatewayURL is set, the server periodically heartbeats to the gateway
@@ -236,6 +239,15 @@ type Server struct {
 	// instead of one opaque block.
 	phases *phaseRecorder
 
+	// usagePut writes one immutable billing-spool object; nil disables
+	// durability and keeps the ledger host-local (which also disables local
+	// pruning — see pruneUsage). Injected as a function rather than a
+	// *gcsblob.Client so the flush/dedup/retry behaviour is testable without a
+	// bucket: that behaviour is what stands between a scaled-in worker and
+	// unrecoverable revenue, so it must be exercised in unit tests.
+	usagePut        func(ctx context.Context, object string, data []byte) error
+	usageBucketName string
+
 	// shuttingDown marks the shutdownAll drain. Billing reads it so a freeze
 	// driven by SIGTERM is recorded as a platform event rather than an ordinary
 	// idle hibernation — otherwise a fleet-wide roll looks, on an invoice, like
@@ -331,6 +343,23 @@ func New(cfg Config, reg *registry.Registry) *Server {
 		s.blob = gcsblob.New(cfg.SnapshotBucket)
 		fmt.Fprintf(os.Stderr, "snapshot durability on: gs://%s\n", cfg.SnapshotBucket)
 	}
+	// Usage spooling defaults to the snapshot bucket so fleets that already have
+	// one get billing durability without new infrastructure, while a dedicated
+	// bucket (its own retention, eventually write-only IAM) is one config line.
+	if bucket := cfg.UsageBucket; bucket != "" || cfg.SnapshotBucket != "" {
+		if bucket == "" {
+			bucket = cfg.SnapshotBucket
+		}
+		client := s.blob
+		if bucket != cfg.SnapshotBucket {
+			client = gcsblob.New(bucket)
+		}
+		s.usageBucketName = bucket
+		s.usagePut = client.PutBytes
+		fmt.Fprintf(os.Stderr, "usage metering durability on: gs://%s/usage/\n", bucket)
+	} else {
+		fmt.Fprintf(os.Stderr, "usage metering is host-local: no usage_bucket or snapshot_bucket configured (ledger is never pruned)\n")
+	}
 	return s
 }
 
@@ -377,6 +406,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Advances every open billable interval's heartbeat, bounding what a host
 	// crash can lose to one tick.
 	go s.usageSampler(ctx)
+	if s.usagePut != nil {
+		go s.usageSpooler(ctx)
+	}
 	if s.cfg.HotCreate {
 		go s.ensureGolden(ctx)
 	}
@@ -537,6 +569,10 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		cancel()
 		s.shutdownAll()
+		// shutdownAll froze every sandbox, which closed their intervals. This is
+		// the most valuable flush of a worker's life — and on a scale-in that
+		// deletes the instance, the only one that can still happen.
+		s.drainUsage()
 		s.pf.CloseAll() // hibernated sandboxes' listeners; reopened next startup
 		return nil
 	case err := <-srvErr:

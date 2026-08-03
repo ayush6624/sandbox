@@ -1,7 +1,7 @@
 # Usage metering plan
 
-Status: **Phase 1 shipped** (ledger, sampler, lifecycle hooks, crash recovery).
-Phases 2–4 are design only.
+Status: **Phases 1–2 shipped** (ledger, sampler, lifecycle hooks, crash recovery,
+durable GCS spool). Phases 3–4 are design only.
 
 Goal: per-sandbox CPU-hours and RAM-hours, durable enough to bill a customer
 from. Disk is deliberately **not** metered — it is not elastic today, so it is
@@ -117,18 +117,24 @@ New linux/stub pair in `internal/vm` — matching the existing build-tag
 convention (`//go:build linux` / `!linux`, identical signatures):
 
 ```go
-type UsageSample struct { CPUUsec uint64; MemCurrentBytes uint64 }
+type UsageSample struct { CPUUsec int64; MemBytes int64; FromCgroup bool }
 func SampleUsage(m *Machine) (UsageSample, error)
 ```
 
-- Jailed path: read `cpu.stat` from the machine's leaf. The leaf path derives
-  from the machine's `vmid` plus the jailer config, so `Machine` needs to retain
-  the resolved leaf (it already retains `launchCleanup` closed over it).
-- Unjailed dev path (`VMIsolation != "jailer"`, macOS stub): fall back to
-  `utime + stime` from `/proc/<pid>/stat` via the existing `vm.PID`. This
-  undercounts kernel-side work outside the process; acceptable for dev, and the
-  fallback is recorded in `end_reason` so a mixed dataset is never mistaken for
-  clean data.
+- Jailed path: read `cpu.stat` (and `memory.current`, diagnostic only) from the
+  machine's leaf. `PreparedLaunch.CgroupLeaf` carries the resolved path from the
+  jailer launcher onto the `Machine`, for both the SDK-backed and raw (clone,
+  UFFD) flavors.
+- Unjailed dev path (`VMIsolation != "jailer"`): fall back to `utime + stime`
+  from `/proc/<pid>/stat` via the existing `vm.PID`. This undercounts
+  kernel-side work outside the process, so `FromCgroup` distinguishes the two —
+  a mixed dataset must never be mistaken for uniformly accurate accounting.
+- Format parsing lives in an untagged file so both layouts are unit-testable off
+  Linux. Only the reads are `//go:build linux`; the macOS stub returns
+  `ErrLinuxOnly`, which callers already treat as "keep the last known total", so
+  local dev degrades to allocated-only rather than failing a lifecycle op.
+- A failed read returns `-1`, never `0`: one unreadable cgroup at teardown must
+  not erase a real bill.
 
 Two writers, both cheap:
 
@@ -253,8 +259,29 @@ Two things the implementation added beyond this design:
 TTL reap is the answer to "why did my sandbox vanish", and a fleet roll must not
 read as every customer's sandbox going idle at the same instant.
 
-**Phase 2 — durability.** GCS spool, flush loop, retention prune,
-`sandbox_usage_unflushed_intervals` + an alert.
+**Phase 2 — durability. DONE.** `internal/server/usage_spool.go`: flush loop
+(5 min + a final flush on graceful shutdown), batch drain, retention prune, and
+`sandbox_usage_intervals_open` / `sandbox_usage_unflushed_intervals` on
+`/metrics`. Alert on the latter — a rising backlog means billing evidence exists
+only on one host's disk.
+
+Details worth knowing:
+
+- **Object names are content-derived**, `usage/<host>/<date>/<end>-<sha8>.jsonl`,
+  not counter-derived. A process restart resets a counter, and a colliding name
+  would silently overwrite a previous flush — destroying exactly the evidence
+  this spool exists to preserve. Content-addressing makes a retry rewrite the
+  identical object instead.
+- **The bucket defaults to `snapshot_bucket`**, so an existing fleet gets
+  durability with no infrastructure change (`configs/devbox-gcp.json` already
+  sets one). `usage_bucket` overrides it, for when usage wants its own retention
+  and write-only IAM.
+- **Pruning is gated on a bucket being configured.** With nowhere to spool, the
+  local rows ARE the record of truth, so a self-hosted deployment without object
+  storage keeps its ledger forever rather than discarding the only copy.
+- `bake-image.sh` clears `snapshot_bucket` for the offline golden build, which
+  also disables usage spooling there — correct, since that throwaway VM's
+  runtime is not billable.
 
 **Phase 3 — read paths.** `GET /v1/usage`, `GET /v1/sandboxes/{id}/usage`,
 gateway scatter-gather, host counters, `api/openapi.yaml` + SDK method

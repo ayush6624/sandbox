@@ -189,6 +189,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		UFFDChunkGCS:           cfg.UFFDChunkGCS,
 		UFFDChunkPrefetch:      cfg.UFFDChunkPrefetch,
 		SnapshotBucket:         cfg.SnapshotBucket,
+		UsageBucket:            cfg.UsageBucket,
 		GatewayURL:             cfg.GatewayURL,
 		GatewayToken:           firstNonEmpty(cfg.GatewayControlToken, cfg.GatewayToken),
 		GatewayTokens:          cfg.GatewayControlTokens,

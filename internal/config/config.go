@@ -53,6 +53,18 @@ type Config struct {
 	// (metadata-server auth). Empty disables all GCS behavior — snapshots
 	// stay host-local exactly as before.
 	SnapshotBucket string `json:"snapshot_bucket"`
+	// UsageBucket is where closed billable intervals are spooled as immutable
+	// newline-JSON (see docs/usage-metering-plan.md). It defaults to
+	// SnapshotBucket, which needs no new infrastructure — but it is a separate
+	// knob because usage objects are billing evidence: they want their own
+	// retention policy and, eventually, write-only IAM, neither of which suits
+	// a bucket full of mutable snapshot artifacts.
+	//
+	// Empty (and no SnapshotBucket) keeps the ledger host-local. That is the
+	// correct self-hosted default, and it is also why local pruning is gated on
+	// a bucket being configured: with nowhere to spool to, the local rows ARE
+	// the record and must not be deleted.
+	UsageBucket string `json:"usage_bucket"`
 
 	// --- Networking ---
 	Bridge      string `json:"bridge"`      // e.g. "br-fc"

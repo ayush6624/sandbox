@@ -73,6 +73,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_warm_claims_total", "Creates served from fully initialized ready VMs.", s.met.warmClaims.Load())
 	counter("sandbox_warm_misses_total", "Eligible creates that found no ready VM and used the normal clone path.", s.met.warmMisses.Load())
 	counter("sandbox_warm_build_failures_total", "Background ready-VM build failures.", s.met.warmFailures.Load())
+	// Billable metering health. Per-sandbox usage is deliberately NOT exported:
+	// a sandbox_id label at this churn rate is a cardinality bomb, and the
+	// ledger/API is the right place for detail. These two are what an operator
+	// must see — intervals accruing, and billing evidence not yet durable.
+	if open, err := s.reg.CountOpenUsageIntervals(r.Context()); err == nil {
+		gauge("sandbox_usage_intervals_open", "Billable intervals currently accruing (one per running sandbox's VMM).", int64(open))
+	}
+	if pending, err := s.reg.CountUnflushedUsageIntervals(r.Context()); err == nil {
+		// Alert on this: a rising backlog means closed intervals exist only on
+		// this host's disk, which a scale-in that deletes the instance destroys.
+		gauge("sandbox_usage_unflushed_intervals", "Closed billable intervals not yet spooled to durable storage.", int64(pending))
+	}
+
 	counter("sandbox_hibernations_total", "Sandboxes frozen to disk (idle reaper, manual, or shutdown).", s.met.hibernations.Load())
 	counter("sandbox_wakes_total", "Sandboxes successfully thawed from hibernation.", s.met.wakes.Load())
 	counter("sandbox_wake_failures_total", "Wake attempts that rolled back to hibernated.", s.met.wakeFailures.Load())
