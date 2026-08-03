@@ -269,14 +269,55 @@ it hit the adjacent symptom. A bandwidth-throttled write makes dirty pages pile
 up faster than they drain — the same accumulation, seen from the I/O side. They
 lifted the bandwidth cap and stopped there; the memory side went unaddressed.
 
-### And a guard, because `memory.high` is not a proof
+### But a warning line cannot create room
 
-`memory.high` makes the failure enormously less likely but cannot guarantee it:
-if writeback truly cannot keep up, usage still climbs to `memory.max`. So the
-snapshot also **fails closed**. If the guard cannot be installed, or there is less
-than one margin of headroom under the hard limit, the snapshot is refused *before
-Firecracker is asked to do anything*. The VM is still alive and paused at that
-point, so the caller resumes it and the sandbox survives.
+A ceiling only helps if there is something reclaimable **and** somewhere to
+reclaim into. A guest whose footprint already sits near its own limit has
+neither: its pages are unreclaimable (no swap), and there is no slack left to
+absorb the write. The kernel throttles without making progress, usage still
+climbs to `memory.max`, and the OOM happens anyway.
+
+That is exactly what the fleet showed. `memory.high` alone fixed 512 and 1024 MiB
+sandboxes — those guests do not fill their configured RAM, so they carry real
+slack — but a 256 MiB guest kept dying, because it does fill its RAM. The result
+was non-monotonic, which is the tell that room, not pressure, was the missing
+ingredient.
+
+So for a **full** snapshot the window also **raises `memory.max`** to
+`current + write_size + margin`, and hands it back when the snapshot finishes:
+
+```
+        before                          during the snapshot
+┌────────────────────┐          ┌────────────────────────────┐
+│ memory.max   1180  │          │ memory.max   1440  (raised)│
+│                    │          │ memory.high   434  ← ceiling│
+│ guest        ~370  │          │ guest        ~370          │
+└────────────────────┘          │ page cache   sawtooth ↕     │
+                                └────────────────────────────┘
+```
+
+`memory.high` keeps actual usage down near the ceiling, so the raised limit is
+mostly **unused insurance**. That is also why handing it back at the end is safe:
+usage is already low, so lowering the hard limit reclaims nothing.
+
+**Where does the extra room come from?** Only from what the task cgroup has not
+already promised. Before raising, the code sums *every* per-VM leaf's
+`memory.max` — their limits, not their usage, because an admitted-but-idle VM is
+entitled to its full allowance at any moment — subtracts that plus serve's 2 GiB
+reserve from the task limit, and raises only if the difference covers it. If it
+does not, the snapshot is refused with everything left untouched. Overcommitting
+the parent is the one outcome worth refusing service over: it OOMs serve and every
+VM on the host at once.
+
+Full-snapshot windows are also serialized, since two of them would each see the
+same headroom as free. Diff snapshots skip the reservation and the lock entirely.
+
+### And a guard, because reserving is not always possible
+
+On a host with no unreserved room, the reservation cannot be made — and
+`memory.high` alone is not a proof. So the snapshot **fails closed**: it is
+refused *before Firecracker is asked to do anything*. The VM is still alive and
+paused at that point, so the caller resumes it and the sandbox survives.
 
 An error instead of a destroyed sandbox is the whole point. Previously the freeze
 path tried to resume a VM that was already dead, failed, and the row was reaped —
@@ -291,7 +332,7 @@ silent, unrecoverable data loss on a documented feature.
 | Guest, while running | **None.** `memory.high` exists only during a snapshot. |
 | Guest, during the snapshot | **None.** It is paused; it cannot be slowed. |
 | Default sandboxes (diff snapshots) | **None.** A few MiB never reaches the line. Freeze stays ~178 ms. |
-| Full snapshots (the ones that used to die) | Slower: disk-bound rather than RAM-bound — roughly the time to genuinely write the file (order 1–3 s per GiB on the local XFS SSD) instead of "instant, flush later". |
+| Full snapshots (the ones that used to die) | Slower: disk-bound rather than RAM-bound — roughly the time to genuinely write the file (order 1–3 s per GiB on the local XFS SSD) instead of "instant, flush later". They are also serialized per host, so a host full of override sandboxes freezes them one at a time. |
 
 The comparison for that last row is not "fast snapshot vs slow snapshot". It is
 "slow snapshot vs destroyed sandbox".

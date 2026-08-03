@@ -1,8 +1,9 @@
 # Full snapshots of jailed VMs are OOM-killed by their own cgroup
 
-Status: **partially fixed and verified on the fleet.** 512 and 1024 MiB
-sandboxes now snapshot successfully; **256 MiB still dies and is still
-destructive.** See [Verification](#verification-what-works-and-what-does-not).
+Status: **FIXED and verified on the fleet** (release `ec5b70c`, 2026-08-03).
+All sizes snapshot successfully, and hibernate/wake/destroy on a
+resource-override sandbox works end to end. See
+[Verification](#verification).
 Reproduced on the production fleet 2026-08-03 at release `860406d`. Pre-existing —
 see [Attribution](#attribution). For the underlying memory model in plain terms,
 see [cgroup-memory-model.md](cgroup-memory-model.md).
@@ -165,81 +166,87 @@ survives. An error instead of silent destruction is the point.
 - Watch: a slower freeze eats more of `shutdownAll`'s 100 s drain budget. Worth
   re-measuring if full-snapshot sandboxes become common.
 
-### Verification: what works and what does not
+### Verification
 
-Rolled and swept on the fleet three times (`81ea99c`, `a58186f`, `ecb610b`):
+Swept on the fleet after each attempt:
 
-| `mem_mib` | before the fix | after |
-| --- | --- | --- |
-| 128 | OK | OK |
-| 256 | died | **still dies (`EOF`), sandbox still destroyed** |
-| 512 | died | **OK** (`format=full`) |
-| 1024 | died | **OK** (`format=full`) |
+| `mem_mib` | before | `ecb610b` (memory.high only) | `ec5b70c` (final) |
+| --- | --- | --- | --- |
+| 128 | OK | OK | **OK** |
+| 256 | died | died | **OK** |
+| 512 | died | OK | **OK** |
+| 1024 | died | OK | **OK** |
 
-A strict improvement, but incomplete. Two hypotheses were tested on the fleet and
-both were wrong, which is worth recording so they are not retried:
+Lifecycle on a cold-booted override sandbox (`vcpus: 2, mem_mib: 1024`), the path
+that used to destroy it: create → **hibernate (`status: hibernated`)** → wake
+(`exec` returns) → destroy `204`. Billable intervals tracked correctly throughout
+(open 1 → 0 on freeze → 1 on wake → 0 on destroy).
 
-1. **A fixed 64 MiB margin is enough** (`81ea99c`). It fixed 512/1024 but *broke*
-   128 and 256, because demanding a full margin under `memory.max` refuses a
-   small guest that sits close to its own small limit. Fixed in `a58186f` by
-   clamping rather than refusing.
-2. **The margin was too large for tight leaves** (`ecb610b`). Making it
-   `slack/4` (clamped to 4–64 MiB) restored 128 but did **not** fix 256.
+Three hypotheses were tested against real VMs and two were wrong. Recording them
+so they are not retried:
 
-Why 256 is the stubborn case, and why the result is non-monotonic: `memory.high`
-can only help if there is something reclaimable *and* room to reclaim into. A
-guest whose footprint already sits near its own limit has neither — the anonymous
-guest pages cannot be reclaimed (swap is off) and there is no slack to absorb the
-write. `memory.high` then throttles without making progress, usage still climbs to
-`memory.max`, and the OOM happens anyway. 512 and 1024 escape because those
-guests do *not* fill their configured RAM, so they carry real slack; 128 escapes
-because its write is small.
+1. **A fixed 64 MiB `memory.high` margin is enough** (`81ea99c`). Fixed 512/1024
+   but *broke* 128 and 256: demanding a full margin refuses a small guest that
+   sits close to its own small limit. Fixed in `a58186f` by clamping instead.
+2. **The margin was too large for tight leaves** (`ecb610b`). Making it `slack/4`
+   restored 128 but did nothing for 256.
+3. **The leaf needs more room, not just a ceiling** (`ec5b70c`) — correct.
 
-**The fail-closed guard does not catch this case**, which is the important
-shortfall: a ceiling *can* be placed (`current < limit`), so the window proceeds —
-it just does not help. The refusal predicate is too weak.
+Why `memory.high` alone could never fix 256: it helps only when there is
+something reclaimable *and* room to reclaim into. A guest whose footprint already
+sits near its own limit has neither — guest pages are unreclaimable with swap off,
+and there is no slack to absorb the write. It throttles without progress, usage
+still reaches `memory.max`, and the OOM happens anyway. 512 and 1024 escaped
+because those guests do not fill their configured RAM; 128 escaped because its
+write is small. Hence the non-monotonic result.
 
-### Completing the fix
+### Reserving the room (what made it work)
 
-Two options, and they compose:
+A full-snapshot window now raises the leaf's `memory.max` to
+`current + burst + margin` — enough that the entire write could be dirty at once —
+and restores it on close. `burst` is the guest's memory size, captured at
+`Prepare` (only the launcher knows it); `BeginSnapshotWrite` takes whether the
+snapshot is full.
 
-- **Refuse on projected burst, not just on placeability.** The expected page-cache
-  burst is approximately the guest's memory size, which is available at
-  `Prepare` time (`LaunchRequest.MemMIB`) and can be captured in the window
-  closure. Refuse when `memory.max - memory.current` is too small a fraction of
-  it. On the four measured points the passing cases had a slack/write ratio of
-  roughly 0.72–0.94 and the failing one 0.61, so a threshold near 0.7 separates
-  them — but that is a curve fitted to four points, and it only converts
-  destruction into a clean error rather than making the snapshot work.
-- **Raise `memory.max` for the window, bounded by parent headroom.** The only
-  option that actually makes the stubborn case succeed, because it is the one that
-  manufactures the missing room. The jailer can read the parent task cgroup's
-  `memory.max`/`memory.current` directly, raise the leaf only when the parent has
-  the headroom, and fall back to refusing otherwise. This is the change whose
-  failure mode is "OOM serve and every VM at once", so it wants care, and
-  serializing snapshot windows per host.
+`memory.high` keeps real usage far below the raised limit, so the raise is
+insurance rather than consumption. That is also why lowering `memory.max` at
+close cannot OOM: usage is already low, so nothing needs reclaiming. The restore
+order is deliberate — `memory.max` first, `memory.high` second; lifting the
+ceiling first would remove that guarantee.
 
-Recommended: both — the refusal first, since it stops the data loss immediately,
-then the `memory.max` window so overrides at every size can actually be
-snapshotted and hibernated.
+**Bounded by the parent.** `parentReservableBytes` subtracts every sibling leaf's
+`memory.max` from the task cgroup's, plus a 2 GiB reserve for serve (whose
+`sandbox-control` leaf carries no limit of its own, mirroring the +2 GiB
+`deploy-job.sh` adds to `TASK_MEMORY`). It subtracts LIMITS, not usage: an
+admitted-but-idle VM is entitled to its full allowance at any moment, so counting
+current usage would hand out room that is already promised — exactly the
+overcommitment `CheckMemoryAdmission` exists to prevent. When the reservation does
+not fit, the snapshot is refused with every limit untouched.
+
+**Serialized per process.** Two concurrent full-snapshot windows would each see
+the same parent headroom as free. Diff snapshots skip the reservation and the lock
+entirely, so the 8-way-parallel shutdown freeze of golden clones is unchanged.
 
 ### Options considered and rejected
 
 - **Raise `jailer_memory_overhead_mib`** above the guest's touched set
   (config-only, immediate). Works, but admission charges it per VM, so density
   drops proportionally fleet-wide. Kept as an emergency lever, not the fix.
-- **Temporarily raise `memory.max`** instead of adding `memory.high`. Also works,
-  but it must be bounded against the parent task cgroup, where overcommitment
-  OOMs `serve` and every VM at once. `memory.high` needs no extra budget and
-  carries none of that risk.
+- **`memory.high` alone, with no reservation.** Tried first because it needs no
+  extra budget. It fixed 512/1024 but not 256 — see Verification. Kept as part of
+  the final fix, not as the whole of it.
 - **`O_DIRECT` or periodic fsync during the write** — both live inside
   Firecracker's code, so unavailable to us.
 
 ### Still to do
 
 - Regression coverage on Linux that actually snapshots a cold-booted VM at
-  template memory — the gap that let this ship. Current tests cover the guard's
-  logic against a fake cgroup leaf, not a live VMM.
+  template memory — the gap that let this ship. Current tests cover the
+  reservation and guard logic against a fake cgroup hierarchy, not a live VMM; the
+  fleet sweep is what proves the real path, and it is manual.
+- Re-measure `shutdownAll`'s drain with full-snapshot sandboxes present. Diff
+  freezes are unchanged, but a host full of override sandboxes now serializes its
+  full snapshots, which the 100 s budget has never been tested against.
 - Set `LogDir` (unset today, so VMM logs land in `/tmp`, outside the Nomad alloc
   directory and unreachable via `nomad alloc fs`). This would have made the
   diagnosis one command instead of an inference.
