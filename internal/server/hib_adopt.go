@@ -251,6 +251,17 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 		return registry.Sandbox{}, fmt.Errorf("insert adopted row: %w", err)
 	}
+	// Restore the labels and provenance the sandbox carried on its old host.
+	// Best-effort: an adopted sandbox that has lost its labels is still a
+	// working sandbox, but it bills unattributably, so this is worth a loud
+	// line rather than a failed adoption.
+	if len(rec.Metadata) > 0 || rec.SourceType != "" || rec.SourceID != "" {
+		if _, perr := s.reg.SetPublicFields(ctx, id, rec.SourceType, rec.SourceID, rec.Metadata); perr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] adopt: restore labels and provenance: %v\n", id, perr)
+		} else {
+			sb.Metadata, sb.SourceType, sb.SourceID = rec.Metadata, rec.SourceType, rec.SourceID
+		}
+	}
 	// Re-expose the sandbox's explicit ports (fresh host ports from this pool).
 	for _, gp := range append(rec.GuestPorts, rec.LegacyGuestPorts...) {
 		if _, perr := s.reg.AddPort(ctx, id, gp); perr != nil {

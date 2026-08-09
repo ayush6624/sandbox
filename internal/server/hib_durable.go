@@ -67,6 +67,15 @@ type hibRecord struct {
 	// BaseSnapshotID keeps the sandbox diff-snapshottable after a move (unchanged
 	// meaning: the golden it was cloned from).
 	BaseSnapshotID string `json:"base_snapshot_id,omitempty"`
+	// Labels and provenance travel with the sandbox. They are descriptive, but
+	// dropping them on a move is not cosmetic: metadata is the only attribution
+	// the billing ledger carries, so a sandbox adopted onto another host would
+	// bill the rest of its life unattributable. Absent in records written before
+	// this field existed, which restores as "no labels" — exactly what those
+	// records could express.
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	SourceType string            `json:"source_type,omitempty"`
+	SourceID   string            `json:"source_id,omitempty"`
 	// Mem durability: MemForm=chunked → read manifest.json; MemForm=diff → pull
 	// mem.diff.sz and rebase onto MemBaseID's base mem.
 	MemForm   string `json:"mem_form"`
@@ -111,6 +120,9 @@ func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
 		ExpiresAtUnix:     unixPtr(sb.ExpiresAt),
 		HibernateAfterSec: sb.HibernateAfterSec,
 		BaseSnapshotID:    sb.BaseSnapshotID,
+		Metadata:          sb.Metadata,
+		SourceType:        sb.SourceType,
+		SourceID:          sb.SourceID,
 		MemForm:           memForm,
 		MemBaseID:         memBaseID,
 		RootfsForm:        rootfsForm,

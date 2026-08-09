@@ -246,3 +246,38 @@ func TestHibChunkMarkerIsScopedToOneFreeze(t *testing.T) {
 		t.Fatal("chunk and diff-base markers must be distinct files")
 	}
 }
+
+// A sandbox that moves hosts keeps its labels. Metadata is the only attribution
+// the billing ledger carries, so a record that dropped it would leave every
+// interval the sandbox bills on its new host unattributable — and the move
+// happens precisely when a host was lost, which is when reconciliation matters
+// most.
+func TestHibRecordCarriesLabelsAcrossAMove(t *testing.T) {
+	sb := registry.Sandbox{
+		ID: "sb-1", Vcpus: 2, MemMIB: 1024,
+		CreatedAt:  time.Unix(1_700_000_000, 0),
+		Metadata:   map[string]string{"team": "payments", "env": "prod"},
+		SourceType: "snapshot", SourceID: "snap-7",
+	}
+
+	rec := buildHibRecord(sb, nil, memFormChunked, "", rootfsFormFull, "")
+
+	if rec.Metadata["team"] != "payments" || rec.Metadata["env"] != "prod" {
+		t.Fatalf("labels lost on the way to the durable record: %+v", rec.Metadata)
+	}
+	if rec.SourceType != "snapshot" || rec.SourceID != "snap-7" {
+		t.Fatalf("provenance lost: source=%q/%q", rec.SourceType, rec.SourceID)
+	}
+	// Round-trip through JSON: the record is read by another host's binary.
+	encoded, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var back hibRecord
+	if err := json.Unmarshal(encoded, &back); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if back.Metadata["team"] != "payments" || back.SourceID != "snap-7" {
+		t.Fatalf("labels did not survive the record round trip: %+v", back)
+	}
+}
