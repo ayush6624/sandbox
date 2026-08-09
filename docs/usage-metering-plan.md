@@ -387,7 +387,40 @@ been on allocated resources — but `cpu_seconds` is a public field and the
 margin input for any future burst SKU. The tell was that cold-booted sandboxes,
 which have no pre-claim life, reported plausible figures the whole time.
 
-Before and after, same scenarios, same fleet:
+Every scenario's expectation is MEASURED, not typed into the call site, and the
+table prints the drift. That matters: the first version of this benchmark
+hardcoded the expected durations, which made a correct 14 s bill look like a
+50% over-charge (the sandbox had genuinely been alive 14 s — it was created
+before a cold-booting peer and torn down with it) and printed an aggregate row
+claiming 80 vCPU-seconds over "0 seconds" billed. An expectation that cannot
+disagree with the meter is not a check.
+
+Measured drift on release `1ba097d`, every row within a second and all but one
+UNDER wall clock (billing starts at `MarkRunning` and ends at teardown, so the
+customer never pays for bring-up):
+
+| scenario | billed | expected | drift | basis |
+| --- | --- | --- | --- | --- |
+| ephemeral | 0 s | 0.2 s | −0.2 | measured wall |
+| short job | 5 s | 5.1 s | −0.1 | measured wall |
+| steady idle | 60 s | 60.2 s | −0.2 | measured wall |
+| pause/resume | 10 s | 10.9 s | −0.9 | measured running spans |
+| proportional small | 14 s | 14.1 s | −0.1 | measured wall |
+| proportional big | 10 s | 10.0 s | −0.0 | measured wall |
+| margin busy / idle | 15 s | 15.0 s | −0.0 | measured wall |
+| **ttl expiry** | **21 s** | **20 s** | **+1.0** | **requested ttl** |
+| churn x8 | 40 s | 40.1 s | −0.1 | 8 × measured hold |
+
+**The TTL row is the only positive drift, and it is the reaper's tick phase.**
+A sandbox with a 20 s TTL is destroyed on the next 10 s reaper tick after
+expiry, so it is genuinely alive — and billable — for 20 s plus 0–10 s. Observed
++1 s, +7 s, and +9 s across runs, which is the uniform distribution you would
+expect, not a proportional error. Negligible on a realistic TTL (0.14% of an
+hour), up to +50% on a 20 s one. Whether a bill should include the platform's
+reap latency is a pricing decision; capping the billed span at `expires_at` or
+tightening the tick are both cheap, and the metering is correct either way.
+
+Before and after the CPU fix, same scenarios, same fleet:
 
 | scenario | consumed CPU before | after | what it should be |
 | --- | --- | --- | --- |

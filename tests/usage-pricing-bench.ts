@@ -42,7 +42,16 @@ let failures = 0
 interface Row {
   scenario: string
   shape: string
-  wallRunningS: number
+  /**
+   * What the interval SHOULD have billed, and where that number came from.
+   * Never a literal typed into the call site: an expectation that is asserted
+   * rather than measured cannot disagree with the meter, which is the whole
+   * point of having it. `null` means the moment cannot be observed from the
+   * client (the idle reaper fires on its own schedule) — printed as "—"
+   * instead of a plausible fiction.
+   */
+  expectedS: number | null
+  basis: string
   billedS: number
   intervals: number
   vcpuS: number
@@ -51,6 +60,15 @@ interface Row {
   usd: number
 }
 const rows: Row[] = []
+
+/**
+ * When each sandbox finished being created, so wall clock is measured from the
+ * moment the customer could first use it — which is also when the interval
+ * opens. Timing from before the create would charge our bring-up to the
+ * comparison and make the meter look like it over-bills.
+ */
+const bornAt = new Map<string, number>()
+const wallOf = (id: string) => (Date.now() - (bornAt.get(id) ?? Date.now())) / 1000
 
 function usd(vcpuS: number, mibS: number): number {
   return (vcpuS / 3600) * PRICE_VCPU_HOUR + (mibS / 1024 / 3600) * PRICE_GIB_HOUR
@@ -69,6 +87,7 @@ async function make(name: string, opts: Parameters<typeof client.sandboxes.creat
     metadata: { ...(opts.metadata ?? {}), bench: RUN, scenario: name },
   })
   created.push(sb.id)
+  bornAt.set(sb.id, Date.now())
   return sb
 }
 
@@ -77,17 +96,18 @@ async function ledger(id: string): Promise<UsageReport> {
   return client.usage.report({ sandboxId: id })
 }
 
-function record(scenario: string, shape: string, wallRunningS: number, report: UsageReport): Row {
+function record(scenario: string, shape: string, expected: number | null, basis: string, report: UsageReport): Row {
   const t = report.totals
   const row: Row = {
-    scenario, shape, wallRunningS,
+    scenario, shape, expectedS: expected, basis,
     billedS: t.durationSeconds, intervals: Number(t.intervals),
     vcpuS: t.vcpuSeconds, mibS: t.memoryMibSeconds, cpuS: t.cpuSeconds,
     usd: usd(t.vcpuSeconds, t.memoryMibSeconds),
   }
   rows.push(row)
+  const drift = expected === null ? '' : ` | expected ~${expected.toFixed(1)}s (${basis}), drift ${(row.billedS - expected >= 0 ? '+' : '')}${(row.billedS - expected).toFixed(1)}s`
   console.log(`    billed ${row.billedS}s over ${row.intervals} interval(s) | ` +
-    `${row.vcpuS} vCPU-s, ${row.mibS} MiB-s, ${row.cpuS.toFixed(3)} CPU-s | ${money(row.usd)}`)
+    `${row.vcpuS} vCPU-s, ${row.mibS} MiB-s, ${row.cpuS.toFixed(3)} CPU-s | ${money(row.usd)}${drift}`)
   return row
 }
 
@@ -104,7 +124,7 @@ async function ephemeral(): Promise<void> {
   const sb = await make('ephemeral')
   await sb.terminate()
   const wall = (Date.now() - t0) / 1000
-  const row = record('ephemeral', '2 vCPU / 1024 MiB', wall, await ledger(sb.id))
+  const row = record('ephemeral', '2 vCPU / 1024 MiB', wall, 'measured wall', await ledger(sb.id))
   check(row.intervals === 1, `one interval for one VM (got ${row.intervals})`)
   if (row.billedS === 0) {
     findings.push(
@@ -124,7 +144,7 @@ async function shortJob(): Promise<void> {
   await sb.commands.run('sleep 5')
   await sb.terminate()
   const wall = (Date.now() - t0) / 1000
-  const row = record('short-job', '2 vCPU / 1024 MiB', wall, await ledger(sb.id))
+  const row = record('short-job', '2 vCPU / 1024 MiB', wallOf(sb.id), 'measured wall', await ledger(sb.id))
   const driftPct = wall > 0 ? ((row.billedS - wall) / wall) * 100 : 0
   console.log(`    wall ${wall.toFixed(2)}s vs billed ${row.billedS}s (${driftPct.toFixed(1)}%)`)
   check(row.billedS <= Math.ceil(wall) + 2, `billed does not exceed wall clock (${row.billedS} vs ${wall.toFixed(2)})`)
@@ -143,7 +163,7 @@ async function steadyIdle(): Promise<void> {
   await sleep(60_000)
   await sb.terminate()
   const wall = (Date.now() - t0) / 1000
-  const row = record('steady-idle', '2 vCPU / 1024 MiB', wall, await ledger(sb.id))
+  const row = record('steady-idle', '2 vCPU / 1024 MiB', wall, 'measured wall', await ledger(sb.id))
   const hourly = usd(row.vcpuS, row.mibS) * (3600 / Math.max(row.billedS, 1))
   console.log(`    implied ${money(hourly)}/hour for this shape`)
   check(Math.abs(row.billedS - wall) <= 3, `billed ${row.billedS}s tracks wall ${wall.toFixed(1)}s within 3s`)
@@ -164,9 +184,11 @@ async function pauseGap(): Promise<void> {
   const resumedAt = Date.now()
   await sleep(5_000)
   await sb.terminate()
+  const terminatedAt = Date.now()
   const parkedS = (resumedAt - pausedAt) / 1000
-  const runningS = (beforePause - (beforePause - 5_000)) / 1000 + 5
-  const row = record('pause-resume', '2 vCPU / 1024 MiB', runningS, await ledger(sb.id))
+  // The two running spans, measured: create -> pause, and resume -> terminate.
+  const runningS = (beforePause - (bornAt.get(sb.id) ?? beforePause)) / 1000 + (terminatedAt - resumedAt) / 1000
+  const row = record('pause-resume', '2 vCPU / 1024 MiB', runningS, 'measured running spans', await ledger(sb.id))
   console.log(`    parked ${parkedS.toFixed(1)}s between two VMs`)
   check(row.intervals === 2, `two VMs produced two intervals (got ${row.intervals})`)
   check(row.billedS < parkedS + runningS,
@@ -181,10 +203,15 @@ async function proportionality(): Promise<void> {
   const small = await make('prop-small')
   const big = await make('prop-big', { resources: { vcpus: 4, memoryMib: 4096 } })
   await Promise.all([small.commands.run('sleep 10'), big.commands.run('sleep 10')])
+  const [smallWall, bigWall] = [wallOf(small.id), wallOf(big.id)]
   await Promise.all([small.terminate(), big.terminate()])
   const [rs, rb] = [await ledger(small.id), await ledger(big.id)]
-  const a = record('proportional-small', '2 vCPU / 1024 MiB', 10, rs)
-  const b = record('proportional-big', '4 vCPU / 4096 MiB', 10, rb)
+  // The small sandbox is created first and then waits for the big one's COLD
+  // boot (a resource override cannot be served from the golden snapshot), so
+  // it is alive longer and bills longer. That is correct, and comparing both
+  // against a literal 10 would have read as the meter over-billing.
+  const a = record('proportional-small', '2 vCPU / 1024 MiB', smallWall, 'measured wall', rs)
+  const b = record('proportional-big', '4 vCPU / 4096 MiB', bigWall, 'measured wall', rb)
   const perSecondSmall = usd(a.vcpuS, a.mibS) / Math.max(a.billedS, 1)
   const perSecondBig = usd(b.vcpuS, b.mibS) / Math.max(b.billedS, 1)
   console.log(`    per running second: small ${money(perSecondSmall)}, big ${money(perSecondBig)} ` +
@@ -204,9 +231,10 @@ async function marginSpread(): Promise<void> {
     busy.commands.run('timeout 15 sh -c "while :; do :; done" || true'),
     idle.commands.run('sleep 15'),
   ])
+  const [busyWall, idleWall] = [wallOf(busy.id), wallOf(idle.id)]
   await Promise.all([busy.terminate(), idle.terminate()])
-  const rb = record('margin-busy', '2 vCPU / 1024 MiB', 15, await ledger(busy.id))
-  const ri = record('margin-idle', '2 vCPU / 1024 MiB', 15, await ledger(idle.id))
+  const rb = record('margin-busy', '2 vCPU / 1024 MiB', busyWall, 'measured wall', await ledger(busy.id))
+  const ri = record('margin-idle', '2 vCPU / 1024 MiB', idleWall, 'measured wall', await ledger(idle.id))
   check(Math.abs(rb.usd - ri.usd) < rb.usd * 0.35, 'both pay for allocation, not consumption')
   const ratio = ri.cpuS > 0.001 ? rb.cpuS / ri.cpuS : Infinity
   console.log(`    consumed CPU differs ${ratio === Infinity ? '>1000' : ratio.toFixed(1)}x for the same bill ` +
@@ -221,17 +249,32 @@ async function marginSpread(): Promise<void> {
 /** A TTL reap has to stop the meter where the sandbox stopped. */
 async function ttlExpiry(): Promise<void> {
   console.log('\n\x1b[1m7. TTL expiry — the meter stops when the reaper does\x1b[0m')
-  const sb = await make('ttl', { ttlMs: 20_000 })
+  const ttlSeconds = 20
+  const sb = await make('ttl', { ttlMs: ttlSeconds * 1000 })
   const t0 = Date.now()
   await sleep(45_000) // TTL + the ~10s reaper tick, with room to spare
   const report = await ledger(sb.id)
   const wall = (Date.now() - t0) / 1000
-  const row = record('ttl-expiry', '2 vCPU / 1024 MiB', 20, report)
+  // The expectation here is the TTL the customer ASKED for, not a measured
+  // span: the reaper decides when the sandbox actually dies, and the gap
+  // between those two is billable time nobody requested.
+  const row = record('ttl-expiry', '2 vCPU / 1024 MiB', ttlSeconds, 'requested ttl', report)
   const reason = report.intervals[0]?.endReason
   check(reason === 'expire', `end_reason is expire (got ${reason})`)
   check(row.billedS > 0 && row.billedS < wall - 10,
     `billed ${row.billedS}s stops at the reap, not at read time (${wall.toFixed(0)}s later)`)
   check(Number(report.totals.openIntervals) === 0, 'no interval left open by the reaper')
+
+  const lag = row.billedS - ttlSeconds
+  console.log(`    reaper lag billed: +${lag.toFixed(0)}s over the requested ${ttlSeconds}s TTL`)
+  if (lag > ttlSeconds * 0.1) {
+    findings.push(
+      `A sandbox with a ${ttlSeconds}s TTL billed ${row.billedS}s — ${(lag / ttlSeconds * 100).toFixed(0)}% more ` +
+      `than the customer asked for, because the TTL reaper ticks every ~10s and the meter ` +
+      `correctly bills every second the sandbox was actually alive. The metering is right; ` +
+      `the question is whether a bill should include the platform's reap latency. Cheap ` +
+      `answers: cap the billed span at expires_at, or tighten the reaper tick.`)
+  }
 }
 
 /** Idle auto-hibernation is the "park it and forget it" story, unattended. */
@@ -250,7 +293,10 @@ async function idleHibernation(): Promise<void> {
     `15s more parked added nothing to the bill (${billedWhileParked}s -> ${stillParked.totals.durationSeconds}s)`)
   await sb.commands.run('echo woke') // wake on access
   await sb.terminate()
-  const row = record('idle-hibernation', '2 vCPU / 1024 MiB', 15, await ledger(sb.id))
+  // No expectation: the idle reaper fires on its own schedule, so the moment
+  // the first interval closed is not observable from here. Inventing a number
+  // would be worse than printing nothing.
+  const row = record('idle-hibernation', '2 vCPU / 1024 MiB', null, 'reaper-timed', await ledger(sb.id))
   check(row.intervals === 2, `wake opened a second interval (got ${row.intervals})`)
 }
 
@@ -259,17 +305,25 @@ async function churn(n: number): Promise<void> {
   console.log(`\n\x1b[1m9. churn — ${n} concurrent sandboxes\x1b[0m`)
   const boxes = await Promise.all(Array.from({ length: n }, (_, i) => make(`churn-${i}`)))
   await sleep(5_000)
+  const heldS = boxes.reduce((sum, b) => sum + wallOf(b.id), 0) / boxes.length
   await Promise.all(boxes.map((b) => b.terminate()))
-  let vcpuS = 0, mibS = 0, intervals = 0
+  let vcpuS = 0, mibS = 0, cpuS = 0, billedS = 0, intervals = 0
   for (const b of boxes) {
     const r = await ledger(b.id)
-    vcpuS += r.totals.vcpuSeconds; mibS += r.totals.memoryMibSeconds; intervals += Number(r.totals.intervals)
+    vcpuS += r.totals.vcpuSeconds; mibS += r.totals.memoryMibSeconds
+    cpuS += r.totals.cpuSeconds; billedS += r.totals.durationSeconds
+    intervals += Number(r.totals.intervals)
   }
-  console.log(`    ${intervals} interval(s), ${vcpuS} vCPU-s, ${money(usd(vcpuS, mibS))} total`)
+  console.log(`    ${intervals} interval(s), ${billedS}s billed, ${vcpuS} vCPU-s, ${money(usd(vcpuS, mibS))} total`)
   check(intervals === n, `exactly one interval per sandbox (${intervals} for ${n})`)
+  // The aggregate must be internally consistent: allocated vCPU-seconds are
+  // exactly 2 x the billed seconds at this shape. A row claiming vCPU-seconds
+  // over zero billed seconds is arithmetically impossible.
+  check(vcpuS === billedS * 2, `${vcpuS} vCPU-s is 2x the ${billedS}s billed`)
   rows.push({
-    scenario: `churn-x${n}`, shape: '2 vCPU / 1024 MiB', wallRunningS: 5,
-    billedS: 0, intervals, vcpuS, mibS, cpuS: 0, usd: usd(vcpuS, mibS),
+    scenario: `churn-x${n}`, shape: `${n} x 2 vCPU / 1024 MiB`,
+    expectedS: heldS * n, basis: `${n} x measured hold`,
+    billedS, intervals, vcpuS, mibS, cpuS, usd: usd(vcpuS, mibS),
   })
 }
 
@@ -323,13 +377,23 @@ async function main(): Promise<void> {
   await reconcile(since)
 
   console.log('\n\x1b[1m== per-scenario bill\x1b[0m')
-  console.log('scenario              shape                 billed_s  vCPU-s    MiB-s      CPU-s    price')
+  console.log('Every expectation below is measured, not asserted, so a row that')
+  console.log('disagrees with the meter shows up in the drift column.\n')
+  console.log('scenario              billed_s  expected  drift   vCPU-s     MiB-s     CPU-s    price     basis')
   for (const r of rows) {
+    const expected = r.expectedS === null ? '—' : r.expectedS.toFixed(1)
+    const drift = r.expectedS === null ? '—'
+      : `${r.billedS - r.expectedS >= 0 ? '+' : ''}${(r.billedS - r.expectedS).toFixed(1)}`
     console.log(
-      r.scenario.padEnd(21) + r.shape.padEnd(22) +
-      String(r.billedS).padStart(8) + String(r.vcpuS).padStart(9) +
-      String(r.mibS).padStart(11) + r.cpuS.toFixed(2).padStart(9) + '  ' + money(r.usd))
+      r.scenario.padEnd(21) + String(r.billedS).padStart(8) + expected.padStart(10) +
+      drift.padStart(7) + String(r.vcpuS).padStart(9) + String(r.mibS).padStart(10) +
+      r.cpuS.toFixed(2).padStart(9) + '  ' + money(r.usd).padEnd(10) + '  ' + r.basis)
   }
+  // An allocated quantity is exactly resources x billed seconds. If any row
+  // breaks that, either the meter or this table is lying about one of them.
+  const inconsistent = rows.filter((r) => r.billedS === 0 && r.vcpuS > 0)
+  check(inconsistent.length === 0,
+    `no row bills resource-seconds over zero duration (${inconsistent.map((r) => r.scenario).join(', ') || 'none'})`)
 
   if (findings.length) {
     console.log('\n\x1b[1m== pricing findings\x1b[0m')
