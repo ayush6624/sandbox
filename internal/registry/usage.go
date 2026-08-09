@@ -49,11 +49,24 @@ type UsageInterval struct {
 	// interval left open by a crashed server: those seconds after it were not
 	// served, so they are not billed.
 	LastSeenAt time.Time `json:"last_seen_at"`
-	// CPUUsec is host CPU time consumed by the VMM, from the cgroup leaf.
-	// Recorded but not billed — see docs/usage-metering-plan.md.
-	CPUUsec   int64      `json:"cpu_usec"`
-	EndReason string     `json:"end_reason,omitempty"`
-	FlushedAt *time.Time `json:"-"`
+	// CPUUsec is host CPU time consumed DURING this interval, from the cgroup
+	// leaf. Recorded but not billed — see docs/usage-metering-plan.md.
+	CPUUsec int64 `json:"cpu_usec"`
+	// CPUUsecBase is the leaf's reading when the interval opened, and CPUUsec
+	// is measured from it.
+	//
+	// This is not bookkeeping for its own sake. A ready-pool VM is launched
+	// minutes before anyone claims it, and its leaf accumulates boot and idle
+	// CPU the whole time — so the absolute counter at claim already holds ~18
+	// CPU-seconds that are platform overhead, not the customer's work.
+	// Reporting it raw produced consumed-CPU figures ABOVE the physical
+	// ceiling of the interval (18.15 CPU-s for a 5 s interval on a 2-vCPU
+	// guest), which is both wrong and visibly wrong. Recorded rather than
+	// subtracted-and-discarded so a row can still be audited back to the two
+	// readings it came from.
+	CPUUsecBase int64      `json:"cpu_usec_base"`
+	EndReason   string     `json:"end_reason,omitempty"`
+	FlushedAt   *time.Time `json:"-"`
 }
 
 // End reasons. Anything that closes an interval names itself, so a ledger row
@@ -112,6 +125,7 @@ func (r *Registry) migrateUsage() error {
 		ended_at     INTEGER,
 		last_seen_at INTEGER NOT NULL,
 		cpu_usec     INTEGER NOT NULL DEFAULT 0,
+		cpu_usec_base INTEGER NOT NULL DEFAULT 0,
 		end_reason   TEXT NOT NULL DEFAULT '',
 		flushed_at   INTEGER
 	);
@@ -124,7 +138,19 @@ func (r *Registry) migrateUsage() error {
 	CREATE INDEX IF NOT EXISTS idx_usage_flush ON usage_intervals(flushed_at) WHERE flushed_at IS NULL;
 	CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_intervals(started_at);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// cpu_usec_base arrived after the ledger shipped. ALTER TABLE has no
+	// IF NOT EXISTS, so the duplicate-column error is the "already migrated"
+	// signal. Existing rows default to 0, which reproduces the old absolute
+	// reading rather than inventing a correction for intervals nobody
+	// measured a baseline for.
+	if _, err := r.db.Exec(`ALTER TABLE usage_intervals ADD COLUMN cpu_usec_base INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
 
 // OpenUsageInterval starts billing a sandbox. Callers pass EFFECTIVE resources
@@ -135,8 +161,14 @@ func (r *Registry) migrateUsage() error {
 // wake — never at create acceptance: bring-up latency and pre-claim ready-pool
 // runtime are the platform's cost, not the customer's.
 //
+// cpuUsecBase is the VM's cgroup CPU reading at this moment; consumed CPU is
+// reported relative to it. Pass a negative value when it cannot be read, which
+// records 0 and degrades to the absolute counter. It matters most on the
+// default create path: a ready-pool VM has been burning CPU since the pool
+// built it, and that time is ours, not the customer's.
+//
 // Opening twice for one sandbox returns ErrUsageOpen instead of double-billing.
-func (r *Registry) OpenUsageInterval(ctx context.Context, sandboxID, hostID, vmID string, vcpus, memMIB int64, metadata map[string]string) (UsageInterval, error) {
+func (r *Registry) OpenUsageInterval(ctx context.Context, sandboxID, hostID, vmID string, vcpus, memMIB, cpuUsecBase int64, metadata map[string]string) (UsageInterval, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return UsageInterval{}, err
@@ -154,24 +186,28 @@ func (r *Registry) OpenUsageInterval(ctx context.Context, sandboxID, hostID, vmI
 		return UsageInterval{}, fmt.Errorf("encode usage metadata: %w", err)
 	}
 
+	if cpuUsecBase < 0 {
+		cpuUsecBase = 0
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 	u := UsageInterval{
-		ID:         usageIntervalID(hostID, sandboxID, maxSeq.Int64+1),
-		SandboxID:  sandboxID,
-		Seq:        maxSeq.Int64 + 1,
-		HostID:     hostID,
-		VMID:       vmID,
-		Vcpus:      vcpus,
-		MemMIB:     memMIB,
-		Metadata:   metadata,
-		StartedAt:  now,
-		LastSeenAt: now,
+		ID:          usageIntervalID(hostID, sandboxID, maxSeq.Int64+1),
+		SandboxID:   sandboxID,
+		Seq:         maxSeq.Int64 + 1,
+		HostID:      hostID,
+		VMID:        vmID,
+		Vcpus:       vcpus,
+		MemMIB:      memMIB,
+		Metadata:    metadata,
+		StartedAt:   now,
+		LastSeenAt:  now,
+		CPUUsecBase: cpuUsecBase,
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO usage_intervals (id, sandbox_id, seq, host_id, vm_id, vcpus, mem_mib, metadata, started_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO usage_intervals (id, sandbox_id, seq, host_id, vm_id, vcpus, mem_mib, metadata, started_at, last_seen_at, cpu_usec_base)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.ID, u.SandboxID, u.Seq, u.HostID, u.VMID, u.Vcpus, u.MemMIB, string(meta),
-		u.StartedAt.Unix(), u.LastSeenAt.Unix()); err != nil {
+		u.StartedAt.Unix(), u.LastSeenAt.Unix(), u.CPUUsecBase); err != nil {
 		if isUniqueViolation(err) {
 			return UsageInterval{}, fmt.Errorf("%w: sandbox %s", ErrUsageOpen, sandboxID)
 		}
@@ -191,9 +227,11 @@ func (r *Registry) OpenUsageInterval(ctx context.Context, sandboxID, hostID, vmI
 // window of a bill rather than the whole interval.
 func (r *Registry) TouchUsageInterval(ctx context.Context, sandboxID string, cpuUsec int64) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE usage_intervals SET last_seen_at=?, cpu_usec=MAX(cpu_usec, ?)
-		 WHERE sandbox_id=? AND ended_at IS NULL`,
-		time.Now().UTC().Unix(), cpuUsec, sandboxID)
+		`UPDATE usage_intervals
+		    SET last_seen_at=?,
+		        cpu_usec=CASE WHEN ? < 0 THEN cpu_usec ELSE MAX(cpu_usec, MAX(? - cpu_usec_base, 0)) END
+		  WHERE sandbox_id=? AND ended_at IS NULL`,
+		time.Now().UTC().Unix(), cpuUsec, cpuUsec, sandboxID)
 	return err
 }
 
@@ -224,7 +262,7 @@ func (r *Registry) CloseUsageInterval(ctx context.Context, sandboxID, reason str
 		`UPDATE usage_intervals
 		    SET ended_at=MAX(?, started_at),
 		        last_seen_at=MAX(last_seen_at, MAX(?, started_at)),
-		        cpu_usec=CASE WHEN ? < 0 THEN cpu_usec ELSE MAX(cpu_usec, ?) END,
+		        cpu_usec=CASE WHEN ? < 0 THEN cpu_usec ELSE MAX(cpu_usec, MAX(? - cpu_usec_base, 0)) END,
 		        end_reason=?
 		  WHERE sandbox_id=? AND ended_at IS NULL`,
 		now, now, cpuUsec, cpuUsec, reason, sandboxID)
@@ -507,7 +545,7 @@ func (r *Registry) PruneUsageIntervals(ctx context.Context, cutoff time.Time) (i
 	return int(n), nil
 }
 
-const usageCols = `id, sandbox_id, seq, host_id, vm_id, vcpus, mem_mib, metadata, started_at, ended_at, last_seen_at, cpu_usec, end_reason, flushed_at`
+const usageCols = `id, sandbox_id, seq, host_id, vm_id, vcpus, mem_mib, metadata, started_at, ended_at, last_seen_at, cpu_usec, cpu_usec_base, end_reason, flushed_at`
 
 // usageQuerier is satisfied by both *sql.DB and *sql.Tx, so a read inside the
 // close transaction sees its own uncommitted UPDATE.
@@ -535,7 +573,7 @@ func queryUsageTx(ctx context.Context, q usageQuerier, where string, args ...any
 			ended, flushed    sql.NullInt64
 		)
 		if err := rows.Scan(&u.ID, &u.SandboxID, &u.Seq, &u.HostID, &u.VMID, &u.Vcpus, &u.MemMIB,
-			&meta, &started, &ended, &lastSeen, &u.CPUUsec, &u.EndReason, &flushed); err != nil {
+			&meta, &started, &ended, &lastSeen, &u.CPUUsec, &u.CPUUsecBase, &u.EndReason, &flushed); err != nil {
 			return nil, err
 		}
 		u.StartedAt = time.Unix(started, 0).UTC()

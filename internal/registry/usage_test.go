@@ -10,7 +10,7 @@ import (
 func TestUsageIntervalOpenCloseRoundTrip(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	u, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, map[string]string{"team": "core"})
+	u, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, map[string]string{"team": "core"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestUsageIntervalsSurviveSandboxDestroy(t *testing.T) {
 	if _, err := r.Create(ctx, "sb1", "", "/tmp/sb1.ext4", nil, "", 0, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 1_000_000); err != nil {
@@ -86,13 +86,13 @@ func TestUsageIntervalsSurviveSandboxDestroy(t *testing.T) {
 func TestUsageHibernateWakeOpensNextSeq(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
 	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndHibernate, 500_000); err != nil {
 		t.Fatalf("close 1: %v", err)
 	}
-	second, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-2", 2, 1024, nil)
+	second, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-2", 2, 1024, 0, nil)
 	if err != nil {
 		t.Fatalf("open 2: %v", err)
 	}
@@ -123,10 +123,10 @@ func TestUsageHibernateWakeOpensNextSeq(t *testing.T) {
 func TestUsageDoubleOpenRefused(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
-	_, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-2", 2, 1024, nil)
+	_, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-2", 2, 1024, 0, nil)
 	if !errors.Is(err, ErrUsageOpen) {
 		t.Fatalf("second open must fail with ErrUsageOpen, got %v", err)
 	}
@@ -149,7 +149,7 @@ func TestUsageCloseIsIdempotentAndTolerantOfAbsence(t *testing.T) {
 		t.Fatalf("closing an absent interval must not error: %v", err)
 	}
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 2_000_000); err != nil {
@@ -177,7 +177,7 @@ func TestUsageCloseIsIdempotentAndTolerantOfAbsence(t *testing.T) {
 func TestUsageCrashRecoveryTruncatesAtLastSeen(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	// Backdate: the sandbox started an hour ago and was last sampled 50 minutes
@@ -221,7 +221,7 @@ func TestUsageCrashRecoveryTruncatesAtLastSeen(t *testing.T) {
 func TestUsageOpenIntervalMeasuredToLastSeen(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 1, 512, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 1, 512, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	started := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
@@ -242,7 +242,7 @@ func TestUsageOpenIntervalMeasuredToLastSeen(t *testing.T) {
 func TestUsageTouchAdvancesHeartbeatAndCPU(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if err := r.TouchUsageInterval(ctx, "sb1", 1_000_000); err != nil {
@@ -265,7 +265,7 @@ func TestUsageTouchAdvancesHeartbeatAndCPU(t *testing.T) {
 func TestUsageCloseWithoutSampleKeepsSampledCPU(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if err := r.TouchUsageInterval(ctx, "sb1", 7_000_000); err != nil {
@@ -285,7 +285,7 @@ func TestUsageCloseWithoutSampleKeepsSampledCPU(t *testing.T) {
 func TestUsageFastCycleHasNonNegativeDuration(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 0); err != nil {
@@ -301,10 +301,10 @@ func TestUsageFlushLifecycle(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
 	// Open intervals are not facts yet, so they are never spooled.
-	if _, err := r.OpenUsageInterval(ctx, "open-one", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "open-one", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := r.OpenUsageInterval(ctx, "closed-one", "host-a", "vm-2", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "closed-one", "host-a", "vm-2", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if _, _, err := r.CloseUsageInterval(ctx, "closed-one", EndDestroy, 1_000); err != nil {
@@ -340,7 +340,7 @@ func TestUsagePruneOnlyDropsFlushedIntervals(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
 	for _, id := range []string{"flushed", "unflushed"} {
-		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 2, 1024, nil); err != nil {
+		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 2, 1024, 0, nil); err != nil {
 			t.Fatalf("open %s: %v", id, err)
 		}
 		if _, _, err := r.CloseUsageInterval(ctx, id, EndDestroy, 1_000); err != nil {
@@ -375,7 +375,7 @@ func TestUsageBetweenIncludesOverlappingIntervals(t *testing.T) {
 	// before: fully in the past. spanning: started earlier, still open.
 	// inside: entirely within the window.
 	for _, id := range []string{"before", "spanning", "inside"} {
-		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 1, 512, nil); err != nil {
+		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 1, 512, 0, nil); err != nil {
 			t.Fatalf("open %s: %v", id, err)
 		}
 	}

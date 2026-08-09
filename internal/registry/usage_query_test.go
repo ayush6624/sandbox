@@ -25,7 +25,7 @@ func TestUsageTotalsMatchGoAccessors(t *testing.T) {
 		{"sb3", 1, 512, 900_000, 200, 0},
 	}
 	for _, s := range seed {
-		if _, err := r.OpenUsageInterval(ctx, s.id, "host-a", "vm-"+s.id, s.vcpus, s.mem, nil); err != nil {
+		if _, err := r.OpenUsageInterval(ctx, s.id, "host-a", "vm-"+s.id, s.vcpus, s.mem, 0, nil); err != nil {
 			t.Fatalf("open %s: %v", s.id, err)
 		}
 		started := time.Now().UTC().Add(-time.Duration(s.ageSec) * time.Second).Unix()
@@ -62,7 +62,7 @@ func TestUsageTotalsMatchGoAccessors(t *testing.T) {
 func TestUsageTotalsAreExactWhenRowsAreTruncated(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 	for _, id := range []string{"a", "b", "c", "d", "e"} {
-		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 2, 1024, nil); err != nil {
+		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 2, 1024, 0, nil); err != nil {
 			t.Fatalf("open %s: %v", id, err)
 		}
 		if _, _, err := r.CloseUsageInterval(ctx, id, EndDestroy, 1_000_000); err != nil {
@@ -104,7 +104,7 @@ func TestQueryUsageSelectsByOverlap(t *testing.T) {
 		"after":     {-60, 0}, // starts inside the window, still open
 	}
 	for id, span := range seed {
-		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 1, 512, nil); err != nil {
+		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 1, 512, 0, nil); err != nil {
 			t.Fatalf("open %s: %v", id, err)
 		}
 		started := now.Unix() + span[0]
@@ -145,13 +145,13 @@ func TestQueryUsageSelectsByOverlap(t *testing.T) {
 // that is most of them, and all of the ones an invoice is made of.
 func TestQueryUsageBySandboxSurvivesTheSandbox(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
-	if _, err := r.OpenUsageInterval(ctx, "gone", "host-a", "vm-1", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "gone", "host-a", "vm-1", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if _, _, err := r.CloseUsageInterval(ctx, "gone", EndDestroy, 2_000_000); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if _, err := r.OpenUsageInterval(ctx, "other", "host-a", "vm-2", 2, 1024, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "other", "host-a", "vm-2", 2, 1024, 0, nil); err != nil {
 		t.Fatalf("open other: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestQueryUsageBySandboxSurvivesTheSandbox(t *testing.T) {
 // close has to report exactly what it closed — and report closing nothing.
 func TestCloseUsageIntervalReturnsTheClosedRow(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
-	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 4, 2048, nil); err != nil {
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 4, 2048, 0, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 
@@ -205,5 +205,76 @@ func assertTotalsEqual(t *testing.T, what string, a, b UsageTotals) {
 		!close(a.DurationSeconds, b.DurationSeconds) || !close(a.VcpuSeconds, b.VcpuSeconds) ||
 		!close(a.MemMIBSeconds, b.MemMIBSeconds) || !close(a.CPUSeconds, b.CPUSeconds) {
 		t.Fatalf("%s disagree:\n  %+v\n  %+v", what, a, b)
+	}
+}
+
+// A ready-pool VM is launched minutes before anyone claims it, so its cgroup
+// leaf already holds the boot and idle CPU that produced it. Reporting that
+// absolute counter made consumed CPU exceed what the interval could physically
+// have used — 18.15 CPU-seconds for a 5-second interval on a 2-vCPU guest,
+// measured on the fleet. Consumed CPU is therefore relative to a baseline
+// taken when the interval opens.
+func TestConsumedCPUExcludesPreClaimRuntime(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	// The VM burned 18s of CPU sitting in the ready pool before this claim.
+	const poolCPU = 18_000_000
+	if _, err := r.OpenUsageInterval(ctx, "claimed", "host-a", "vm-1", 2, 1024, poolCPU, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// The customer then used 2s of CPU during a 5s interval.
+	if err := r.TouchUsageInterval(ctx, "claimed", poolCPU+1_000_000); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	closed, ok, err := r.CloseUsageInterval(ctx, "claimed", EndDestroy, poolCPU+2_000_000)
+	if err != nil || !ok {
+		t.Fatalf("close: ok=%v err=%v", ok, err)
+	}
+	if closed.CPUUsec != 2_000_000 {
+		t.Fatalf("cpu_usec=%d, want 2000000 — the pool's CPU leaked into the customer's interval", closed.CPUUsec)
+	}
+	if closed.CPUUsecBase != poolCPU {
+		t.Fatalf("baseline not recorded (%d); a row must be auditable back to both readings", closed.CPUUsecBase)
+	}
+
+	// The ceiling that made this visible: consumed CPU cannot exceed
+	// vcpus x duration. Duration here is sub-second, so any inherited CPU at
+	// all would break it.
+	if closed.CPUSeconds() > float64(closed.Vcpus)*closed.Duration().Seconds()+2 {
+		t.Fatalf("consumed %0.2f CPU-s exceeds the %d-vCPU ceiling for a %s interval",
+			closed.CPUSeconds(), closed.Vcpus, closed.Duration())
+	}
+}
+
+// An unreadable cgroup must not be recorded as a baseline of zero-with-meaning
+// or as a negative one: it degrades to the old absolute reading rather than
+// inventing a correction.
+func TestUnreadableBaselineDegradesToAbsolute(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, -1, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	closed, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 5_000_000)
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if closed.CPUUsecBase != 0 || closed.CPUUsec != 5_000_000 {
+		t.Fatalf("base=%d cpu=%d, want 0 and 5000000", closed.CPUUsecBase, closed.CPUUsec)
+	}
+}
+
+// A sample below the baseline (a leaf that was recreated, a counter that
+// cannot be trusted) must floor at zero rather than wrap into a negative bill.
+func TestConsumedCPUNeverGoesNegative(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, 9_000_000, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	closed, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 1_000_000)
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if closed.CPUUsec != 0 {
+		t.Fatalf("cpu_usec=%d, want 0", closed.CPUUsec)
 	}
 }

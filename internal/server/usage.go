@@ -36,7 +36,12 @@ func (s *Server) meterStart(ctx context.Context, sb registry.Sandbox) {
 	defer cancel()
 
 	eff := s.effectiveResources(sb)
-	_, err := s.reg.OpenUsageInterval(ctx, sb.ID, s.hostID(), sb.VMID, eff.Vcpus, eff.MemMIB, sb.Metadata)
+	// Baseline the cgroup counter at open. On the default create path the VM
+	// has been running in the ready pool since long before this claim, so its
+	// leaf already holds ~18 CPU-seconds of boot and idle that belong to us —
+	// reported raw, that made consumed CPU exceed the interval's own physical
+	// ceiling. -1 (unreadable) records no baseline rather than a wrong one.
+	_, err := s.reg.OpenUsageInterval(ctx, sb.ID, s.hostID(), sb.VMID, eff.Vcpus, eff.MemMIB, s.sampleCPUUsec(sb.ID), sb.Metadata)
 	switch {
 	case err == nil:
 	case errors.Is(err, registry.ErrUsageOpen):
