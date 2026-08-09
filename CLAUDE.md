@@ -625,6 +625,28 @@ scripts/              Host setup shell scripts
   same hazard at the riskiest moment. `tests/pty-stress.ts` and `tests/sshkey-probe.ts`
   drive both shapes across churn rounds; `internal/server/agentpool_test.go` pins the
   pool-key behavior directly.
+- **Billable usage is a ledger keyed on the VMM lifetime, and it outlives the
+  sandbox.** One `usage_intervals` row per Firecracker process that served a
+  user-visible sandbox (`internal/registry/usage.go`), opened at `MarkRunning`
+  / warm claim / wake and closed by every teardown path — so a hibernate/wake
+  cycle bills two intervals and the frozen span in between bills nothing. Ready-
+  pool and `starting`/`stopping` VMs never bill. The row must be a separate
+  table because `Destroy` deletes the sandbox row outright; usage of a
+  terminated sandbox would otherwise have nowhere to live. Billed = ALLOCATED
+  (`vcpus`/`mem_mib` × duration, resolved through `effectiveResources` at open,
+  since the registry's `0` means "template default"); consumed `cpu_usec` from
+  the cgroup leaf is recorded but NOT billed (CPU is oversubscribed). An open
+  interval is measured to `last_seen_at` — never to now — so a crashed host
+  cannot bill an outage. Closed rows spool to `gs://<bucket>/usage/<host>/<date>/`
+  and **the bucket, not SQLite, is the billing record**: local rows are pruned 7
+  days after they are durable. Read paths: `GET /v1/usage` (fleet, scatter-
+  gathered over EVERY host including empty ones, fails closed on any
+  unreachable host), `GET /v1/sandboxes/{id}/usage` (id-routed, so it cannot
+  answer for a deleted sandbox — `/v1/usage?sandbox_id=` can). Totals are SQL-
+  aggregated over the whole selection while only rows paginate, so the amount
+  owed never depends on `page_size`; windows select by OVERLAP and report
+  intervals whole, because `cpu_usec` is one counter that cannot be apportioned.
+  See docs/usage-metering-plan.md.
 - **Memory is admission-checked; CPU is deliberately oversubscribed (~6:1).**
   `mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
   total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running

@@ -182,6 +182,16 @@ Counters (reset only on restart): `sandbox_creates_ok_total`,
 `sandbox_creates_error_total`, `sandbox_hibernations_total`,
 `sandbox_wakes_total`, `sandbox_wake_failures_total`.
 
+Billable volume, credited when an interval closes (see
+[Usage](#usage)): `sandbox_billable_vcpu_seconds_total`,
+`sandbox_billable_mem_mib_seconds_total`, and `sandbox_cpu_seconds_total`
+(consumed, never billed). They are host-level with no `sandbox_id` label —
+that cardinality is a bomb at this churn rate, and money belongs in the ledger
+rather than a store that samples and expires. Ledger health is
+`sandbox_usage_intervals_open` and `sandbox_usage_unflushed_intervals`
+(**alert on the latter**: a backlog means closed intervals exist only on one
+host's disk).
+
 ## Sandboxes
 
 ### Create — `POST /sandboxes`
@@ -401,6 +411,39 @@ Established` turns the HTTP connection into an opaque bidirectional TCP stream
 to the guest. It wakes a hibernated sandbox, re-reads its post-wake guest IP,
 and pins it against idle hibernation for the connection lifetime.
 
+## Usage
+
+### This host's ledger — `GET /usage`
+
+Query: `from`, `to` (RFC 3339), `sandbox_id`, `limit` (1–5000, default 1000).
+
+```json
+{
+  "host_id": "worker-1",
+  "intervals": [{"id":"worker-1:<sandbox>:2","sandbox_id":"…","seq":2,"vcpus":2,
+                 "mem_mib":1024,"started_at":"…","ended_at":"…","last_seen_at":"…",
+                 "cpu_usec":90000000,"end_reason":"hibernate"}],
+  "totals": {"intervals":2,"open_intervals":1,"duration_seconds":900,
+             "vcpu_seconds":1800,"mem_mib_seconds":921600,"cpu_seconds":132.5},
+  "truncated": false
+}
+```
+
+One interval is the span a single VM served a sandbox, so a hibernate/wake
+cycle produces two and the frozen span between them bills nothing. `vcpus` and
+`mem_mib` are the EFFECTIVE resources snapshotted at open, so a row is billable
+after its sandbox is gone.
+
+`limit` bounds the rows, never `totals` — those are aggregated over the whole
+selection so a truncated page still reports the true amount. `from`/`to` select
+intervals that OVERLAP the window and report them whole; an open interval is
+measured to `last_seen_at`, never to now.
+
+### One sandbox — `GET /sandboxes/{id}/usage`
+
+Same shape, filtered. It reads the ledger directly and so **answers for a
+destroyed sandbox** — the usage outlives the sandbox row it describes.
+
 ## Snapshots
 
 A snapshot is a complete capture of a running sandbox: memory, processes, and
@@ -463,6 +506,7 @@ The gateway fronts N hosts with the same API, plus:
 | `GET /metrics/hosts` | Federated per-host metrics: the gateway scrapes each live host's `/metrics` (using the addr+token from its heartbeat) and re-exports every series with a `host="<id>"` label, grouped into valid exposition. `sandbox_host_scrape_ok{host}` flags any host it couldn't reach. Lets Prometheus collect per-host detail while scraping only the gateway — no worker service discovery |
 | `POST /sandboxes` | Bin-packed onto the fullest live host with a free slot. When the fleet is full the request **waits in a bounded queue**; if it can't be placed it fails `503` with `Retry-After: 5` — retry with backoff. `502` if the chosen host errored |
 | `GET /sandboxes` | Merged across all hosts |
+| `GET /usage` | Scatter-gathered across **every** known host, including ones holding no sandboxes (their ledgers still hold the usage of sandboxes already destroyed). Totals are folded from each host's own totals, so a host that truncated its rows still contributes its full amount. Any unreachable host is `502` — a partial ledger is a smaller bill, silently |
 | `/sandboxes/{id}/…` | Proxied to the owning host (includes exec, exec/stream, files, dir, `/shell`, ports, `/snapshot`, `/hibernate`); unknown id → `404` |
 | `host_addr` | Sandbox objects gain `"host_addr"`: the owning host's address. Pair it with the `host_port` from an explicit port mapping (not the gateway); the SDK does this |
 | `GET /snapshots` | Merged + deduped across live hosts |

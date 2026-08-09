@@ -1,7 +1,9 @@
 # Usage metering plan
 
-Status: **Phases 1–2 shipped** (ledger, sampler, lifecycle hooks, crash recovery,
-durable GCS spool). Phases 3–4 are design only.
+Status: **Phases 1–3 shipped** (ledger, sampler, lifecycle hooks, crash recovery,
+durable GCS spool, and the read paths — `GET /v1/usage`,
+`GET /v1/sandboxes/{id}/usage`, billable counters, SDK). Phase 4 (invoice
+rollup, tenant binding, quotas) is design only.
 
 Goal: per-sandbox CPU-hours and RAM-hours, durable enough to bill a customer
 from. Disk is deliberately **not** metered — it is not elastic today, so it is
@@ -283,9 +285,45 @@ Details worth knowing:
   also disables usage spooling there — correct, since that throwaway VM's
   runtime is not billable.
 
-**Phase 3 — read paths.** `GET /v1/usage`, `GET /v1/sandboxes/{id}/usage`,
-gateway scatter-gather, host counters, `api/openapi.yaml` + SDK method
-(remember `npm run check:api` fails on drift).
+**Phase 3 — read paths. DONE.** `GET /v1/usage` and
+`GET /v1/sandboxes/{id}/usage` (`internal/apiv1/usage.go` over worker routes in
+`internal/server/usage_read.go`), gateway scatter-gather
+(`internal/gateway/usage.go`), the three billable counters on `/metrics`,
+`api/openapi.yaml` (spec 1.4.0), and `client.usage` in the TS SDK.
+
+Five decisions in the implementation are worth keeping in view, because each
+one is a way this could have quietly reported the wrong number:
+
+- **Totals are aggregated in SQL over the whole selection; only the ROWS
+  paginate.** Summing the returned page would have made the amount owed depend
+  on `page_size`. `TestUsageTotalsMatchGoAccessors` pins the SQL formula against
+  the Go accessors so the two implementations of one billing formula cannot
+  drift.
+- **The window selects by overlap and reports intervals WHOLE, never clipped.**
+  Clipping would have to apportion `cpu_usec` — one cgroup counter for the
+  entire interval, with no defensible way to spread it over time — so a
+  response that clipped the other quantities but not that one would be worse
+  than one that is uniformly un-clipped. `window.selection: "overlap"` says so
+  on every response.
+- **Reads never resolve the sandbox first.** Usage outlives what it bills:
+  `Destroy` deletes the sandbox row, so a handler that checked existence would
+  404 for exactly the sandboxes an invoice is made of. `/v1/usage?sandbox_id=`
+  therefore answers for deleted sandboxes (it asks every host), while the
+  id-scoped route cannot — and its 404 says which endpoint can.
+- **The gateway fails closed and asks EVERY host, including empty ones.**
+  `handleList` skips hosts that look empty as an optimization; here that would
+  drop the ledger of every host whose sandboxes are already gone. A partial
+  ledger is a smaller bill, silently and in the customer's favour — the kind of
+  error nobody reports — so any unreachable host is a 502, matching
+  `handleList`'s reasoning for sandbox loss.
+- **The counters are credited at interval close, from the closed row**, which is
+  why `CloseUsageInterval` now returns it. Deriving them from the ledger instead
+  would look smoother and be wrong: pruning deletes spooled rows, so a
+  ledger-derived counter would DECREASE and be read as a counter reset.
+
+Not covered, deliberately: coverage is live hosts only. A worker the MIG deleted
+took its SQLite with it, and its usage exists only in the bucket. The response
+says this (`coverage.scope: "live_hosts"`) rather than leaving it in a doc.
 
 **Phase 4 — later, out of scope here.** Invoice rollup over the spool, tenant
 auth binding, quotas.
