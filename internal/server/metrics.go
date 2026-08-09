@@ -73,6 +73,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_warm_claims_total", "Creates served from fully initialized ready VMs.", s.met.warmClaims.Load())
 	counter("sandbox_warm_misses_total", "Eligible creates that found no ready VM and used the normal clone path.", s.met.warmMisses.Load())
 	counter("sandbox_warm_build_failures_total", "Background ready-VM build failures.", s.met.warmFailures.Load())
+	// Billable volume, credited as each interval closes (see creditBillable).
+	// Host-level only, for the same cardinality reason as the gauges below:
+	// per-sandbox detail belongs to /v1/usage, and money belongs in the ledger
+	// and the durability bucket rather than in a metrics store that samples,
+	// downsamples, and expires.
+	counter("sandbox_billable_vcpu_seconds_total", "Allocated vCPU-seconds billed by closed intervals since process start.", s.met.billableVcpuSeconds.Load())
+	counter("sandbox_billable_mem_mib_seconds_total", "Allocated MiB-seconds billed by closed intervals since process start.", s.met.billableMemMIBSeconds.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_cpu_seconds_total Host CPU seconds consumed by guests in closed intervals (recorded, never billed).\n# TYPE sandbox_cpu_seconds_total counter\nsandbox_cpu_seconds_total %.6f\n",
+		float64(s.met.consumedCPUUsec.Load())/1e6)
+
 	// Billable metering health. Per-sandbox usage is deliberately NOT exported:
 	// a sandbox_id label at this churn rate is a cardinality bomb, and the
 	// ledger/API is the right place for detail. These two are what an operator

@@ -272,6 +272,14 @@ type serverMetrics struct {
 	warmClaims   atomic.Int64 // creates served by a fully initialized ready VM
 	warmMisses   atomic.Int64 // eligible creates that found the ready pool empty
 	warmFailures atomic.Int64 // background ready-VM builds that failed
+	// Billable totals, credited when an interval closes. Integer units, not
+	// float: interval timestamps have one-second resolution and vcpus/mem_mib
+	// are integers, so every billed quantity is exactly an integer and stays
+	// that way — a float accumulator would make the cheapest possible number
+	// (a sum of integers) the one place rounding could creep into a bill.
+	billableVcpuSeconds   atomic.Int64 // allocated vCPU-seconds billed
+	billableMemMIBSeconds atomic.Int64 // allocated MiB-seconds billed
+	consumedCPUUsec       atomic.Int64 // host CPU consumed by guests (recorded, not billed)
 }
 
 // fcOverheadMIB is the FLOOR on per-VM memory charged on top of the guest's
@@ -451,6 +459,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /info", s.handleInfo)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Ledger reads. These answer from usage_intervals, which outlives the
+	// sandboxes it bills, so neither is id-resolved against the sandbox table.
+	mux.HandleFunc("GET /usage", s.handleUsage)
+	mux.HandleFunc("GET /sandboxes/{id}/usage", s.handleSandboxUsage)
 	mux.HandleFunc("POST /sandboxes", s.handleCreate)
 	mux.HandleFunc("GET /sandboxes", s.handleList)
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)

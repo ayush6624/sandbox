@@ -73,7 +73,7 @@ func closeInterval(t *testing.T, s *Server, id string) {
 	t.Helper()
 	ctx := context.Background()
 	s.meterStart(ctx, registry.Sandbox{ID: id, VMID: "vm-" + id})
-	if err := s.reg.CloseUsageInterval(ctx, id, registry.EndDestroy, 1_000_000); err != nil {
+	if _, _, err := s.reg.CloseUsageInterval(ctx, id, registry.EndDestroy, 1_000_000); err != nil {
 		t.Fatalf("close %s: %v", id, err)
 	}
 }
@@ -190,7 +190,7 @@ func TestFlushUsageDrainsMultipleBatches(t *testing.T) {
 	for i := 0; i < usageFlushBatch+7; i++ {
 		id := "sb" + strconv.Itoa(i)
 		s.meterStart(ctx, registry.Sandbox{ID: id, VMID: "vm-" + id})
-		if err := s.reg.CloseUsageInterval(ctx, id, registry.EndDestroy, 1000); err != nil {
+		if _, _, err := s.reg.CloseUsageInterval(ctx, id, registry.EndDestroy, 1000); err != nil {
 			t.Fatalf("close %s: %v", id, err)
 		}
 	}

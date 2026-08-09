@@ -435,6 +435,11 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /metrics/hosts", g.handleHostMetrics)
 	mux.HandleFunc("POST /sandboxes", g.handleCreate)
 	mux.HandleFunc("GET /sandboxes", g.handleList)
+	// Fleet-wide ledger read. Per-sandbox usage (/sandboxes/{id}/usage) needs no
+	// route here: it is id-scoped and the reverse proxy below already sends it
+	// to the owning host — though only while the sandbox still has an owner,
+	// which is why this endpoint takes a sandbox_id filter of its own.
+	mux.HandleFunc("GET /usage", g.handleUsage)
 	// Drain moves a host's sandboxes elsewhere (release on the source, adopt on
 	// a target) — maintenance, or rebalancing (roadmap B4).
 	mux.HandleFunc("POST /hosts/{host}/drain", g.handleDrain)

@@ -147,6 +147,34 @@ func (c *Client) List(ctx context.Context) ([]registry.Sandbox, error) {
 	return out, nil
 }
 
+// Usage returns one host's billable ledger. The gateway calls this per host to
+// assemble a fleet answer; a host reports only its own intervals, and only
+// those the retention window has not yet pruned.
+func (c *Client) Usage(ctx context.Context, q registry.UsageQuery) (registry.UsageReport, error) {
+	values := url.Values{}
+	if q.SandboxID != "" {
+		values.Set("sandbox_id", q.SandboxID)
+	}
+	if !q.From.IsZero() {
+		values.Set("from", q.From.UTC().Format(time.RFC3339))
+	}
+	if !q.To.IsZero() {
+		values.Set("to", q.To.UTC().Format(time.RFC3339))
+	}
+	if q.Limit > 0 {
+		values.Set("limit", strconv.Itoa(q.Limit))
+	}
+	path := "/usage"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var out registry.UsageReport
+	if err := c.do(ctx, "GET", path, nil, &out); err != nil {
+		return registry.UsageReport{}, err
+	}
+	return out, nil
+}
+
 // Get returns a single sandbox by ID.
 func (c *Client) Get(ctx context.Context, id string) (registry.Sandbox, error) {
 	var sb registry.Sandbox

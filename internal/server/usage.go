@@ -66,9 +66,31 @@ func (s *Server) meterStop(ctx context.Context, id, reason string) {
 	if s.shuttingDown.Load() {
 		reason = registry.EndShutdown
 	}
-	if err := s.reg.CloseUsageInterval(ctx, id, reason, s.sampleCPUUsec(id)); err != nil {
+	closed, ok, err := s.reg.CloseUsageInterval(ctx, id, reason, s.sampleCPUUsec(id))
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] usage: close interval: %v\n", id, err)
+		return
 	}
+	if ok {
+		s.creditBillable(closed)
+	}
+}
+
+// creditBillable advances this host's cumulative billable counters.
+//
+// Crediting happens at CLOSE, with the interval's whole quantity, because that
+// is the first moment the amount is final. The counters are therefore lumpy —
+// a long-lived sandbox contributes nothing until it is frozen or destroyed —
+// and they reset when the process does, which is exactly what a Prometheus
+// counter is allowed to do. Deriving them from the ledger instead would look
+// smoother and be wrong: pruning deletes spooled rows after the retention
+// window, so a ledger-derived counter would silently DECREASE and be read as a
+// reset.
+func (s *Server) creditBillable(iv registry.UsageInterval) {
+	seconds := int64(iv.Duration() / time.Second)
+	s.met.billableVcpuSeconds.Add(iv.Vcpus * seconds)
+	s.met.billableMemMIBSeconds.Add(iv.MemMIB * seconds)
+	s.met.consumedCPUUsec.Add(iv.CPUUsec)
 }
 
 // meterCtx detaches a ledger write from its caller's cancellation.
@@ -129,9 +151,13 @@ func (s *Server) sampleOpenUsage(ctx context.Context) {
 			// No VMM: whatever ended it did not get to close the interval.
 			// Close at the last heartbeat (-1 keeps the sampled CPU) so the
 			// bill stops where the VM did.
-			if err := s.reg.CloseUsageInterval(ctx, iv.SandboxID, registry.EndVMExit, -1); err != nil {
+			closed, ok, err := s.reg.CloseUsageInterval(ctx, iv.SandboxID, registry.EndVMExit, -1)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] usage: close orphaned interval: %v\n", iv.SandboxID, err)
 				continue
+			}
+			if ok {
+				s.creditBillable(closed)
 			}
 			fmt.Fprintf(os.Stderr, "[%s] usage: closed interval with no live VM (missed close)\n", iv.SandboxID)
 			continue

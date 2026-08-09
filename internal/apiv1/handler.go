@@ -59,6 +59,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/port-forwards", h.listPortForwards)
 	mux.Handle("PUT /v1/sandboxes/{id}/ssh-access", h.idem.Wrap(http.HandlerFunc(h.prepareSSHAccess)))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/connect/{port}", h.connectPort)
+	mux.HandleFunc("GET /v1/usage", h.listUsage)
+	mux.HandleFunc("GET /v1/sandboxes/{id}/usage", h.getSandboxUsage)
 }
 
 // prepareSSHAccess and connectPort are CLI data-plane adapters. Keeping their
