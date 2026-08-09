@@ -107,7 +107,7 @@ worker host access.
 `/tmp` on the worker and is unreachable through Nomad. Pointing it at
 `$NOMAD_TASK_DIR` would have made this a one-command diagnosis.
 
-## Latent: a worker that must cold-build its golden cannot
+## Latent: a worker that must cold-build its golden — RESOLVED 2026-08-09
 
 `buildGolden` cold-boots a throwaway sandbox and takes a **full** snapshot of it
 at template memory (1024 MiB) — the exact failing shape. Production never hits
@@ -115,11 +115,33 @@ this because workers **adopt** a baked golden (`golden snapshot ... adopted;
 creates are hot` in every worker log), and `bake-image.sh` builds it under
 `systemd-run --property=MemoryMax=4G`.
 
-Unverified hypothesis, but it implies that a worker whose golden manifest is
-missing or stale — the documented fallback — would **fail to cold-build one** and
-serve every create on the slow cold path forever. It also suggests
-`bake-image.sh golden` itself may be broken since the jailer landed. Both are
-cheap to check and would be bad to discover during a scale-up.
+It was left as an unverified hypothesis: a worker whose golden manifest is
+missing or stale — the documented fallback — would **fail to cold-build one**
+and serve every create on the slow cold path forever.
+
+**It is covered, structurally and empirically.** The write window is installed
+per **launch**, not per snapshot handler: `prepareJailedLaunch` builds
+`snapshotWriteWindow(cfg, req.VMID, req.MemMIB)` into `PreparedLaunch.
+BeginSnapshotWrite` (`internal/vm/jailer.go:498`), so every jailed VMM carries
+it — including the throwaway that `buildGolden` snapshots. There is no path that
+takes a full snapshot outside the window.
+
+Reproduced on release `1e8687c` against the production fleet, in the golden's
+exact shape (cold-booted override sandbox → full snapshot → source still
+usable), at **1024 MiB and at 256 MiB** — the latter being the size that still
+died under the `memory.high`-only attempt:
+
+| `mem_mib` | snapshot | source survived |
+| --- | --- | --- |
+| 1024 | created | yes (`exec` answered) |
+| 256 | created | yes (`exec` answered) |
+
+Still unverified: **`bake-image.sh golden`** itself. It runs the same code under
+a 4 GiB `systemd-run` ceiling — far more headroom than a per-slot leaf, and the
+window bounds its reservation by available parent slack — so there is no known
+mechanism by which it would fail where the fleet case passes. Confirming it
+means a real image bake, a laptop-bound provisioning one-off, so it is left for
+the next time one is run.
 
 ## Fix (implemented)
 
