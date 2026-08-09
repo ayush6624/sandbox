@@ -2,6 +2,7 @@ package apiv1
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -22,11 +23,22 @@ import (
 // UsageInterval is one billable span: the time a single VM served a sandbox. A
 // pause/resume cycle produces two, because it runs two VMs.
 type UsageInterval struct {
+	// ID identifies this line item as "<sandbox_id>:<sequence>". It is
+	// deliberately NOT the ledger's internal id, which is
+	// "<host>:<sandbox>:<sequence>" so the at-least-once durability spool can
+	// dedupe on it — that key is for the invoicing pipeline, and publishing it
+	// would put a worker's identity in every bill. Sandbox ids are never
+	// reused, so this is still globally unique and stable.
 	ID        string `json:"id"`
 	SandboxID string `json:"sandbox_id"`
 	// Sequence counts a sandbox's intervals from 1.
-	Sequence int64  `json:"sequence"`
-	HostID   string `json:"host_id,omitempty"`
+	//
+	// There is deliberately no host identity here. Which worker ran a sandbox
+	// is infrastructure, not billing: it is not something a caller can act on,
+	// it changes under them on every pause/resume, and api-v1.md already
+	// states that runtime placement is not part of public objects. The ledger
+	// and the durability spool keep host_id for operators and invoicing.
+	Sequence int64 `json:"sequence"`
 	// State is "open" while the sandbox is still running on this VM.
 	State     string    `json:"state"`
 	Resources Resources `json:"resources"`
@@ -72,7 +84,11 @@ type UsageWindow struct {
 // UsageCoverage is the honest caveat, in the response rather than the docs: a
 // live read sees only hosts that are still alive.
 type UsageCoverage struct {
-	Hosts []string `json:"hosts,omitempty"`
+	// HostsReporting is how many hosts answered — a COUNT, not identities.
+	// It is what makes the caveat below checkable (a fleet that normally
+	// answers from four hosts reporting two is a signal) without publishing
+	// the fleet's topology to everyone who reads a bill.
+	HostsReporting int `json:"hosts_reporting"`
 	// Scope is always "live_hosts". Usage from a worker that has since been
 	// deleted survives only in the durability bucket, which is the billing
 	// record of truth; this API is for dashboards and debugging.
@@ -140,7 +156,7 @@ func (h *Handler) usageFrom(w http.ResponseWriter, r *http.Request, path string)
 		Intervals:     page,
 		Totals:        publicUsageTotals(report.Totals),
 		Window:        UsageWindow{From: report.From, To: report.To, Selection: "overlap"},
-		Coverage:      UsageCoverage{Hosts: reportHosts(report), Scope: "live_hosts", Truncated: report.Truncated},
+		Coverage:      UsageCoverage{HostsReporting: reportHostCount(report), Scope: "live_hosts", Truncated: report.Truncated},
 		NextPageToken: next,
 	})
 }
@@ -176,10 +192,9 @@ func publicUsageInterval(iv registry.UsageInterval) UsageInterval {
 		state = "closed"
 	}
 	return UsageInterval{
-		ID:               iv.ID,
+		ID:               fmt.Sprintf("%s:%d", iv.SandboxID, iv.Seq),
 		SandboxID:        iv.SandboxID,
 		Sequence:         iv.Seq,
-		HostID:           iv.HostID,
 		State:            state,
 		Resources:        Resources{VCPU: iv.Vcpus, MemoryMIB: iv.MemMIB},
 		StartedAt:        iv.StartedAt,
@@ -204,14 +219,15 @@ func publicUsageTotals(t registry.UsageTotals) UsageTotals {
 	}
 }
 
-// reportHosts normalizes the two shapes the ledger answers in: a worker names
-// itself, a gateway names everyone that answered.
-func reportHosts(report registry.UsageReport) []string {
-	if len(report.Hosts) > 0 {
-		return report.Hosts
+// reportHostCount normalizes the two shapes the ledger answers in: a worker
+// names itself, a gateway names everyone that answered. Only the count crosses
+// into the public response.
+func reportHostCount(report registry.UsageReport) int {
+	if n := len(report.Hosts); n > 0 {
+		return n
 	}
 	if report.HostID != "" {
-		return []string{report.HostID}
+		return 1
 	}
-	return nil
+	return 0
 }

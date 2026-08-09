@@ -109,8 +109,13 @@ func TestUsageSeparatesBilledFromRecorded(t *testing.T) {
 	if got.Window.Selection != "overlap" {
 		t.Fatalf("window selection not stated: %+v", got.Window)
 	}
-	if got.Coverage.Scope != "live_hosts" || len(got.Coverage.Hosts) != 1 || got.Coverage.Hosts[0] != "worker-1" {
+	if got.Coverage.Scope != "live_hosts" || got.Coverage.HostsReporting != 1 {
 		t.Fatalf("coverage caveat missing or wrong: %+v", got.Coverage)
+	}
+	// Which worker ran a sandbox is infrastructure, not billing, and
+	// api-v1.md says runtime placement is not part of public objects.
+	if strings.Contains(w.Body.String(), "worker-1") {
+		t.Fatalf("host identity leaked into a tenant-facing bill: %s", w.Body.String())
 	}
 	if got.Totals.VcpuSeconds != 2400 || got.Totals.OpenIntervals != 1 {
 		t.Fatalf("totals not passed through: %+v", got.Totals)

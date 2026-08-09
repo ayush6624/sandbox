@@ -194,14 +194,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   // rows rather than one long span.
   const usageIntervals = [
     {
-      id: 'worker-1:sandbox-1:2', sandbox_id: 'sandbox-1', sequence: 2, host_id: 'worker-1',
+      id: 'sandbox-1:2', sandbox_id: 'sandbox-1', sequence: 2,
       state: 'open', resources: { vcpu: 2, memory_mib: 1024 },
       started_at: '2026-07-26T00:30:00Z',
       duration_seconds: 300, vcpu_seconds: 600, memory_mib_seconds: 307200, cpu_seconds: 42.5,
       metadata: { run: '1' },
     },
     {
-      id: 'worker-1:sandbox-1:1', sandbox_id: 'sandbox-1', sequence: 1, host_id: 'worker-1',
+      id: 'sandbox-1:1', sandbox_id: 'sandbox-1', sequence: 1,
       state: 'closed', resources: { vcpu: 2, memory_mib: 1024 },
       started_at: '2026-07-26T00:00:00Z', ended_at: '2026-07-26T00:10:00Z',
       duration_seconds: 600, vcpu_seconds: 1200, memory_mib_seconds: 614400, cpu_seconds: 90,
@@ -219,7 +219,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         vcpu_seconds: 1800, memory_mib_seconds: 921600, cpu_seconds: 132.5,
       },
       window: { selection: 'overlap', ...(url.searchParams.get('from') ? { from: url.searchParams.get('from') } : {}) },
-      coverage: { hosts: ['worker-1'], scope: 'live_hosts', truncated: false },
+      coverage: { hosts_reporting: 1, scope: 'live_hosts', truncated: false },
       ...(offset + size < usageIntervals.length ? { next_page_token: 'next' } : {}),
     }
   }
@@ -381,7 +381,9 @@ test('usage separates billed quantities from recorded CPU', async () => {
   assert.deepEqual(closed.resources, { vcpus: 2, memoryMib: 1024 })
   assert.equal(report.window.selection, 'overlap')
   assert.equal(report.coverage.scope, 'live_hosts')
-  assert.deepEqual(report.coverage.hosts, ['worker-1'])
+  assert.equal(report.coverage.hostsReporting, 1)
+  // Which worker ran a sandbox is infrastructure, not billing.
+  assert.equal(JSON.stringify(report).includes('worker-1'), false)
 })
 
 // Paging the rows must not page the money: the totals describe the selection.
@@ -395,7 +397,7 @@ test('usage totals stay whole while intervals page', async () => {
 
   const seen: string[] = []
   for await (const interval of client.usage.list({ pageSize: 1 })) seen.push(interval.id)
-  assert.deepEqual(seen, ['worker-1:sandbox-1:2', 'worker-1:sandbox-1:1'])
+  assert.deepEqual(seen, ['sandbox-1:2', 'sandbox-1:1'])
 })
 
 test('per-sandbox usage reads from the sandbox, and 404 points at the fleet ledger', async () => {

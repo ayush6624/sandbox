@@ -91,8 +91,7 @@ two — the paused span in between bills nothing.
 ```json
 {
   "intervals": [{
-    "id": "worker-1:sbx_123:2", "sandbox_id": "sbx_123", "sequence": 2,
-    "host_id": "worker-1", "state": "closed",
+    "id": "sbx_123:2", "sandbox_id": "sbx_123", "sequence": 2, "state": "closed",
     "resources": {"vcpu": 2, "memory_mib": 1024},
     "started_at": "2026-08-09T10:00:00Z", "ended_at": "2026-08-09T10:10:00Z",
     "duration_seconds": 600, "vcpu_seconds": 1200, "memory_mib_seconds": 614400,
@@ -101,7 +100,7 @@ two — the paused span in between bills nothing.
   "totals": {"intervals": 2, "open_intervals": 1, "duration_seconds": 900,
              "vcpu_seconds": 1800, "memory_mib_seconds": 921600, "cpu_seconds": 132.5},
   "window": {"from": "2026-08-01T00:00:00Z", "selection": "overlap"},
-  "coverage": {"hosts": ["worker-1"], "scope": "live_hosts", "truncated": false}
+  "coverage": {"hosts_reporting": 1, "scope": "live_hosts", "truncated": false}
 }
 ```
 
@@ -118,6 +117,13 @@ Four properties clients should rely on:
 - `coverage.scope` is `live_hosts`. Usage from a worker that no longer exists
   survives only in the deployment's durability bucket, which is the billing
   record of truth; this API is for dashboards and debugging.
+- **No host identity appears anywhere in a bill.** Which worker ran a sandbox is
+  infrastructure, not billing: it is not actionable, it changes on every
+  pause/resume, and runtime placement is already excluded from public objects.
+  `coverage.hosts_reporting` is a count, and the line-item `id` is
+  `<sandbox_id>:<sequence>` rather than the ledger's host-keyed internal key —
+  that one exists so the at-least-once durability spool can dedupe, and it stays
+  in the spool.
 
 `GET /v1/usage?sandbox_id=` also answers for **deleted** sandboxes, because it
 queries every host instead of routing by ID. The id-scoped route cannot — it

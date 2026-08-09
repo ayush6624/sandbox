@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Sandbox API
-  version: 1.4.0
+  version: 1.5.0
   description: |
     Versioned public contract for creating and operating isolated development
     sandboxes. Routes outside `/v1` are deprecated compatibility endpoints.
@@ -433,10 +433,9 @@ components:
         transparency, never billed, because CPU is oversubscribed.
       required: [id, sandbox_id, sequence, state, resources, started_at, duration_seconds, vcpu_seconds, memory_mib_seconds, cpu_seconds, metadata]
       properties:
-        id: {type: string, description: 'Stable and deterministic: "<host>:<sandbox>:<sequence>".'}
+        id: {type: string, description: 'Line item identity, "<sandbox_id>:<sequence>". Stable, and never reused.'}
         sandbox_id: {type: string}
         sequence: {type: integer, description: Counts a sandbox's intervals from 1; a resume opens the next.}
-        host_id: {type: string}
         state: {type: string, enum: [open, closed]}
         resources: {$ref: '#/components/schemas/Resources'}
         started_at: {type: string, format: date-time}
@@ -478,9 +477,9 @@ components:
             selection: {const: overlap, description: Intervals overlapping the window are included whole, never clipped.}
         coverage:
           type: object
-          required: [scope, truncated]
+          required: [hosts_reporting, scope, truncated]
           properties:
-            hosts: {type: array, items: {type: string}}
+            hosts_reporting: {type: integer, description: How many hosts answered. A count, not identities — which worker ran a sandbox is infrastructure, not billing.}
             scope: {const: live_hosts, description: Usage from hosts that no longer exist lives only in the durability bucket.}
             truncated: {type: boolean, description: A host returned fewer rows than it holds; totals are unaffected.}
         next_page_token: {type: string}

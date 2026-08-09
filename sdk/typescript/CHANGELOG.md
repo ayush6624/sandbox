@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.5.0 - 2026-08-09
+
+### Changed
+
+- **Breaking at compile time (type-level only):** `UsageIntervalResource.hostId`
+  is gone, and `UsageReport.coverage.hosts` (string[]) is now
+  `coverage.hostsReporting` (number). Which worker ran a sandbox is
+  infrastructure, not billing — it is not actionable, it changes on every
+  pause/resume, and the v1 contract already states that runtime placement is
+  not part of public objects. Usage line-item ids are now
+  `<sandboxId>:<sequence>` rather than the ledger's internal
+  `<host>:<sandbox>:<sequence>`; the host-keyed key stays where it is needed,
+  in the durability spool that dedupes on it.
+
+### Fixed
+
+- `cpuSeconds` no longer includes the ready pool's runtime. A warm-claimed
+  sandbox inherited its ready VM's whole cgroup counter — roughly 18 CPU-seconds
+  of boot and idle that are the platform's cost — which could report consumed
+  CPU above what an interval could physically have used. Billing was never
+  affected: it has always been on allocated resources.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.5.0`).
+
 ## 2.4.0 - 2026-08-09
 
 ### Added

@@ -218,6 +218,13 @@ sandbox_usage_unflushed_intervals      # alert on this: durability falling behin
 These federate through the gateway's `/metrics/hosts` with a `host` label for
 free (`injectHostLabel`, `internal/gateway/federate.go`).
 
+**No host identity crosses into a bill.** The ledger keys on `host_id` (it must:
+the spool is per-host and the id must dedupe), but the public shape exposes only
+a COUNT of hosts that answered, and line items are identified as
+`<sandbox_id>:<sequence>`. Which worker ran a sandbox is not actionable, changes
+on every pause/resume, and `api-v1.md` already excludes runtime placement from
+public objects.
+
 **Per-sandbox detail is API-only:**
 
 - `GET /v1/sandboxes/{id}/usage` — intervals plus totals for one sandbox.

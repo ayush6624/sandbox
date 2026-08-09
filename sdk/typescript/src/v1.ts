@@ -168,12 +168,11 @@ export interface OperationState<T> {
  * between bills nothing.
  */
 export interface UsageIntervalResource {
-  /** Stable and deterministic (`host:sandbox:sequence`), so replays dedupe. */
+  /** Line item identity, `<sandboxId>:<sequence>`. Stable, and never reused. */
   id: string
   sandboxId: string
   /** Counts a sandbox's intervals from 1; a resume opens the next. */
   sequence: number
-  hostId?: string
   state: 'open' | 'closed'
   resources: SandboxResources
   startedAt: Date
@@ -218,7 +217,8 @@ export interface UsageReport {
     selection: 'overlap'
   }
   coverage: {
-    hosts: string[]
+    /** How many hosts answered. A count, not identities. */
+    hostsReporting: number
     /**
      * Always `live_hosts`: usage from a host that no longer exists survives
      * only in the deployment's durability bucket, which is the billing record
@@ -700,7 +700,7 @@ function usageReportFromApi(raw: ApiUsageReport): UsageReport {
       ...(raw.window.to === undefined ? {} : { to: new Date(raw.window.to) }),
     },
     coverage: {
-      hosts: raw.coverage.hosts ?? [],
+      hostsReporting: raw.coverage.hosts_reporting,
       scope: raw.coverage.scope,
       truncated: raw.coverage.truncated,
     },
@@ -723,7 +723,6 @@ function usageIntervalFromApi(raw: ApiUsageInterval): UsageIntervalResource {
     cpuSeconds: raw.cpu_seconds,
     metadata: raw.metadata ?? {},
   }
-  if (raw.host_id !== undefined) interval.hostId = raw.host_id
   if (raw.ended_at !== undefined) interval.endedAt = new Date(raw.ended_at)
   if (raw.end_reason !== undefined) interval.endReason = raw.end_reason
   return interval

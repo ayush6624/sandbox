@@ -420,12 +420,11 @@ export interface components {
          *     transparency, never billed, because CPU is oversubscribed.
          */
         UsageInterval: {
-            /** @description Stable and deterministic: "<host>:<sandbox>:<sequence>". */
+            /** @description Line item identity, "<sandbox_id>:<sequence>". Stable, and never reused. */
             id: string;
             sandbox_id: string;
             /** @description Counts a sandbox's intervals from 1; a resume opens the next. */
             sequence: number;
-            host_id?: string;
             /** @enum {string} */
             state: "open" | "closed";
             resources: components["schemas"]["Resources"];
@@ -475,7 +474,8 @@ export interface components {
                 selection: "overlap";
             };
             coverage: {
-                hosts?: string[];
+                /** @description How many hosts answered. A count */
+                hosts_reporting: number;
                 /**
                  * @description Usage from hosts that no longer exist lives only in the durability bucket.
                  * @constant
