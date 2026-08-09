@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/httpapi"
@@ -161,11 +162,45 @@ func (h *Handler) usageFrom(w http.ResponseWriter, r *http.Request, path string)
 	})
 }
 
-// usageForwardQuery passes only the ledger filters through to the legacy route.
-// Pagination is applied here, over the rows that come back, so page_size and
-// page_token must not leak downstream where they would mean something else.
+// usageLedgerMaxRows mirrors the ledger's own per-response row cap (the worker
+// and the gateway both reject a larger limit). Past it a caller is told the
+// rows were truncated; the totals still cover everything selected.
+const usageLedgerMaxRows = 5000
+
+// usageFetchRows is how many rows the ledger must return for the page about to
+// be served.
+//
+// Pagination here is an offset into the fetched slice, so asking for the
+// default number of rows and then paging inside them walks a caller off the end
+// of the ledger's default cap: page 11 of a 2400-interval month came back empty
+// while the totals kept counting all 2400. Malformed values are left to
+// paginate, which produces the proper 400 — this only sizes the fetch.
+func usageFetchRows(in url.Values) int {
+	size := 50
+	if n, err := strconv.Atoi(in.Get("page_size")); err == nil && n >= 1 && n <= 100 {
+		size = n
+	}
+	offset := 0
+	if token := in.Get("page_token"); token != "" {
+		if n, err := httpapi.ParseCursor(token); err == nil {
+			offset = n
+		}
+	}
+	// One past the page proves whether a next page exists.
+	rows := offset + size + 1
+	if rows > usageLedgerMaxRows {
+		return usageLedgerMaxRows
+	}
+	return rows
+}
+
+// usageForwardQuery passes the ledger filters through to the legacy route, plus
+// the row count this page needs. Pagination itself is applied here, over the
+// rows that come back, so page_size and page_token must not leak downstream
+// where they would mean something else.
 func usageForwardQuery(in url.Values) (string, error) {
 	out := url.Values{}
+	out.Set("limit", strconv.Itoa(usageFetchRows(in)))
 	for _, name := range []string{"from", "to"} {
 		value := in.Get(name)
 		if value == "" {
