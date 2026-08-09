@@ -203,6 +203,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Billable usage across the fleet.
+         * @description Returns billable intervals and their totals. One interval is the span a
+         *     single VM served a sandbox, so a pause/resume cycle produces two.
+         *
+         *     `from`/`to` select by OVERLAP: an interval that started before the
+         *     window and is still running is included, and is reported whole rather
+         *     than clipped. Totals cover everything the window selected, including
+         *     intervals beyond the current page.
+         *
+         *     Accepts a `sandbox_id` filter, which — unlike
+         *     `/v1/sandboxes/{id}/usage` — also answers for sandboxes that have been
+         *     deleted, since it queries every host rather than routing by id.
+         *
+         *     Coverage is live hosts only: usage from a worker that no longer exists
+         *     survives in the deployment's durability bucket, which is the billing
+         *     record of truth. This endpoint is for dashboards and debugging.
+         */
+        get: operations["listUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/sandboxes/{sandbox_id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sandbox_id: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Billable usage for one sandbox.
+         * @description Routes to the sandbox's current host, so it answers only while the
+         *     sandbox exists. For a deleted sandbox use
+         *     `GET /v1/usage?sandbox_id=`, which asks every host.
+         */
+        get: operations["getSandboxUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/operations": {
         parameters: {
             query?: never;
@@ -354,6 +412,79 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             completed_at?: string;
+        };
+        /**
+         * @description One billable span: the time a single VM served a sandbox. `vcpu_seconds`
+         *     and `memory_mib_seconds` are the BILLED quantities (allocated resources
+         *     × duration). `cpu_seconds` is host CPU actually consumed — recorded for
+         *     transparency, never billed, because CPU is oversubscribed.
+         */
+        UsageInterval: {
+            /** @description Stable and deterministic: "<host>:<sandbox>:<sequence>". */
+            id: string;
+            sandbox_id: string;
+            /** @description Counts a sandbox's intervals from 1; a resume opens the next. */
+            sequence: number;
+            host_id?: string;
+            /** @enum {string} */
+            state: "open" | "closed";
+            resources: components["schemas"]["Resources"];
+            /** Format: date-time */
+            started_at: string;
+            /**
+             * Format: date-time
+             * @description Absent while the interval is open.
+             */
+            ended_at?: string;
+            /**
+             * @description Billable span. An open interval is measured to its last heartbeat,
+             *     never to "now", so a crashed host cannot bill an outage.
+             */
+            duration_seconds: number;
+            vcpu_seconds: number;
+            memory_mib_seconds: number;
+            cpu_seconds: number;
+            /** @enum {string} */
+            end_reason?: "destroy" | "hibernate" | "expire" | "shutdown" | "vm_exit" | "crash";
+            /** @description The sandbox's labels as of interval open; a later update cannot rewrite billing history. */
+            metadata: {
+                [key: string]: string;
+            };
+        };
+        UsageTotals: {
+            intervals: number;
+            open_intervals: number;
+            duration_seconds: number;
+            vcpu_seconds: number;
+            memory_mib_seconds: number;
+            cpu_seconds: number;
+        };
+        UsageReport: {
+            intervals: components["schemas"]["UsageInterval"][];
+            /** @description Covers the whole selection, not just the current page. */
+            totals: components["schemas"]["UsageTotals"];
+            window: {
+                /** Format: date-time */
+                from?: string;
+                /** Format: date-time */
+                to?: string;
+                /**
+                 * @description Intervals overlapping the window are included whole
+                 * @constant
+                 */
+                selection: "overlap";
+            };
+            coverage: {
+                hosts?: string[];
+                /**
+                 * @description Usage from hosts that no longer exist lives only in the durability bucket.
+                 * @constant
+                 */
+                scope: "live_hosts";
+                /** @description A host returned fewer rows than it holds; totals are unaffected. */
+                truncated: boolean;
+            };
+            next_page_token?: string;
         };
         Problem: {
             /** Format: uri */
@@ -869,6 +1000,61 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Template"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    listUsage: {
+        parameters: {
+            query?: {
+                page_size?: components["parameters"]["PageSize"];
+                page_token?: components["parameters"]["PageToken"];
+                sandbox_id?: string;
+                from?: string;
+                to?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of usage intervals with totals for the whole selection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageReport"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getSandboxUsage: {
+        parameters: {
+            query?: {
+                page_size?: components["parameters"]["PageSize"];
+                page_token?: components["parameters"]["PageToken"];
+                from?: string;
+                to?: string;
+            };
+            header?: never;
+            path: {
+                sandbox_id: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of this sandbox's usage intervals with totals. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageReport"];
                 };
             };
             default: components["responses"]["Problem"];

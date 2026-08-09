@@ -14,6 +14,7 @@ export {
   TemplatesCollection,
   OperationsCollection,
   PortForwardsCollection,
+  UsageCollection,
 } from './v1.js'
 export type {
   SandboxClientOptions,
@@ -34,6 +35,10 @@ export type {
   BatchResult,
   OperationState,
   SshInstructions,
+  UsageIntervalResource,
+  UsageTotals,
+  UsageReport,
+  UsageQueryOptions,
 } from './v1.js'
 export {
   SandboxError,

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.4.0 - 2026-08-09
+
+### Added
+
+- **Billable usage reads.** `client.usage.report()`, `client.usage.list()`,
+  `client.usage.forSandbox(id)`, and `sandbox.usage()` return billable
+  intervals plus totals. One interval is the span a single VM served a sandbox,
+  so pausing and resuming produces two — the paused span in between bills
+  nothing.
+- `UsageReport` separates **billed** quantities (`vcpuSeconds`,
+  `memoryMibSeconds` — allocated resources × duration) from **recorded**
+  `cpuSeconds`, which is host CPU actually consumed and is never charged
+  because CPU is deliberately oversubscribed.
+- Totals cover the whole selection rather than the returned page, so paging
+  never changes the amount owed. `from`/`to` select intervals that overlap the
+  window and report them whole (`window.selection === 'overlap'`), and an open
+  interval is measured to its last heartbeat, never to "now".
+- `coverage.scope` is `live_hosts`: usage from a host that no longer exists
+  survives only in the deployment's durability bucket, which is the billing
+  record of truth. `report({ sandboxId })` also answers for **deleted**
+  sandboxes because it queries every host; `forSandbox()` routes by ID and
+  cannot, and its `NotFoundError` says so.
+
+No breaking changes; existing code type-checks unchanged.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.4.0`).
+
 ## 2.3.0 - 2026-08-03
 
 ### Changed

@@ -189,6 +189,55 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
 
+  // Two intervals for one sandbox: a VM that was paused, and the VM the resume
+  // started. The pause between them bills nothing, which is why there are two
+  // rows rather than one long span.
+  const usageIntervals = [
+    {
+      id: 'worker-1:sandbox-1:2', sandbox_id: 'sandbox-1', sequence: 2, host_id: 'worker-1',
+      state: 'open', resources: { vcpu: 2, memory_mib: 1024 },
+      started_at: '2026-07-26T00:30:00Z',
+      duration_seconds: 300, vcpu_seconds: 600, memory_mib_seconds: 307200, cpu_seconds: 42.5,
+      metadata: { run: '1' },
+    },
+    {
+      id: 'worker-1:sandbox-1:1', sandbox_id: 'sandbox-1', sequence: 1, host_id: 'worker-1',
+      state: 'closed', resources: { vcpu: 2, memory_mib: 1024 },
+      started_at: '2026-07-26T00:00:00Z', ended_at: '2026-07-26T00:10:00Z',
+      duration_seconds: 600, vcpu_seconds: 1200, memory_mib_seconds: 614400, cpu_seconds: 90,
+      end_reason: 'hibernate', metadata: { run: '1' },
+    },
+  ]
+  function usageReport(offset: number): Record<string, unknown> {
+    const size = Number(url.searchParams.get('page_size') ?? usageIntervals.length)
+    return {
+      intervals: usageIntervals.slice(offset, offset + size),
+      // Totals cover the whole selection, not the page — that is the property
+      // a caller must be able to rely on when paging.
+      totals: {
+        intervals: 2, open_intervals: 1, duration_seconds: 900,
+        vcpu_seconds: 1800, memory_mib_seconds: 921600, cpu_seconds: 132.5,
+      },
+      window: { selection: 'overlap', ...(url.searchParams.get('from') ? { from: url.searchParams.get('from') } : {}) },
+      coverage: { hosts: ['worker-1'], scope: 'live_hosts', truncated: false },
+      ...(offset + size < usageIntervals.length ? { next_page_token: 'next' } : {}),
+    }
+  }
+  if (req.method === 'GET' && url.pathname === '/v1/usage') {
+    json(res, 200, usageReport(url.searchParams.get('page_token') ? 1 : 0))
+    return
+  }
+  const usageMatch = url.pathname.match(/^\/v1\/sandboxes\/([^/]+)\/usage$/)
+  if (req.method === 'GET' && usageMatch) {
+    if (!sandboxes.has(usageMatch[1]!)) {
+      problem(res, 404, 'sandbox_not_found',
+        'sandbox not found; usage for a deleted sandbox is available from GET /v1/usage?sandbox_id=')
+      return
+    }
+    json(res, 200, usageReport(0))
+    return
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/templates') {
     json(res, 200, { templates: [{ id: 'default', revision: 'rev-1', resources: { vcpu: 2, memory_mib: 1024 } }] })
     return
@@ -312,5 +361,54 @@ test('problem details expose stable code and request id', async () => {
   await assert.rejects(
     client.sandboxes.get('missing'),
     (error: unknown) => error instanceof NotFoundError && error.code === 'not_found' && error.requestId === 'req-test',
+  )
+})
+
+test('usage separates billed quantities from recorded CPU', async () => {
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY })
+  const report = await client.usage.report({ from: new Date('2026-07-26T00:00:00Z') })
+
+  // Newest first, so index 1 is the older interval that has already closed.
+  const [open, closed] = [report.intervals[0]!, report.intervals[1]!]
+  assert.equal(open.state, 'open')
+  assert.equal(open.endedAt, undefined)
+  assert.equal(closed.state, 'closed')
+  assert.deepEqual(closed.endedAt, new Date('2026-07-26T00:10:00Z'))
+  assert.equal(closed.endReason, 'hibernate')
+  assert.equal(closed.vcpuSeconds, 1200)
+  assert.equal(closed.memoryMibSeconds, 614400)
+  assert.equal(closed.cpuSeconds, 90)
+  assert.deepEqual(closed.resources, { vcpus: 2, memoryMib: 1024 })
+  assert.equal(report.window.selection, 'overlap')
+  assert.equal(report.coverage.scope, 'live_hosts')
+  assert.deepEqual(report.coverage.hosts, ['worker-1'])
+})
+
+// Paging the rows must not page the money: the totals describe the selection.
+test('usage totals stay whole while intervals page', async () => {
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY })
+  const first = await client.usage.report({ pageSize: 1 })
+  assert.equal(first.intervals.length, 1)
+  assert.equal(first.totals.intervals, 2)
+  assert.equal(first.totals.vcpuSeconds, 1800)
+  assert.ok(first.nextPageToken)
+
+  const seen: string[] = []
+  for await (const interval of client.usage.list({ pageSize: 1 })) seen.push(interval.id)
+  assert.deepEqual(seen, ['worker-1:sandbox-1:2', 'worker-1:sandbox-1:1'])
+})
+
+test('per-sandbox usage reads from the sandbox, and 404 points at the fleet ledger', async () => {
+  sandboxes.clear()
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY })
+  const created = await client.sandboxes.create({})
+  const report = await created.usage()
+  assert.equal(report.totals.openIntervals, 1)
+  assert.equal(report.intervals[0]!.sandboxId, 'sandbox-1')
+
+  await created.terminate()
+  await assert.rejects(
+    client.usage.forSandbox('sandbox-1'),
+    (error: unknown) => error instanceof NotFoundError && /\/v1\/usage\?sandbox_id=/.test(error.message),
   )
 })

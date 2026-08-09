@@ -14,6 +14,8 @@ type ApiOperation = components['schemas']['Operation']
 type ApiPortForward = components['schemas']['PortForward']
 type ApiCreate = components['schemas']['CreateSandboxRequest']
 type ApiUpdate = components['schemas']['UpdateSandboxRequest']
+type ApiUsageReport = components['schemas']['UsageReport']
+type ApiUsageInterval = components['schemas']['UsageInterval']
 
 export interface SandboxClientOptions {
   baseUrl?: string
@@ -158,6 +160,86 @@ export interface OperationState<T> {
   results: Array<BatchResult<T>>
   createdAt: Date
   completedAt?: Date
+}
+
+/**
+ * One billable span: the time a single VM served a sandbox. Pausing and
+ * resuming produces two intervals, because it runs two VMs; the paused span in
+ * between bills nothing.
+ */
+export interface UsageIntervalResource {
+  /** Stable and deterministic (`host:sandbox:sequence`), so replays dedupe. */
+  id: string
+  sandboxId: string
+  /** Counts a sandbox's intervals from 1; a resume opens the next. */
+  sequence: number
+  hostId?: string
+  state: 'open' | 'closed'
+  resources: SandboxResources
+  startedAt: Date
+  /** Absent while the interval is open. */
+  endedAt?: Date
+  /**
+   * Billable span. An open interval is measured to its last heartbeat, never
+   * to "now", so the number is reproducible and an outage cannot be billed.
+   */
+  durationSeconds: number
+  /** Billed: allocated vCPUs × duration. */
+  vcpuSeconds: number
+  /** Billed: allocated MiB × duration. */
+  memoryMibSeconds: number
+  /**
+   * Host CPU actually consumed. Recorded for transparency and NOT the billing
+   * base — CPU is deliberately oversubscribed.
+   */
+  cpuSeconds: number
+  endReason?: 'destroy' | 'hibernate' | 'expire' | 'shutdown' | 'vm_exit' | 'crash'
+  /** The sandbox's metadata as of interval open; a later update cannot rewrite it. */
+  metadata: Record<string, string>
+}
+
+export interface UsageTotals {
+  intervals: number
+  openIntervals: number
+  durationSeconds: number
+  vcpuSeconds: number
+  memoryMibSeconds: number
+  cpuSeconds: number
+}
+
+export interface UsageReport {
+  intervals: UsageIntervalResource[]
+  /** Covers the whole selection, not just the returned page. */
+  totals: UsageTotals
+  window: {
+    from?: Date
+    to?: Date
+    /** Intervals overlapping the window are included whole, never clipped. */
+    selection: 'overlap'
+  }
+  coverage: {
+    hosts: string[]
+    /**
+     * Always `live_hosts`: usage from a host that no longer exists survives
+     * only in the deployment's durability bucket, which is the billing record
+     * of truth. This API is for dashboards and debugging.
+     */
+    scope: 'live_hosts'
+    /** A host returned fewer rows than it holds; totals are unaffected. */
+    truncated: boolean
+  }
+  nextPageToken?: string
+}
+
+export interface UsageQueryOptions {
+  /** Also matches sandboxes that have been deleted. */
+  sandboxId?: string
+  /** Selects intervals overlapping [from, to). */
+  from?: Date
+  to?: Date
+  pageSize?: number
+  pageToken?: string
+  signal?: AbortSignal
 }
 
 export interface SshInstructions {
@@ -334,6 +416,16 @@ export class ClientSandbox {
     )
     return raw.port_forwards.map(portForwardFromApi)
   }
+
+  /**
+   * This sandbox's billable usage. Available while the sandbox exists; after
+   * termination, read it from `client.usage.report({ sandboxId })`.
+   */
+  async usage(options: Omit<UsageQueryOptions, 'sandboxId'> = {}): Promise<UsageReport> {
+    return usageReportFromApi(await this.transport.get<ApiUsageReport>(
+      `/v1/sandboxes/${encodeURIComponent(this.id)}/usage`, usageQuery(options), options.signal,
+    ))
+  }
 }
 
 export class Operation<T> {
@@ -373,6 +465,7 @@ export class SandboxClient {
   readonly templates: TemplatesCollection
   readonly operations: OperationsCollection
   readonly portForwards: PortForwardsCollection
+  readonly usage: UsageCollection
   private readonly transport: V1Transport
 
   constructor(options: SandboxClientOptions = {}) {
@@ -382,6 +475,42 @@ export class SandboxClient {
     this.templates = new TemplatesCollection(this.transport)
     this.operations = new OperationsCollection(this.transport)
     this.portForwards = new PortForwardsCollection(this.transport)
+    this.usage = new UsageCollection(this.transport)
+  }
+}
+
+/**
+ * Billable usage.
+ *
+ * {@link report} is the primary call because totals belong with the rows: they
+ * cover the whole selection, so paging through intervals alone would make the
+ * amount owed look like it depends on the page size.
+ */
+export class UsageCollection {
+  constructor(private readonly transport: V1Transport) {}
+
+  /** One page of intervals plus totals for the entire selection. */
+  async report(options: UsageQueryOptions = {}): Promise<UsageReport> {
+    return usageReportFromApi(await this.transport.get<ApiUsageReport>('/v1/usage', usageQuery(options), options.signal))
+  }
+
+  /**
+   * Usage for one sandbox. This routes to the sandbox's host, so it only
+   * answers while the sandbox exists — for a deleted one, call
+   * `report({ sandboxId })`, which asks every host.
+   */
+  async forSandbox(sandboxId: string, options: Omit<UsageQueryOptions, 'sandboxId'> = {}): Promise<UsageReport> {
+    return usageReportFromApi(await this.transport.get<ApiUsageReport>(
+      `/v1/sandboxes/${encodeURIComponent(sandboxId)}/usage`, usageQuery(options), options.signal,
+    ))
+  }
+
+  /** Every interval in the selection, paging transparently. */
+  list(options: UsageQueryOptions = {}): AsyncIterable<UsageIntervalResource> {
+    return paginated(async (pageToken) => {
+      const page = await this.report({ ...options, ...(pageToken === undefined ? {} : { pageToken }) })
+      return { items: page.intervals, ...(page.nextPageToken === undefined ? {} : { nextPageToken: page.nextPageToken }) }
+    })
   }
 }
 
@@ -544,6 +673,60 @@ function snapshotFromApi(raw: ApiSnapshot): SnapshotResource {
     createdAt: new Date(raw.created_at),
     ...(raw.expires_at === undefined ? {} : { expiresAt: new Date(raw.expires_at) }),
   }
+}
+
+function usageQuery(options: UsageQueryOptions & { pageToken?: string }): Record<string, string> {
+  const query: Record<string, string> = {}
+  if (options.sandboxId) query.sandbox_id = options.sandboxId
+  if (options.from) query.from = options.from.toISOString()
+  if (options.to) query.to = options.to.toISOString()
+  return paginationQuery(query, options.pageSize, options.pageToken)
+}
+
+function usageReportFromApi(raw: ApiUsageReport): UsageReport {
+  const report: UsageReport = {
+    intervals: raw.intervals.map(usageIntervalFromApi),
+    totals: {
+      intervals: raw.totals.intervals,
+      openIntervals: raw.totals.open_intervals,
+      durationSeconds: raw.totals.duration_seconds,
+      vcpuSeconds: raw.totals.vcpu_seconds,
+      memoryMibSeconds: raw.totals.memory_mib_seconds,
+      cpuSeconds: raw.totals.cpu_seconds,
+    },
+    window: {
+      selection: raw.window.selection,
+      ...(raw.window.from === undefined ? {} : { from: new Date(raw.window.from) }),
+      ...(raw.window.to === undefined ? {} : { to: new Date(raw.window.to) }),
+    },
+    coverage: {
+      hosts: raw.coverage.hosts ?? [],
+      scope: raw.coverage.scope,
+      truncated: raw.coverage.truncated,
+    },
+  }
+  if (raw.next_page_token !== undefined) report.nextPageToken = raw.next_page_token
+  return report
+}
+
+function usageIntervalFromApi(raw: ApiUsageInterval): UsageIntervalResource {
+  const interval: UsageIntervalResource = {
+    id: raw.id,
+    sandboxId: raw.sandbox_id,
+    sequence: raw.sequence,
+    state: raw.state,
+    resources: { vcpus: raw.resources.vcpu, memoryMib: raw.resources.memory_mib },
+    startedAt: new Date(raw.started_at),
+    durationSeconds: raw.duration_seconds,
+    vcpuSeconds: raw.vcpu_seconds,
+    memoryMibSeconds: raw.memory_mib_seconds,
+    cpuSeconds: raw.cpu_seconds,
+    metadata: raw.metadata ?? {},
+  }
+  if (raw.host_id !== undefined) interval.hostId = raw.host_id
+  if (raw.ended_at !== undefined) interval.endedAt = new Date(raw.ended_at)
+  if (raw.end_reason !== undefined) interval.endReason = raw.end_reason
+  return interval
 }
 
 function templateFromApi(raw: ApiTemplate): TemplateResource {

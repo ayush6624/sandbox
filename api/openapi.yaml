@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Sandbox API
-  version: 1.3.0
+  version: 1.4.0
   description: |
     Versioned public contract for creating and operating isolated development
     sandboxes. Routes outside `/v1` are deprecated compatibility endpoints.
@@ -15,6 +15,7 @@ tags:
   - {name: Templates}
   - {name: Operations}
   - {name: Port forwards}
+  - {name: Usage}
 paths:
   /v1/sandboxes:
     get:
@@ -228,6 +229,58 @@ paths:
       responses:
         '200': {description: Template, content: {application/json: {schema: {$ref: '#/components/schemas/Template'}}}}
         default: {$ref: '#/components/responses/Problem'}
+  /v1/usage:
+    get:
+      tags: [Usage]
+      operationId: listUsage
+      summary: Billable usage across the fleet.
+      description: |
+        Returns billable intervals and their totals. One interval is the span a
+        single VM served a sandbox, so a pause/resume cycle produces two.
+
+        `from`/`to` select by OVERLAP: an interval that started before the
+        window and is still running is included, and is reported whole rather
+        than clipped. Totals cover everything the window selected, including
+        intervals beyond the current page.
+
+        Accepts a `sandbox_id` filter, which — unlike
+        `/v1/sandboxes/{id}/usage` — also answers for sandboxes that have been
+        deleted, since it queries every host rather than routing by id.
+
+        Coverage is live hosts only: usage from a worker that no longer exists
+        survives in the deployment's durability bucket, which is the billing
+        record of truth. This endpoint is for dashboards and debugging.
+      parameters:
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/PageToken'}
+        - {name: sandbox_id, in: query, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        '200':
+          description: A page of usage intervals with totals for the whole selection.
+          content: {application/json: {schema: {$ref: '#/components/schemas/UsageReport'}}}
+        default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}/usage:
+    parameters: [{$ref: '#/components/parameters/SandboxId'}]
+    get:
+      tags: [Usage]
+      operationId: getSandboxUsage
+      summary: Billable usage for one sandbox.
+      description: |
+        Routes to the sandbox's current host, so it answers only while the
+        sandbox exists. For a deleted sandbox use
+        `GET /v1/usage?sandbox_id=`, which asks every host.
+      parameters:
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/PageToken'}
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        '200':
+          description: A page of this sandbox's usage intervals with totals.
+          content: {application/json: {schema: {$ref: '#/components/schemas/UsageReport'}}}
+        default: {$ref: '#/components/responses/Problem'}
   /v1/operations:
     get:
       tags: [Operations]
@@ -371,6 +424,66 @@ components:
         results: {type: array, items: {$ref: '#/components/schemas/BatchItem'}}
         created_at: {type: string, format: date-time}
         completed_at: {type: string, format: date-time}
+    UsageInterval:
+      type: object
+      description: |
+        One billable span: the time a single VM served a sandbox. `vcpu_seconds`
+        and `memory_mib_seconds` are the BILLED quantities (allocated resources
+        × duration). `cpu_seconds` is host CPU actually consumed — recorded for
+        transparency, never billed, because CPU is oversubscribed.
+      required: [id, sandbox_id, sequence, state, resources, started_at, duration_seconds, vcpu_seconds, memory_mib_seconds, cpu_seconds, metadata]
+      properties:
+        id: {type: string, description: 'Stable and deterministic: "<host>:<sandbox>:<sequence>".'}
+        sandbox_id: {type: string}
+        sequence: {type: integer, description: Counts a sandbox's intervals from 1; a resume opens the next.}
+        host_id: {type: string}
+        state: {type: string, enum: [open, closed]}
+        resources: {$ref: '#/components/schemas/Resources'}
+        started_at: {type: string, format: date-time}
+        ended_at: {type: string, format: date-time, description: Absent while the interval is open.}
+        duration_seconds:
+          type: number
+          description: |
+            Billable span. An open interval is measured to its last heartbeat,
+            never to "now", so a crashed host cannot bill an outage.
+        vcpu_seconds: {type: number}
+        memory_mib_seconds: {type: number}
+        cpu_seconds: {type: number}
+        end_reason: {type: string, enum: [destroy, hibernate, expire, shutdown, vm_exit, crash]}
+        metadata: {type: object, additionalProperties: {type: string}, description: The sandbox's labels as of interval open; a later update cannot rewrite billing history.}
+    UsageTotals:
+      type: object
+      required: [intervals, open_intervals, duration_seconds, vcpu_seconds, memory_mib_seconds, cpu_seconds]
+      properties:
+        intervals: {type: integer}
+        open_intervals: {type: integer}
+        duration_seconds: {type: number}
+        vcpu_seconds: {type: number}
+        memory_mib_seconds: {type: number}
+        cpu_seconds: {type: number}
+    UsageReport:
+      type: object
+      required: [intervals, totals, window, coverage]
+      properties:
+        intervals: {type: array, items: {$ref: '#/components/schemas/UsageInterval'}}
+        totals:
+          allOf: [{$ref: '#/components/schemas/UsageTotals'}]
+          description: Covers the whole selection, not just the current page.
+        window:
+          type: object
+          required: [selection]
+          properties:
+            from: {type: string, format: date-time}
+            to: {type: string, format: date-time}
+            selection: {const: overlap, description: Intervals overlapping the window are included whole, never clipped.}
+        coverage:
+          type: object
+          required: [scope, truncated]
+          properties:
+            hosts: {type: array, items: {type: string}}
+            scope: {const: live_hosts, description: Usage from hosts that no longer exist lives only in the durability bucket.}
+            truncated: {type: boolean, description: A host returned fewer rows than it holds; totals are unaffected.}
+        next_page_token: {type: string}
     Problem:
       type: object
       required: [type, title, status, code, request_id]
