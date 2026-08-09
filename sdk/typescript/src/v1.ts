@@ -193,7 +193,11 @@ export interface UsageIntervalResource {
    */
   cpuSeconds: number
   endReason?: 'destroy' | 'hibernate' | 'expire' | 'shutdown' | 'vm_exit' | 'crash'
-  /** The sandbox's metadata as of interval open; a later update cannot rewrite it. */
+  /**
+   * The sandbox's labels while this interval was accruing. An open interval
+   * tracks the sandbox's current labels; a closed one is history and is never
+   * rewritten.
+   */
   metadata: Record<string, string>
 }
 

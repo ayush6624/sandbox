@@ -1301,6 +1301,17 @@ func (s *Server) handlePublicFields(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
+	// Labels are the ledger's only attribution, and they arrive here — the v1
+	// adapter creates the sandbox first and annotates it immediately after, by
+	// which time the billable interval is already open. Carry them onto the
+	// interval that is accruing now; closed intervals are history and stay as
+	// they were billed. Best-effort, like every other metering hook: a bill
+	// missing a label is worth a log line, not a failed request.
+	if body.Metadata != nil {
+		if err := s.reg.SetOpenUsageMetadata(r.Context(), current.ID, metadata); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] usage: record labels on open interval: %v\n", current.ID, err)
+		}
+	}
 	writeJSON(w, 200, s.effectiveResources(updated))
 }
 

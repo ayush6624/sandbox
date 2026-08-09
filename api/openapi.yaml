@@ -449,7 +449,7 @@ components:
         memory_mib_seconds: {type: number}
         cpu_seconds: {type: number}
         end_reason: {type: string, enum: [destroy, hibernate, expire, shutdown, vm_exit, crash]}
-        metadata: {type: object, additionalProperties: {type: string}, description: The sandbox's labels as of interval open; a later update cannot rewrite billing history.}
+        metadata: {type: object, additionalProperties: {type: string}, description: "The sandbox's labels while this interval was accruing. An open interval tracks the sandbox's current labels; a closed one is history and is never rewritten."}
     UsageTotals:
       type: object
       required: [intervals, open_intervals, duration_seconds, vcpu_seconds, memory_mib_seconds, cpu_seconds]

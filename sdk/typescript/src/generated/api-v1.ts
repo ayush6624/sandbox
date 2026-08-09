@@ -445,7 +445,7 @@ export interface components {
             cpu_seconds: number;
             /** @enum {string} */
             end_reason?: "destroy" | "hibernate" | "expire" | "shutdown" | "vm_exit" | "crash";
-            /** @description The sandbox's labels as of interval open; a later update cannot rewrite billing history. */
+            /** @description The sandbox's labels while this interval was accruing. An open interval tracks the sandbox's current labels; a closed one is history and is never rewritten. */
             metadata: {
                 [key: string]: string;
             };

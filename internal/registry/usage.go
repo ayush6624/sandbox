@@ -37,10 +37,15 @@ type UsageInterval struct {
 	// time, so the resolved values are what we keep.
 	Vcpus  int64 `json:"vcpus"`
 	MemMIB int64 `json:"mem_mib"`
-	// Metadata is the sandbox's labels as of interval open. Not an owner
-	// concept (there is no tenant model yet) — it is recorded so that whatever
-	// callers label sandboxes with today stays recoverable when attribution is
-	// designed, and so a later PATCH cannot rewrite billing history.
+	// Metadata is the sandbox's labels while this interval was accruing. Not
+	// an owner concept (there is no tenant model yet) — it is recorded so that
+	// whatever callers label sandboxes with today stays recoverable when
+	// attribution is designed.
+	//
+	// An OPEN interval tracks the sandbox's current labels (see
+	// SetOpenUsageMetadata: the v1 API labels a sandbox just after the interval
+	// opens, so a snapshot taken at open would be empty for every sandbox it
+	// ever created). A CLOSED interval is history and is never rewritten.
 	Metadata  map[string]string `json:"metadata,omitempty"`
 	StartedAt time.Time         `json:"started_at"`
 	// EndedAt is nil while the interval is open.
@@ -232,6 +237,30 @@ func (r *Registry) TouchUsageInterval(ctx context.Context, sandboxID string, cpu
 		        cpu_usec=CASE WHEN ? < 0 THEN cpu_usec ELSE MAX(cpu_usec, MAX(? - cpu_usec_base, 0)) END
 		  WHERE sandbox_id=? AND ended_at IS NULL`,
 		time.Now().UTC().Unix(), cpuUsec, cpuUsec, sandboxID)
+	return err
+}
+
+// SetOpenUsageMetadata records a sandbox's current labels on the interval it is
+// accruing right now. Closed intervals are never touched.
+//
+// This exists because labels arrive AFTER the interval opens. The v1 adapter
+// creates a sandbox on a worker and only then PATCHes its metadata, so an
+// interval that snapshotted labels at open would record an empty map for every
+// sandbox the public API ever created — and metadata is the only attribution
+// this ledger carries.
+//
+// Restricting it to the open interval is what keeps "a later PATCH cannot
+// rewrite billing history" true: a closed interval is a fact, already spoolable
+// and possibly already durable in the bucket, while an open one is still
+// accruing and has not been reported to anyone as final.
+func (r *Registry) SetOpenUsageMetadata(ctx context.Context, sandboxID string, metadata map[string]string) error {
+	meta, err := json.Marshal(nonNilMetadata(metadata))
+	if err != nil {
+		return fmt.Errorf("encode usage metadata: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx,
+		`UPDATE usage_intervals SET metadata=? WHERE sandbox_id=? AND ended_at IS NULL`,
+		string(meta), sandboxID)
 	return err
 }
 

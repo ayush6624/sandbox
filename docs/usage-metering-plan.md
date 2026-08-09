@@ -241,13 +241,26 @@ debugging; **the bucket is the billing source of truth.**
 
 ## Attribution (deferred, but not lost)
 
-No owner column, per decision 4. But the ledger snapshots the sandbox's
-`metadata` JSON at interval open (already a first-class create/PATCH field,
-≤64 keys, `internal/server/server.go:1176`). This is not an owner concept and
-must not be presented as one — it is a hedge that costs one column and means
-that whatever labels callers happen to set today (`team`, `project`, whatever)
-are recoverable when attribution is designed properly. Snapshotting at open also
-means a later `PATCH` of metadata cannot rewrite billing history.
+No owner column, per decision 4. But the ledger records the sandbox's
+`metadata` JSON on each interval (already a first-class create/PATCH field,
+≤64 keys). This is not an owner concept and must not be presented as one — it is
+a hedge that costs one column and means that whatever labels callers happen to
+set today (`team`, `project`, whatever) are recoverable when attribution is
+designed properly.
+
+An **open** interval tracks the sandbox's current labels; a **closed** one is
+history and is never rewritten, which is what keeps a later `PATCH` from
+rewriting a bill. Snapshotting once at open was the original design and was
+wrong in exactly the case that matters: the v1 adapter creates a sandbox on a
+worker and only then `PATCH`es its metadata onto the row, so the interval had
+always opened before the labels existed. Measured on the production fleet
+(2026-08-09): **0 of 24** intervals from a burst of v1 creates carried any
+label, i.e. every sandbox the public API had ever created was unattributable.
+`registry.SetOpenUsageMetadata` is the fix, called from the worker's
+`public-fields` handler — the one funnel both the create-time annotation and a
+later `PATCH` go through. A sandbox that MOVES hosts keeps its labels too: they
+travel in the durable hibernation record (`hibRecord.metadata`), without which
+an adopted sandbox billed the rest of its life unlabelled.
 
 When tenant auth lands, add `owner_id` populated from the auth context, and
 backfill from these snapshots where they happen to carry something usable.
