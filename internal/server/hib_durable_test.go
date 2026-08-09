@@ -33,7 +33,7 @@ func TestBuildHibRecordDiffFreeze(t *testing.T) {
 		{GuestPort: 22, PublicPort: 20000},
 	}
 
-	rec := buildHibRecord(sb, extras, memFormDiff, "golden-abc", rootfsFormDiff, "golden-abc")
+	rec := buildHibRecord(sb, extras, memFormDiff, "golden-abc", rootfsFormDiff, "golden-abc", 0)
 
 	if rec.Version != hibRecordVersion || rec.ID != "sb-1" || rec.Name != "devbox" {
 		t.Fatalf("identity fields wrong: %+v", rec)
@@ -82,7 +82,7 @@ func TestBuildHibRecordFullColdBoot(t *testing.T) {
 		CreatedAt: time.Unix(1_700_000_000, 0),
 		// no BaseSnapshotID (cold boot), no expiry
 	}
-	rec := buildHibRecord(sb, nil, memFormChunked, "", rootfsFormFull, "")
+	rec := buildHibRecord(sb, nil, memFormChunked, "", rootfsFormFull, "", 0)
 
 	if rec.MemForm != memFormChunked || rec.MemBaseID != "" {
 		t.Fatalf("mem form wrong: %+v", rec)
@@ -260,8 +260,11 @@ func TestHibRecordCarriesLabelsAcrossAMove(t *testing.T) {
 		SourceType: "snapshot", SourceID: "snap-7",
 	}
 
-	rec := buildHibRecord(sb, nil, memFormChunked, "", rootfsFormFull, "")
+	rec := buildHibRecord(sb, nil, memFormChunked, "", rootfsFormFull, "", 4)
 
+	if rec.UsageSeq != 4 {
+		t.Fatalf("usage sequence lost on the way to the durable record: %d", rec.UsageSeq)
+	}
 	if rec.Metadata["team"] != "payments" || rec.Metadata["env"] != "prod" {
 		t.Fatalf("labels lost on the way to the durable record: %+v", rec.Metadata)
 	}
@@ -277,7 +280,7 @@ func TestHibRecordCarriesLabelsAcrossAMove(t *testing.T) {
 	if err := json.Unmarshal(encoded, &back); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if back.Metadata["team"] != "payments" || back.SourceID != "snap-7" {
+	if back.Metadata["team"] != "payments" || back.SourceID != "snap-7" || back.UsageSeq != 4 {
 		t.Fatalf("labels did not survive the record round trip: %+v", back)
 	}
 }

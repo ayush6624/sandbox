@@ -76,6 +76,11 @@ type hibRecord struct {
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	SourceType string            `json:"source_type,omitempty"`
 	SourceID   string            `json:"source_id,omitempty"`
+	// UsageSeq is the highest billable-interval sequence this sandbox reached on
+	// the host that froze it. The adopting host continues from there, so the
+	// "<sandbox>:<sequence>" line items a bill is made of stay unique across a
+	// move. Absent in older records, which restarts numbering as it used to.
+	UsageSeq int64 `json:"usage_seq,omitempty"`
 	// Mem durability: MemForm=chunked → read manifest.json; MemForm=diff → pull
 	// mem.diff.sz and rebase onto MemBaseID's base mem.
 	MemForm   string `json:"mem_form"`
@@ -109,7 +114,7 @@ func unixPtr(t *time.Time) *int64 {
 // durability decisions. Pure (no I/O) so it's unit-testable; the orchestrator
 // fills the *Form/*BaseID fields from what it actually uploaded.
 func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
-	memForm, memBaseID, rootfsForm, rootfsBaseID string) hibRecord {
+	memForm, memBaseID, rootfsForm, rootfsBaseID string, usageSeq int64) hibRecord {
 	rec := hibRecord{
 		Version:           hibRecordVersion,
 		ID:                sb.ID,
@@ -123,6 +128,7 @@ func buildHibRecord(sb registry.Sandbox, ports []registry.PortMapping,
 		Metadata:          sb.Metadata,
 		SourceType:        sb.SourceType,
 		SourceID:          sb.SourceID,
+		UsageSeq:          usageSeq,
 		MemForm:           memForm,
 		MemBaseID:         memBaseID,
 		RootfsForm:        rootfsForm,
@@ -208,7 +214,13 @@ func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.S
 		fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: list ports: %v\n", id, err)
 		return
 	}
-	rec := buildHibRecord(sb, ports, memForm, memBaseID, rootfsForm, rootfsBaseID)
+	// Best-effort: a record without it just restarts the numbering on the far
+	// host, which is what records written before this field did.
+	usageSeq, err := s.reg.LastUsageSeq(ctx, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] durable hibernate: read last usage sequence: %v\n", id, err)
+	}
+	rec := buildHibRecord(sb, ports, memForm, memBaseID, rootfsForm, rootfsBaseID, usageSeq)
 	meta, err := json.Marshal(rec)
 	if err == nil {
 		// Every payload for THIS generation is published, so the record about to

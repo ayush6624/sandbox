@@ -142,6 +142,15 @@ func (r *Registry) migrateUsage() error {
 	CREATE INDEX IF NOT EXISTS idx_usage_open ON usage_intervals(ended_at) WHERE ended_at IS NULL;
 	CREATE INDEX IF NOT EXISTS idx_usage_flush ON usage_intervals(flushed_at) WHERE flushed_at IS NULL;
 	CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_intervals(started_at);
+	-- Sequence numbers a sandbox already used on ANOTHER host. A sandbox that
+	-- moves (host failure, adoption) arrives at a registry that has never seen
+	-- it and would otherwise restart its numbering at 1 — colliding with the
+	-- intervals its old host already billed, in a namespace the public API
+	-- presents as "<sandbox>:<sequence>" and promises is unique.
+	CREATE TABLE IF NOT EXISTS usage_seq_floor (
+		sandbox_id TEXT PRIMARY KEY,
+		seq        INTEGER NOT NULL
+	);
 	`)
 	if err != nil {
 		return err
@@ -180,9 +189,15 @@ func (r *Registry) OpenUsageInterval(ctx context.Context, sandboxID, hostID, vmI
 	}
 	defer tx.Rollback()
 
+	// The next sequence number continues from whichever is higher: what this
+	// host has already billed, or what the sandbox used before it moved here.
 	var maxSeq sql.NullInt64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT MAX(seq) FROM usage_intervals WHERE sandbox_id=?`, sandboxID).Scan(&maxSeq); err != nil {
+	if err := tx.QueryRowContext(ctx, `
+		SELECT MAX(seq) FROM (
+			SELECT MAX(seq) AS seq FROM usage_intervals WHERE sandbox_id=?1
+			UNION ALL
+			SELECT seq FROM usage_seq_floor WHERE sandbox_id=?1
+		)`, sandboxID).Scan(&maxSeq); err != nil {
 		return UsageInterval{}, fmt.Errorf("read usage seq: %w", err)
 	}
 
@@ -261,6 +276,42 @@ func (r *Registry) SetOpenUsageMetadata(ctx context.Context, sandboxID string, m
 	_, err = r.db.ExecContext(ctx,
 		`UPDATE usage_intervals SET metadata=? WHERE sandbox_id=? AND ended_at IS NULL`,
 		string(meta), sandboxID)
+	return err
+}
+
+// LastUsageSeq is the highest sequence number this sandbox has reached here,
+// including anything it carried in from a previous host. Zero means it has
+// never been billed. It is what travels with a sandbox that moves, so its
+// numbering continues instead of restarting.
+func (r *Registry) LastUsageSeq(ctx context.Context, sandboxID string) (int64, error) {
+	var seq sql.NullInt64
+	err := r.rdb.QueryRowContext(ctx, `
+		SELECT MAX(seq) FROM (
+			SELECT MAX(seq) AS seq FROM usage_intervals WHERE sandbox_id=?1
+			UNION ALL
+			SELECT seq FROM usage_seq_floor WHERE sandbox_id=?1
+		)`, sandboxID).Scan(&seq)
+	return seq.Int64, err
+}
+
+// SetUsageSeqFloor records that a sandbox already billed up to seq somewhere
+// else, so this host's first interval for it is seq+1.
+//
+// Without it, an adopted sandbox restarts at 1 and produces a second
+// "<sandbox>:1" line item — two real intervals that a consumer deduping on that
+// id would collapse into one, dropping usage on exactly the path a host failure
+// takes. The ledger's own ids stay unique regardless (they carry the host), so
+// this protects the public numbering, not the durability spool.
+//
+// Lowering the floor is refused: sequence numbers only move forward.
+func (r *Registry) SetUsageSeqFloor(ctx context.Context, sandboxID string, seq int64) error {
+	if seq <= 0 {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO usage_seq_floor (sandbox_id, seq) VALUES (?, ?)
+		ON CONFLICT(sandbox_id) DO UPDATE SET seq=MAX(seq, excluded.seq)`,
+		sandboxID, seq)
 	return err
 }
 
@@ -571,6 +622,14 @@ func (r *Registry) PruneUsageIntervals(ctx context.Context, cutoff time.Time) (i
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
+	// A sequence floor outlives the intervals it was protecting only for as long
+	// as any of them are still here; once a sandbox has no rows left, the floor
+	// is protecting nothing and would otherwise accumulate forever.
+	if _, err := r.db.ExecContext(ctx, `
+		DELETE FROM usage_seq_floor
+		 WHERE NOT EXISTS (SELECT 1 FROM usage_intervals WHERE usage_intervals.sandbox_id = usage_seq_floor.sandbox_id)`); err != nil {
+		return int(n), err
+	}
 	return int(n), nil
 }
 

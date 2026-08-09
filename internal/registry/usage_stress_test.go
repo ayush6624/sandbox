@@ -692,3 +692,101 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// A sandbox that moves hosts continues its interval numbering instead of
+// restarting it. The public API presents a line item as "<sandbox>:<sequence>"
+// and promises that is unique, so a restart produces two rows claiming to be
+// the same charge — and a consumer deduping on it drops a real interval, on
+// exactly the path a host failure takes.
+func TestAdoptedSandboxContinuesItsIntervalNumbering(t *testing.T) {
+	ctx := context.Background()
+
+	// Host A bills three intervals (a create plus two hibernate/wake cycles).
+	hostA := testRegistry(t)
+	for i := 0; i < 3; i++ {
+		if _, err := hostA.OpenUsageInterval(ctx, "sb1", "host-a", "vm", 2, 1024, 0, nil); err != nil {
+			t.Fatalf("open on host A: %v", err)
+		}
+		if _, _, err := hostA.CloseUsageInterval(ctx, "sb1", EndHibernate, -1); err != nil {
+			t.Fatalf("close on host A: %v", err)
+		}
+	}
+	carried, err := hostA.LastUsageSeq(ctx, "sb1")
+	if err != nil {
+		t.Fatalf("last seq: %v", err)
+	}
+	if carried != 3 {
+		t.Fatalf("host A reports last sequence %d, want 3", carried)
+	}
+
+	// Host B adopts it, carrying that number in the durable record.
+	hostB := testRegistry(t)
+	if err := hostB.SetUsageSeqFloor(ctx, "sb1", carried); err != nil {
+		t.Fatalf("set floor: %v", err)
+	}
+	iv, err := hostB.OpenUsageInterval(ctx, "sb1", "host-b", "vm", 2, 1024, 0, nil)
+	if err != nil {
+		t.Fatalf("open on host B: %v", err)
+	}
+	if iv.Seq != 4 {
+		t.Fatalf("the adopted sandbox restarted at sequence %d, colliding with host A's line items", iv.Seq)
+	}
+	if iv.ID != "host-b:sb1:4" {
+		t.Fatalf("ledger id = %q, want host-b:sb1:4", iv.ID)
+	}
+	if _, _, err := hostB.CloseUsageInterval(ctx, "sb1", EndDestroy, -1); err != nil {
+		t.Fatalf("close on host B: %v", err)
+	}
+	next, err := hostB.OpenUsageInterval(ctx, "sb1", "host-b", "vm", 2, 1024, 0, nil)
+	if err != nil {
+		t.Fatalf("reopen on host B: %v", err)
+	}
+	if next.Seq != 5 {
+		t.Fatalf("second interval on host B has sequence %d, want 5", next.Seq)
+	}
+
+	// A floor can only move forward: a stale record must not renumber a sandbox
+	// backwards into ids it has already used.
+	if err := hostB.SetUsageSeqFloor(ctx, "sb1", 1); err != nil {
+		t.Fatalf("lower floor: %v", err)
+	}
+	if got, _ := hostB.LastUsageSeq(ctx, "sb1"); got != 5 {
+		t.Fatalf("a stale floor rewound the sequence to %d", got)
+	}
+}
+
+// A floor is bookkeeping for intervals that are still here. Once a sandbox's
+// rows are pruned it protects nothing, and would otherwise accumulate one row
+// per migrated sandbox forever.
+func TestUsageSeqFloorIsPrunedWithTheIntervalsItProtects(t *testing.T) {
+	r, ctx := testRegistry(t), context.Background()
+
+	if err := r.SetUsageSeqFloor(ctx, "sb1", 7); err != nil {
+		t.Fatalf("set floor: %v", err)
+	}
+	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-b", "vm", 2, 1024, 0, nil); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, -1); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := r.MarkUsageFlushed(ctx, []string{"host-b:sb1:8"}); err != nil {
+		t.Fatalf("mark flushed: %v", err)
+	}
+
+	// Still holding rows: the floor stays.
+	if _, err := r.PruneUsageIntervals(ctx, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("prune (nothing due): %v", err)
+	}
+	if got, _ := r.LastUsageSeq(ctx, "sb1"); got != 8 {
+		t.Fatalf("floor dropped while its intervals were still present (last seq %d)", got)
+	}
+
+	// Rows pruned: the floor goes with them.
+	if _, err := r.PruneUsageIntervals(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if got, _ := r.LastUsageSeq(ctx, "sb1"); got != 0 {
+		t.Fatalf("floor survived the pruning of every interval it covered (last seq %d)", got)
+	}
+}

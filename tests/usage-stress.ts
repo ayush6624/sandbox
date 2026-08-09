@@ -650,6 +650,84 @@ async function reconcileRun(): Promise<Record<string, unknown>> {
   }
 }
 
+
+/**
+ * Scale: push the ledger past the row cap a single response can hold, then
+ * check that the report is still auditable.
+ *
+ * This is the shape that hid a real defect. Totals are aggregated over the whole
+ * selection while rows are paginated, so a caller with more intervals than one
+ * response holds sees the right amount owed and — before this was fixed — could
+ * never page to the rows behind it. Opt-in (USAGE_STRESS_DEEP=1): it creates and
+ * destroys hundreds of sandboxes.
+ */
+async function scenarioDeepLedger(): Promise<void> {
+  const target = Number(process.env.USAGE_STRESS_DEEP_INTERVALS ?? 900)
+  const wave = Number(process.env.USAGE_STRESS_DEEP_WAVE ?? 32)
+  head(`l. deep ledger: churn ~${target} intervals, then page the whole thing`)
+
+  const t0 = Date.now()
+  let churned = 0
+  let churnErrors = 0
+  while (churned < target) {
+    const size = Math.min(wave, target - churned)
+    const boxes = await Promise.all(
+      Array.from({ length: size }, async () => {
+        try {
+          return await make('deep')
+        } catch {
+          churnErrors++
+          return null
+        }
+      }),
+    )
+    await Promise.all(boxes.filter((sb): sb is ClientSandbox => sb !== null).map(kill))
+    churned += size
+  }
+  console.log(`    churned ${churned} sandboxes in ${secs(Date.now() - t0).toFixed(0)}s (${churnErrors} create failures)`)
+  await sleep(2000)
+
+  // The whole fleet ledger, not just this run: the cap applies per response.
+  const first = await client.usage.report({ pageSize: 100 })
+  console.log(`    fleet ledger holds ${first.totals.intervals} intervals (truncated=${first.coverage.truncated})`)
+  check(
+    Number(first.totals.intervals) > 1000,
+    `the ledger holds ${first.totals.intervals} intervals, enough to exceed a single response's default rows`,
+  )
+
+  const seen = new Set<string>()
+  let pageToken: string | undefined
+  let pages = 0
+  let totalsMoved = 0
+  do {
+    const page = await client.usage.report({ pageSize: 100, pageToken })
+    if (page.totals.intervals !== first.totals.intervals) totalsMoved++
+    for (const iv of page.intervals) {
+      if (seen.has(iv.id)) check(false, `interval ${iv.id} served on two pages`)
+      seen.add(iv.id)
+    }
+    pageToken = page.nextPageToken
+    pages++
+  } while (pageToken && pages < 200)
+
+  console.log(`    paged ${seen.size} intervals over ${pages} pages`)
+  check(seen.size > 1000, `paging reached ${seen.size} intervals, past the ${1000}-row default a single response returns`)
+  check(
+    first.coverage.truncated || seen.size === Number(first.totals.intervals),
+    `paging reached ${seen.size} of the ${first.totals.intervals} intervals the totals count`,
+  )
+  // Concurrent churn means the ledger legitimately grows while we page; what
+  // must not happen is a page reporting DIFFERENT totals for the same window.
+  if (totalsMoved > 0) console.log(`    (note: totals moved on ${totalsMoved} page(s) — the fleet was live; the windowed check in scenario i pins stability)`)
+
+  // The same selection, one page: money must not depend on how it was read.
+  const single = await client.usage.report({ pageSize: 1 })
+  check(
+    single.totals.vcpuSeconds >= first.totals.vcpuSeconds,
+    `a one-row page reports ${single.totals.vcpuSeconds} vCPU-s against ${first.totals.vcpuSeconds} for a hundred-row page`,
+  )
+}
+
 // ---------------------------------------------------------------------- main
 
 const scenarios: Array<[string, () => Promise<void>]> = [
@@ -664,6 +742,8 @@ const scenarios: Array<[string, () => Promise<void>]> = [
   ['i', scenarioPaginationAndWindows],
   ['j', scenarioUsageOutlivesTheSandbox],
   ['k', scenarioLabels],
+  // Opt-in: hundreds of sandboxes.
+  ...(process.env.USAGE_STRESS_DEEP ? ([['l', scenarioDeepLedger]] as Array<[string, () => Promise<void>]>) : []),
 ]
 
 async function cleanup(): Promise<void> {

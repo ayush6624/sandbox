@@ -251,6 +251,13 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 		return registry.Sandbox{}, fmt.Errorf("insert adopted row: %w", err)
 	}
+	// Continue the sandbox's billable-interval numbering rather than restarting
+	// it, so the line items on a bill stay unique across the move.
+	if rec.UsageSeq > 0 {
+		if perr := s.reg.SetUsageSeqFloor(ctx, id, rec.UsageSeq); perr != nil {
+			fmt.Fprintf(os.Stderr, "[%s] adopt: carry usage sequence %d: %v\n", id, rec.UsageSeq, perr)
+		}
+	}
 	// Restore the labels and provenance the sandbox carried on its old host.
 	// Best-effort: an adopted sandbox that has lost its labels is still a
 	// working sandbox, but it bills unattributably, so this is worth a loud
