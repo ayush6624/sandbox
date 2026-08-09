@@ -162,9 +162,15 @@ func (s *Server) sampleOpenUsage(ctx context.Context) {
 				continue
 			}
 			if ok {
+				// Only a close that actually landed is evidence of a missed
+				// close. The interval listed above can legitimately have been
+				// closed by a freeze or a destroy in the meantime — that races
+				// on every hibernation — and shouting about it there trains
+				// operators to ignore the one message that means billing was
+				// running away.
 				s.creditBillable(closed)
+				fmt.Fprintf(os.Stderr, "[%s] usage: closed interval with no live VM (missed close)\n", iv.SandboxID)
 			}
-			fmt.Fprintf(os.Stderr, "[%s] usage: closed interval with no live VM (missed close)\n", iv.SandboxID)
 			continue
 		}
 		if err := s.reg.TouchUsageInterval(ctx, iv.SandboxID, s.sampleCPUUsec(iv.SandboxID)); err != nil {
