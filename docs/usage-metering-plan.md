@@ -361,7 +361,7 @@ real unit coverage:
   the ledger reports two intervals with plausible non-zero CPU and the expected
   RAM-seconds.
 
-## Measured behavior (fleet, release `cdd305c`)
+## Measured behavior (fleet, release `1ba097d`)
 
 `tests/usage-pricing-bench.ts` drives ten real-world shapes through the SDK and
 reports what each one bills. Run it from the control VM; rates are illustrative
@@ -381,11 +381,25 @@ pool's runtime.** A warm-claimed sandbox inherited its ready VM's whole cgroup
 counter — about 18 CPU-seconds of boot and idle that are ours — which reported
 consumed CPU ABOVE the interval's physical ceiling (18.15 CPU-s for a 5-second
 interval on a 2-vCPU guest, where the ceiling is 10) and compressed the
-busy-vs-idle margin from roughly 17x to 1.8x. Fixed by baselining the counter
-at interval open (`cpu_usec_base`). Billing was never affected — it has always
+busy-vs-idle margin from 55x to 1.8x. Fixed by baselining the counter at interval open
+(`cpu_usec_base`). Billing was never affected — it has always
 been on allocated resources — but `cpu_seconds` is a public field and the
 margin input for any future burst SKU. The tell was that cold-booted sandboxes,
 which have no pre-claim life, reported plausible figures the whole time.
+
+Before and after, same scenarios, same fleet:
+
+| scenario | consumed CPU before | after | what it should be |
+| --- | --- | --- | --- |
+| create + terminate (sub-second) | 17.81 s | **0.00 s** | ~0 |
+| 5 s `sleep` | 18.15 s | **0.12 s** | a sleeping guest uses almost none |
+| 60 s idle | 19.30 s | **1.06 s** | ~2% of one vCPU |
+| 15 s busy spin | 34.59 s | **15.18 s** | ~1 vCPU for 15 s |
+| busy vs idle ratio | 1.8x | **55.2x** | the oversubscription margin |
+
+The 5-second row is the one that proves it rather than merely improving it:
+18.15 CPU-seconds cannot happen in a 5-second interval on a 2-vCPU guest,
+because the ceiling is 10.
 
 ## Open questions
 
