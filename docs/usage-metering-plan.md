@@ -43,10 +43,17 @@ existing lifecycle already produces:
 - Every transition that ends compute — destroy, hibernate, TTL reap, unexpected
   VM exit, `shutdownAll` — also ends that leaf.
 
-So `cpu.stat`'s `usage_usec`, read at close, **is** the interval's consumed CPU.
-No cross-interval subtraction, no counter-reset handling, no risk of attributing
-one sandbox's CPU to another. A hibernate/wake cycle produces two intervals
-because it produces two VMMs, which is also exactly what we want to bill.
+So `cpu.stat`'s `usage_usec` is scoped to one VMM: no counter-reset handling,
+and no way to attribute one sandbox's CPU to another. A hibernate/wake cycle
+produces two intervals because it produces two VMMs, which is also exactly what
+we want to bill.
+
+**The leaf is not scoped to the INTERVAL, though, and assuming it was is what
+made consumed CPU wrong for months.** A ready-pool VM is launched long before
+anyone claims it, so at claim time its counter already holds the boot and idle
+CPU that produced it — about 18 CPU-seconds. The interval therefore records a
+baseline (`cpu_usec_base`) when it opens and reports consumed CPU relative to
+it. The reading at close is the *end* of the measurement, not the whole of it.
 
 ### What does and does not accrue
 
@@ -89,7 +96,8 @@ CREATE TABLE IF NOT EXISTS usage_intervals (
   started_at    INTEGER NOT NULL,
   ended_at      INTEGER,            -- NULL = open
   last_seen_at  INTEGER NOT NULL,   -- sampler heartbeat; crash-truncation point
-  cpu_usec      INTEGER NOT NULL DEFAULT 0,
+  cpu_usec      INTEGER NOT NULL DEFAULT 0,       -- consumed DURING the interval
+  cpu_usec_base INTEGER NOT NULL DEFAULT 0,       -- leaf reading at open; cpu_usec measures from it
   end_reason    TEXT NOT NULL DEFAULT '',
   flushed_at    INTEGER             -- NULL = not yet spooled to the bucket
 );
@@ -111,6 +119,7 @@ duration_s      = (ended_at ?? last_seen_at) - started_at
 vcpu_seconds    = vcpus   * duration_s      -- billed
 mem_mib_seconds = mem_mib * duration_s      -- billed
 cpu_seconds     = cpu_usec / 1e6            -- recorded, not billed
+                                            -- (already net of cpu_usec_base)
 ```
 
 ## Sampling
@@ -345,9 +354,40 @@ real unit coverage:
   the ledger reports two intervals with plausible non-zero CPU and the expected
   RAM-seconds.
 
+## Measured behavior (fleet, release `cdd305c`)
+
+`tests/usage-pricing-bench.ts` drives ten real-world shapes through the SDK and
+reports what each one bills. Run it from the control VM; rates are illustrative
+and env-overridable, and exist so edge cases show up in money rather than
+seconds.
+
+What it confirmed: billing tracks wall clock within a second on everything
+longer than a few seconds; a parked sandbox costs nothing (a 21 s pause was
+excluded, worth $0.11/hour parked at the illustrative rate); bring-up is not
+billed even on the slow cold path; a 4 vCPU / 4096 MiB sandbox bills exactly
+4 vCPU-seconds and 4096 MiB-seconds per second; a TTL reap stops the meter at
+the reap rather than at read time; and every sandbox in a run appears exactly
+once in the fleet-wide ledger with the same money as its per-sandbox read.
+
+What it found, which unit tests could not: **consumed CPU included the ready
+pool's runtime.** A warm-claimed sandbox inherited its ready VM's whole cgroup
+counter — about 18 CPU-seconds of boot and idle that are ours — which reported
+consumed CPU ABOVE the interval's physical ceiling (18.15 CPU-s for a 5-second
+interval on a 2-vCPU guest, where the ceiling is 10) and compressed the
+busy-vs-idle margin from roughly 17x to 1.8x. Fixed by baselining the counter
+at interval open (`cpu_usec_base`). Billing was never affected — it has always
+been on allocated resources — but `cpu_seconds` is a public field and the
+margin input for any future burst SKU. The tell was that cold-booted sandboxes,
+which have no pre-claim life, reported plausible figures the whole time.
+
 ## Open questions
 
-- **Rounding and minimums.** Per-second billing with no minimum is the honest
+- **Rounding and minimums.** Measured: a create-then-terminate held capacity for
+  0.18 s and billed **$0.000000** — whole-second timestamps floor it to zero, so
+  a burst of ephemeral sandboxes is unbounded free capacity. Second-granularity
+  is also worth ±1 s per interval, which is noise on an hour and a fifth of a
+  5 s job. The ledger keeps raw microseconds, so a per-create minimum or
+  sub-second rounding can be applied at invoice time without touching metering. Per-second billing with no minimum is the honest
   default and the easiest to explain, but a 12 ms create (measured p50 for a
   ready-pool hit) means a sandbox can cost effectively nothing. Whether that
   needs a per-create minimum is a pricing decision, not a metering one — the
