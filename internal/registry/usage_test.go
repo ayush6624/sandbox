@@ -21,7 +21,7 @@ func TestUsageIntervalOpenCloseRoundTrip(t *testing.T) {
 		t.Fatalf("id must be deterministic for at-least-once dedup, got %q", u.ID)
 	}
 
-	if err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 3_500_000); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 3_500_000); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
@@ -65,7 +65,7 @@ func TestUsageIntervalsSurviveSandboxDestroy(t *testing.T) {
 	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 1_000_000); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 1_000_000); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	if err := r.Destroy(ctx, "sb1"); err != nil {
@@ -89,7 +89,7 @@ func TestUsageHibernateWakeOpensNextSeq(t *testing.T) {
 	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "sb1", EndHibernate, 500_000); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndHibernate, 500_000); err != nil {
 		t.Fatalf("close 1: %v", err)
 	}
 	second, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-2", 2, 1024, nil)
@@ -145,17 +145,17 @@ func TestUsageDoubleOpenRefused(t *testing.T) {
 func TestUsageCloseIsIdempotentAndTolerantOfAbsence(t *testing.T) {
 	r, ctx := testRegistry(t), context.Background()
 
-	if err := r.CloseUsageInterval(ctx, "never-existed", EndDestroy, 100); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "never-existed", EndDestroy, 100); err != nil {
 		t.Fatalf("closing an absent interval must not error: %v", err)
 	}
 
 	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 2_000_000); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 2_000_000); err != nil {
 		t.Fatalf("close 1: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "sb1", EndVMExit, 9_999_999); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndVMExit, 9_999_999); err != nil {
 		t.Fatalf("close 2: %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestUsageCloseWithoutSampleKeepsSampledCPU(t *testing.T) {
 	if err := r.TouchUsageInterval(ctx, "sb1", 7_000_000); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "sb1", EndVMExit, -1); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndVMExit, -1); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
@@ -288,7 +288,7 @@ func TestUsageFastCycleHasNonNegativeDuration(t *testing.T) {
 	if _, err := r.OpenUsageInterval(ctx, "sb1", "host-a", "vm-1", 2, 1024, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 0); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "sb1", EndDestroy, 0); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	got, _ := r.UsageForSandbox(ctx, "sb1")
@@ -307,7 +307,7 @@ func TestUsageFlushLifecycle(t *testing.T) {
 	if _, err := r.OpenUsageInterval(ctx, "closed-one", "host-a", "vm-2", 2, 1024, nil); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := r.CloseUsageInterval(ctx, "closed-one", EndDestroy, 1_000); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "closed-one", EndDestroy, 1_000); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
@@ -343,7 +343,7 @@ func TestUsagePruneOnlyDropsFlushedIntervals(t *testing.T) {
 		if _, err := r.OpenUsageInterval(ctx, id, "host-a", "vm-"+id, 2, 1024, nil); err != nil {
 			t.Fatalf("open %s: %v", id, err)
 		}
-		if err := r.CloseUsageInterval(ctx, id, EndDestroy, 1_000); err != nil {
+		if _, _, err := r.CloseUsageInterval(ctx, id, EndDestroy, 1_000); err != nil {
 			t.Fatalf("close %s: %v", id, err)
 		}
 	}
@@ -379,7 +379,7 @@ func TestUsageBetweenIncludesOverlappingIntervals(t *testing.T) {
 			t.Fatalf("open %s: %v", id, err)
 		}
 	}
-	if err := r.CloseUsageInterval(ctx, "before", EndDestroy, 0); err != nil {
+	if _, _, err := r.CloseUsageInterval(ctx, "before", EndDestroy, 0); err != nil {
 		t.Fatalf("close before: %v", err)
 	}
 	mustExec := func(q string, args ...any) {
