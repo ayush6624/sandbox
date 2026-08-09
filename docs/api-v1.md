@@ -104,7 +104,7 @@ two — the paused span in between bills nothing.
 }
 ```
 
-Four properties clients should rely on:
+Five properties clients should rely on:
 
 - `vcpu_seconds` and `memory_mib_seconds` are **billed** (allocated resources ×
   duration). `cpu_seconds` is host CPU actually consumed — recorded for
