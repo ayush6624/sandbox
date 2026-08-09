@@ -101,7 +101,7 @@ still means what it is for: billing that would otherwise run away.
 
 ## What held up
 
-Everything else. Across the three fleet runs and the local suites:
+Everything else. Across the four fleet runs and the local suites:
 
 - **No double-billing.** One open interval per sandbox at all times; racing
   teardowns (destroy + pause + TTL + VM-exit + sampler, fired together) elect
