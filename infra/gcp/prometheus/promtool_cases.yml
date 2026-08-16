@@ -3,6 +3,10 @@
 # actually broken this fleet twice: an expression that parses fine and silently
 # evaluates to a constant because of label-set or empty-vector semantics.
 #
+# This is now an observability signal rather than a control input — the gateway
+# computes its own demand — but it feeds the fleet dashboard, and a dashboard
+# that quietly reads a constant is its own kind of outage.
+#
 # Rendered against LEAD_SECONDS=90, HEADROOM_SLOTS=48, SLOTS_PER_HOST=48, so an
 # idle fleet's demand is ceil(48/48) = 1.
 rule_files:
@@ -11,8 +15,7 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
-  # Quiet fleet, gateway scaled out long ago: the floor is inert and desired is
-  # pure demand.
+  # Quiet fleet: desired is the headroom floor, ceil(48/48) = 1.
   - interval: 1m
     input_series:
       - series: 'sandbox_slots_committed{job="sandbox-gateway"}'
@@ -25,91 +28,40 @@ tests:
         values: "0+0x10"
       - series: 'sandbox_creates_total{job="sandbox-gateway"}'
         values: "0+0x10"
-      - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
-        values: "3+0x10"
-      - series: 'sandbox_direct_scale_out_total{job="sandbox-gateway"}'
-        values: "7+0x10"
     promql_expr_test:
-      - expr: sandbox:workers_scale_out_floor
-        eval_time: 8m
-        exp_samples:
-          - labels: '{__name__="sandbox:workers_scale_out_floor"}'
-            value: 0
       - expr: sandbox:workers_desired
         eval_time: 8m
         exp_samples:
           - labels: '{__name__="sandbox:workers_desired"}'
             value: 1
 
-  # THE REGRESSION THIS FIX EXISTS FOR. Same idle-looking demand of 1, but the
-  # gateway requested a resize inside the last 5m and the MIG target is 3.
-  # Before the floor, desired read 1 here and the autoscaler purged the host the
-  # gateway had just added.
+  # Held burst: 96 committed + 64 queued + 48 headroom over 48 slots/host = 5.
   - interval: 1m
     input_series:
       - series: 'sandbox_slots_committed{job="sandbox-gateway"}'
-        values: "0+0x10"
+        values: "96+0x10"
       - series: 'sandbox_hibernated{job="sandbox-gateway"}'
         values: "0+0x10"
       - series: "sandbox_create_queue_depth"
-        values: "0+0x10"
+        values: "64+0x10"
       - series: "sandbox_create_rejected_total"
         values: "0+0x10"
       - series: 'sandbox_creates_total{job="sandbox-gateway"}'
         values: "0+0x10"
-      - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
-        values: "3+0x10"
-      - series: 'sandbox_direct_scale_out_total{job="sandbox-gateway"}'
-        values: "7+0x4 8+0x6"
     promql_expr_test:
       - expr: sandbox:workers_desired
         eval_time: 8m
         exp_samples:
           - labels: '{__name__="sandbox:workers_desired"}'
-            value: 3
+            value: 5
 
-  # The floor is a floor, not an override: real demand above it still wins, or a
-  # burst mid-scale-out could never grow past the size already requested.
-  # (200 committed + 48 headroom) / 48 = 6.
-  - interval: 1m
-    input_series:
-      - series: 'sandbox_slots_committed{job="sandbox-gateway"}'
-        values: "200+0x10"
-      - series: 'sandbox_hibernated{job="sandbox-gateway"}'
-        values: "0+0x10"
-      - series: "sandbox_create_queue_depth"
-        values: "0+0x10"
-      - series: "sandbox_create_rejected_total"
-        values: "0+0x10"
-      - series: 'sandbox_creates_total{job="sandbox-gateway"}'
-        values: "0+0x10"
-      - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
-        values: "3+0x10"
-      - series: 'sandbox_direct_scale_out_total{job="sandbox-gateway"}'
-        values: "7+0x4 8+0x6"
-    promql_expr_test:
-      - expr: sandbox:workers_desired
-        eval_time: 8m
-        exp_samples:
-          - labels: '{__name__="sandbox:workers_desired"}'
-            value: 6
-
-  # Gateway/Prometheus outage: the demand series are gone. desired must stay
-  # ABSENT so the autoscaler's query errors and it holds. The floor is present
-  # and non-empty here (`or vector(0)`), so a naive `(demand > floor) or floor`
-  # would answer 0 and scale the fleet to MIG_MIN during the outage.
+  # Gateway/Prometheus outage: the demand series are gone. The signal must be
+  # ABSENT, so the dashboard shows a gap rather than a confident zero.
   - interval: 1m
     input_series:
       - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
         values: "3+0x10"
-      - series: 'sandbox_direct_scale_out_total{job="sandbox-gateway"}'
-        values: "7+0x4 8+0x6"
     promql_expr_test:
-      - expr: sandbox:workers_scale_out_floor
-        eval_time: 8m
-        exp_samples:
-          - labels: '{__name__="sandbox:workers_scale_out_floor"}'
-            value: 3
       - expr: sandbox:workers_desired
         eval_time: 8m
         exp_samples: []

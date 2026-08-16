@@ -54,44 +54,21 @@
 # that predates this counter, or no creates yet). Set LEAD_SECONDS=0 to disable
 # the lead and fall back to the pure static floor.
 #
-# Clamped to >=1 (never scale to zero). The autoscaler reads this and (via
-# max_over_time in its policy) makes scale-up instant and scale-down slow. If
-# the gateway/Prometheus is down the series is absent and the query errors, so
-# the autoscaler holds — a safe default.
+# Clamped to >=1 (never scale to zero). Absent when the gateway series are
+# missing, so a gateway/Prometheus outage shows as a gap rather than a
+# confident zero.
 #
-# FLOORED on the provider target size while a gateway scale-out is recent. The
-# gateway and this rule are two independent implementations of "how many hosts
-# do we need", and they do NOT agree: evaluateDirectScaleOut nudges its answer
-# to live+1 whenever the create queue is non-empty, because a queued create
-# PROVES the registered fleet can't place it even when the arithmetic says it
-# fits. This rule has no such term. So a queue that forms without moving the
-# ratio (measured 2026-08-16: queue peaked at 11, gateway grew 2 -> 3, this rule
-# stayed at 2) makes the autoscaler read a legitimately-lower number and scale
-# straight back in — and with node_purge + newest_create_index it destroys the
-# host the gateway just added, killing every sandbox on it (11 x
-# `502 host ... unreachable: EOF` mid-sweep).
+# The autoscaler that used to consume this is gone; the gateway now owns both
+# scaling directions and computes demand in-process (internal/gateway,
+# fleetDemand). This rule survives as the OBSERVABILITY view of that same
+# arithmetic — it is what the Grafana fleet dashboard graphs — so keep the two
+# in step when either changes.
 #
-# max_over_time(SCALE_DOWN_WINDOW) in the policy was meant to be that
-# protection, but it can only latch values this rule actually emits, and the
-# gateway's decision never appeared here. sandbox_scale_out_requested can't be
-# the floor either: it re-baselines to the LIVE host count, never below, so
-# flooring on it would pin the fleet at its high-water mark forever.
-#
-# The floor is therefore event-scoped, not level-scoped: while the gateway has
-# requested a scale-out in the last 5m, desired is at least the MIG target it
-# asked for; after that the floor disappears and the policy's own
-# max_over_time window carries the remaining decay. Net effect: no scale-in
-# until SCALE_DOWN_WINDOW of quiet has passed since the last scale-out, which
-# is the asymmetry this fleet already intends.
-#
-# The demand arithmetic and the floor are split into their own recording rules
-# so the combining expression stays readable — this signal has now silently
-# collapsed to a constant TWICE from PromQL label/empty-set semantics, and a
-# 1,400-character one-liner is how that keeps happening. Every reference is
-# wrapped in sum(): a recording rule's result carries
-# __name__="sandbox:...", and two differently-named vectors do NOT match in a
-# binary operator, which is precisely the failure mode documented on the
-# policy's own query.
+# Deliberately not a control input any more. When it was one, this rule and the
+# gateway were two implementations of "how many hosts do we need" that disagreed
+# by a host (the gateway sizes to live+1 on a non-empty create queue; this has
+# no such term), and the autoscaler applied the lower answer by purging the host
+# the gateway had just added. A signal read by one writer cannot reproduce that.
 groups:
   - name: sandbox
     # Recompute on the 5s gateway scrape cadence. A 10s scrape + 10s rule
@@ -99,48 +76,8 @@ groups:
     # resume and sandbox bring-up.
     interval: 5s
     rules:
-      # Raw demand arithmetic. Absent when the gateway series are missing, which
-      # is what makes the autoscaler HOLD during a gateway/Prometheus outage
-      # rather than scale to MIG_MIN — sandbox:workers_desired below preserves
-      # that emptiness deliberately.
-      - record: sandbox:workers_demand
-        expr: clamp_min(ceil((sum(sandbox_slots_committed{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
-      # The MIG size the gateway asked for, but only while that request is
-      # recent. `or vector(0)` makes it always present, so the max below never
-      # collapses to an empty vector when the gateway predates either series.
-      - record: sandbox:workers_scale_out_floor
-        expr: (sum(sandbox_mig_target_size{job="sandbox-gateway"}) and (sum(increase(sandbox_direct_scale_out_total{job="sandbox-gateway"}[5m])) > 0)) or vector(0)
-      # max(demand, floor), and empty when demand is empty. `(A > B) or B` alone
-      # would answer B during an outage (B is never empty), turning a dead
-      # gateway into a scale-in; `(F and D)` yields the floor's value only where
-      # demand exists, and the trailing `or D` covers demand < floor being false
-      # because the floor is 0.
       - record: sandbox:workers_desired
-        expr: (sum(sandbox:workers_demand) > sum(sandbox:workers_scale_out_floor)) or (sum(sandbox:workers_scale_out_floor) and sum(sandbox:workers_demand)) or sum(sandbox:workers_demand)
-      # Ceiling for the autoscaler's SCALE-IN-ONLY policy. The gateway owns
-      # scale-out (its direct path reacts in ~1s vs this loop's ~10s, and ~189s
-      # if the request lands in the gce-mig confirmation blackout), so the
-      # autoscaler must never request MORE nodes than the group is already
-      # targeting — two writers that both grow can ratchet it above demand.
-      #
-      # The ceiling is the PROVIDER's target size, which the gateway polls and
-      # exports. It must NOT be derived from heartbeats: sandbox_hosts_live also
-      # counts resumed standby workers that sit outside the MIG target, and
-      # capping on it let the autoscaler scale out past this cap anyway
-      # (measured 2026-07-28: hosts_live=8 vs targetSize=5 admitted a latched
-      # max_over_time peak of 6, logged `from=5 to=6 scaling up because metric
-      # is 6`). targetSize is the same number the gce-mig target compares
-      # against, so min(desired, targetSize) can only ever hold or shrink.
-      #
-      # Fallback when sandbox_mig_target_size is absent (a gateway predating it,
-      # or no successful provider poll yet): max(hosts_live, the gateway's
-      # grow-only watermark). That is the previous, looser behaviour — it can
-      # still admit a scale-out, but it never blocks scale-in, which is the
-      # safer failure direction. `(A > B) or B` is PromQL element-wise max, and
-      # `or vector(0)` keeps the expression non-empty so scale-in cannot
-      # silently stop.
-      - record: sandbox:workers_scale_in_ceiling
-        expr: sum(sandbox_mig_target_size{job="sandbox-gateway"}) or ((sum(sandbox_hosts_live{job="sandbox-gateway"}) > (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0))) or (sum(sandbox_scale_out_requested{job="sandbox-gateway"}) or vector(0)))
+        expr: clamp_min(ceil((sum(sandbox_slots_committed{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
 
   - name: public-ingress
     interval: 15s

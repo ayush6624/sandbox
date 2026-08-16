@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The sandbox control plane VM: nomad server + `sandbox gateway` + Prometheus +
-# nomad-autoscaler. One small non-spot e2-medium with a reserved static internal
+# Grafana. One small non-spot e2-medium with a reserved static internal
 # IP (workers retry_join it) and Tailscale (laptop access + subnet router).
 #
 #   ./control.sh up        # SA + static IP + create the VM
@@ -31,10 +31,8 @@ GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 GRAFANA_VERSION="${GRAFANA_VERSION:-11.1.0}"
 LEGO_VERSION="${LEGO_VERSION:-4.21.0}"
 PROM_VERSION="${PROMETHEUS_VERSION:-2.53.0}"
-AUTOSCALER_VERSION="${AUTOSCALER_VERSION:-0.5.0}"
 # gce-mig scale-out confirmation budget = scale-up blackout window (see
 # config.env.example). Needs autoscaler >= 0.4.8 to take effect.
-AUTOSCALER_RETRY_ATTEMPTS="${AUTOSCALER_RETRY_ATTEMPTS:-3}"
 NOMAD_VERSION="${NOMAD_VERSION:-1.7.7}"
 REMOTE_DIR="/home/${SSH_USER}/sandbox"
 SECRETS="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
@@ -141,11 +139,9 @@ cmd_deploy() {
        SANDBOX_RELEASE='$control_release' \
        CONTROL_IP='$IP' GW_PORT='$GW_PORT' PROM_PORT='$PROM_PORT' \
        PROM_VERSION='$PROM_VERSION' NOMAD_VERSION='$NOMAD_VERSION' \
-       AUTOSCALER_VERSION='$AUTOSCALER_VERSION' \
-       AUTOSCALER_RETRY_ATTEMPTS='$AUTOSCALER_RETRY_ATTEMPTS' \
        SLOTS_PER_HOST='${SLOTS_PER_HOST:-24}' HEADROOM_SLOTS='${HEADROOM_SLOTS:-12}' \
        LEAD_SECONDS='${LEAD_SECONDS:-90}' \
-       SCALE_DOWN_WINDOW='${SCALE_DOWN_WINDOW:-15m}' \
+       SCALE_IN_AFTER_SEC='${SCALE_IN_AFTER_SEC:-600}' \
        PROJECT='$PROJECT' ZONE='$ZONE' MIG_NAME='${MIG_NAME:-sandbox-workers}' \
        MIG_MIN='${MIG_MIN:-1}' MIG_MAX='${MIG_MAX:-8}' \
        QUEUE_WAIT='${QUEUE_WAIT:-240s}' QUEUE_MAX='${QUEUE_MAX:-4096}' \
@@ -170,7 +166,7 @@ cmd_status() {
   [ -f "$SECRETS" ] && source "$SECRETS"
   echo
   echo ">> Control plane on $NAME (tailnet $tsip, internal $IP)"
-  sshx "$NAME" 'for u in nomad-server sandbox-gateway prometheus nomad-autoscaler grafana; do
+  sshx "$NAME" 'for u in nomad-server sandbox-gateway prometheus grafana; do
       printf "   %-18s %s\n" "$u" "$(systemctl is-active $u 2>/dev/null)"; done' 2>/dev/null || true
   echo
   echo ">> Drive from laptop:"

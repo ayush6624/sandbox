@@ -5,15 +5,15 @@
 # GATEWAY_EDGE_TOKEN (optional: gates /route + /raw-route for the ingress edge)
 # GW_TOKEN_PREV / GATEWAY_EDGE_TOKEN_PREV (optional: written as a second line of
 #   the matching token file so an overlap rotation survives a deploy)
-# PROM_PORT PROM_VERSION NOMAD_VERSION AUTOSCALER_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
-# HEADROOM_SLOTS SCALE_DOWN_WINDOW PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
+# PROM_PORT PROM_VERSION NOMAD_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
+# HEADROOM_SLOTS SCALE_IN_AFTER_SEC PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
 # QUEUE_WAIT QUEUE_MAX INGRESS_BUCKET RAW_PUBLIC_HOST RAW_PORT_MIN RAW_PORT_MAX
 # REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
 # GRAFANA_ADMIN_PASSWORD
 #
 # SECTIONS=gateway installs ONLY the gateway (binary + tokens + unit + restart)
 # and exits. That is the whole cost of shipping a new `sandbox` build to the
-# control plane; the rest — nomad server, prometheus, autoscaler, grafana — is
+# control plane; the rest — nomad server, prometheus, grafana — is
 # pinned by version and unchanged by a code deploy, so reinstalling and
 # restarting it on every rollout is pure latency. Used by `control.sh gateway`
 # and `rollout.sh --fast`. Default (unset/all) installs everything.
@@ -119,17 +119,23 @@ ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --direct-scale-zone ${ZONE} \
   --direct-scale-mig ${MIG_NAME} \
   --direct-scale-max ${MIG_MAX} \
+  --direct-scale-min ${MIG_MIN} \
+  --scale-in-after-sec ${SCALE_IN_AFTER_SEC:-600} \
   --direct-scale-slots-per-host ${SLOTS_PER_HOST} \
   --direct-scale-headroom ${HEADROOM_SLOTS:-0} ${RAW_ARGS}
-# Single-writer invariant: the GATEWAY is the sole process allowed to GROW the
-# production MIG, and the Nomad Autoscaler policy is capped to scale-IN only
-# (see nomad/policies/workers.hcl.tpl and the sandbox:workers_scale_in_ceiling
-# recording rule). Two independent writers that both grow can ratchet the target
-# far above demand, so do not remove that cap while these flags are set.
-# The gateway owns scale-out because its queue-triggered path decides in ~1s
-# where the Prometheus/autoscaler loop needs ~10s — and ~189s when the request
-# lands inside the gce-mig confirmation blackout. Measured: that difference is
-# ~10s of held-burst p95.
+# Single-writer invariant: the GATEWAY is the ONLY process that resizes the
+# production MIG, in both directions. It owns scale-out because its
+# queue-triggered path decides in ~1s where the Prometheus/autoscaler loop
+# needed ~10s (~189s inside the gce-mig confirmation blackout) — measured as
+# ~10s of held-burst p95. It owns scale-in because it is the only component that
+# can see what a host holds.
+#
+# Do not reintroduce a second writer. Two controllers sizing one group is not a
+# tuning problem: on 2026-08-16 they disagreed by one host and the shrinking one
+# deleted the growing one's work, mid-burst, with live sandboxes on it.
+#
+# --direct-scale-min is the floor AND the scale-in enable: 0 leaves the fleet
+# unable to shrink rather than able to shrink to nothing.
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
@@ -249,58 +255,33 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
 
-# --- 4. Nomad autoscaler ---
-# VERSION-AWARE (was `command -v nomad-autoscaler ||`, which never re-fetched, so
-# bumping AUTOSCALER_VERSION silently left the old binary installed forever).
-# Compares the running binary's reported version and re-fetches on mismatch,
-# mirroring the Grafana block below.
-# NB pipeline-free on purpose: this script runs under `set -euo pipefail`, where
-# `... | grep | head -1` can SIGPIPE grep once head exits, making the whole
-# command substitution exit 141 and aborting the install with NO error message.
-# Bash regex matching has no such failure mode.
-installed_autoscaler_version() {
-  local out=""
-  # 2>&1, NOT 2>/dev/null: nomad-autoscaler prints its version banner on STDERR,
-  # so discarding stderr made this always report "none" and re-download on every
-  # deploy — the exact staleness the version check exists to avoid.
-  out="$(/usr/local/bin/nomad-autoscaler --version 2>&1)" || out=""
-  if [[ $out =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-    printf '%s' "${BASH_REMATCH[1]}"
-  fi
-  return 0
-}
-have_autoscaler="$(installed_autoscaler_version)"
-if [ "$have_autoscaler" != "$AUTOSCALER_VERSION" ]; then
-  echo ">> installing nomad-autoscaler ${AUTOSCALER_VERSION} (was ${have_autoscaler:-none})"
-  fetch_unzip "https://releases.hashicorp.com/nomad-autoscaler/${AUTOSCALER_VERSION}/nomad-autoscaler_${AUTOSCALER_VERSION}_linux_amd64.zip" /usr/local/bin/nomad-autoscaler
-fi
-
-# retry_attempts in the gce-mig target block needs >= 0.4.8; older builds ignore
-# it and keep the hard-coded 15 attempts (150s of post-action scale-up blackout).
-# Warn loudly rather than fail — an old pin still autoscales, just slower to
-# react to a second burst wave.
-case "$AUTOSCALER_VERSION" in
-  0.4.[0-7]|0.[0-3].*) echo "WARNING: autoscaler ${AUTOSCALER_VERSION} < 0.4.8 ignores retry_attempts; scale-up blackout stays at 150s per action" >&2 ;;
-esac
-
-mkdir -p /etc/nomad-autoscaler/policies
-PROM_PORT="$PROM_PORT" envsubst < "${REMOTE_DIR}/nomad/autoscaler.hcl.tpl" > /etc/nomad-autoscaler/autoscaler.hcl
-PROJECT="$PROJECT" ZONE="$ZONE" MIG_NAME="$MIG_NAME" MIG_MIN="$MIG_MIN" MIG_MAX="$MIG_MAX" \
-  SCALE_DOWN_WINDOW="$SCALE_DOWN_WINDOW" \
-  AUTOSCALER_RETRY_ATTEMPTS="${AUTOSCALER_RETRY_ATTEMPTS:-3}" \
-  envsubst < "${REMOTE_DIR}/nomad/policies/workers.hcl.tpl" > /etc/nomad-autoscaler/policies/workers.hcl
-cat >/etc/systemd/system/nomad-autoscaler.service <<UNIT
-[Unit]
-Description=Nomad Autoscaler
-After=network-online.target nomad-server.service
-Wants=network-online.target
-[Service]
-ExecStart=/usr/local/bin/nomad-autoscaler agent -config /etc/nomad-autoscaler/autoscaler.hcl
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-UNIT
+# --- 4. Scale-in ---
+# There is no nomad-autoscaler here anymore, deliberately.
+#
+# It was the only scale-IN writer, and it could not do the job: every worker
+# runs ONE system-job allocation whether it holds zero sandboxes or fifty
+# (sandboxes are Firecracker VMs inside that allocation), so
+# node_selector_strategy was a guess about occupancy made by something that
+# cannot observe occupancy, and node_purge acted on the guess by destroying the
+# data disk. On 2026-08-16 it selected the host the gateway had just added for a
+# burst and killed 11 running trials.
+#
+# It was also broken in fact: its check produced no metric at all
+# (count.original:0 with an empty reason_history, while the same query returned
+# a clean 2 or 3 from Prometheus on this host), so it was a constant "drive to
+# MIG_MIN" loop -- invisible while the fleet sat at MIG_MIN, destructive every
+# time the gateway grew it.
+#
+# The gateway owns both directions now: it cordons the emptiest host, waits for
+# it to actually empty, then deletes THAT instance by name (a resize-down lets
+# GCE pick its own victim, which is never the drained one). See
+# internal/gateway/scalein.go, and --direct-scale-min/--scale-in-after-sec on
+# the gateway unit above.
+#
+# Leave the removal in place for hosts upgrading from the old layout.
+systemctl disable --now nomad-autoscaler 2>/dev/null || true
+rm -f /etc/systemd/system/nomad-autoscaler.service
+rm -rf /etc/nomad-autoscaler
 
 # --- 5. Grafana ---
 # Runs alongside Prometheus on the control VM; view over the tailnet at
@@ -387,13 +368,13 @@ UNIT
 fi
 
 systemctl daemon-reload
-systemctl enable nomad-server sandbox-gateway prometheus nomad-autoscaler grafana
+systemctl enable nomad-server sandbox-gateway prometheus grafana
 if [ -f /etc/systemd/system/sandbox-edge-cert-renew.timer ]; then
   systemctl enable --now sandbox-edge-cert-renew.timer
 fi
 # restart (not enable --now): a redeploy must pick up new binaries/config on
 # already-running services. Gateway routes rebuild from heartbeats in <=5s.
-systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler grafana
+systemctl restart nomad-server sandbox-gateway prometheus grafana
 
 # `systemctl restart` proves nothing about a Type=simple unit: it returns 0 as
 # soon as the process forks. A service that rejects its config and exits, or
@@ -403,7 +384,7 @@ systemctl restart nomad-server sandbox-gateway prometheus nomad-autoscaler grafa
 # deploy.
 sleep 5
 install_failed=""
-for unit in nomad-server sandbox-gateway prometheus nomad-autoscaler grafana; do
+for unit in nomad-server sandbox-gateway prometheus grafana; do
   if ! systemctl is-active --quiet "$unit"; then
     echo "error: $unit is not active after restart" >&2
     systemctl --no-pager --lines=15 status "$unit" >&2 || true

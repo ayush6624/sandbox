@@ -1,72 +1,87 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Single-writer invariant, inverted 2026-07-28.
+# Single-writer invariant, final form (2026-08-17).
 #
-# The GATEWAY is now the sole process allowed to GROW the production MIG: its
-# queue-triggered, level-triggered direct path decides in ~1s where the
-# Prometheus/Nomad-autoscaler loop needs ~10s — and ~189s when the request lands
-# inside the gce-mig confirmation blackout. On the canonical 160-create held
-# burst that difference was ~10s of create p95.
+# The GATEWAY is the only process that resizes the production MIG, in BOTH
+# directions.
 #
-# The Nomad Autoscaler keeps the scale-IN half, capped so it should not request
-# MORE nodes than the fleet already has. Two writers that both grow can ratchet
-# the target far above demand, which is what the previous version of this script
-# guarded against by forbidding the gateway's flags outright.
+# It took two inversions to get here. First the gateway took scale-out, because
+# its queue-triggered path decides in ~1s where the Prometheus/Nomad-autoscaler
+# loop needs ~10s — and ~189s when the request lands inside the gce-mig
+# confirmation blackout, worth ~10s of create p95 on a 160-create burst. The
+# autoscaler kept scale-in, capped so it could not also grow the group.
 #
-# The cap's authority is the PROVIDER's target size (sandbox_mig_target_size,
-# polled and exported by the gateway) — the same number the gce-mig target
-# compares against, so min(desired, targetSize) can only hold or shrink.
-# An earlier version capped on sandbox_hosts_live, which also counts resumed
-# standby workers outside that target; the autoscaler was then observed scaling
-# out anyway (from=5 to=6) after a burst drained on 2026-07-28.
+# That split failed on 2026-08-16, twice over:
+#
+#   1. The two sides were independent implementations of "how many hosts do we
+#      need" and disagreed by one host — the gateway sizes to live+1 whenever
+#      the create queue is non-empty, because a queued create PROVES the fleet
+#      cannot place it, and the recording rule had no such term. The autoscaler
+#      applied its lower answer and, with node_purge + newest_create_index,
+#      deleted the host the gateway had just added. 11 running trials died with
+#      `502 host ... unreachable: EOF`.
+#
+#   2. Its check was returning nothing at all — count.original:0 with an empty
+#      reason_history, while the identical query returned a clean 2 or 3 from
+#      Prometheus on the same host. So it was never a signal-driven controller;
+#      it was a constant "drive to MIG_MIN" loop, invisible while the fleet sat
+#      at MIG_MIN and destructive every time the gateway grew it.
+#
+# Underneath both: Nomad cannot see occupancy here. Every worker runs ONE
+# system-job allocation whether it holds zero sandboxes or fifty, because
+# sandboxes are Firecracker VMs inside that allocation. node_selector_strategy
+# was therefore a guess, and node_purge acted on the guess by destroying the
+# data disk.
+#
+# The gateway drains instead of guessing: cordon the emptiest host, wait for it
+# to actually empty, then delete THAT instance by name.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 UNIT="$DIR/control-install.sh"
-POLICY="$DIR/nomad/policies/workers.hcl.tpl"
-RULES="$DIR/prometheus/rules.yml.tpl"
+GW="$DIR/../../internal/gateway"
 
 fail() {
   echo "error: $1" >&2
   exit 1
 }
 
-# 1. The gateway must actually own scale-out.
+# 1. The gateway must own scale-out.
 grep -q -- '--direct-scale-mig' "$UNIT" ||
   fail "production gateway unit does not enable direct MIG scale-out"
 
-# 2. The autoscaler must still exist as the scale-in writer.
-grep -q 'target "gce-mig"' "$POLICY" ||
-  fail "Nomad Autoscaler MIG target is missing"
+# 2. ...and scale-in. --direct-scale-min is both the floor and the enable, so
+#    its absence silently leaves the fleet unable to shrink at all.
+grep -q -- '--direct-scale-min' "$UNIT" ||
+  fail "production gateway unit does not enable gateway-owned scale-in (--direct-scale-min)"
 
-# 3. ...and it must be capped, or it becomes a competing scale-OUT writer.
-grep -q 'sandbox:workers_scale_in_ceiling' "$POLICY" ||
-  fail "Nomad Autoscaler policy is not capped to scale-in only (missing sandbox:workers_scale_in_ceiling)"
+# 3. No second writer may exist. These templates returning is the regression.
+# Spelled with explicit `if`, not `test ... && fail`: under `set -e` an AND-list
+# whose left side fails is the normal (passing) path here, and getting that
+# subtlety wrong makes the guard exit 0 on the very case it exists to catch.
+for gone in "$DIR/nomad/policies/workers.hcl.tpl" "$DIR/nomad/autoscaler.hcl.tpl"; do
+  if [ -e "$gone" ]; then
+    fail "$(basename "$gone") is back: the Nomad autoscaler is a competing MIG writer"
+  fi
+done
+if grep -q 'ExecStart=/usr/local/bin/nomad-autoscaler' "$UNIT"; then
+  fail "control-install.sh installs the nomad-autoscaler service again"
+fi
+grep -q 'systemctl disable --now nomad-autoscaler' "$UNIT" ||
+  fail "control-install.sh must keep removing a previously installed nomad-autoscaler"
 
-# 4. The cap must exist as a recording rule, and its FIRST term must be the
-#    provider target size. A heartbeat-derived ceiling is not equivalent: it
-#    counts resumed standby workers outside the MIG target and admitted a real
-#    scale-out past the cap on 2026-07-28.
-grep -q 'record: sandbox:workers_scale_in_ceiling' "$RULES" ||
-  fail "sandbox:workers_scale_in_ceiling recording rule is missing"
-grep -qE 'expr: *sum\(sandbox_mig_target_size\{job="sandbox-gateway"\}\)' "$RULES" ||
-  fail "scale-in ceiling must lead with the provider target size sandbox_mig_target_size"
+# 4. Scale-in must remove a NAMED instance. A resize-down lets GCE choose the
+#    victim, which is never the host that was drained — that is the whole bug
+#    this design exists to avoid.
+grep -q 'deleteInstances' "$DIR/../../internal/gcemig/scaler.go" ||
+  fail "the scaler no longer deletes a specific instance; a resize-down picks its own victim"
 
-# 5. ...and the gateway must actually export that series, or the ceiling
-#    silently falls back to the looser heartbeat form forever.
-grep -q 'sandbox_mig_target_size' "$DIR/../../internal/gateway/metrics.go" ||
-  fail "gateway does not export sandbox_mig_target_size"
+# 5. A drained host is defined by holding nothing, and the cordon must be
+#    honoured by placement or the drain never finishes.
+grep -q 'func (h \*host) load()' "$GW/gateway.go" ||
+  fail "host.load() is gone; scale-in cannot tell a drained host from a busy one"
+grep -q 'h.draining' "$GW/gateway.go" ||
+  fail "placement no longer honours the scale-in cordon"
 
-# 6. A ceiling alone is not enough: it stops the autoscaler out-growing the
-#    gateway, but nothing stopped it shrinking BELOW what the gateway just
-#    asked for. The gateway sizes to live+1 on a non-empty create queue and
-#    sandbox:workers_demand has no such term, so the autoscaler read the lower
-#    number and purged the host the gateway had just added, mid-burst
-#    (2026-08-16: 11 x `502 host ... unreachable: EOF`). The floor closes it.
-grep -q 'record: sandbox:workers_scale_out_floor' "$RULES" ||
-  fail "sandbox:workers_scale_out_floor recording rule is missing (autoscaler can scale in against a live gateway scale-out)"
-grep -q 'sandbox_direct_scale_out_total' "$DIR/../../internal/gateway/metrics.go" ||
-  fail "gateway does not export sandbox_direct_scale_out_total; the scale-out floor would never engage"
-
-echo "PASS: gateway owns scale-out; autoscaler capped to scale-in on the provider target size, floored on a live scale-out"
+echo "PASS: the gateway is the sole MIG writer; scale-in cordons, drains, then deletes by name"
