@@ -58,4 +58,15 @@ grep -qE 'expr: *sum\(sandbox_mig_target_size\{job="sandbox-gateway"\}\)' "$RULE
 grep -q 'sandbox_mig_target_size' "$DIR/../../internal/gateway/metrics.go" ||
   fail "gateway does not export sandbox_mig_target_size"
 
-echo "PASS: gateway owns scale-out; autoscaler capped to scale-in on the provider target size"
+# 6. A ceiling alone is not enough: it stops the autoscaler out-growing the
+#    gateway, but nothing stopped it shrinking BELOW what the gateway just
+#    asked for. The gateway sizes to live+1 on a non-empty create queue and
+#    sandbox:workers_demand has no such term, so the autoscaler read the lower
+#    number and purged the host the gateway had just added, mid-burst
+#    (2026-08-16: 11 x `502 host ... unreachable: EOF`). The floor closes it.
+grep -q 'record: sandbox:workers_scale_out_floor' "$RULES" ||
+  fail "sandbox:workers_scale_out_floor recording rule is missing (autoscaler can scale in against a live gateway scale-out)"
+grep -q 'sandbox_direct_scale_out_total' "$DIR/../../internal/gateway/metrics.go" ||
+  fail "gateway does not export sandbox_direct_scale_out_total; the scale-out floor would never engage"
+
+echo "PASS: gateway owns scale-out; autoscaler capped to scale-in on the provider target size, floored on a live scale-out"

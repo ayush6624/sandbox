@@ -223,6 +223,57 @@ One further defect is visible at 36.4 s: a resumed standby worker
 That is [improvement 7](#7-keep-standby-workers-release-compatible) — standby
 workers suspended before a roll come back stale and are briefly ineligible.
 
+#### The cap had no floor (2026-08-16)
+
+The `d93c80a` cap stops the autoscaler *out-growing* the gateway. Nothing
+stopped it *shrinking below* what the gateway had just requested, and on the
+89-task Terminal-Bench sweep it did exactly that: the gateway grew the fleet
+2 → 3 for a create queue that peaked at 11, and the autoscaler deleted the new
+worker while trials were running on it — 11 × `502 host ... unreachable: EOF`.
+
+The two writers disagree by construction. `evaluateDirectScaleOut` nudges its
+answer to `live+1` whenever the create queue is non-empty, because a queued
+create *proves* the registered fleet cannot place it even when the ratio says
+it fits. `sandbox:workers_desired` had no such term, so it stayed at 2 while
+the gateway asked for 3, and the autoscaler applied its lower answer through
+`node_purge` + `newest_create_index` — which selects precisely the host the
+gateway just added.
+
+Two things make this easy to misdiagnose:
+
+- The autoscaler was **not** misreading Prometheus. `from=3 to=2` means the
+  check read 2, which is what the rule genuinely computed. The high-volume
+  `from=2 to=2` lines are the benign `MIG_MIN` clamp already documented above,
+  not evidence of a zero.
+- `max_over_time(SCALE_DOWN_WINDOW)` looks like it should have prevented this,
+  but it can only latch values the rule actually emits, and the gateway's
+  decision never appeared in the rule.
+
+Fix: `sandbox:workers_desired` is floored on `sandbox:workers_scale_out_floor`
+— the MIG target size, admitted only while `sandbox_direct_scale_out_total`
+has moved in the last 5 minutes. The floor is **event**-scoped, not
+level-scoped, because the obvious level signal cannot work:
+`sandbox_scale_out_requested` re-baselines down to the live host count and
+never below, so flooring on it would pin the fleet at its high-water mark and
+scale-in would never fire again. After the 5 minute window the floor drops and
+the policy's own `max_over_time` carries the remaining decay, so the net rule
+is: no scale-in until `SCALE_DOWN_WINDOW` of quiet has passed since the last
+scale-out.
+
+The demand arithmetic and the floor are now separate recording rules
+(`sandbox:workers_demand`, `sandbox:workers_scale_out_floor`) because this
+signal has silently collapsed to a constant twice from PromQL label and
+empty-set semantics, and `infra/gcp/prometheus/promtool_cases.yml` evaluates
+the real rules against synthetic series — including the case where the demand
+series are absent, which must leave `sandbox:workers_desired` **empty** so the
+autoscaler holds during a gateway outage instead of scaling to `MIG_MIN`.
+
+Still open: a *legitimate* scale-in remains destructive. `node_selector_strategy`
+is Nomad-blind (sandboxes are Firecracker VMs inside one task, not allocations),
+so the emptiest-host heuristic is statistical, and `node_purge` destroys the data
+disk with any hibernated sandbox not yet durable in GCS. Long-running workloads
+should pin `MIG_MIN` for the duration rather than rely on selection luck.
+
 ### Current request path
 
 For a create that fits on an existing worker:

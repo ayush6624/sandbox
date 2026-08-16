@@ -75,6 +75,15 @@ scaling "sandbox_workers" {
     # exactly when the ceiling BINDS — i.e. during a burst — which is the worst
     # possible time. sum() drops every label, so both branches present the same
     # single label-free sample the plugin got before this cap existed.
+    #
+    # If you are here because scale-in fired against a host the GATEWAY had
+    # just added, the fix is not in this file: sandbox:workers_desired is
+    # floored on sandbox:workers_scale_out_floor while a gateway scale-out is
+    # recent (prometheus/rules.yml.tpl). The value read here was never wrong —
+    # the gateway sizes to live+1 on a non-empty create queue and this signal
+    # has no such term, so the two writers disagreed by exactly one host and
+    # the autoscaler's answer, applied through node_purge, deleted live
+    # sandboxes (2026-08-16). Do not diagnose that as an APM misread.
     check "workers_desired" {
       source = "prometheus"
       query  = "sum((max_over_time(sandbox:workers_desired[${SCALE_DOWN_WINDOW}]) < sandbox:workers_scale_in_ceiling) or sandbox:workers_scale_in_ceiling)"
