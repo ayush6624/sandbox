@@ -237,10 +237,24 @@ chmod 0755 /mnt/sandbox-data/jailer
 # invalidate the very golden they're adopting — so fail loudly if it's absent.
 cp --sparse=always --preserve=mode,timestamps /opt/fc/devbox-rootfs.ext4 /mnt/sandbox-data/base/devbox-rootfs.ext4
 cp --preserve=mode,timestamps /opt/fc/devbox-rootfs.ext4.agent-stamp /mnt/sandbox-data/base/devbox-rootfs.ext4.agent-stamp
-# Offline golden build: clear snapshot_bucket so serve never reaches for GCS.
+# This host exists to build exactly ONE golden VM, and serve runs here under a
+# 4 GiB cgroup (below) rather than the worker's whole-machine budget, so the
+# worker config has to be narrowed to match before serve will start:
+#   snapshot_bucket  offline build — never reach for GCS
+#   mem_budget_mib   absent in the worker config means "host total - 2 GiB",
+#                    which is ~62 GiB here and the memory-admission guard
+#                    refuses to start when the budget exceeds the task cgroup
+#   warm_pool_size   8 ready VMs is ~9.4 GiB of admission the bake never uses
 mkdir -p /var/lib/sandbox
-sed 's#"snapshot_bucket":[[:space:]]*"[^"]*"#"snapshot_bucket": ""#' \
-  /opt/sandbox-bake/configs/devbox-gcp.json > /tmp/golden-bake.json
+python3 - <<'CFG'
+import json
+path = '/opt/sandbox-bake/configs/devbox-gcp.json'
+cfg = json.load(open(path))
+cfg['snapshot_bucket'] = ''
+cfg['mem_budget_mib'] = 2048
+cfg['warm_pool_size'] = 0
+json.dump(cfg, open('/tmp/golden-bake.json', 'w'), indent=2)
+CFG
 cd /opt/sandbox-bake
 chmod +x bin/sandbox bin/sandboxd
 rm -f /tmp/golden-serve.log
