@@ -1134,6 +1134,32 @@ func (s *Server) effectiveResources(sb registry.Sandbox) registry.Sandbox {
 	return sb
 }
 
+// restoreOptions is the template carrying the resources the RESTORED guest
+// actually has, and every path that brings a VM up from a snapshot must use it
+// rather than s.cfg.VMTemplate directly.
+//
+// Firecracker takes a restored guest's vcpu count and memory size from the
+// SNAPSHOT STATE, not from these options — so the guest boots at its baked size
+// whatever we pass. The jailer, however, sizes the VM's cgroup from them
+// (`memory.max = MemMIB + overhead`, plus the cpu weight/quota). Passing the
+// template therefore caps a larger guest's VMM at the TEMPLATE's memory, and
+// the host OOM-kills firecracker the moment the guest touches more than that.
+//
+// It fails silently and looks like anything but a memory limit: the guest sees
+// its full size and reports gigabytes free, host RAM is plentiful, and the only
+// symptom is the VM abruptly exiting mid-workload, surfacing to clients as
+// `502 agent unreachable`. Restores reject vcpu/mem overrides precisely because
+// the snapshot owns those values, which makes it easy to forget that the cgroup
+// still has to be told.
+func (s *Server) restoreOptions(sb registry.Sandbox) vm.RunOptions {
+	eff := s.effectiveResources(sb)
+	opts := s.cfg.VMTemplate
+	opts.Vcpus = eff.Vcpus
+	opts.MemMIB = eff.MemMIB
+	opts.SocketPath = "" // auto-generate per VM
+	return opts
+}
+
 func (s *Server) withIngress(ctx context.Context, sb registry.Sandbox) registry.Sandbox {
 	ports, err := s.reg.Ports(ctx, sb.ID)
 	if err != nil {

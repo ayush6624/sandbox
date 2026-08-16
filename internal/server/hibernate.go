@@ -701,9 +701,8 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 		return fmt.Errorf("create tap: %w", err)
 	}
 
-	opts := s.cfg.VMTemplate
+	opts := s.restoreOptions(sb)
 	opts.RootfsPath = sb.RootfsPath
-	opts.SocketPath = ""
 	opts.UFFDChunkBytes = s.cfg.UFFDChunkBytes
 	// Prefer the GCS chunk source when enabled and a manifest THIS generation
 	// published exists: the guest faults its RAM in from local-cache → GCS, so
@@ -784,8 +783,7 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 		fmt.Fprintf(os.Stderr, "[%s] arp listener on %s failed (will sleep instead): %v\n", sb.ID, sb.TapDevice, err)
 		arp = nil
 	}
-	opts := s.cfg.VMTemplate
-	opts.SocketPath = ""
+	opts := s.restoreOptions(sb)
 	setupTime := time.Since(startedAt)
 	guestMAC := randomMAC()
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{

@@ -509,9 +509,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	opts := s.cfg.VMTemplate
+	opts := s.restoreOptions(sb)
 	opts.RootfsPath = rootfsPath
-	opts.SocketPath = "" // auto-generate per VM
 
 	tLoad := time.Now()
 	m, rt, err := vm.NewMachineFromSnapshot(s.vmCtx, opts, snap.MemPath, snap.StatePath, false)
@@ -908,8 +907,7 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 		fmt.Fprintf(os.Stderr, "[%s] arp listener on %s failed (will sleep instead): %v\n", id, sb.TapDevice, err)
 		arp = nil
 	}
-	opts := s.cfg.VMTemplate
-	opts.SocketPath = ""
+	opts := s.restoreOptions(sb)
 	setupTime := time.Since(startedAt)
 	guestMAC := randomMAC()
 	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
