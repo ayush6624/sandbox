@@ -75,11 +75,14 @@ exec_guest() { # exec_guest <sandbox-id> <timeout-sec> <command>
 }
 
 log "creating prep sandbox (${VCPUS} vcpu / ${MEM_MIB} MiB)"
-# idle_timeout_seconds -1: an apt-get run is quiet on the API, and a sandbox
-# that idle-hibernates mid-install wakes on a different guest IP under dockerd.
+# A long apt-get or docker pull is quiet on the API and reads as an idle
+# sandbox, and a hibernate mid-install wakes on a new guest IP underneath
+# dockerd. The legacy API spells "never hibernate" as -1, but /v1 rejects
+# negative lifecycle durations (internal/apiv1/handler.go), so the only way to
+# say it through the public API is a window longer than the sandbox's own TTL.
 SBX="$(api POST /v1/sandboxes "$(cat <<JSON
 {"name": "${NAME}-prep",
- "lifecycle": {"ttl_seconds": 7200, "idle_timeout_seconds": -1},
+ "lifecycle": {"ttl_seconds": 7200, "idle_timeout_seconds": 86400},
  "resources": {"vcpu": ${VCPUS}, "memory_mib": ${MEM_MIB}}}
 JSON
 )" | jget id)"
@@ -91,22 +94,37 @@ log "checking passwordless sudo"
 exec_guest "$SBX" 30 'sudo -n true'
 
 log "installing docker (~1-2 min)"
+# The docker socket must be group `sandbox`, NOT the conventional `docker`
+# group: sandboxd runs every exec'd command with an explicit
+# Credential{Uid, Gid} and NO supplementary groups
+# (cmd/sandboxd/guestuser_linux.go), so the guest's primary gid is the only
+# group it ever has and `usermod -aG docker sandbox` changes nothing that the
+# API can reach. Without this, every `docker` call in a task fails with
+# "permission denied while trying to connect to the docker API".
+#
+# It has to be set on docker.SOCKET, not in daemon.json: Ubuntu's docker.io
+# socket-activates dockerd, so systemd creates the socket with its own
+# SocketGroup=docker and daemon.json's `group` is never consulted.
 exec_guest "$SBX" 900 'export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
 sudo apt-get install -y -qq docker.io docker-compose-v2
-sudo systemctl enable --now docker
-sudo usermod -aG docker sandbox'
+sudo install -d -m 0755 /etc/systemd/system/docker.socket.d
+printf "[Socket]\nSocketGroup=sandbox\n" | sudo tee /etc/systemd/system/docker.socket.d/group.conf > /dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable docker
+sudo systemctl restart docker.socket
+sudo systemctl restart docker'
 
-# The group add above only affects NEW logins, and exec reuses the guest
-# session, so verify through sg rather than discovering it at task time.
-log "verifying docker"
-exec_guest "$SBX" 300 'sudo docker run --rm hello-world | tail -3
-docker version --format "{{.Server.Version}}" 2>/dev/null || sg docker -c "docker version --format \"{{.Server.Version}}\""
-docker compose version'
+# Verify as the ordinary guest user with a bare `docker` — that is exactly how
+# Harbor's DinDComposeOps will call it, and `sudo docker` passing proves nothing.
+log "verifying docker as the guest user"
+exec_guest "$SBX" 300 'docker version --format "server {{.Server.Version}}"
+docker compose version
+docker run --rm hello-world | grep -i "working correctly"'
 
 for image in ${PULL_IMAGES[@]+"${PULL_IMAGES[@]}"}; do
   log "pre-pulling ${image}"
-  exec_guest "$SBX" 600 "sudo docker pull ${image}"
+  exec_guest "$SBX" 600 "docker pull ${image}"
 done
 
 log "guest disk after install"

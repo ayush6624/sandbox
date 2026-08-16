@@ -354,8 +354,10 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
             name=self.environment_name[:64],
             ttl_seconds=self._ttl_seconds,
             # Never idle-hibernate mid-trial: an agent thinking for two minutes
-            # between tool calls looks exactly like an idle sandbox.
-            idle_timeout_seconds=-1,
+            # between tool calls looks exactly like an idle sandbox. The legacy
+            # API spells that -1, but /v1 rejects negative lifecycle durations,
+            # so the portable way to say it is a window outliving the trial.
+            idle_timeout_seconds=self._ttl_seconds + 3600,
             vcpus=vcpus,
             memory_mib=memory_mib,
             metadata={
