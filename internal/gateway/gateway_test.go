@@ -1181,6 +1181,17 @@ func TestMemoryWeightedReservationRequiresEnoughDefaultSlotUnits(t *testing.T) {
 	if got := g.hosts["fits"].reservedUnits; got != 4 {
 		t.Fatalf("reserved demand units = %d, want 4", got)
 	}
+	if got := g.hosts["fits"].free(); got != 4 {
+		t.Fatalf("free demand after one four-unit reservation = %d, want 4", got)
+	}
+	second := g.reserveHostDemand(nil, 4)
+	if second == nil || second.id != "fits" {
+		t.Fatalf("second four-unit reservation should exactly fill host: %+v", second)
+	}
+	if got := g.reserveHostDemand(nil, 4); got != nil {
+		t.Fatalf("third four-unit reservation overcommitted host: %+v", got)
+	}
+	g.releaseReservation(second, false)
 
 	g.hosts["fits"].slotsFree = 3
 	g.releaseReservation(h, false)

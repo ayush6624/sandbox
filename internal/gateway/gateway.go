@@ -121,7 +121,16 @@ func (h *host) placeable(now time.Time, ttl time.Duration) bool {
 }
 
 func (h *host) free() int {
-	f := h.slotsFree - h.reserved
+	// slotsFree is expressed in DEFAULT-sandbox capacity units: worker memory
+	// admission can make it much smaller than the remaining tap/IP count. An
+	// in-flight large-memory create therefore consumes reservationUnits here,
+	// not merely one request. Keep reserved as the floor for legacy/default
+	// reservations and for physical multi-slot operations such as fanout.
+	held := h.reservedUnits
+	if h.reserved > held {
+		held = h.reserved
+	}
+	f := h.slotsFree - held
 	if f < 0 {
 		return 0
 	}
