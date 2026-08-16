@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     console.log(`  ${res.stdout.trim().replace('\n', ' / ')}  (round-trip ${execMs} ms)`)
   } finally {
     step(`Killing ${cleanup.length} sandboxes...`)
-    await Promise.allSettled(cleanup.map((s) => s.kill()))
+    await Promise.allSettled(cleanup.map((s) => s.terminate()))
   }
 }
 

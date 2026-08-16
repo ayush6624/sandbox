@@ -6,9 +6,6 @@
  * so this file breaks CI the moment a removed method becomes callable again.
  * (`tsconfig.build.json` only includes `src`, so this never ships in `dist/`.)
  *
- * The matching runtime assertion — that JavaScript callers, who have no
- * compile step, still get a descriptive `SandboxError` — lives in
- * `smoke.test.ts`.
  */
 import { Sandbox } from '../src/index.js'
 import type { FleetHostInfo, SandboxOpts } from '../src/index.js'
@@ -26,4 +23,17 @@ async function sandboxHostsIsNotCallable(opts: SandboxOpts): Promise<void> {
   void withOpts
 }
 
+// Removed in 2.6.0. These were pure forwarding aliases — three names for two
+// operations — and every one of them had a `@deprecated` tag pointing at the
+// name kept here.
+async function deprecatedAliasesAreGone(sbx: Sandbox): Promise<void> {
+  // @ts-expect-error Sandbox.kill() was removed in 2.6.0: use Sandbox.terminate().
+  await Sandbox.kill('id')
+  // @ts-expect-error sandbox.kill() was removed in 2.6.0: use sandbox.terminate().
+  await sbx.kill()
+  // @ts-expect-error sandbox.hibernate() was removed in 2.6.0: use sandbox.pause().
+  await sbx.hibernate()
+}
+
 void sandboxHostsIsNotCallable
+void deprecatedAliasesAreGone

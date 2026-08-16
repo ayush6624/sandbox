@@ -1,6 +1,6 @@
 {
   "name": "sandbox",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "TypeScript SDK for the sandbox Firecracker microVM sandbox API. Mirrors the e2b JavaScript SDK surface.",
   "license": "MIT",
   "type": "module",
@@ -50,8 +50,6 @@
     "bench:fleet": "tsx benchmarks/fleet-bench.ts",
     "bench:lifecycle": "tsx benchmarks/lifecycle-bench.ts",
     "bench:snapshot-paths": "tsx benchmarks/snapshot-paths-bench.ts",
-    "bench:restore": "tsx benchmarks/restore-bench.ts",
-    "bench:fanout": "tsx benchmarks/fanout-bench.ts",
     "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts benchmarks/fleet-bench.test.ts benchmarks/snapshot-batch-bench.test.ts"
   },
   "devDependencies": {

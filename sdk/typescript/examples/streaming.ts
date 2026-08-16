@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     }
   } finally {
     step(`Killing sandbox ${sbx.sandboxId}...`)
-    await sbx.kill()
+    await sbx.terminate()
   }
 }
 

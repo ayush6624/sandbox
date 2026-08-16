@@ -62,7 +62,7 @@ function bringUpBody(opts: {
  * await sbx.files.write('/home/sandbox/server.js', code)
  * const host = await sbx.exposePort(3000)
  * const api = await sbx.exposePort(8000)
- * await sbx.kill()
+ * await sbx.terminate()
  * ```
  */
 export class Sandbox {
@@ -179,35 +179,6 @@ export class Sandbox {
     return toHostInfo(raw)
   }
 
-  /**
-   * @deprecated Removed in 2.0.0. Fleet host inventory is an operator call, not
-   * a tenant one: it discloses per-host addresses and live capacity, so the
-   * gateway authenticates it with the worker-control credential. Use
-   * {@link FleetClient} — `new FleetClient().hosts.list()`.
-   *
-   * ```ts
-   * // before
-   * const hosts = await Sandbox.hosts()
-   * // after
-   * const hosts = await new FleetClient({ controlKey: process.env.SANDBOX_CONTROL_KEY }).hosts.list()
-   * ```
-   *
-   * Removal is enforced at **compile time**: the required `[never]` parameter
-   * means no call site can typecheck — `Sandbox.hosts()` fails with "Expected 1
-   * arguments, but got 0" and `Sandbox.hosts(opts)` with "not assignable to
-   * never". `Promise<never>` alone would not do it: it is assignable to
-   * `Promise<FleetHostInfo[]>`, so unchanged 1.x call sites would still build
-   * and only fail in production. The body still throws so JavaScript
-   * consumers, who have no compile step, get a message naming the replacement
-   * instead of `TypeError: Sandbox.hosts is not a function`.
-   *
-   * @throws {SandboxError} always.
-   */
-  static async hosts(..._migratedToFleetClient: [never]): Promise<never> {
-    throw new SandboxError(
-      'Sandbox.hosts() was removed in sandbox SDK 2.0.0: fleet host inventory is an operator API, not a tenant one. Use the FleetClient: `new FleetClient({ controlKey }).hosts.list()`, with the gateway worker-control credential (SANDBOX_CONTROL_KEY / GATEWAY_CONTROL_TOKEN). A tenant SANDBOX_API_KEY cannot read it.'
-    )
-  }
 
   /**
    * Lists all sandboxes — `running` and `hibernated` alike (a hibernated
@@ -228,10 +199,6 @@ export class Sandbox {
     await client.request('DELETE', `/sandboxes/${sandboxId}`)
   }
 
-  /** @deprecated Use Sandbox.terminate(). */
-  static async kill(sandboxId: string, opts: SandboxOpts = {}): Promise<void> {
-    return this.terminate(sandboxId, opts)
-  }
 
   /**
    * Restores a brand-new sandbox from a snapshot, resuming it from the saved
@@ -549,16 +516,10 @@ export class Sandbox {
     this.info.status = raw.status
   }
 
-  /** @deprecated Use pause(). */
-  async hibernate(): Promise<void> { return this.pause() }
-
   /**
    * Destroys this sandbox and releases its resources on the host.
    */
   async terminate(): Promise<void> {
     await this.client.request('DELETE', `/sandboxes/${this.sandboxId}`)
   }
-
-  /** @deprecated Use terminate(). */
-  async kill(): Promise<void> { return this.terminate() }
 }

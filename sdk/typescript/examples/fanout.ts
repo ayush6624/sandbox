@@ -58,7 +58,7 @@ async function main(): Promise<void> {
   console.log(`  snapshot ${snap.snapshotId.slice(0, 8)} of ${snap.sourceId.slice(0, 8)}`)
 
   step('Killing the source (a snapshot outlives its sandbox)...')
-  await source.kill()
+  await source.terminate()
 
   let clones: Sandbox[] = []
   try {
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
   } finally {
     // --- Cleanup -------------------------------------------------------------
     step('Killing clones and deleting the snapshot...')
-    await Promise.allSettled(clones.map((c) => c.kill()))
+    await Promise.allSettled(clones.map((c) => c.terminate()))
     await Sandbox.deleteSnapshot(snap.snapshotId)
   }
 }

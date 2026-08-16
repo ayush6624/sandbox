@@ -110,9 +110,8 @@ slot count when a production warm pool is enabled.
 
 Historic JSON fields such as `restore`, `fanout`, `perCloneMs`, and `killMs`
 remain as deprecated aliases so dashboards can compare new runs with old ones.
-The `bench:restore` and `bench:fanout` npm commands also remain compatibility
-aliases, but new automation should use `bench:snapshot-source` and
-`bench:snapshot-batch`.
+The `bench:restore` and `bench:fanout` npm commands have been removed; use
+`bench:snapshot-source` and `bench:snapshot-batch`.
 
 The snapshot batch suite clamps API `maxParallelism` to 32, the v1 contract
 maximum. Operation completion and command readiness are reported separately.

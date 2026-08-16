@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.6.0 - 2026-08-16
+
+### Removed
+
+- **Breaking at compile time (type-level only):** the deprecated forwarding
+  aliases are gone. `sandbox.kill()` → `sandbox.terminate()`,
+  `Sandbox.kill(id)` → `Sandbox.terminate(id)`, `sandbox.hibernate()` →
+  `sandbox.pause()`. Each was a one-line forward to the name it points at, and
+  each had carried a `@deprecated` tag. Behavior is unchanged; only the extra
+  name is gone. `test/removed-api.types.ts` now fails the build if any of them
+  becomes callable again.
+- `Sandbox.hosts()`, removed in 2.0.0, no longer exists even as an
+  always-throwing stub. Its `[never]` parameter already made every call site
+  fail to compile, so the stub only served JavaScript callers of a
+  two-major-versions-old API. Use
+  `new FleetClient({ controlKey }).hosts.list()`.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.5.0`).
+
 ## 2.5.0 - 2026-08-09
 
 ### Changed

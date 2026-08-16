@@ -62,6 +62,5 @@ bash scripts/bench-extensive.sh
 ```
 
 Only promote results after verifying all benchmark resources were cleaned up
-and no credentials are present. Deprecated aliases remain for existing
-automation: `restore`, `fanout`, `perCloneMs`, `killMs`,
-`bench:restore`, and `bench:fanout`.
+and no credentials are present. Deprecated JSON field aliases remain for
+existing dashboards: `restore`, `fanout`, `perCloneMs`, and `killMs`.

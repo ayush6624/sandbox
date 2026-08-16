@@ -620,7 +620,7 @@ test('full lifecycle: create → exec → write/read/list → kill', async () =>
   assert.equal(reconnected.sandboxId, SANDBOX_ID)
 
   // kill
-  await sbx.kill()
+  await sbx.terminate()
   const remaining = await Sandbox.list(opts())
   assert.equal(remaining.length, 0)
 })
@@ -663,7 +663,7 @@ test('streaming exec: callbacks get chunks, result accumulates full output', asy
   )
   assert.deepEqual(seen, ['started\n'])
 
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('create with timeoutMs sends timeout_sec and surfaces expiresAt', async () => {
@@ -672,11 +672,11 @@ test('create with timeoutMs sends timeout_sec and surfaces expiresAt', async () 
   assert.ok(sbx.info.expiresAt instanceof Date)
 
   // plain create sends no body and has no expiry
-  await sbx.kill()
+  await sbx.terminate()
   const plain = await Sandbox.create(opts())
   assert.equal(lastCreateBody, undefined)
   assert.equal(plain.info.expiresAt, undefined)
-  await plain.kill()
+  await plain.terminate()
 })
 
 test('create with name sends it and rename updates it', async () => {
@@ -690,12 +690,12 @@ test('create with name sends it and rename updates it', async () => {
   // an empty name clears it, and unnamed sandboxes surface no name at all
   await sbx.rename('')
   assert.equal(sbx.info.name, undefined)
-  await sbx.kill()
+  await sbx.terminate()
 
   const plain = await Sandbox.create(opts())
   assert.equal(lastCreateBody, undefined)
   assert.equal(plain.info.name, undefined)
-  await plain.kill()
+  await plain.terminate()
 })
 
 test('create with vcpus/memMib sends the resource overrides and surfaces them', async () => {
@@ -704,7 +704,7 @@ test('create with vcpus/memMib sends the resource overrides and surfaces them', 
   assert.equal(lastCreateBody?.mem_mib, 2048)
   assert.equal(sbx.info.vcpus, 4)
   assert.equal(sbx.info.memMib, 2048)
-  await sbx.kill()
+  await sbx.terminate()
 
   // plain create sends neither field; the server reports the effective
   // (template-default) resources, and the SDK surfaces them as-is.
@@ -712,7 +712,7 @@ test('create with vcpus/memMib sends the resource overrides and surfaces them', 
   assert.equal(lastCreateBody, undefined)
   assert.equal(plain.info.vcpus, TEMPLATE_VCPUS)
   assert.equal(plain.info.memMib, TEMPLATE_MEM_MIB)
-  await plain.kill()
+  await plain.terminate()
 })
 
 test('hostInfo maps the /info payload to camelCase', async () => {
@@ -731,19 +731,19 @@ test('hostInfo maps the /info payload to camelCase', async () => {
 test('create with hibernateAfterMs sends hibernate_after_sec; -1 passes through unscaled', async () => {
   const sbx = await Sandbox.create({ ...opts(), hibernateAfterMs: 90_500 })
   assert.equal(lastCreateBody?.hibernate_after_sec, 91) // ceil(90.5)
-  await sbx.kill()
+  await sbx.terminate()
 
   const never = await Sandbox.create({ ...opts(), hibernateAfterMs: -1 })
   assert.equal(lastCreateBody?.hibernate_after_sec, -1)
-  await never.kill()
+  await never.terminate()
 })
 
 test('hibernate() posts to the hibernate endpoint and updates status', async () => {
   const sbx = await Sandbox.create(opts())
   assert.equal(sbx.info.status, 'running')
-  await sbx.hibernate()
+  await sbx.pause()
   assert.equal(sbx.info.status, 'hibernated')
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('pause/resume/terminate are standard lifecycle names', async () => {
@@ -771,7 +771,7 @@ test('setTimeout posts ceil(ms/1000) and updates expiresAt', async () => {
   assert.equal(lastTimeoutBody?.timeout_sec, 0)
   assert.equal(expiry(), undefined)
 
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('exposePort allocates a host port and feeds the getHost cache', async () => {
@@ -805,7 +805,7 @@ test('exposePort allocates a host port and feeds the getHost cache', async () =>
     },
   ])
 
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('public ingress URLs are exposed, cached, and survive unexpose', async () => {
@@ -841,7 +841,7 @@ test('public ingress URLs are exposed, cached, and survive unexpose', async () =
   await sbx.unexposePort(8080)
   assert.throws(() => sbx.getUrl(8080), SandboxError)
 
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('a sandbox knows its port URLs straight from create, with no extra call', async () => {
@@ -853,7 +853,7 @@ test('a sandbox knows its port URLs straight from create, with no extra call', a
   const reconnected = await Sandbox.connect(sbx.sandboxId, opts())
   assert.equal(reconnected.getUrl(3000), `https://3000-${SANDBOX_ID}.sandboxes.example.com`)
 
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('raw exposure returns a stable address and unexpose clears local caches', async () => {
@@ -868,12 +868,12 @@ test('raw exposure returns a stable address and unexpose clears local caches', a
   assert.equal(sbx.getHost(8080), '127.0.0.1:5200')
   await sbx.unexposePort(8080)
   assert.throws(() => sbx.getHost(8080), SandboxError)
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('static kill destroys a sandbox by id', async () => {
   const sbx = await Sandbox.create(opts())
-  await Sandbox.kill(sbx.sandboxId, opts())
+  await Sandbox.terminate(sbx.sandboxId, opts())
   await assert.rejects(
     () => Sandbox.connect(sbx.sandboxId, opts()),
     (err: unknown) => err instanceof NotFoundError
@@ -921,7 +921,7 @@ test('missing apiUrl/apiKey fail fast with helpful messages', async () => {
 test('create surfaces baseSnapshotId for golden clones', async () => {
   const sbx = await Sandbox.create(opts())
   assert.equal(sbx.info.baseSnapshotId, GOLDEN_SNAPSHOT_ID)
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('snapshot lifecycle: take → list → rename → delete', async () => {
@@ -962,12 +962,12 @@ test('snapshot lifecycle: take → list → rename → delete', async () => {
     () => Sandbox.deleteSnapshot(SNAPSHOT_ID, opts()),
     (err: unknown) => err instanceof NotFoundError
   )
-  await sbx.kill()
+  await sbx.terminate()
 })
 
 test('snapshot of a sandbox that is not running throws ConflictError', async () => {
   const sbx = await Sandbox.create(opts())
-  await sbx.kill()
+  await sbx.terminate()
   await assert.rejects(
     () => sbx.snapshot(),
     (err: unknown) => {
@@ -988,7 +988,7 @@ test('restore sends timeout_sec + hibernate_after_sec and reports the snapshot r
     () => Sandbox.restore(SNAPSHOT_ID, opts()),
     (err: unknown) => err instanceof ConflictError
   )
-  await sbx.kill()
+  await sbx.terminate()
 
   const restored = await Sandbox.restore(SNAPSHOT_ID, {
     ...opts(),
@@ -1043,7 +1043,7 @@ test('refresh() re-reads the sandbox and updates info in place', async () => {
   assert.equal(info.name, 'before')
 
   // Change state out of band, the way the reaper or another client would.
-  await Sandbox.kill(SANDBOX_ID, opts())
+  await Sandbox.terminate(SANDBOX_ID, opts())
   await assert.rejects(
     () => sbx.refresh(),
     (err: unknown) => err instanceof NotFoundError
@@ -1055,7 +1055,7 @@ test('refresh() re-reads the sandbox and updates info in place', async () => {
   assert.equal(refreshed.name, 'after')
   // A cleared TTL is dropped, not left stale.
   assert.equal(refreshed.expiresAt, undefined)
-  await live.kill()
+  await live.terminate()
 })
 
 test('a full fleet surfaces CapacityError with the Retry-After hint', async () => {
@@ -1161,24 +1161,6 @@ test('the fleet client demands its own credential, never SANDBOX_API_KEY', () =>
     delete process.env.SANDBOX_API_KEY
     if (previous !== undefined) process.env.SANDBOX_CONTROL_KEY = previous
   }
-})
-
-test('Sandbox.hosts() throws a migration error without touching the network', async () => {
-  // A TypeScript call site cannot compile at all (asserted in
-  // removed-api.types.ts). This is the JavaScript caller's path, which has no
-  // compile step — erasing the types is what reproduces it.
-  const asJavaScriptCaller = Sandbox.hosts as unknown as (o?: unknown) => Promise<never>
-  await assert.rejects(
-    () => asJavaScriptCaller(opts()),
-    (err: unknown) => {
-      assert.ok(err instanceof SandboxError)
-      // Not an HTTP failure: it never left the process.
-      assert.equal(err.status, undefined)
-      assert.match(err.message, /FleetClient/)
-      assert.match(err.message, /SANDBOX_CONTROL_KEY/)
-      return true
-    }
-  )
 })
 
 test('errors carry the HTTP status they came from', async () => {
