@@ -2,8 +2,7 @@
 
 Status: **explainer / orientation.** Read this first, then
 `docs/uffd-roadmap.md` (phase-by-phase status) and `docs/uffd-b2-design.md`
-(the GCS chunk-source design). Ground truth for scale-to-zero context is
-`docs/scale-to-zero.md`.
+(the GCS chunk-source design).
 
 This doc explains, from the beginning and in plain terms, what UFFD is, why we
 built it, why it's **off by default**, and why we're building on it anyway. The

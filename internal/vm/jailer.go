@@ -551,7 +551,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 //     into a file, and cgroup v2 charges that page cache to the same leaf that
 //     already holds the guest — a leaf sized at mem_mib + jailer overhead. The
 //     kernel's answer at memory.max is the OOM killer, so the VMM died and the
-//     sandbox was lost (docs/cold-boot-snapshot-oom.md). memory.high makes the
+//     sandbox was lost (docs/cgroup-memory-model.md). memory.high makes the
 //     kernel throttle and reclaim instead, which is what it exists for.
 //
 // Diff snapshots never hit this (a few MiB of dirty pages), which is why only
@@ -683,7 +683,7 @@ func reserveSnapshotMemory(cfg JailerConfig, leaf string, burst int64) (func() e
 		return nil, err
 	}
 	if extra > headroom {
-		return nil, fmt.Errorf("snapshot needs %d MiB beyond this VM's %d MiB limit but only %d MiB is unreserved in the host task cgroup: refusing rather than risking an OOM of serve and every VM (see docs/cold-boot-snapshot-oom.md)",
+		return nil, fmt.Errorf("snapshot needs %d MiB beyond this VM's %d MiB limit but only %d MiB is unreserved in the host task cgroup: refusing rather than risking an OOM of serve and every VM (see docs/cgroup-memory-model.md)",
 			extra>>20, limit>>20, headroom>>20)
 	}
 
@@ -830,7 +830,7 @@ func armSnapshotMemoryHigh(leaf string) (func() error, error) {
 		// Already at the fence: there is nowhere to put a ceiling, so the
 		// kernel is the only thing standing between this write and an OOM kill.
 		// Refuse while the VMM is alive and resumable.
-		return nil, fmt.Errorf("snapshot cannot proceed safely: the VM is already using %d of its %d MiB limit (see docs/cold-boot-snapshot-oom.md)",
+		return nil, fmt.Errorf("snapshot cannot proceed safely: the VM is already using %d of its %d MiB limit (see docs/cgroup-memory-model.md)",
 			current>>20, limit>>20)
 	}
 

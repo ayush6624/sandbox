@@ -27,7 +27,7 @@ import (
 // guest then resumes IMMEDIATELY with no memory paged in; every page it touches
 // faults to us and we copy it in from the mem file on demand. Wake latency
 // tracks the working set, not the guest size, and wake I/O collapses to the
-// pages actually read. See docs/scale-to-zero.md.
+// pages actually read. See docs/uffd-roadmap.md.
 //
 // The page bytes come from a pageSource (uffd_source.go). The default
 // localSource mmaps the mem file read-only and serves faults straight out of the

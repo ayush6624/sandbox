@@ -131,7 +131,7 @@ type Config struct {
 	// cutting wake latency (and wake I/O) roughly to the working set instead of
 	// the whole guest. Off = the eager File backend (whole-RAM fault-in before
 	// resume). Only the same-identity restore path is UFFD-backed; the
-	// clone-path wake still uses File. See docs/scale-to-zero.md.
+	// clone-path wake still uses File. See docs/uffd-roadmap.md.
 	UFFDRestore bool `json:"uffd_restore"`
 	// UFFDChunkKiB selects the UFFD page source when UFFDRestore is on: 0 (default)
 	// serves faults from a whole-file mmap of the mem image; >0 reads the mem file

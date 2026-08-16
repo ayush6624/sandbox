@@ -1,7 +1,7 @@
 # UFFD roadmap — from a wake trick to a memory substrate
 
 Status: **plan**. Follows the shipped-but-default-off UFFD restore (see
-`docs/scale-to-zero.md` and `internal/vm/uffd_linux.go`).
+`internal/vm/uffd_linux.go`).
 
 ## The lesson from the first cut
 

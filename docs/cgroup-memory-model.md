@@ -360,6 +360,10 @@ memory.max  =  fence (kills)      memory.high = warning line (throttles)
 guest RAM   =  unreclaimable (no swap)   page cache = reclaimable once flushed
 ```
 
-Related: [cold-boot-snapshot-oom.md](cold-boot-snapshot-oom.md) is the bug report
-this came out of; [usage-metering-plan.md](usage-metering-plan.md) covers the
-billing ledger, which is how the bug was found.
+This came out of the cold-boot snapshot OOM: a FULL snapshot of a cold-booted
+sandbox charged the guest's whole memory image to the same cgroup leaf that
+already held the guest, and the kernel OOM-killed the VMM. Fixed and verified on
+the fleet in release `ec5b70c` (2026-08-03); `internal/vm/jailer.go` carries the
+`memory.high` fence and the pre-snapshot headroom check that close it.
+[usage-metering-plan.md](usage-metering-plan.md) covers the billing ledger,
+which is how the bug was found.

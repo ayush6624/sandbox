@@ -444,7 +444,7 @@ scripts/              Host setup shell scripts
   memory (scale-to-zero Model B). NB `page_size_kib` in FC v1.15's UFFD message is actually
   BYTES (4096), not KiB — `pageSizeBytes()` normalizes it; getting this wrong made 4 MiB
   "pages" and an offset that panicked. The fault loop has a `recover()` so a handler bug
-  degrades to a failed wake, never a serve crash. See docs/scale-to-zero.md.
+  degrades to a failed wake, never a serve crash. See docs/uffd-roadmap.md.
 - **`/etc/resolv.conf` in the guest must be a REAL FILE, never a symlink to
   `/proc/net/pnp`.** The config's nameservers reach the guest only through the kernel
   `ip=` boot param, which the kernel re-exposes at `/proc/net/pnp` in resolv.conf

@@ -6,8 +6,7 @@ kill-on-fault, and chunk-granular working-set prewarm). B2c proved the GCS chunk
 source is correct and lazy end-to-end but *slower on the same host* (it pays GCS
 fetches the local backends avoid). B4 is where that source finally pays off:
 **waking a hibernated sandbox on a host that never created it.** See
-`docs/uffd-roadmap.md` (Phase B) and `docs/scale-to-zero.md` (Model B — this is
-the multi-host enabler it names).
+`docs/uffd-roadmap.md` (Phase B), which names this as the multi-host enabler.
 
 ## Goal and the one measurement that justifies it
 

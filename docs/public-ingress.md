@@ -6,9 +6,8 @@ load-balancer health were verified end to end on 2026-07-31. The edge serves a
 publicly trusted Let's Encrypt certificate for `sbx.getaion.ai` and
 `*.sbx.getaion.ai`, issued with a manual Cloudflare DNS-01 challenge. Renewal
 remains manual because no Cloudflare API token is installed. The design below
-is what shipped; §Implemented surface records the concrete contracts, and [the
-E4/E5 plan](public-ingress-e4-e5-plan.md) carries the remaining HA-edge and
-durable-raw-port work. Prereqs, all shipped: the userspace port proxy
+is what shipped; §Implemented surface records the concrete contracts. HA-edge
+and durable-raw-port work remains unstarted. Prereqs, all shipped: the userspace port proxy
 (`internal/server/portproxy.go`), gateway routing from heartbeats
 (`internal/gateway/gateway.go`), and cross-host wake (B4,
 `docs/uffd-b4-design.md`).
