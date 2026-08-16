@@ -4,7 +4,8 @@ Goal: pick popular, credible open-source workloads that prove the fleet is a
 real substrate for agent evaluation and RL rollouts, and run them end to end
 without spending a fortune on tokens.
 
-Everything below is grounded in the upstream code as it stands today (Harbor's
+Phases 0-3 are DONE against the production fleet (2026-08-16); see §5. Everything
+below is grounded in the upstream code as it stands today (Harbor's
 `BaseEnvironment` and `DinDComposeOps`, `verifiers`' v1 `Runtime`), and the
 adapters described here are already written under
 [`examples/rl-environments/`](../examples/rl-environments/).
@@ -157,23 +158,42 @@ harbor run --environment-import-path …:SandboxEnvironment
         └─ stop(delete)  → DELETE /v1/sandboxes/{id}     (kills the whole project)
 ```
 
-**Prerequisite: Docker must be baked into the base rootfs.** The image ships
-Node/pnpm/TypeScript/Python/build-essential/git but no Docker, and installing it
-per task would cost 30–60 s of the task's own budget and need egress.
-[`bake-docker-into-rootfs.sh`](../examples/rl-environments/bake-docker-into-rootfs.sh)
-loop-mounts the rootfs and installs `docker.io` + `docker-compose-v2`, optionally
-pre-pulling task base images so a task's first compose build hits no network at
-all. The 10 GiB sparse rootfs has ample room.
+**Prerequisite: Docker in the guest — via a prepared SNAPSHOT, not a rootfs
+bake.** The base image ships Node/pnpm/TypeScript/Python/build-essential/git but
+no Docker. The original plan here was to bake Docker into the base rootfs; that
+was replaced, because a rootfs change costs a worker-image rebake
+(`bake-image.sh bake && golden`) plus a MIG roll **for every toolchain change**.
 
-Two consequences worth stating plainly, both already documented in CLAUDE.md and
-both intended:
+Instead, [`prepare-docker-snapshot.sh`](../examples/rl-environments/prepare-docker-snapshot.sh)
+provisions one ordinary sandbox through the public API — installs
+`docker.io` + `docker-compose-v2`, pre-pulls common base images — snapshots it,
+and deletes it. Every trial clones that snapshot (`SANDBOX_SNAPSHOT_ID`). The
+toolchain becomes a *snapshot id*: rebuild it whenever, roll nothing. Measured on
+the fleet: clone **~990 ms**, dockerd alive across the restore, container egress
+working on the clone's fresh network identity.
 
-- A rootfs change bumps the base mtime, which **invalidates the golden snapshot**
-  (`goldenUsable` keys on base mtime+size). Restart `serve` and it cold-builds a
-  fresh golden that includes Docker. On the fleet this is a rebake
-  (`bake-image.sh bake && golden`) plus a MIG roll, not a `rollout.sh` deploy.
+What the image *did* need, one time only, is **passwordless root in the guest**
+(`sandboxSudoers` in `cmd/sandbox/installagent.go`). `sandboxd` runs every exec
+with an explicit `Credential{Uid, Gid}` (uid 1000), so without sudo a workload
+cannot provision the machine it was handed at all. That is one bake + MIG roll,
+and it unlocks runtime provisioning for every future environment.
+
+Three consequences worth stating plainly:
+
 - Docker-in-microVM is containers inside a VM, not nested virtualization. The
-  workers already run with nested virt enabled for KVM; this needs nothing extra.
+  workers already run nested virt for KVM; this needs nothing extra. Verified:
+  the guest kernel (6.18.36) has `OVERLAY_FS`, `VETH`, `BRIDGE`, `NF_NAT`,
+  `IP_NF_IPTABLES`, `NETFILTER_XT_MATCH_ADDRTYPE` all built in (`=y`), which
+  matters because `/lib/modules` is empty.
+- **The docker socket must be group `sandbox`, not `docker`.** sandboxd sets no
+  supplementary groups, so the guest's primary gid is the only group it has and
+  `usermod -aG docker sandbox` changes nothing reachable through the API. It has
+  to be set on `docker.socket` (`SocketGroup=sandbox`), not in `daemon.json`:
+  Ubuntu socket-activates dockerd, so systemd creates the socket and
+  `daemon.json`'s `group` is never consulted.
+- **A snapshot fixes the trial's memory**, because restores reject vcpu/mem
+  overrides. Size the prep sandbox for the heaviest task (we use 2 vCPU /
+  4096 MiB); a per-size snapshot is the upgrade path if one task needs more.
 
 ---
 
@@ -182,12 +202,12 @@ both intended:
 Each phase has an explicit gate. Don't start the next one until the gate is
 green — the whole point of the oracle agent is that the gates are cheap.
 
-| Phase | Work | Gate |
-|---|---|---|
-| **0. Docker in the guest** | Run `bake-docker-into-rootfs.sh` on one dev host; restart `serve`; confirm the golden rebuilt | `sandbox exec <id> -- "docker run --rm hello-world"` succeeds; create latency back to the hot path |
-| **1. Adapter smoke** | `harbor run --dataset hello-world@1.0 --agent oracle --environment-import-path …` | 1/1 task, reward 1.0 |
-| **2. Negative control** | Same, `--agent nop` | 1/1 task, reward 0.0 — proves the verifier actually verifies |
-| **3. Small sweep** | `terminal-bench-sample@2.0` (10 tasks), `--n-concurrent 4`, oracle | 10/10; no leaked sandboxes in `sandbox list` |
+| Phase | Work | Gate | Status |
+|---|---|---|---|
+| **0. Docker in the guest** | Bake guest sudo (one MIG roll); `prepare-docker-snapshot.sh` | `docker run --rm hello-world` as the guest user; clone keeps it | ✅ done — snapshot clone ~990 ms |
+| **1. Adapter smoke** | `harbor run --dataset hello-world@1.0 --agent oracle` | 1/1 task, reward 1.0 | ✅ 1/1 reward 1.0, 37 s |
+| **2. Negative control** | Same, `--agent nop` | 1/1 task, reward 0.0 — proves the verifier actually verifies | ✅ reward 0.0 |
+| **3. Small sweep** | `terminal-bench-sample@2.0` (10 tasks), `--n-concurrent 4`, oracle | 10/10; no leaked sandboxes | ✅ 10/10 trials, 0 exceptions, 9/10 reward 1.0, no leaks |
 | **4. Full oracle sweep** | `terminal-bench@2.0` (89), `--n-concurrent 32` | ≥ 85/89 (a handful of upstream tasks are flaky by nature); every failure attributed to a task, not to us; `GET /v1/usage` reports the run |
 | **5. Fleet scale** | Raise `--n-concurrent` until the gateway queues, then 503s | Capacity errors are 503 + Retry-After (never 500/404); the autoscaler adds hosts; nothing leaks after teardown |
 | **6. Real agent** | `mini-swe-agent` on the 10-task sample, then 89 with `--n-concurrent 16` | Comparable pass rate to the published leaderboard for that model |
@@ -195,6 +215,67 @@ green — the whole point of the oracle agent is that the gates are cheap.
 | **8. verifiers runtime** | Patch the runtime union; run one `verifiers` env end-to-end; then a snapshot-per-task group fan-out | A rollout completes; `pause_between: true` shows near-zero billed time during sampling |
 
 Phases 0–5 cost **no tokens at all**. That is the point.
+
+### What phases 0–3 actually found (2026-08-16)
+
+Every one of these was a defect in code that had never been run, and three were
+in the fleet rather than in the adapter.
+
+- **A restored VM's cgroup was sized from the template, not the sandbox**
+  (`61ffa33`, the big one). All four restore paths passed `s.cfg.VMTemplate`
+  verbatim, so a snapshot-restored guest larger than the template got
+  `memory.max = 1024+156 MiB` while Firecracker gave the guest its baked
+  4096 MiB. The host OOM-killed firecracker the moment the guest touched
+  ~1.17 GiB. **This is invisible from inside** — the guest reports gigabytes free,
+  host RAM is plentiful, nothing panics; the VM just exits and clients see
+  `502 agent unreachable`. It also throttled every hibernated sandbox with
+  `mem_mib` above the template on wake, which has nothing to do with Harbor.
+  Fixed via one `restoreOptions()` helper; this alone took the 10-task sweep
+  from **4/10 to 10/10**.
+- **`/v1` cannot express "never hibernate."** It forwards
+  `idle_timeout_seconds` → `hibernate_after_sec` but rejects negatives, while the
+  legacy API spells never as `-1`. Both adapters had `-1` hard-coded, so every
+  create would have 400'd. Worked around with a window outliving the trial; the
+  contract gap is still open.
+- **`bake-image.sh golden` was broken outright** — it ran `serve` under a 4 GiB
+  cgroup with a config declaring a ~62 GiB memory budget, which the memory
+  admission guard refuses to start on. Pre-existing and unrelated to this work.
+- **Terminal-Bench 2.0 tasks ship prebuilt images**
+  (`docker_image = "ghcr.io/laude-institute/terminal-bench/<task>:2.0"`), so the
+  per-trial cost is a registry *pull*, not a build — worth knowing before
+  optimising the wrong thing. Harbor's own E2B backend takes the same
+  `Template().from_image()` path for these.
+- Two adapter bugs: `host_exec` always `cd`s into a directory only
+  `_stage_and_up` creates, so the adapter could never bootstrap (and Go reports a
+  failed chdir as `fork/exec /bin/bash: no such file or directory`); and Harbor's
+  `/logs/{agent,verifier,artifacts}` tree must be created **inside the main
+  container** by the provider, exactly as `blaxel.py` and `tensorlake.py` do.
+
+### Task-snapshot caching (the local stand-in for a template-build API)
+
+`/v1/templates` is read-only, so we cannot do what `E2BEnvironment` does — turn a
+task into a native template keyed by a content hash and skip the image step
+forever. A snapshot is the primitive that closes the gap: get the task's image
+into a guest once (pull or build), snapshot before `up`, and clone every later
+trial from it. The adapter keys the cache on a hash of the task's environment
+directory plus the base snapshot id, so editing a Dockerfile invalidates it the
+same way E2B's alias hash does.
+
+Measured on the 10-task sample at `--n-concurrent 4`:
+
+| Run | Wall clock |
+|---|---|
+| No caching | 4m 47s |
+| Cold (populate cache) | 7m 38s |
+| Warm (clone task snapshots) | **3m 20s** |
+
+So it is a **30% cut on repeat sweeps**, paying back its own cold penalty after
+about two runs and immediately for multi-trial (`-k`) runs. Two caveats worth
+stating: for these tasks the GHCR pull is only ~2 s from inside GCP, so most of
+the win is the container start rather than the image transfer; and each task
+snapshot costs ~2–3 GB of worker disk, which is a real constraint at 89 tasks
+(~220 GB across two workers) and wants pruning before phase 4.
+`SANDBOX_NO_TASK_SNAPSHOT=1` disables it.
 
 ---
 
@@ -250,8 +331,10 @@ Three token-cost levers that actually move the needle:
 
 | Gap | Consequence | Mitigation |
 |---|---|---|
-| No Docker in the base image | Harbor tasks can't run at all | Phase 0 bake; it's a one-time image change |
-| No template-build API (`/v1/templates` is read-only) | We can't take the E2B route of turning a task Dockerfile into a native template; every task pays a compose build inside the guest | Pre-pull common base images into the rootfs. Longer term, a template-build API would let a task's image become a snapshot and cut task setup to a clone |
+| No Docker in the base image | Harbor tasks can't run at all | **Resolved** by a prepared snapshot, not a rootfs bake — see §4. Needed one image change: guest sudo |
+| No template-build API (`/v1/templates` is read-only) | We can't take the E2B route of turning a task Dockerfile into a native template | **Mitigated** by task-snapshot caching (§5): 30% off a repeat sweep. A real template-build API would still be better — it would make the cache server-side, shared across hosts, and free of the ~2–3 GB/task disk cost |
+| `/v1` rejects a negative `idle_timeout_seconds` | No way to say "never hibernate" through the public API, though the legacy API's `-1` means exactly that | Adapters pass a window longer than the trial's TTL. Worth fixing in the contract |
+| sandboxd sets no supplementary groups on exec'd commands | Group-based access inside the guest (`docker`, and any future socket) silently does nothing | Give the socket the guest's primary group instead. A real fix is `Credential.Groups` in `cmd/sandboxd/guestuser_linux.go`, which needs an agent rebake |
 | No per-sandbox egress policy | Harbor tasks that require network isolation, and `verifiers` configs with `allow`/`block` lists, are refused | Declared as unsupported capabilities so both harnesses refuse up front rather than running unisolated. Real fix: per-sandbox iptables policy on the worker |
 | Buffered exec caps output at 2 MiB/stream | A verbose 40-minute agent run would truncate | Both adapters use streaming exec / redirect to a file and download |
 | Idle hibernation vs a thinking policy | A policy thinking for two minutes looks exactly like an idle sandbox; an unexpected freeze shows up as one mysteriously slow step | Both adapters set `idle_timeout_seconds: -1` and pause *explicitly* instead |
@@ -268,11 +351,13 @@ Three token-cost levers that actually move the needle:
 | [`harbor_sandbox_env.py`](../examples/rl-environments/harbor_sandbox_env.py) | `SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment)` — the Harbor backend, loadable via `--environment-import-path`, no fork |
 | [`verifiers_sandbox_runtime.py`](../examples/rl-environments/verifiers_sandbox_runtime.py) | `SandboxRuntime(Runtime)` for `verifiers` v1, plus `prepare_task_snapshot()` / `fanout_rollouts()` helpers and the exact union patch needed to register it |
 | [`shard-runner.ts`](../examples/rl-environments/shard-runner.ts) | Prepare-once/clone-N-ways shard runner over the TS SDK, with a zero-token `--dry-run` mode |
-| [`bake-docker-into-rootfs.sh`](../examples/rl-environments/bake-docker-into-rootfs.sh) | Bakes Docker (and optional pre-pulled images) into the base rootfs |
+| [`prepare-docker-snapshot.sh`](../examples/rl-environments/prepare-docker-snapshot.sh) | Provisions one sandbox with Docker + pre-pulled images and snapshots it; prints the snapshot id. **This is phase 0** |
+| [`bake-docker-into-rootfs.sh`](../examples/rl-environments/bake-docker-into-rootfs.sh) | Superseded by the above. Kept only for a host that wants Docker in the base image itself |
 
-All Python syntax-compiles, the TypeScript typechecks against the SDK, and the
-shell script passes `bash -n`. **None of it has been run against a live fleet
-yet** — that is phase 0.
+`harbor_sandbox_env.py` and `sandbox_client.py` have now been **run against the
+production fleet** through phase 3 (Harbor 0.21.0); every import in the adapter
+resolves against that release. `verifiers_sandbox_runtime.py` and
+`shard-runner.ts` still have not run anywhere.
 
 ---
 
