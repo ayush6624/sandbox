@@ -60,6 +60,10 @@ type host struct {
 	slotsFree  int
 	warmReady  int // worker-reported fully initialized VMs ready for atomic claim
 	hibernated int // idle sandboxes frozen to disk on the host (hold no slot)
+	// reservedCount is set only on the COPY returned by a reservation: how many
+	// slots it covers. A fanout of N reserves N at once, so releasing it has to
+	// undo the same N.
+	reservedCount int
 	// reserved counts creates dispatched to this host but not yet completed.
 	// Without it, a burst of concurrent creates all read the same stale
 	// slotsFree (heartbeats lag by seconds) and pile onto one bin-pack target
@@ -790,6 +794,91 @@ func (g *Gateway) reserveHost(exclude map[string]bool) *host {
 	return g.reserveHostMode(exclude, true)
 }
 
+// reserveHostFor reserves `needed` slots for a snapshot-sourced create
+// (restore/fanout). It differs from reserveHost in three ways, each deliberate:
+//
+//   - it never consumes a warm-ready VM, because those are pre-booted from the
+//     GOLDEN image and a snapshot create cannot use one;
+//   - it reserves N slots at once, so a fanout of N cannot be placed on a host
+//     that can only hold one of them;
+//   - it prefers the host that already holds the snapshot, because any other
+//     host has to pull it from the bucket first — but only as a PREFERENCE. The
+//     owner binding used to be absolute, which is what made every create for a
+//     given snapshot pile onto one host and 503 at its ceiling while the rest
+//     of the fleet sat idle.
+func (g *Gateway) reserveHostFor(exclude map[string]bool, needed int, prefer string) *host {
+	if needed <= 0 {
+		needed = 1
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+
+	fits := func(h *host) bool {
+		return h != nil && !exclude[h.id] && !now.Before(h.penaltyUntil) &&
+			now.Sub(h.lastSeen) <= g.ttl && h.free() >= needed
+	}
+	best := g.hosts[prefer]
+	if !fits(best) {
+		best = nil
+		for _, h := range g.hosts {
+			if !fits(h) {
+				continue
+			}
+			// Bin-pack, matching reserveHostMode: the tightest host that still
+			// fits, with a stable tie-break.
+			if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
+				best = h
+			}
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	best.reserved += needed
+	snap := *best
+	snap.reservedCount = needed
+	return &snap
+}
+
+// releaseReservationN ends a reservation covering more than one slot. landed
+// mirrors releaseReservation: true debits the advertised free count until the
+// next heartbeat, false just frees the reservation and wakes a queued create.
+func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
+	n := reserved.reservedCount
+	if n <= 1 {
+		g.releaseReservation(reserved, landed)
+		return
+	}
+	g.mu.Lock()
+	h := g.hosts[reserved.id]
+	if h == nil {
+		g.mu.Unlock()
+		return
+	}
+	if h.reserved >= n {
+		h.reserved -= n
+	} else {
+		h.reserved = 0
+	}
+	if landed {
+		for i := 0; i < n; i++ {
+			if h.slotsUsed < h.slotsTotal {
+				h.slotsUsed++
+			}
+			if h.slotsFree > 0 {
+				h.slotsFree--
+			}
+		}
+	}
+	g.mu.Unlock()
+	if landed {
+		g.createsOK.Add(1)
+		return
+	}
+	g.notifySlotFreed()
+}
+
 // reserveHostOrdinary is used by snapshot adoption, which cannot consume a
 // default-create ready VM.
 func (g *Gateway) reserveHostOrdinary(exclude map[string]bool) *host {
@@ -990,6 +1079,15 @@ const queuePollInterval = 250 * time.Millisecond
 // exactly once), or nil when queueing is disabled, the queue is full, the
 // wait times out, or the client goes away.
 func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map[string]bool) *host {
+	return g.awaitHostWith(ctx, deadline, func() *host { return g.reserveHost(exclude) })
+}
+
+// awaitHostWith is awaitHost with the placement rule supplied by the caller, so
+// a snapshot-sourced create waits in the SAME bounded queue as a default one.
+// That shared queue is the point: its depth is the scale-out signal
+// (sandbox_create_queue_depth), so a burst that never enqueues is a burst the
+// fleet never grows for.
+func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, reserve func() *host) *host {
 	if g.queueWait <= 0 || g.queueMax <= 0 {
 		return nil
 	}
@@ -1024,11 +1122,11 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 		case <-timeout.C:
 			return nil
 		case <-slotFreed:
-			if h := g.reserveHost(exclude); h != nil {
+			if h := reserve(); h != nil {
 				return h
 			}
 		case <-tick.C:
-			if h := g.reserveHost(exclude); h != nil {
+			if h := reserve(); h != nil {
 				return h
 			}
 		}

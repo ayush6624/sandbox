@@ -319,7 +319,16 @@ scripts/              Host setup shell scripts
   bin-packing and reserving those ready VMs across hosts before it falls back to the fullest
   host with ordinary free slots. Snapshot adoption deliberately uses ordinary placement so
   it cannot steal default-create ready capacity. Both modes reserve at pick time so concurrent
-  creates see each other. A create that a host rejects with a
+  creates see each other. **Snapshot- and template-sourced creates (restore/fanout) go through
+  the SAME reserve → queue → fail-over loop** (`serveSnapshotCreate`, internal/gateway/snapshots.go).
+  They used to be pinned to whichever host owned the snapshot and 503 outright when it was
+  full: measured on the 89-task Terminal-Bench oracle sweep (2026-08-16), 28 of 89 trials died
+  that way while other hosts had free slots, and — because a rejected create never enqueues —
+  `sandbox_create_queue_depth` stayed 0, so the gateway's level-triggered scale-out never fired
+  and the fleet never grew. Snapshot locality is now a PREFERENCE (the owner is picked when it
+  can hold the request, since anyone else must pull from the bucket first), a fanout of N
+  reserves N slots on one host, and `recordSnapshotOp` must skip its own slot debit when a
+  reservation already did it or the same sandboxes are counted twice. A create that a host rejects with a
   capacity-class error (503/429, e.g. pool exhaustion) or a connection failure **fails over**
   to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
   host errors return 502 without retry. When no slot is free the create

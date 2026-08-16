@@ -1270,3 +1270,72 @@ func TestScalerWithoutTargetSizeExportsNothing(t *testing.T) {
 		t.Fatal("scaler without TargetSize must export no target series")
 	}
 }
+
+// A snapshot-sourced create (restore, fanout — and therefore every
+// template-sourced create) used to be pinned to the host that owned the
+// snapshot and rejected outright when that host was full. Measured on an
+// 89-task benchmark: 28 trials 503'd while other hosts had free slots.
+func TestSnapshotCreatePrefersOwnerButFailsOverWhenItIsFull(t *testing.T) {
+	full := &host{id: "owner", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
+	roomy := &host{id: "other", slotsTotal: 4, slotsUsed: 0, slotsFree: 4}
+	g := liveGateway(full, roomy)
+
+	h := g.reserveHostFor(nil, 1, "owner")
+	if h == nil || h.id != "other" {
+		t.Fatalf("full owner must fail over to a host with capacity, got %v", h)
+	}
+
+	// Locality still wins whenever the owner can actually hold the request.
+	g2 := liveGateway(
+		&host{id: "owner", slotsTotal: 4, slotsUsed: 0, slotsFree: 4},
+		&host{id: "other", slotsTotal: 4, slotsUsed: 0, slotsFree: 4},
+	)
+	if h := g2.reserveHostFor(nil, 1, "owner"); h == nil || h.id != "owner" {
+		t.Fatalf("owner with capacity must be preferred (avoids a bucket pull), got %v", h)
+	}
+}
+
+// A fanout of N needs N slots on ONE host: placing it where only some fit just
+// moves the failure into the middle of the batch.
+func TestSnapshotFanoutReservesEverySlotItNeeds(t *testing.T) {
+	g := liveGateway(
+		&host{id: "small", slotsTotal: 2, slotsUsed: 0, slotsFree: 2},
+		&host{id: "big", slotsTotal: 8, slotsUsed: 0, slotsFree: 8},
+	)
+	h := g.reserveHostFor(nil, 4, "")
+	if h == nil || h.id != "big" {
+		t.Fatalf("fanout of 4 must land where 4 fit, got %v", h)
+	}
+	if got := g.hosts["big"].reserved; got != 4 {
+		t.Fatalf("reserved = %d, want 4 (the whole batch)", got)
+	}
+	g.releaseReservationN(h, false)
+	if got := g.hosts["big"].reserved; got != 0 {
+		t.Fatalf("reserved after release = %d, want 0", got)
+	}
+}
+
+// The queue is the scale-out signal, so a snapshot create that finds no
+// capacity must WAIT in it rather than 503 immediately — otherwise a burst of
+// them is invisible to the autoscaler and the fleet never grows. This is the
+// defect that left 28 benchmark trials dead while the fleet stayed at 2 hosts.
+func TestSnapshotCreateQueuesAndTriggersScaleOut(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 2, slotsUsed: 2, slotsFree: 0})
+	g.queueWait, g.queueMax = time.Minute, 8
+	scaler := &fakeDirectScaler{desired: make(chan int, 2)}
+	if err := g.ConfigureDirectScaleOut(scaler, 2, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go g.awaitHostWith(ctx, g.queueDeadline(), func() *host {
+		return g.reserveHostFor(nil, 1, "owner-that-is-full")
+	})
+
+	select {
+	case <-scaler.desired: // a queued snapshot create asked the fleet to grow
+	case <-time.After(2 * time.Second):
+		t.Fatal("a queued snapshot create did not trigger scale-out")
+	}
+}
