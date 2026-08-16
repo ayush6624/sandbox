@@ -38,6 +38,8 @@ silently:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import shlex
 from pathlib import Path
@@ -61,7 +63,7 @@ from harbor.environments.docker import (
 from harbor.models.task.config import EnvironmentConfig, TaskOS
 from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
-from .sandbox_client import SandboxClient, acquire_with_backoff
+from .sandbox_client import SandboxClient, SandboxError, acquire_with_backoff
 
 SANDBOX_ROOT = "/home/sandbox/harbor"
 """Everything for one trial lives under here in the guest: the staged compose
@@ -161,6 +163,10 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
         self._sandbox_id: str | None = None
         self._compose_ops = _SandboxComposeOps(self)
         self._use_prebuilt = False
+        # Set when this trial was cloned from a task snapshot, i.e. the image is
+        # already built in the guest and the build step can be skipped.
+        self._image_prebaked = False
+        self._cache_disabled = bool(os.environ.get("SANDBOX_NO_TASK_SNAPSHOT"))
 
     # ── identity & declarations ──────────────────────────────────────────
 
@@ -224,14 +230,111 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
                 "Dockerfile, and the task declares no docker_image."
             )
 
+    # ── task-snapshot cache ──────────────────────────────────────────────
+    #
+    # This is the local equivalent of what a provider with a template-build API
+    # gets for free. Harbor's E2BEnvironment turns a task's Dockerfile into a
+    # native template keyed by a content hash and skips the build whenever that
+    # alias already exists, so an image build is paid once per task ever. We have
+    # no template-build API (`/v1/templates` is read-only), and the Docker-in-VM
+    # route otherwise pays a full `docker compose build` inside the guest on
+    # every single trial.
+    #
+    # A snapshot is the primitive that closes the gap: build the task's image
+    # once in a real sandbox, snapshot it, and clone every later trial from that
+    # instead — a ~1 s restore rather than a 30-60 s build. The cache maps a hash
+    # of the task's environment directory to the snapshot id, so editing a task's
+    # Dockerfile invalidates it exactly the way E2B's alias hash does.
+
+    def _env_hash(self) -> str:
+        """Hash the build inputs: the environment dir, plus the base snapshot.
+
+        The base snapshot is part of the key because the built image lives
+        *inside* it — rebuild the Docker base and every task snapshot derived
+        from it describes a different machine.
+        """
+        digest = hashlib.sha256()
+        digest.update((self._snapshot_id or "no-base").encode())
+        digest.update(str(self.task_env_config.docker_image or "").encode())
+        for path in sorted(
+            p for p in self.environment_dir.rglob("*") if p.is_file()
+        ):
+            digest.update(str(path.relative_to(self.environment_dir)).encode())
+            digest.update(path.read_bytes())
+        return digest.hexdigest()[:16]
+
+    def _cache_path(self) -> Path:
+        root = os.environ.get("SANDBOX_TASK_SNAPSHOT_CACHE")
+        if root:
+            return Path(root)
+        return Path.home() / ".cache" / "sandbox-harbor" / "task-snapshots.json"
+
+    def _read_cache(self) -> dict[str, Any]:
+        try:
+            return json.loads(self._cache_path().read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _lookup_task_snapshot(self) -> str | None:
+        if not self._snapshot_id or self._cache_disabled:
+            return None
+        entry = self._read_cache().get(self._env_hash())
+        return entry.get("snapshot_id") if isinstance(entry, dict) else None
+
+    def _record_task_snapshot(self, snapshot_id: str) -> None:
+        """Write the mapping, tolerating a concurrent writer.
+
+        Two trials of the same task that both miss the cache each build and each
+        snapshot; last writer wins and the loser's snapshot is simply unused.
+        That wastes one build, never correctness, so it isn't worth a lock —
+        an oracle sweep runs one trial per task anyway.
+        """
+        path = self._cache_path()
+        cache = self._read_cache()
+        cache[self._env_hash()] = {
+            "snapshot_id": snapshot_id,
+            "task": self.environment_name,
+            "base_snapshot": self._snapshot_id,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp.%d" % os.getpid())
+            tmp.write_text(json.dumps(cache, indent=2, sort_keys=True))
+            tmp.replace(path)
+        except OSError as exc:
+            self.logger.warning("could not record task snapshot %s: %s", snapshot_id, exc)
+
+    def _forget_task_snapshot(self) -> None:
+        path = self._cache_path()
+        cache = self._read_cache()
+        if cache.pop(self._env_hash(), None) is None:
+            return
+        try:
+            tmp = path.with_suffix(".tmp.%d" % os.getpid())
+            tmp.write_text(json.dumps(cache, indent=2, sort_keys=True))
+            tmp.replace(path)
+        except OSError:
+            pass
+
     # ── guest paths ──────────────────────────────────────────────────────
 
     @property
     def _project_name(self) -> str:
-        # Compose project names allow [a-z0-9_-]; session ids carry '__'.
+        """Compose project name, derived from the TASK rather than the trial.
+
+        Every trial gets its own microVM, so there is exactly one compose
+        project per guest and nothing to collide with — while a per-trial name
+        would defeat the task-snapshot cache entirely: compose tags built images
+        `<project>-<service>`, so a name carrying the trial id makes the image
+        baked into the snapshot unreachable by the next trial, which then
+        rebuilds it. It also keeps the staged paths below identical across
+        trials, so a snapshot's staged compose files land where the clone
+        expects them.
+        """
+        # Compose project names allow [a-z0-9_-]; task names may carry others.
         cleaned = "".join(
             char if char.isalnum() or char in "-_" else "-"
-            for char in self.session_id.lower()
+            for char in self.environment_name.lower()
         )
         return cleaned.strip("-_") or "harbor"
 
@@ -348,9 +451,47 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
                 self._snapshot_id,
             )
 
-        sandbox = await acquire_with_backoff(
+        # Prefer this task's own snapshot (image already built) over the plain
+        # Docker base. On any failure fall back to the base and rebuild: a task
+        # snapshot can legitimately go missing — deleted by hand, or created on
+        # another worker and not yet replicated to the durability bucket — and
+        # "rebuild it" is always a correct answer, where failing the trial isn't.
+        task_snapshot = self._lookup_task_snapshot()
+        try:
+            sandbox = await self._acquire(task_snapshot or self._snapshot_id, vcpus, memory_mib)
+            self._image_prebaked = task_snapshot is not None
+        except SandboxError as exc:
+            if task_snapshot is None:
+                raise
+            self.logger.warning(
+                "task snapshot %s unusable (%s); forgetting it and rebuilding from %s",
+                task_snapshot, exc, self._snapshot_id,
+            )
+            self._forget_task_snapshot()
+            sandbox = await self._acquire(self._snapshot_id, vcpus, memory_mib)
+            self._image_prebaked = False
+
+        self._sandbox_id = sandbox.id
+        self.logger.info(
+            "sandbox %s up for %s (%s vcpu / %s MiB, image %s)",
+            sandbox.id,
+            self.session_id,
+            sandbox.vcpus or self._template_vcpus,
+            sandbox.memory_mib or self._template_memory_mib,
+            "prebaked" if self._image_prebaked else "to build",
+        )
+
+        await self._bootstrap_dirs()
+        await self._ensure_docker_ready()
+        await self._stage_and_up(force_build)
+
+    async def _acquire(
+        self, snapshot_id: str | None, vcpus: int | None, memory_mib: int | None
+    ):
+        assert self._client is not None
+        return await acquire_with_backoff(
             self._client,
-            snapshot_id=self._snapshot_id,
+            snapshot_id=snapshot_id,
             name=self.environment_name[:64],
             ttl_seconds=self._ttl_seconds,
             # Never idle-hibernate mid-trial: an agent thinking for two minutes
@@ -366,18 +507,6 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
                 **({"harbor_trial": str(self.context_id)} if self.context_id else {}),
             },
         )
-        self._sandbox_id = sandbox.id
-        self.logger.info(
-            "sandbox %s up for %s (%s vcpu / %s MiB)",
-            sandbox.id,
-            self.session_id,
-            sandbox.vcpus or self._template_vcpus,
-            sandbox.memory_mib or self._template_memory_mib,
-        )
-
-        await self._bootstrap_dirs()
-        await self._ensure_docker_ready()
-        await self._stage_and_up(force_build)
 
     async def _bootstrap_dirs(self) -> None:
         """Create the session tree before anything else runs in the guest.
@@ -457,7 +586,13 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
             force_build=force_build,
         )
 
-        if not self._use_prebuilt:
+        if self._use_prebuilt or self._image_prebaked:
+            # Nothing to build: either the task names a ready-made image, or this
+            # trial was cloned from a snapshot in which the image is already
+            # built. `up` below finds it by tag, which is why _project_name is
+            # derived from the task rather than the trial.
+            pass
+        else:
             build = await self._compose_ops._compose_exec(
                 ["build"], timeout_sec=round(self.task_env_config.build_timeout_sec)
             )
@@ -466,6 +601,11 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
                     f"docker compose build failed in sandbox {self._sandbox_id}: "
                     f"{build.stdout} {build.stderr}"
                 )
+            # Snapshot BEFORE `up`, so the cached image is captured without any
+            # running containers: a clone then starts its own, rather than
+            # resuming this trial's. Best-effort — a failure here costs the next
+            # trial a rebuild and nothing else.
+            await self._cache_task_snapshot()
 
         up = await self._compose_ops._compose_exec(
             ["up", "-d"], timeout_sec=COMPOSE_UP_TIMEOUT_SEC
@@ -481,6 +621,27 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
         # has to land in the container after it is up. The base method no-ops
         # for build-from-Dockerfile tasks.
         await self._upload_environment_dir_after_start()
+
+    async def _cache_task_snapshot(self) -> None:
+        """Snapshot this guest so later trials of the task skip the image build."""
+        if self._cache_disabled or not self._snapshot_id:
+            return
+        client, sandbox_id = self._require()
+        try:
+            snapshot = await client.snapshot(
+                sandbox_id, name=f"harbor-task-{self._project_name}"[:64]
+            )
+        except SandboxError as exc:
+            self.logger.warning("could not snapshot the built task image: %s", exc)
+            return
+        snapshot_id = snapshot.get("id")
+        if not snapshot_id:
+            return
+        self._record_task_snapshot(snapshot_id)
+        self.logger.info(
+            "cached task %s as snapshot %s; later trials clone it instead of building",
+            self.environment_name, snapshot_id,
+        )
 
     async def _ensure_harbor_dirs(self) -> None:
         """Create Harbor's fixed directory tree inside the main service.
