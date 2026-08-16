@@ -1052,7 +1052,7 @@ func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool, demandU
 	preferWarm := false
 	if useWarm {
 		for _, h := range g.hosts {
-			if exclude[h.id] || !h.placeable(now, g.ttl) || h.free() <= 0 {
+			if exclude[h.id] || !h.placeable(now, g.ttl) || h.free() < demandUnits {
 				continue
 			}
 			if h.warmFree() > 0 {
@@ -1065,7 +1065,7 @@ func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool, demandU
 		if exclude[h.id] || !h.placeable(now, g.ttl) {
 			continue
 		}
-		if h.free() <= 0 {
+		if h.free() < demandUnits {
 			continue
 		}
 		if preferWarm && h.warmFree() <= 0 {

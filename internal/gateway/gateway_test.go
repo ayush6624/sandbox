@@ -1169,6 +1169,26 @@ func TestFleetDemandAccountsForMemoryBoundOccupancyAndQueue(t *testing.T) {
 	}
 }
 
+func TestMemoryWeightedReservationRequiresEnoughDefaultSlotUnits(t *testing.T) {
+	g := liveGateway(
+		&host{id: "almost-full", slotsTotal: 48, slotsUsed: 10, slotsFree: 3},
+		&host{id: "fits", slotsTotal: 48, slotsUsed: 10, slotsFree: 8},
+	)
+	h := g.reserveHostDemand(nil, 4)
+	if h == nil || h.id != "fits" {
+		t.Fatalf("four-unit create placed on host without four free units: %+v", h)
+	}
+	if got := g.hosts["fits"].reservedUnits; got != 4 {
+		t.Fatalf("reserved demand units = %d, want 4", got)
+	}
+
+	g.hosts["fits"].slotsFree = 3
+	g.releaseReservation(h, false)
+	if got := g.reserveHostDemand(nil, 4); got != nil {
+		t.Fatalf("four-unit create should queue when every host has <4 units, got %+v", got)
+	}
+}
+
 // A queued request's weight must survive the whole queue lifetime and be
 // removed on cancellation; otherwise fleetDemand sees a transient one-slot
 // request or leaks demand after the client leaves.
