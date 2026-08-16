@@ -19,6 +19,32 @@ const AgentPath = "/usr/local/bin/sandboxd"
 // template built from a container image has to carry an entry under this name.
 const GuestUser = "sandbox"
 
+// GuestProfilePath is where a template build records the identity the IMAGE
+// declares, for sandboxd to adopt instead of the defaults above. A container
+// image's contract is "processes run as its USER, in its WORKDIR" — usually
+// root in something like /app — and workloads written for that image assume it:
+// a Terminal-Bench verifier apt-gets packages and checks `$PWD`. Honoring it is
+// what makes an unmodified published image behave as a sandbox.
+//
+// It is deliberately a file in the image rather than a create-time field: the
+// values come from the image, so they belong to the template, not the request.
+// Absent (every non-template guest) means the defaults, so the base image is
+// completely unaffected.
+//
+// Running as root here is consistent with the model this project already
+// documents — the isolation boundary is the microVM, not the guest uid, which
+// is why the base image grants passwordless sudo in the first place.
+const GuestProfilePath = "/etc/sandbox-guest.json"
+
+// GuestProfile is the content of GuestProfilePath. Empty fields fall back to
+// the built-in defaults, so a partially written profile degrades rather than
+// breaking the guest.
+type GuestProfile struct {
+	User string `json:"user,omitempty"`
+	Home string `json:"home,omitempty"`
+	Cwd  string `json:"cwd,omitempty"`
+}
+
 // ThawWakeEtherType and ThawWakeMagic identify the private Ethernet frame the
 // host sends across an unbridged tap immediately after resuming a clone. It is
 // only a latency hint; MMDS polling remains the correctness fallback.

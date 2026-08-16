@@ -27,11 +27,12 @@ import (
 // worker without the artifacts pulls them from the snapshot bucket), so nothing
 // else has to distribute a template.
 //
-// Two things the image must provide, because the guest is a machine rather than
-// a container: /bin/bash (exec and the pty shell are `bash -l`) and iproute2's
-// `ip` (a clone adopts its network identity by reconfiguring eth0 at thaw).
-// Both are one apt/apk line in the Dockerfile, so this fails fast and says so
-// rather than producing a template that boots and then misbehaves.
+// The one thing the image must provide, because the guest is a machine rather
+// than a container, is /bin/bash — exec and the pty shell are `bash -l`. This
+// fails fast and says so rather than producing a template that boots and then
+// misbehaves. Notably it does NOT need iproute2: the agent reconfigures eth0
+// over netlink when `ip` is absent (cmd/sandboxd/netlink_linux.go), so a
+// published image works unmodified.
 //
 // The image's ENTRYPOINT/CMD and any init system are NOT run: sandboxd is PID 1
 // (cmd/sandboxd/init_linux.go). The image's ENV is preserved via /etc/profile.d.
@@ -123,13 +124,14 @@ func templateBuild(ctx context.Context, args templateBuildArgs) error {
 	}
 	defer os.RemoveAll(stage)
 
-	tarPath, env := args.fromTar, []string(nil)
+	tarPath := args.fromTar
+	var imgCfg imageConfig
 	if args.fromImage != "" {
 		logf("exporting %s", args.fromImage)
 		if tarPath, err = dockerExport(args.fromImage, stage); err != nil {
 			return err
 		}
-		if env, err = dockerImageEnv(args.fromImage); err != nil {
+		if imgCfg, err = dockerImageConfig(args.fromImage); err != nil {
 			return err
 		}
 	}
@@ -144,7 +146,7 @@ func templateBuild(ctx context.Context, args templateBuildArgs) error {
 	}
 
 	logf("overlaying the sandbox agent")
-	if err := overlayTemplateRootfs(root, args.agentBin, env); err != nil {
+	if err := overlayTemplateRootfs(root, args.agentBin, imgCfg); err != nil {
 		return err
 	}
 
@@ -195,22 +197,54 @@ func dockerExport(ref, stage string) (string, error) {
 	return tarPath, nil
 }
 
-func dockerImageEnv(ref string) ([]string, error) {
-	out, err := exec.Command("docker", "image", "inspect", "-f", "{{json .Config.Env}}", ref).Output()
+// imageConfig is the part of a container image's config that describes how its
+// processes are meant to run. All three are contract, not decoration: a
+// workload built for the image expects its ENV, its USER, and its WORKDIR.
+type imageConfig struct {
+	Env        []string `json:"Env"`
+	User       string   `json:"User"`
+	WorkingDir string   `json:"WorkingDir"`
+}
+
+func dockerImageConfig(ref string) (imageConfig, error) {
+	var cfg imageConfig
+	out, err := exec.Command("docker", "image", "inspect", "-f", "{{json .Config}}", ref).Output()
 	if err != nil {
-		return nil, fmt.Errorf("docker image inspect %s: %w", ref, err)
+		return cfg, fmt.Errorf("docker image inspect %s: %w", ref, err)
 	}
-	var env []string
-	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("decode image env: %w", err)
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return cfg, fmt.Errorf("decode image config: %w", err)
 	}
-	return env, nil
+	return cfg, nil
+}
+
+// guestProfileFor maps an image config onto the identity sandboxd should adopt.
+// An image with no USER runs as root — that is Docker's default and what
+// workloads written for it assume — and its WORKDIR becomes the exec cwd.
+func guestProfileFor(cfg imageConfig) agentapi.GuestProfile {
+	profile := agentapi.GuestProfile{User: cfg.User, Cwd: cfg.WorkingDir}
+	// "user:group" — the group comes from the account itself.
+	if name, _, ok := strings.Cut(profile.User, ":"); ok {
+		profile.User = name
+	}
+	// A USER may be given as a uid; sandboxd resolves by name, so only a name
+	// is usable. Fall back to root rather than guessing wrong.
+	if _, err := strconv.Atoi(profile.User); err == nil {
+		profile.User = ""
+	}
+	if profile.User == "" {
+		profile.User = "root"
+	}
+	if profile.Cwd == "" {
+		profile.Cwd = "/"
+	}
+	return profile
 }
 
 // overlayTemplateRootfs installs everything the guest side of the sandbox
 // contract needs into an extracted image: the agent, the account exec runs as,
 // and the drop-ins that make sudo/sshd behave as they do in the base image.
-func overlayTemplateRootfs(root, agentBin string, env []string) error {
+func overlayTemplateRootfs(root, agentBin string, cfg imageConfig) error {
 	if err := requireGuestBinaries(root); err != nil {
 		return err
 	}
@@ -274,11 +308,23 @@ func overlayTemplateRootfs(root, agentBin string, env []string) error {
 	if err := writeFileIn(root, "etc/hosts", "127.0.0.1\tlocalhost sandbox\n::1\tlocalhost ip6-localhost ip6-loopback\n", 0o644); err != nil {
 		return err
 	}
-	return writeFileIn(root, templateEnvFile, imageEnvScript(env), 0o644)
+	if err := writeFileIn(root, templateEnvFile, imageEnvScript(cfg.Env), 0o644); err != nil {
+		return err
+	}
+
+	// Record the identity the image declares, so the agent runs work as that
+	// user in that directory instead of as the sandbox account.
+	guest := guestProfileFor(cfg)
+	profile, err := json.Marshal(guest)
+	if err != nil {
+		return err
+	}
+	logf("image identity: user=%s cwd=%s", guest.User, guest.Cwd)
+	return writeFileIn(root, strings.TrimPrefix(agentapi.GuestProfilePath, "/"), string(profile)+"\n", 0o644)
 }
 
-// requireGuestBinaries fails the build on the two image contents a sandbox
-// cannot work without, with the fix rather than just the symptom.
+// requireGuestBinaries fails the build on image contents a sandbox cannot work
+// without, with the fix rather than just the symptom.
 func requireGuestBinaries(root string) error {
 	for _, need := range []struct {
 		what, fix string
@@ -286,8 +332,6 @@ func requireGuestBinaries(root string) error {
 	}{
 		{"bash", "install bash in your image (exec and the pty shell run `bash -l`)",
 			[]string{"bin/bash", "usr/bin/bash", "usr/local/bin/bash"}},
-		{"ip", "install iproute2 in your image (a sandbox reconfigures eth0 when it is cloned)",
-			[]string{"sbin/ip", "usr/sbin/ip", "bin/ip", "usr/bin/ip"}},
 	} {
 		found := false
 		for _, p := range need.paths {

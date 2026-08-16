@@ -132,14 +132,18 @@ Harbor tasks are compose projects: a `task.toml` plus a `docker-compose.yaml` or
 strategies exist upstream:
 
 1. **Provider builds the image** — `E2BEnvironment` turns the task's Dockerfile
-   into an E2B template; Daytona builds a Daytona snapshot. We *can't* do this
-   today: `/v1/templates` is read-only, there is no template-build API.
+   into an E2B template; Daytona builds a Daytona snapshot. **We can now do this
+   too** (`sandbox template build`, docs/templates.md): a task's image becomes
+   the guest's rootfs, and each trial is a clone of that template — no Docker
+   inside the VM at all. Proven against real Terminal-Bench 2.0 tasks, see the
+   note below. The adapter has NOT been switched to it, for one reason: the
+   build needs docker and root beside a worker, and fleet workers have neither.
 2. **Docker-in-the-VM** — `EC2Environment` provisions a VM, installs Docker, and
    runs `docker compose build && up` inside it, execing into the `main` service.
    `DinDComposeOps` factors out everything except two primitives: run a shell
    command on the VM, and move files to/from it.
 
-We take route 2. `SandboxEnvironment` is ~380 lines because `DinDComposeOps`
+We take route 2, still. `SandboxEnvironment` is ~380 lines because `DinDComposeOps`
 does the rest, and it maps the task's `cpus`/`memory_mb` onto the **guest VM**
 rather than a cgroup inside it — a stronger boundary than Docker limits, and
 honest about CPU (the fleet oversubscribes CPU ~6:1 by design, so we declare
@@ -157,6 +161,38 @@ harbor run --environment-import-path …:SandboxEnvironment
         ├─ upload/download → two-hop: API → guest /tmp → docker compose cp
         └─ stop(delete)  → DELETE /v1/sandboxes/{id}     (kills the whole project)
 ```
+
+**Route 1 is available and measured (2026-08-16), and what it still needs.**
+A task's image can be turned into a template directly, which is the E2B shape:
+
+```bash
+sandbox template build --from-image ghcr.io/laude-institute/terminal-bench/<task>:2.0
+```
+
+Verified on a dev host against real cached tasks:
+
+- `build-cython-ext@2.0` — the **published image, unmodified** (no iproute2, no
+  sudo): template built, 2 clones live in 1.08 s, reidentify 7–12 ms. Oracle
+  solve + verifier produced **exactly the same result as running the same
+  scripts in plain Docker** (1 failed / 10 passed, reward 0 — that task fails
+  its own oracle upstream on this host, in Docker too).
+- `hello-world@1.0` — built from its Dockerfile: **oracle reward 1, nop reward
+  0**, i.e. the full UC-1 gate, with the solution writing relative to the
+  image's `WORKDIR` and the verifier `apt-get`ing as root.
+
+Two properties made those work and are worth keeping in mind when comparing the
+routes: the guest runs as the image's `USER` in its `WORKDIR` (so task scripts
+that assume root and `$PWD` behave), and no iproute2 is needed because the agent
+reconfigures `eth0` over netlink.
+
+What blocks switching the adapter is placement, not capability: `sandbox
+template build` runs on a host with docker AND a worker on it, and fleet workers
+have no docker. The options are (a) bake docker into the worker image and drive
+builds on a worker, (b) build the image inside a sandbox and turn *that* into
+the template, or (c) keep route 2, whose per-task snapshot cache already removes
+the per-trial build cost. Pick one before rewriting the adapter — route 1's win
+over the current cache is the missing dockerd layer (memory, one less indirection
+per exec), not the build time, which is already paid once either way.
 
 **Prerequisite: Docker in the guest — via a prepared SNAPSHOT, not a rootfs
 bake.** The base image ships Node/pnpm/TypeScript/Python/build-essential/git but

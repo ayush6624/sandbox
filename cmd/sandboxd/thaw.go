@@ -213,6 +213,13 @@ func applyIdentity(id cloneIdentity) error {
 		return fmt.Errorf("bad IPv4 prefix %q", prefix)
 	}
 
+	// A template built from a container image need not contain iproute2, and a
+	// clone that cannot reconfigure eth0 is unreachable. Do it over netlink
+	// instead (netlink_linux.go); guests that have `ip` keep the batch below.
+	if !haveIPCommand() {
+		return applyIdentityNetlink(mmdsIface, id.IP, id.MAC, id.GW, bits)
+	}
+
 	// One iproute2 batch replaces eight short-lived `ip` processes on every
 	// clone. Besides saving process startup, the commands remain ordered and
 	// the tap is still unbridged until the GARP acknowledgement.
@@ -234,6 +241,10 @@ func applyIdentity(id cloneIdentity) error {
 // ensureMMDSRoute makes sure the link-local MMDS address is routed via eth0
 // (kernel-configured guests don't get this route automatically).
 func ensureMMDSRoute() {
+	if !haveIPCommand() {
+		_ = mmdsRouteNetlink(nil)
+		return
+	}
 	// `ip route add` is idempotent enough for our purpose; ignore "File exists".
 	_ = exec.Command("ip", "route", "add", mmdsAddr+"/32", "dev", mmdsIface).Run()
 }

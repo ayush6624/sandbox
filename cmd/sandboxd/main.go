@@ -27,8 +27,6 @@ import (
 	"github.com/ayush6624/sandbox/internal/agentapi"
 )
 
-const defaultCwd = "/home/sandbox/app"
-
 func main() {
 	// A guest built from a container image has no init system, so the kernel
 	// boots this binary as PID 1 (see init_linux.go). It mounts the guest's
@@ -495,7 +493,7 @@ func handleWriteFile(w http.ResponseWriter, r *http.Request) {
 func handleListDir(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		path = defaultCwd
+		path = guestCwd()
 	}
 	var out []agentapi.DirEntry
 	err := withGuestFilesystem(func() error {
@@ -532,8 +530,10 @@ func workingDir(requested string) string {
 	if requested != "" {
 		return requested
 	}
-	if _, err := os.Stat(defaultCwd); err == nil {
-		return defaultCwd
+	if cwd := guestCwd(); cwd != "" {
+		if _, err := os.Stat(cwd); err == nil {
+			return cwd
+		}
 	}
 	return "/"
 }

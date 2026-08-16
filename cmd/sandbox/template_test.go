@@ -83,21 +83,31 @@ func TestEnsureGuestAccount(t *testing.T) {
 	})
 }
 
-// A missing bash or ip yields a template that boots and then misbehaves — an
-// unreachable clone or a failing exec — so the build has to refuse up front.
+// A missing bash yields a template that boots and then fails every exec, so the
+// build has to refuse up front. iproute2 is deliberately NOT required — the
+// agent reconfigures eth0 over netlink without it, which is what lets a
+// published image (no iproute2 in any Terminal-Bench task image) be templated
+// unmodified.
 func TestRequireGuestBinaries(t *testing.T) {
 	root := fakeImage(t, "root:x:0:0:root:/root:/bin/bash\n")
 	if err := requireGuestBinaries(root); err != nil {
 		t.Fatalf("complete image rejected: %v", err)
 	}
-	for _, missing := range []string{"bin/bash", "usr/sbin/ip"} {
-		root := fakeImage(t, "root:x:0:0:root:/root:/bin/bash\n")
-		if err := os.Remove(filepath.Join(root, missing)); err != nil {
-			t.Fatal(err)
-		}
-		if err := requireGuestBinaries(root); err == nil {
-			t.Fatalf("image without %s accepted", missing)
-		}
+
+	noIP := fakeImage(t, "root:x:0:0:root:/root:/bin/bash\n")
+	if err := os.Remove(filepath.Join(noIP, "usr/sbin/ip")); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireGuestBinaries(noIP); err != nil {
+		t.Fatalf("image without iproute2 rejected: %v", err)
+	}
+
+	noBash := fakeImage(t, "root:x:0:0:root:/root:/bin/bash\n")
+	if err := os.Remove(filepath.Join(noBash, "bin/bash")); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireGuestBinaries(noBash); err == nil {
+		t.Fatal("image without bash accepted")
 	}
 }
 
@@ -119,6 +129,29 @@ func TestImageEnvScript(t *testing.T) {
 	}
 	if strings.Contains(script, "MALFORMED") {
 		t.Fatalf("exported a valueless entry: %q", script)
+	}
+}
+
+// The image's USER/WORKDIR are contract: a workload built for the image expects
+// to run as that user, there. An image declaring neither is root in / — Docker's
+// own default, and what a task verifier that apt-gets packages assumes.
+func TestGuestProfileFor(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cfg       imageConfig
+		user, cwd string
+	}{
+		{"defaults to root", imageConfig{}, "root", "/"},
+		{"honors user and workdir", imageConfig{User: "app", WorkingDir: "/srv"}, "app", "/srv"},
+		{"strips the group", imageConfig{User: "app:app"}, "app", "/"},
+		{"numeric uid is unusable by name", imageConfig{User: "1000"}, "root", "/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := guestProfileFor(tc.cfg)
+			if got.User != tc.user || got.Cwd != tc.cwd {
+				t.Fatalf("got user=%q cwd=%q, want user=%q cwd=%q", got.User, got.Cwd, tc.user, tc.cwd)
+			}
+		})
 	}
 }
 

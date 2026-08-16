@@ -60,23 +60,42 @@ sandbox, and you find out at build time rather than at create time.
 
 ## Requirements on the image
 
-Two, both checked before anything is built:
+One, checked before anything is built:
 
 - **`bash`** — `/exec` and the pty shell run `bash -l`.
-- **`iproute2`** (`ip`) — a clone adopts its network identity by reconfiguring
-  `eth0` at thaw. Without it the clone resumes still holding the template's
-  address and is simply unreachable.
 
-```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends bash iproute2
-# alpine: apk add --no-cache bash iproute2
-```
+Notably **not** iproute2. A clone has to reconfigure `eth0` to adopt its own
+network identity, and shelling out to `ip` would make iproute2 a hard
+requirement of every image — which no published image satisfies (not one
+Terminal-Bench task image ships it). When `ip` is absent the agent does the same
+work over netlink instead (`cmd/sandboxd/netlink_linux.go`), so an image
+templates unmodified.
 
 Optional, and absent-by-default in slim images:
 
 - **OpenSSH** — no sshd means `sandbox ssh` does not work for this template.
   Everything else (exec, files, pty, ports) is unaffected.
-- **sudo** — without it the workload cannot become root inside its own guest.
+
+## The image's identity is honored
+
+A container image declares how its processes run, and workloads written for it
+depend on that: a Terminal-Bench verifier `apt-get`s packages and checks `$PWD`,
+and its solution writes files relative to the working directory. So the build
+records what the image declares and the agent adopts it:
+
+| From the image | Effect |
+|---|---|
+| `USER` (unset ⇒ `root`, Docker's own default) | who exec, files, and the pty shell run as |
+| `WORKDIR` | the default exec cwd |
+| `ENV` | exported into every login shell |
+
+It lands as `/etc/sandbox-guest.json` in the template's rootfs. Guests without
+that file — the base image and everything derived from it — keep the
+unprivileged `sandbox` account and `/home/sandbox/app` exactly as before.
+
+Running as root inside a template guest is consistent with the boundary this
+project already relies on: isolation is the microVM, not the guest uid, which is
+why the base image grants passwordless sudo in the first place.
 
 ## What is NOT carried over from the image
 

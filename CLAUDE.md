@@ -384,9 +384,19 @@ scripts/              Host setup shell scripts
   sandboxd runs as PID 1** (cmd/sandboxd/init_linux.go) — it mounts /proc, /sys, /dev,
   /dev/pts, /dev/shm, /run, then re-execs itself as a supervised child, because a generic
   `wait4(-1)` reaper in the same process as the agent would steal exit statuses from
-  os/exec and break every exec. Two image requirements are checked at build time with the
-  fix in the message: **bash** (exec/pty run `bash -l`) and **iproute2** (a clone
-  reconfigures eth0 at thaw). The subtle one that cost a debugging session: **the kernel
+  os/exec and break every exec. The image needs only **bash** (exec/pty run `bash -l`),
+  checked at build time — NOT iproute2: a clone must reconfigure eth0 at thaw, and
+  shelling out to `ip` would exclude every published image (no Terminal-Bench task
+  image ships it), so sandboxd falls back to netlink when `ip` is absent
+  (cmd/sandboxd/netlink_linux.go; the library is already in the module graph via
+  the Firecracker SDK's CNI deps). **The image's USER/WORKDIR/ENV are honored** —
+  recorded at build time in `/etc/sandbox-guest.json` (agentapi.GuestProfile) and
+  adopted by the agent, so exec runs as root in e.g. `/app` rather than as the
+  `sandbox` account in `/home/sandbox/app`. Workloads written for the image depend
+  on this (a Terminal-Bench verifier apt-gets and checks `$PWD`), and root in the
+  guest is the model this repo already documents. A guest without that file — the
+  base image and everything derived from it — is completely unaffected.
+  The subtle one that cost a debugging session: **the kernel
   hands init an environment with no PATH**, so `exec.Command("ip", …)` in the thaw agent
   silently fails to resolve and the clone resumes still holding the template's address —
   reachable at the OLD ip, invisible at the new one. `runInit` sets a default PATH; don't
