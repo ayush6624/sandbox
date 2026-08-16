@@ -9,6 +9,20 @@
  * success by itself. Every held sandbox gets durable in-guest identity state
  * and is repeatedly connected to and executed against while hosts resume,
  * Nomad reconciles allocations, and the gateway changes its routing table.
+ *
+ * Resource overrides make this a stand-in for a real memory-heavy workload
+ * (e.g. a terminal-bench sweep) without running one:
+ *
+ *   AUTOSCALE_VCPUS=2 AUTOSCALE_MEM_MIB=4096 \
+ *   LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS \
+ *   npm run test:autoscale -- scale-in-drain
+ *
+ * At 4096 MiB a 48-slot host admits ~11 sandboxes, not 48, so scale-out is
+ * reached with a fraction of the VMs and the run exercises the memory-admission
+ * path that the slot arithmetic mis-sizes. Pair it with a short
+ * --scale-in-after-sec on the gateway (and a matching
+ * AUTOSCALE_SCALE_IN_AFTER_MS here) to watch a full cordon -> drain -> delete
+ * cycle in minutes rather than waiting out the production window.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -38,6 +52,24 @@ const MAX_HOSTS = integerEnv('AUTOSCALE_MAX_HOSTS', 22, FLOOR_HOSTS)
 const MAX_LIVE_SANDBOXES = integerEnv('AUTOSCALE_MAX_LIVE_SANDBOXES', 512, 1)
 const MAX_CREATE_P95_MS = integerEnv('AUTOSCALE_MAX_CREATE_P95_MS', 30_000, 1)
 const MAX_CREATE_MS = integerEnv('AUTOSCALE_MAX_CREATE_MS', 60_000, MAX_CREATE_P95_MS)
+// Per-sandbox resource overrides, so a burst can be made MEMORY-bound rather
+// than slot-bound. That is the regime real workloads land in, and the one the
+// slot arithmetic gets wrong: with MEM_PER_SLOT_MIB=1180 a 48-slot host
+// advertises 48 slots but admits only ~11 sandboxes at 4096 MiB (measured
+// 2026-08-16 — three hosts at 99.2% of a 56,640 MiB budget while running
+// 11/9/11 sandboxes).
+//
+// It also makes the benchmark much cheaper: forcing scale-out costs ~11 creates
+// per host instead of 48, so a full multi-host cycle needs a fraction of the VMs
+// and boots. Setting either forces a cold boot (snapshots bake vcpus/mem), which
+// is worth exercising in its own right — the ready pool cannot serve these, so
+// this is also the path that has no warm fast lane.
+const VCPUS = integerEnv('AUTOSCALE_VCPUS', 0, 0)
+const MEM_MIB = integerEnv('AUTOSCALE_MEM_MIB', 0, 0)
+// How long the gateway must see low demand before it cordons a host, mirroring
+// the gateway's --scale-in-after-sec. Drive a run with a short value to exercise
+// scale-in without waiting out the production window.
+const SCALE_IN_AFTER_MS = integerEnv('AUTOSCALE_SCALE_IN_AFTER_MS', 600_000, 1_000)
 const OUTPUT = process.env.AUTOSCALE_OUTPUT ??
   resolve(dirname(fileURLToPath(import.meta.url)), 'results', `autoscale-traffic-${stamp()}.json`)
 
@@ -145,6 +177,10 @@ class ScenarioContext {
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
       hibernateAfterMs: -1,
       name: `autoscale-${RUN_ID}-${this.scenario}-${label}`.slice(0, 63),
+      // Omitted entirely when zero: the API treats absent as "template default",
+      // and sending an explicit 0 is not the same thing.
+      ...(VCPUS > 0 ? { vcpus: VCPUS } : {}),
+      ...(MEM_MIB > 0 ? { memMib: MEM_MIB } : {}),
     })
     this.createLatencyMs.push(Date.now() - started)
     this.creates++
@@ -247,6 +283,28 @@ class ScenarioContext {
     for (let attempt = 0; attempt < 5 && this.held.size; attempt++) {
       await mapItems([...this.held.values()], 48, (held) => this.kill(held))
       if (this.held.size) await sleep(500)
+    }
+  }
+
+  heldCount(): number {
+    return this.held.size
+  }
+
+  /**
+   * Release everything except `keep` sandboxes, which stay live and probed.
+   * Scale-in has to be observed with something still running: a fleet that is
+   * entirely empty cannot show whether the controller drained a host or simply
+   * deleted one out from under a tenant.
+   */
+  async killAllBut(keep: number): Promise<void> {
+    const doomed = [...this.held.values()].slice(keep)
+    for (let attempt = 0; attempt < 5 && doomed.some((h) => this.held.has(h.sandbox.sandboxId)); attempt++) {
+      await mapItems(
+        doomed.filter((h) => this.held.has(h.sandbox.sandboxId)),
+        48,
+        (held) => this.kill(held)
+      )
+      if (doomed.some((h) => this.held.has(h.sandbox.sandboxId))) await sleep(500)
     }
   }
 
@@ -474,11 +532,103 @@ const sawtooth: Scenario = {
   },
 }
 
+/**
+ * Exercises gateway-owned scale-in end to end: grow past the floor, release the
+ * load, and require the fleet to come back to the floor THROUGH a cordon and a
+ * drain rather than by deleting a busy host.
+ *
+ * The assertions are about mechanism, not just the final count. The old Nomad
+ * autoscaler also returned the fleet to MIG_MIN — it just did so by purging
+ * whichever instance GCE picked, which on 2026-08-16 was the host the gateway
+ * had added seconds earlier, killing 11 running trials. A test that only checked
+ * "we ended at 2 hosts" passed happily through that. So this one requires:
+ *
+ *   - a cordon actually happened (sandbox_scale_in_cordons_total advanced), and
+ *   - no sandbox died while it happened (every held sandbox stays reachable
+ *     across the whole cycle, which holdAndProbe enforces), and
+ *   - the removal was a drain, not a purge (removed advanced, and the fleet
+ *     never dipped below the floor).
+ */
+const scaleInDrain: Scenario = {
+  name: 'scale-in-drain',
+  async run(ctx) {
+    const before = await getGatewayMetrics()
+    const cordonsBefore = metric(before, 'sandbox_scale_in_cordons_total')
+    const removedBefore = metric(before, 'sandbox_scale_in_removed_total')
+
+    // Grow past the floor. With memory overrides this is a small burst.
+    const burst = integerEnv('AUTOSCALE_DRAIN_BURST', (FLOOR_HOSTS + 1) * perHostCapacity(), 1)
+    await ctx.createMany(burst, 'drain')
+    await waitFor(
+      async () => (await getHosts()).filter((host) => host.alive).length > FLOOR_HOSTS,
+      10 * 60_000,
+      5_000,
+      `scale-out past the floor of ${FLOOR_HOSTS} hosts`,
+      () => ctx.assertHealthy()
+    )
+    const peak = (await getHosts()).filter((host) => host.alive).length
+
+    // Keep a few sandboxes alive across the whole drain. The cordon must not
+    // touch them, and the host holding them must not be deleted under them.
+    const survivors = Math.min(ctx.heldCount(), integerEnv('AUTOSCALE_DRAIN_SURVIVORS', 4, 1))
+    await ctx.killAllBut(survivors)
+
+    // Demand is now low. Wait out the gateway's window plus its 30s evaluation
+    // tick, then require evidence of the mechanism.
+    await waitFor(
+      async () => metric(await getGatewayMetrics(), 'sandbox_scale_in_cordons_total') > cordonsBefore,
+      SCALE_IN_AFTER_MS + 5 * 60_000,
+      5_000,
+      'the gateway to cordon a host for draining',
+      () => ctx.assertHealthy()
+    )
+
+    await waitFor(
+      async () => {
+        const alive = (await getHosts()).filter((host) => host.alive).length
+        const now = await getGatewayMetrics()
+        return alive === FLOOR_HOSTS &&
+          metric(now, 'sandbox_scale_in_removed_total') > removedBefore &&
+          metric(now, 'sandbox_hosts_draining') === 0
+      },
+      SCALE_IN_AFTER_MS + 15 * 60_000,
+      5_000,
+      `drained scale-in back to ${FLOOR_HOSTS} hosts with no host left cordoned`,
+      () => ctx.assertHealthy()
+    )
+
+    // The survivors must have lived through the entire cycle. This is the
+    // property the old autoscaler violated.
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_DRAIN_VERIFY_MS', 15_000, 1_000))
+    const after = await getGatewayMetrics()
+    console.log(
+      `   scale-in: ${peak} -> ${FLOOR_HOSTS} hosts, ` +
+        `cordons +${metric(after, 'sandbox_scale_in_cordons_total') - cordonsBefore}, ` +
+        `removed +${metric(after, 'sandbox_scale_in_removed_total') - removedBefore}, ` +
+        `${survivors} sandbox(es) survived`
+    )
+    await ctx.killAll()
+  },
+}
+
+/**
+ * Sandboxes one host can hold. With a memory override this is the memory
+ * admission bound, which is what actually limits density — the slot count
+ * overstates it by ~4x for a 4 GiB sandbox.
+ */
+function perHostCapacity(): number {
+  if (MEM_MIB <= 0) return SLOTS_PER_HOST
+  const budgetMib = integerEnv('AUTOSCALE_MEM_BUDGET_MIB', SLOTS_PER_HOST * 1180, 1)
+  const perSandbox = MEM_MIB + 156 // VMM overhead, matching the registry's admission check
+  return Math.max(1, Math.floor(budgetMib / perSandbox))
+}
+
 // Sawtooth must start from the preflight floor. Other scenarios intentionally
 // reuse whatever running capacity a prior scenario caused; sawtooth itself
 // proves return-to-floor behavior between its cycles.
 const ALL: Scenario[] = [
   sawtooth,
+  scaleInDrain,
   standbyRefillBoundary,
   heldBurst,
   gradualRamp,
@@ -810,6 +960,40 @@ async function getHosts(): Promise<RawHost[]> {
 
 async function getSandboxes(): Promise<RawSandbox[]> {
   return apiJson<RawSandbox[]>('/sandboxes')
+}
+
+/**
+ * Scrape the gateway's own counters. Scale-in is only observable here: a
+ * cordoned host still heartbeats and still serves, so /hosts alone cannot
+ * distinguish "draining" from "idle", and the delete is invisible until the
+ * host disappears entirely.
+ */
+async function getGatewayMetrics(): Promise<Map<string, number>> {
+  const response = await fetch(`${API_URL.replace(/\/$/, '')}/metrics`, {
+    headers: { Authorization: `Bearer ${CONTROL_KEY}` },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!response.ok) throw new Error(`GET /metrics: HTTP ${response.status}`)
+  const out = new Map<string, number>()
+  for (const line of (await response.text()).split('\n')) {
+    if (!line || line.startsWith('#')) continue
+    // Only unlabelled families are needed here, so take `name value` and skip
+    // anything carrying labels rather than half-parsing it.
+    const match = /^([a-zA-Z_:][a-zA-Z0-9_:]*) ([0-9.eE+-]+)$/.exec(line.trim())
+    if (match) out.set(match[1], Number(match[2]))
+  }
+  return out
+}
+
+function metric(metrics: Map<string, number>, name: string): number {
+  const value = metrics.get(name)
+  if (value === undefined) {
+    throw new Error(
+      `gateway /metrics has no ${name}: the deployed gateway predates ` +
+        'gateway-owned scale-in, so this scenario cannot verify anything'
+    )
+  }
+  return value
 }
 
 async function apiJson<T>(path: string, key: string = API_KEY): Promise<T> {
