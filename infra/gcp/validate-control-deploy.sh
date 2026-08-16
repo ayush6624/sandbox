@@ -4,7 +4,8 @@ set -euo pipefail
 # Gateway-only deploys are the fast rollout path. They must pass every setting
 # that changes the generated gateway unit, or a normal code rollout can
 # silently remove a production feature even though the binary still supports
-# it. Raw ingress was disabled this way when cmd_gateway omitted the settings
+# it, or make the installer fail under set -u. Raw ingress was disabled this
+# way when cmd_gateway omitted the settings
 # that cmd_deploy already supplied. GATEWAY_EDGE_TOKEN is in the list for the
 # same reason and is worse than a missing feature: dropping it makes the gateway
 # fall back to accepting the CLIENT credential on /route and /raw-route, which
@@ -29,10 +30,12 @@ for assignment in \
   "RAW_PORT_MAX='\${EDGE_RAW_PORT_MAX:-29999}'" \
   "GATEWAY_EDGE_TOKEN='\$GATEWAY_EDGE_TOKEN'" \
   "GW_TOKEN_PREV='\${GATEWAY_TOKEN_PREV:-}'" \
-  "GATEWAY_EDGE_TOKEN_PREV='\${GATEWAY_EDGE_TOKEN_PREV:-}'"
+  "GATEWAY_EDGE_TOKEN_PREV='\${GATEWAY_EDGE_TOKEN_PREV:-}'" \
+  "MIG_MIN='\${MIG_MIN:-1}'" \
+  "SCALE_IN_AFTER_SEC='\${SCALE_IN_AFTER_SEC:-600}'"
 do
   grep -Fq "$assignment" <<<"$gateway_fn" ||
     fail "gateway-only deploy does not pass $assignment"
 done
 
-echo "PASS: gateway-only deploy preserves raw ingress and edge-credential configuration"
+echo "PASS: gateway-only deploy preserves scaling, raw ingress, and edge-credential configuration"
