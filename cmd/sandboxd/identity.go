@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -86,6 +87,15 @@ func initializeGuestIdentity(sandboxID string) error {
 	if err := os.Remove(authorizedKeysPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove inherited authorized_keys: %w", err)
 	}
+	// A template built from a container image need not contain OpenSSH. There
+	// is then no host key to rotate and no sshd to impersonate, so the
+	// uniqueness this call exists to guarantee is vacuous: record the identity
+	// and let SSH access fail later with its own error rather than failing
+	// every create for this template.
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		log.Print("identity: no ssh-keygen in this image; skipping host key rotation")
+		return writeIdentityMarker(sandboxID)
+	}
 	// Every /etc/ssh/ssh_host_* file was just removed, so ssh-keygen has nothing
 	// to overwrite and cannot prompt; runIdentityCommand also leaves Stdin nil,
 	// which exec wires to /dev/null, so it can never block on input either.
@@ -105,6 +115,14 @@ func initializeGuestIdentity(sandboxID string) error {
 }
 
 func restartSSHService() error {
+	// In a template guest there is no service manager at all — sandboxd is
+	// PID 1's child and owns sshd directly, so none of the fallbacks below
+	// apply and the systemctl ones would only turn a working guest into a
+	// failed create.
+	if initMode() {
+		return restartOwnSSHD()
+	}
+
 	// Snapshot restores preserve sshd's master PID. Signal that process
 	// directly, then prove it completed re-exec by observing a replacement
 	// port-22 listener inode. sshd loads host keys before opening that listener,

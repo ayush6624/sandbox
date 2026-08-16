@@ -492,6 +492,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /sandboxes/{id}/adopt", s.handleAdopt)
 	mux.HandleFunc("POST /sandboxes/{id}/release", s.handleRelease)
 	mux.HandleFunc("POST /internal/v1/sandboxes/{action}", s.handleInternalSandboxAction)
+	mux.HandleFunc("POST /templates/build", s.handleTemplateBuild)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/rename", s.handleRenameSnapshot)
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
@@ -827,7 +828,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !hot {
-		s2, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB)
+		s2, err := s.createCold(ctx, body.Name, expiresAt, body.HibernateAfterSec, body.Vcpus, body.MemMIB, "")
 		if err != nil {
 			s.met.createsErr.Add(1)
 			capacityOrHTTPError(w, 500, err)
@@ -969,7 +970,11 @@ func (s *Server) tryAcquireCreate() bool {
 // kernel boot, and agent startup. It blocks until the in-guest agent answers,
 // so callers can exec/write files the moment it returns. vcpus/memMIB override
 // the template's resources when nonzero (already validated by the caller).
-func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (registry.Sandbox, error) {
+// rootfsBase selects the image to copy this sandbox's disk from: "" is the
+// host's configured base, and anything else is a template build booting a
+// container-image rootfs (see handleTemplateBuild), which also needs the kernel
+// pointed at sandboxd as init since such an image has no init system.
+func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64, rootfsBase string) (registry.Sandbox, error) {
 	id := uuid.NewString()
 	lifecycle := s.wakeLock(id)
 	lifecycle.Lock()
@@ -984,7 +989,11 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
 	}
 
-	if _, err := s.cfg.Provisioner.PrepareRootfs(id); err != nil {
+	base := rootfsBase
+	if base == "" {
+		base = s.cfg.Provisioner.RootfsBase
+	}
+	if _, err := s.cfg.Provisioner.PrepareRootfsFrom(base, id); err != nil {
 		s.rollbackPreVM(id, sb)
 		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
@@ -996,6 +1005,14 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 
 	opts := s.cfg.VMTemplate
 	opts.RootfsPath = rootfsPath
+	if rootfsBase != "" {
+		// A container image has no /sbin/init, so the kernel is pointed at the
+		// agent, which mounts the guest's pseudo-filesystems and supervises
+		// itself (cmd/sandboxd/init_linux.go). Only this one boot needs it:
+		// every sandbox made from the resulting snapshot resumes a running
+		// process and never re-reads the kernel command line.
+		opts.KernelArgs += " init=" + templateInitPath
+	}
 	opts.TapDevice = sb.TapDevice
 	opts.GuestCIDR = fmt.Sprintf("%s/%d", sb.GuestIP, s.guestSubnetBits())
 	opts.GatewayIP = s.cfg.GatewayIP

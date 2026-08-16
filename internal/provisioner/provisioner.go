@@ -192,11 +192,18 @@ func defaultInterface() (string, error) {
 
 // PrepareRootfs copies the base rootfs to a per-sandbox path (sparse).
 func (p *Provisioner) PrepareRootfs(sandboxID string) (string, error) {
+	return p.PrepareRootfsFrom(p.RootfsBase, sandboxID)
+}
+
+// PrepareRootfsFrom is PrepareRootfs against an explicit base image, used by
+// template builds: the one boot that turns a container image into a snapshot
+// runs off that image's rootfs rather than the host's configured base.
+func (p *Provisioner) PrepareRootfsFrom(base, sandboxID string) (string, error) {
 	if err := os.MkdirAll(p.RootfsDir, 0o755); err != nil {
 		return "", err
 	}
 	dest := p.rootfsPath(sandboxID)
-	if err := CloneFile(p.RootfsBase, dest); err != nil {
+	if err := CloneFile(base, dest); err != nil {
 		return "", fmt.Errorf("clone rootfs: %w", err)
 	}
 	return dest, nil

@@ -30,6 +30,14 @@ import (
 const defaultCwd = "/home/sandbox/app"
 
 func main() {
+	// A guest built from a container image has no init system, so the kernel
+	// boots this binary as PID 1 (see init_linux.go). It mounts the guest's
+	// pseudo-filesystems and re-execs us as its supervised child, which is the
+	// process that falls through to the agent below.
+	if isInit() {
+		runInit() // never returns
+	}
+
 	addr := flag.String("addr", fmt.Sprintf(":%d", agentapi.Port), "listen address")
 	flag.Parse()
 

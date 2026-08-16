@@ -8,6 +8,17 @@ import "time"
 // reaches it directly at guestIP:Port over the bridge (no DNAT involved).
 const Port = 8090
 
+// AgentPath is where sandboxd is installed in every guest. It is a shared
+// constant rather than three literals because a template guest boots the agent
+// as init (`init=<AgentPath>`, see internal/server/template.go), so the path the
+// build overlays it at and the path the kernel is told to exec must agree.
+const AgentPath = "/usr/local/bin/sandboxd"
+
+// GuestUser is the unprivileged account every exec, file operation, and shell
+// runs as. sandboxd resolves it BY NAME in the guest's /etc/passwd, so a
+// template built from a container image has to carry an entry under this name.
+const GuestUser = "sandbox"
+
 // ThawWakeEtherType and ThawWakeMagic identify the private Ethernet frame the
 // host sends across an unbridged tap immediately after resuming a clone. It is
 // only a latency hint; MMDS polling remains the correctness fallback.

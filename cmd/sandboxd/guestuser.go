@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+
+	"github.com/ayush6624/sandbox/internal/agentapi"
 	"os/user"
 	"strconv"
 	"strings"
@@ -9,7 +11,7 @@ import (
 )
 
 const (
-	guestUsername = "sandbox"
+	guestUsername = agentapi.GuestUser
 	guestHome     = "/home/sandbox"
 )
 

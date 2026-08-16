@@ -44,6 +44,7 @@ sudo ./sandbox read <id> /path                       # file out of the guest →
 sudo ./sandbox write <id> /path [--from local]       # stdin/local file → guest
 sudo ./sandbox ls <id> [/path]                       # list a guest directory
 sudo ./sandbox install-agent --agent ./sandboxd      # bake sandboxd into base rootfs
+sudo ./sandbox template build --from-image my-env    # container image → template snapshot (docs/templates.md)
 sudo ./sandbox stop-server [--force]                 # SIGTERM (graceful) / SIGKILL the server
 ```
 
@@ -369,6 +370,30 @@ scripts/              Host setup shell scripts
   disk + cold build otherwise). The `sandbox` SERVER binary is still pulled from the GCS release,
   so a host can only ADOPT if that release has `importGoldenManifest` (deploy ≥ this change).
   Rebake both images together (a drifted pair just cold-rebuilds).
+- **A template IS a snapshot, and a container image can become one.**
+  `sandbox template build --from-image <ref>` (cmd/sandbox/template.go) exports the
+  image, overlays the guest-side sandbox contract onto the extracted tree, `mkfs.ext4
+  -d`s it, and asks the worker to boot it once and snapshot it (`POST /templates/build`,
+  internal/server/template.go — buildGolden's sequence minus the golden marking). The
+  snapshot id is the template id: `source:{type:"snapshot",id}` creates from it, the GCS
+  pull makes it usable on any worker, and hibernate/wake/TTL/ports/usage all work because
+  the result is an ordinary sandbox. So there is deliberately NO template registry, no
+  new id space, and no distribution code. The route is worker-local — the gateway proxies
+  an explicit path list and `/templates` is not on it — which is what keeps a tenant from
+  naming a host path to boot. **The image's ENTRYPOINT/CMD and init system are NOT run:
+  sandboxd runs as PID 1** (cmd/sandboxd/init_linux.go) — it mounts /proc, /sys, /dev,
+  /dev/pts, /dev/shm, /run, then re-execs itself as a supervised child, because a generic
+  `wait4(-1)` reaper in the same process as the agent would steal exit statuses from
+  os/exec and break every exec. Two image requirements are checked at build time with the
+  fix in the message: **bash** (exec/pty run `bash -l`) and **iproute2** (a clone
+  reconfigures eth0 at thaw). The subtle one that cost a debugging session: **the kernel
+  hands init an environment with no PATH**, so `exec.Command("ip", …)` in the thaw agent
+  silently fails to resolve and the clone resumes still holding the template's address —
+  reachable at the OLD ip, invisible at the new one. `runInit` sets a default PATH; don't
+  remove it. systemd sets one in the base image, which is why only template guests hit it.
+  Resources are baked at build time (restores reject vcpu/mem overrides), and template
+  creates are fan-out speed (~300 ms–1 s), not ready-pool speed — the pool and golden are
+  per-host and singular. See docs/templates.md.
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
   `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
   `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override

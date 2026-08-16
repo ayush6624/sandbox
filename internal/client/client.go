@@ -138,6 +138,26 @@ func (c *Client) CreateRaw(ctx context.Context, body []byte) (registry.Sandbox, 
 	return sb, nil
 }
 
+// TemplateBuildOpts describes one template build: boot this host-local rootfs
+// image once and snapshot it. See internal/server/template.go — the resulting
+// snapshot id is the template id.
+type TemplateBuildOpts struct {
+	RootfsPath string `json:"rootfs_path"`
+	Name       string `json:"name,omitempty"`
+	Vcpus      int64  `json:"vcpus,omitempty"`
+	MemMIB     int64  `json:"mem_mib,omitempty"`
+}
+
+// BuildTemplate turns a prepared rootfs image into a snapshot. Worker-local:
+// the gateway does not proxy this route, and the caller names a host path.
+func (c *Client) BuildTemplate(ctx context.Context, opts TemplateBuildOpts) (registry.Snapshot, error) {
+	var snap registry.Snapshot
+	if err := c.do(ctx, "POST", "/templates/build", opts, &snap); err != nil {
+		return registry.Snapshot{}, err
+	}
+	return snap, nil
+}
+
 // List returns all running sandboxes.
 func (c *Client) List(ctx context.Context) ([]registry.Sandbox, error) {
 	var out []registry.Sandbox
