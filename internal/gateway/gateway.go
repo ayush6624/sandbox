@@ -1207,20 +1207,22 @@ func dialAddr(addr string) string {
 }
 
 // hostOnly strips the port from an addr, so clients can pair it with a
-// sandbox's forwarded ports (which live on the host, not the gateway).
+// sandbox's forwarded ports (which live on the host, not the gateway). A bare
+// "host:port" parses with an empty url.Host, which is why the SplitHostPort
+// fallback is not redundant.
 func hostOnly(addr string) string {
-	if parsed, err := url.Parse(addr); err == nil && parsed.Host != "" {
-		if host := parsed.Hostname(); host != "" {
-			return portHost(host)
+	var host string
+	switch parsed, err := url.Parse(addr); {
+	case err == nil && parsed.Hostname() != "":
+		host = parsed.Hostname()
+	default:
+		h, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return addr
 		}
+		host = h
 	}
-	if h, _, err := net.SplitHostPort(addr); err == nil {
-		return portHost(h)
-	}
-	return addr
-}
-
-func portHost(host string) string {
+	// Both extractors strip IPv6 brackets; callers append ":port", so put them back.
 	if strings.Contains(host, ":") {
 		return "[" + strings.Trim(host, "[]") + "]"
 	}

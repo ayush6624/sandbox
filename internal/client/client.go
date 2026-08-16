@@ -332,19 +332,6 @@ func (c *Client) ExposePort(ctx context.Context, id string, guestPort int) (regi
 	return pm, nil
 }
 
-// ExposeHostPort reserves a worker host port, regardless of the host's
-// default_url_only setting. Callers that must dial the worker directly (SSH,
-// scp/rsync) need a real host port, so they cannot inherit a default that may
-// hand back a URL-only mapping with HostPort 0.
-func (c *Client) ExposeHostPort(ctx context.Context, id string, guestPort int) (registry.PortMapping, error) {
-	var pm registry.PortMapping
-	body := map[string]any{"guest_port": guestPort, "host_port": true}
-	if err := c.do(ctx, "POST", "/sandboxes/"+id+"/ports", body, &pm); err != nil {
-		return registry.PortMapping{}, err
-	}
-	return pm, nil
-}
-
 // ExposeURLPort authorizes public ingress without reserving a worker host port.
 func (c *Client) ExposeURLPort(ctx context.Context, id string, guestPort int) (registry.PortMapping, error) {
 	var pm registry.PortMapping

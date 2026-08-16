@@ -3,10 +3,11 @@ package registry
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -837,20 +838,13 @@ func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath stri
 	}, nil
 }
 
-// CreateRestore inserts a running row for an already-ready restored sandbox.
-// Unlike Create, the tap and guest IP are fixed (the snapshot baked them in) —
-// The partial unique indexes guarantee the tap/IP aren't already taken by a
-// running sandbox, so a restore
-// fails cleanly if the source (or a prior restore of the same snapshot) is
-// still live. vcpus/memMIB carry the snapshot's recorded resources — the
-// restore can't change them (they're baked into the snapshot), it just
-// reports them.
-func (r *Registry) CreateRestore(ctx context.Context, id, name, rootfsPath, tap, ip string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
-	return r.createRestore(ctx, StatusRunning, id, name, rootfsPath, tap, ip, expiresAt, hibernateAfterSec, vcpus, memMIB)
-}
-
 // CreateRestoreStarting reserves a snapshot's fixed identity without routing
-// it until restore readiness completes.
+// it until restore readiness completes. The tap and guest IP are fixed (the
+// snapshot baked them in); the partial unique indexes guarantee they aren't
+// already taken by a running sandbox, so a restore fails cleanly if the source
+// (or a prior restore of the same snapshot) is still live. vcpus/memMIB carry
+// the snapshot's recorded resources — the restore can't change them (they're
+// baked into the snapshot), it just reports them.
 func (r *Registry) CreateRestoreStarting(ctx context.Context, id, name, rootfsPath, tap, ip string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
 	return r.createRestore(ctx, StatusStarting, id, name, rootfsPath, tap, ip, expiresAt, hibernateAfterSec, vcpus, memMIB)
 }
@@ -1919,13 +1913,16 @@ func pickFreePort(used usedResources, p Pools) (int, error) {
 }
 
 func ipToUint32(s string) (uint32, error) {
-	ip := net.ParseIP(s).To4()
-	if ip == nil {
+	addr, err := netip.ParseAddr(s)
+	if err != nil || !addr.Is4() {
 		return 0, fmt.Errorf("invalid IPv4 %q", s)
 	}
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3]), nil
+	b := addr.As4()
+	return binary.BigEndian.Uint32(b[:]), nil
 }
 
 func uint32ToIP(n uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d", byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], n)
+	return netip.AddrFrom4(b).String()
 }

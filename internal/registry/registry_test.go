@@ -568,7 +568,7 @@ func TestRestoreChargesBakedMem(t *testing.T) {
 	r, ctx := memRegistry(t), context.Background()
 
 	// A restore whose snapshot baked more memory than the budget allows.
-	_, err := r.CreateRestore(ctx, "big", "", "/tmp/big.ext4", "fc0", "172.16.0.10", nil, 0, 0, 4096)
+	_, err := r.createRestore(ctx, StatusRunning, "big", "", "/tmp/big.ext4", "fc0", "172.16.0.10", nil, 0, 0, 4096)
 	if err == nil {
 		t.Fatal("restore with baked mem beyond the budget should be rejected")
 	}
@@ -727,7 +727,7 @@ func TestSnapshotRecordsSourceResources(t *testing.T) {
 	}
 
 	// ...and a restore stamps them onto the new row.
-	sb, err := r.CreateRestore(ctx, "sb2", "", "/tmp/sb2.ext4", got.TapDevice, got.GuestIP, nil, 0, got.Vcpus, got.MemMIB)
+	sb, err := r.createRestore(ctx, StatusRunning, "sb2", "", "/tmp/sb2.ext4", got.TapDevice, got.GuestIP, nil, 0, got.Vcpus, got.MemMIB)
 	if err != nil {
 		t.Fatalf("create restore: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestFailedWakeRestoresFrozenIdentity(t *testing.T) {
 		t.Fatalf("hibernate A: %v", err)
 	}
 	// Something takes A's identity while it sleeps, forcing the clone path.
-	if _, err := r.CreateRestore(ctx, "B", "", "/tmp/b.ext4", frozen.TapDevice, frozen.GuestIP, nil, 0, 0, 0); err != nil {
+	if _, err := r.createRestore(ctx, StatusRunning, "B", "", "/tmp/b.ext4", frozen.TapDevice, frozen.GuestIP, nil, 0, 0, 0); err != nil {
 		t.Fatalf("squat A's identity: %v", err)
 	}
 

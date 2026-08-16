@@ -6,12 +6,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -219,26 +219,24 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
-// Cursor encodes an opaque list offset. It is intentionally not a database
-// key so the representation can change without becoming API surface.
+// Cursor encodes a list offset as a page token. It is deliberately not a
+// database key, so the representation stays free to change. It carried a
+// sha256 suffix once; that bought nothing, because the offset was emitted in
+// plaintext right beside it — the token was never opaque and the digest only
+// rejected hand-typed values, which a range check does anyway.
 func Cursor(offset int) string {
 	if offset <= 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("sandbox-cursor:%d", offset)))
-	return fmt.Sprintf("%d.%s", offset, hex.EncodeToString(sum[:6]))
+	return strconv.Itoa(offset)
 }
 
 func ParseCursor(value string) (int, error) {
 	if value == "" {
 		return 0, nil
 	}
-	var offset int
-	var signature string
-	if _, err := fmt.Sscanf(value, "%d.%s", &offset, &signature); err != nil || offset < 0 {
-		return 0, fmt.Errorf("invalid cursor")
-	}
-	if Cursor(offset) != value {
+	offset, err := strconv.Atoi(value)
+	if err != nil || offset < 0 {
 		return 0, fmt.Errorf("invalid cursor")
 	}
 	return offset, nil

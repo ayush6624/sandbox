@@ -155,13 +155,13 @@ func (p *Provisioner) DiffExtents(clonePath, basePath string) ([]Range, error) {
 			bEnd := bOff + int64(be.Length)
 			if bOff > pos {
 				// Gap in base before its next extent → changed.
-				end := min64(bOff, cEnd)
+				end := min(bOff, cEnd)
 				out = appendRange(out, pos, end)
 				pos = end
 				continue
 			}
 			// Overlap [pos, min(bEnd, cEnd)). Shared iff physical addresses line up.
-			end := min64(bEnd, cEnd)
+			end := min(bEnd, cEnd)
 			cPhys := int64(ce.Physical) + (pos - cOff)
 			bPhys := int64(be.Physical) + (pos - bOff)
 			shared := cPhys == bPhys && be.Flags&(fiemapExtentUnknown|fiemapExtentDelalloc|fiemapExtentEncoded) == 0
@@ -241,11 +241,4 @@ func appendRange(out []Range, off, end int64) []Range {
 		return out
 	}
 	return append(out, Range{Off: off, Len: end - off})
-}
-
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }
