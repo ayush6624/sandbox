@@ -1147,6 +1147,16 @@ func TestFleetDemandAccountsForMemoryBoundOccupancyAndQueue(t *testing.T) {
 	if fs.demand != 2 {
 		t.Fatalf("memory demand = %d hosts, want 2 (52/48 units)", fs.demand)
 	}
+	// A heartbeat may include creates whose gateway reservations have not been
+	// released yet. That overlap must never make one 48-unit host report more
+	// than 48 units and trigger an unnecessary extra resize.
+	g.hosts["a"].reserved = 10
+	g.hosts["a"].reservedUnits = 40
+	if got := g.hosts["a"].demandCommitted(); got != 48 {
+		t.Fatalf("overlapping heartbeat + reservations demand = %d, want host cap 48", got)
+	}
+	g.hosts["a"].reserved = 0
+	g.hosts["a"].reservedUnits = 0
 	body := gatewayMetrics(g)
 	for _, want := range []string{
 		"sandbox_slots_demand 40",

@@ -30,6 +30,8 @@ import { fileURLToPath } from 'node:url'
 import { Sandbox } from '../sdk/typescript/src/index.js'
 
 const LIVE_ACK = 'I_UNDERSTAND_THIS_CREATES_REAL_VMS'
+const ALLOW_HIBERNATED_BASELINE =
+  process.env.AUTOSCALE_ALLOW_HIBERNATED_BASELINE === LIVE_ACK
 const API_URL = required('SANDBOX_API_URL')
 const API_KEY = required('SANDBOX_API_KEY')
 // Worker-control credential (GATEWAY_CONTROL_TOKEN). Only the host-inventory
@@ -80,6 +82,7 @@ interface RawHost {
   slots_used: number
   hibernated: number
   free: number
+  warm_ready?: number
   alive: boolean
   last_seen_ms_ago: number
   release?: string
@@ -638,6 +641,7 @@ const ALL: Scenario[] = [
 ]
 let interrupted = false
 let activeContext: ScenarioContext | undefined
+let baselineSandboxIds = new Set<string>()
 
 async function main(): Promise<void> {
   if (process.env.LIVE_AUTOSCALE_BENCHMARK !== LIVE_ACK) {
@@ -708,6 +712,7 @@ async function main(): Promise<void> {
       maxLiveSandboxes: MAX_LIVE_SANDBOXES,
       maxCreateP95Ms: MAX_CREATE_P95_MS,
       maxCreateMs: MAX_CREATE_MS,
+      baselineSandboxIds: [...baselineSandboxIds],
     },
     results,
     summary: {
@@ -731,7 +736,18 @@ async function preflight(): Promise<void> {
     )
   }
   const sandboxes = await getSandboxes()
-  if (sandboxes.length) throw new Error(`preflight: gateway already owns ${sandboxes.length} sandboxes`)
+  if (sandboxes.length) {
+    if (!ALLOW_HIBERNATED_BASELINE) {
+      throw new Error(`preflight: gateway already owns ${sandboxes.length} sandboxes`)
+    }
+    const active = sandboxes.filter((sandbox) => sandbox.status !== 'hibernated')
+    if (active.length) {
+      throw new Error(
+        `preflight: refusing a baseline with ${active.length} non-hibernated sandbox(es)`
+      )
+    }
+  }
+  baselineSandboxIds = new Set(sandboxes.map((sandbox) => sandbox.id))
   const hosts = await getHosts()
   assertHostInvariants(hosts)
   const alive = hosts.filter((host) => host.alive)
@@ -739,10 +755,10 @@ async function preflight(): Promise<void> {
     throw new Error(`preflight: expected exactly ${FLOOR_HOSTS} alive floor hosts, got ${alive.length}`)
   }
   for (const host of alive) {
-    if (host.slots_used !== 0 || host.free !== SLOTS_PER_HOST) {
+    if (host.slots_used !== 0 || host.free + (host.warm_ready ?? 0) !== SLOTS_PER_HOST) {
       throw new Error(
         `preflight: ${host.id} is not empty ${SLOTS_PER_HOST}-slot floor ` +
-        `(used=${host.slots_used}, free=${host.free})`
+        `(used=${host.slots_used}, free=${host.free}, warm=${host.warm_ready ?? 0})`
       )
     }
   }
@@ -757,10 +773,14 @@ function assertHostInvariants(hosts: RawHost[]): void {
   }
   for (const host of alive) {
     if (host.release !== EXPECTED_RELEASE || host.release_compatible !== true) {
-      throw new Error(
-        `incompatible host ${host.id}: release=${host.release ?? '<missing>'}, ` +
-        `compatible=${String(host.release_compatible)}, expected=${EXPECTED_RELEASE}`
-      )
+      if (host.free !== 0) {
+        throw new Error(
+          `incompatible host ${host.id} advertised free=${host.free}: ` +
+          `release=${host.release ?? '<missing>'}, compatible=${String(host.release_compatible)}, ` +
+          `expected=${EXPECTED_RELEASE}`
+        )
+      }
+      continue
     }
     if (host.slots_total !== SLOTS_PER_HOST) {
       throw new Error(`host ${host.id}: slots_total=${host.slots_total}, expected ${SLOTS_PER_HOST}`)
@@ -945,8 +965,11 @@ function pendingStandbyRefillSuspensions(
 async function assertCleanGateway(): Promise<void> {
   await waitFor(async () => {
     const [sandboxes, hosts] = await Promise.all([getSandboxes(), getHosts()])
-    return sandboxes.length === 0 && hosts.filter((host) => host.alive).every((host) => host.slots_used === 0)
-  }, 60_000, 500, 'zero residual sandboxes and zero advertised host usage')
+    const ids = new Set(sandboxes.map((sandbox) => sandbox.id))
+    const baselineIntact = ids.size === baselineSandboxIds.size &&
+      [...baselineSandboxIds].every((id) => ids.has(id))
+    return baselineIntact && hosts.filter((host) => host.alive).every((host) => host.slots_used === 0)
+  }, 60_000, 500, 'only the preserved baseline sandboxes and zero advertised host usage')
   const hosts = await getHosts()
   assertHostInvariants(hosts)
 }
@@ -970,7 +993,7 @@ async function getSandboxes(): Promise<RawSandbox[]> {
  */
 async function getGatewayMetrics(): Promise<Map<string, number>> {
   const response = await fetch(`${API_URL.replace(/\/$/, '')}/metrics`, {
-    headers: { Authorization: `Bearer ${CONTROL_KEY}` },
+    headers: { Authorization: `Bearer ${API_KEY}` },
     signal: AbortSignal.timeout(15_000),
   })
   if (!response.ok) throw new Error(`GET /metrics: HTTP ${response.status}`)

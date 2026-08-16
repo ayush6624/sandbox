@@ -177,6 +177,14 @@ func (h *host) demandCommitted() int {
 	if physical := h.committed(); units < physical {
 		units = physical
 	}
+	// A heartbeat can observe a registry-committed create before its HTTP
+	// response releases the gateway reservation. DemandSlots and reservedUnits
+	// then briefly describe the same sandbox. No host can consume more than its
+	// whole configured capacity, so cap that overlap rather than letting one
+	// host transiently size like two and ratchet the MIG target upward.
+	if units > h.slotsTotal {
+		units = h.slotsTotal
+	}
 	return units
 }
 
