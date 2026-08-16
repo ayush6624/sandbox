@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/cluster"
@@ -18,6 +20,52 @@ import (
 // heartbeatInterval is how often the host re-registers with the gateway. The
 // gateway's stale-host TTL should be a small multiple of this.
 const heartbeatInterval = 5 * time.Second
+
+// metadataInstanceNameURL is the GCE metadata endpoint naming this VM.
+const metadataInstanceNameURL = "http://metadata.google.internal/computeMetadata/v1/instance/name"
+
+var (
+	instanceNameMu     sync.Mutex
+	instanceNameCached string
+)
+
+// gceInstanceName reports the provider instance this worker runs on, so the
+// gateway can delete THIS host when it scales in — a MIG resize-down chooses
+// its own victim, which is never the host that was drained.
+//
+// Empty off GCE (metadata.google.internal does not resolve, so this fails
+// immediately rather than hanging), which leaves the host ineligible for
+// scale-in. Only a non-empty answer is cached: a transient metadata failure
+// during boot would otherwise permanently strip this worker of the ability to
+// be scaled in, and the loss would be silent.
+func gceInstanceName(ctx context.Context) string {
+	instanceNameMu.Lock()
+	defer instanceNameMu.Unlock()
+	if instanceNameCached != "" {
+		return instanceNameCached
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataInstanceNameURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if err != nil {
+		return ""
+	}
+	instanceNameCached = strings.TrimSpace(string(body))
+	return instanceNameCached
+}
 
 // heartbeat periodically POSTs this host's state to the gateway so it can route
 // requests here. It runs for the server's lifetime. Failures are logged and
@@ -143,16 +191,17 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		fmt.Fprintf(os.Stderr, "heartbeat: list snapshots: %v\n", err)
 	}
 	hb := cluster.Heartbeat{
-		HostID:      hostID,
-		Addr:        advertise,
-		Release:     s.cfg.WorkerRelease,
-		SlotsTotal:  s.reg.Pools().Slots(),
-		SlotsUsed:   runningCount,
-		WarmReady:   warmReady,
-		Hibernated:  hibernated,
-		SandboxIDs:  ids,
-		SnapshotIDs: snapIDs,
-		RawRoutes:   rawRoutes,
+		HostID:       hostID,
+		Addr:         advertise,
+		InstanceName: gceInstanceName(ctx),
+		Release:      s.cfg.WorkerRelease,
+		SlotsTotal:   s.reg.Pools().Slots(),
+		SlotsUsed:    runningCount,
+		WarmReady:    warmReady,
+		Hibernated:   hibernated,
+		SandboxIDs:   ids,
+		SnapshotIDs:  snapIDs,
+		RawRoutes:    rawRoutes,
 	}
 	if s.workerCredentials != nil {
 		hb.ControlToken = s.workerCredentials.Outbound()

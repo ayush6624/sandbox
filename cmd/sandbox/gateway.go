@@ -32,6 +32,8 @@ var (
 	gwScaleZone       string
 	gwScaleMIG        string
 	gwScaleMax        int
+	gwScaleMin        int
+	gwScaleInAfterSec int
 	gwScaleSlots      int
 	gwScaleHeadroom   int
 	gwReleaseFile     string
@@ -88,6 +90,8 @@ token to the caller and must therefore never be reachable with a client key.`,
 	cmd.Flags().StringVar(&gwScaleZone, "direct-scale-zone", "", "GCE zone for queue-triggered direct MIG scale-out")
 	cmd.Flags().StringVar(&gwScaleMIG, "direct-scale-mig", "", "GCE managed instance group for queue-triggered direct scale-out")
 	cmd.Flags().IntVar(&gwScaleMax, "direct-scale-max", 0, "maximum MIG size for direct scale-out")
+	cmd.Flags().IntVar(&gwScaleMin, "direct-scale-min", 0, "minimum MIG size; enables gateway-owned scale-in (0 disables scale-in entirely)")
+	cmd.Flags().IntVar(&gwScaleInAfterSec, "scale-in-after-sec", 0, "seconds demand must stay below fleet size before a host is cordoned (0 = 600)")
 	cmd.Flags().IntVar(&gwScaleSlots, "direct-scale-slots-per-host", 0, "sandbox slots supplied by each worker")
 	cmd.Flags().IntVar(&gwScaleHeadroom, "direct-scale-headroom", 0, "extra slots included in direct scale-out demand")
 	cmd.Flags().StringVar(&gwReleaseFile, "worker-release-file", "", "persisted expected worker release used to gate stale allocations")
@@ -163,6 +167,14 @@ func runGateway(cmd *cobra.Command, args []string) error {
 		}
 		if err := g.ConfigureDirectScaleOut(scaler, gwScaleSlots, gwScaleHeadroom); err != nil {
 			return err
+		}
+		// Scale-in is opt-in on the minimum: without a floor the fleet would be
+		// allowed to drain to zero hosts, and an empty fleet cannot serve the
+		// create that would have grown it back.
+		if gwScaleMin > 0 {
+			if err := g.ConfigureScaleIn(gwScaleMin, time.Duration(gwScaleInAfterSec)*time.Second); err != nil {
+				return err
+			}
 		}
 	}
 	if gwIngressBucket != "" {

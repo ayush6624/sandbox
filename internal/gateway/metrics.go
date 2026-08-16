@@ -91,6 +91,15 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# HELP sandbox_creates_total Sandboxes the gateway successfully brought up.\n# TYPE sandbox_creates_total counter\nsandbox_creates_total %d\n", g.createsOK.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_total Queue-triggered direct scale-out requests submitted to the scaler.\n# TYPE sandbox_direct_scale_out_total counter\nsandbox_direct_scale_out_total %d\n", g.directScaleStarted.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_failed_total Queue-triggered direct scale-out requests that failed.\n# TYPE sandbox_direct_scale_out_failed_total counter\nsandbox_direct_scale_out_failed_total %d\n", g.directScaleFailed.Load())
+	// Gateway-owned scale-in. hosts_draining is the one to alarm on: a host that
+	// stays cordoned is capacity being paid for and not used, which means
+	// something on it will not drain (a pinned sandbox, a stuck wake).
+	// cordons - removed - aborted should stay equal to it.
+	gauge("sandbox_hosts_draining", "Hosts cordoned for scale-in: serving what they hold, accepting no new placements.", g.drainingHostCount())
+	fmt.Fprintf(&b, "# HELP sandbox_scale_in_cordons_total Hosts cordoned to begin draining for scale-in.\n# TYPE sandbox_scale_in_cordons_total counter\nsandbox_scale_in_cordons_total %d\n", g.scaleInCordons.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_scale_in_removed_total Drained hosts whose provider instance was deleted.\n# TYPE sandbox_scale_in_removed_total counter\nsandbox_scale_in_removed_total %d\n", g.scaleInRemoved.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_scale_in_aborted_total Cordons released because demand returned before the host emptied.\n# TYPE sandbox_scale_in_aborted_total counter\nsandbox_scale_in_aborted_total %d\n", g.scaleInAborted.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_scale_in_failed_total Provider instance deletions that failed; the host stays cordoned and is retried.\n# TYPE sandbox_scale_in_failed_total counter\nsandbox_scale_in_failed_total %d\n", g.scaleInFailed.Load())
 	// The grow-only watermark the gateway has already asked the MIG to reach.
 	// Diagnostic only — it is NOT the scale-in ceiling. It re-baselines to the
 	// live host count whenever the queue empties, so it can read lower than the

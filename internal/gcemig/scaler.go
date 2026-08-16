@@ -3,6 +3,7 @@
 package gcemig
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -110,6 +111,41 @@ func (s *Scaler) ScaleOut(ctx context.Context, desired int) error {
 	return nil
 }
 
+// DeleteInstance removes ONE named instance from the group and decrements its
+// target size in the same operation.
+//
+// This is deliberately not a resize-down. `resize` to N-1 lets GCE choose the
+// victim by its own ordering, which has no relationship to which host the
+// gateway drained — so a resize would delete a host full of live sandboxes and
+// leave the empty one running. deleteInstances is the only call that removes a
+// SPECIFIC member, and it is what makes cordon-then-drain meaningful.
+//
+// The caller owns the floor: this refuses to act only on an empty name. Going
+// below a minimum is a policy decision the gateway makes with knowledge of
+// demand, and duplicating it here would let the two disagree.
+func (s *Scaler) DeleteInstance(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("delete MIG instance: empty instance name")
+	}
+	token, err := s.token(ctx)
+	if err != nil {
+		return err
+	}
+	// A fully qualified instance URL is accepted, but the zonal short form is
+	// what the MIG reports and is unambiguous within the group's zone.
+	body := struct {
+		Instances []string `json:"instances"`
+	}{Instances: []string{fmt.Sprintf("zones/%s/instances/%s", s.zone, name)}}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	if err := s.doJSONBody(ctx, http.MethodPost, s.endpoint()+"/deleteInstances", token, raw, nil); err != nil {
+		return fmt.Errorf("delete MIG instance %s: %w", name, err)
+	}
+	return nil
+}
+
 func (s *Scaler) token(ctx context.Context) (string, error) {
 	s.tokenMu.Lock()
 	defer s.tokenMu.Unlock()
@@ -146,11 +182,22 @@ func (s *Scaler) token(ctx context.Context) (string, error) {
 }
 
 func (s *Scaler) doJSON(ctx context.Context, method, endpoint, token string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	return s.doJSONBody(ctx, method, endpoint, token, nil, dst)
+}
+
+func (s *Scaler) doJSONBody(ctx context.Context, method, endpoint, token string, body []byte, dst any) error {
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, rdr)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err

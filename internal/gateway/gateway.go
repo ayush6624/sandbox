@@ -83,6 +83,28 @@ type host struct {
 	// failure. Zero = no penalty.
 	penaltyUntil time.Time
 	lastSeen     time.Time
+	// instanceName is the provider instance backing this host, self-reported in
+	// its heartbeat. Empty (non-GCE, or a worker predating the field) means the
+	// gateway cannot name this host to the provider, so it must never be chosen
+	// for scale-in — deleting an instance we cannot identify is unacceptable.
+	instanceName string
+	// draining cordons the host: it keeps serving, routing, and waking
+	// everything it already owns, but accepts no new placements. Set by the
+	// scale-in controller and cleared if demand returns before the host empties,
+	// so a cordon is always reversible until the instance is actually deleted.
+	draining bool
+	// drainingSince timestamps the cordon, purely so a host stuck draining
+	// behind a long-lived sandbox is visible rather than silently pinned.
+	drainingSince time.Time
+}
+
+// placeable reports whether a NEW create may be assigned to this host. It
+// deliberately does not consider free capacity: callers need different amounts
+// (one slot, N for a fanout), but every caller shares these three exclusions,
+// and a cordon that only some placement paths honoured would drain a host
+// through one door while another kept filling it.
+func (h *host) placeable(now time.Time, ttl time.Duration) bool {
+	return !h.draining && !now.Before(h.penaltyUntil) && now.Sub(h.lastSeen) <= ttl
 }
 
 func (h *host) free() int {
@@ -99,6 +121,17 @@ func (h *host) warmFree() int {
 		return 0
 	}
 	return f
+}
+
+// load is everything this host holds that a scale-in has to wait out: running
+// sandboxes, hibernated ones (frozen on THIS host's disk, so deleting the
+// instance destroys them), and creates already dispatched but not yet landed.
+//
+// Ready-pool VMs are deliberately excluded. They hold no user state and are
+// rebuilt on demand elsewhere, so waiting for the pool to empty would mean
+// waiting forever — the maintainer refills it — while protecting nothing.
+func (h *host) load() int {
+	return h.slotsUsed + h.hibernated + h.reserved
 }
 
 // committed is running occupancy plus create reservations assigned to this
@@ -189,6 +222,19 @@ type Gateway struct {
 	directRequested    atomic.Int64
 	directScaleStarted atomic.Int64
 	directScaleFailed  atomic.Int64
+
+	// Scale-IN state. Owned entirely by scaleInLoop's goroutine except the
+	// counters, so scaleInLowSince needs no lock: it is read and written by that
+	// one loop. See scalein.go for why this controller exists rather than the
+	// Nomad autoscaler.
+	scaleInEnabled  bool
+	scaleInMin      int
+	scaleInAfter    time.Duration
+	scaleInLowSince time.Time
+	scaleInCordons  atomic.Uint64
+	scaleInRemoved  atomic.Uint64
+	scaleInAborted  atomic.Uint64
+	scaleInFailed   atomic.Uint64
 
 	// migTarget is the provider's own target worker count, polled when the
 	// scaler implements TargetSizer. Exported as sandbox_mig_target_size so the
@@ -403,6 +449,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	}
 	go g.pruneLoop(ctx)
 	go g.migTargetLoop(ctx)
+	go g.scaleInLoop(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", g.handleRegister)
@@ -565,6 +612,12 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.addr = hb.Addr
 	h.token = callbackToken
 	h.release = hb.Release
+	// Only ever adopt a non-empty name: a worker that momentarily fails its
+	// metadata lookup must not erase an identity the gateway already knows, or
+	// a host mid-drain would silently become unremovable.
+	if hb.InstanceName != "" {
+		h.instanceName = hb.InstanceName
+	}
 	h.slotsTotal = hb.SlotsTotal
 	h.slotsUsed = hb.SlotsUsed
 	h.warmReady = hb.WarmReady
@@ -815,8 +868,7 @@ func (g *Gateway) reserveHostFor(exclude map[string]bool, needed int, prefer str
 	now := time.Now()
 
 	fits := func(h *host) bool {
-		return h != nil && !exclude[h.id] && !now.Before(h.penaltyUntil) &&
-			now.Sub(h.lastSeen) <= g.ttl && h.free() >= needed
+		return h != nil && !exclude[h.id] && h.placeable(now, g.ttl) && h.free() >= needed
 	}
 	best := g.hosts[prefer]
 	if !fits(best) {
@@ -893,8 +945,7 @@ func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool) *host {
 	preferWarm := false
 	if useWarm {
 		for _, h := range g.hosts {
-			if exclude[h.id] || now.Before(h.penaltyUntil) ||
-				now.Sub(h.lastSeen) > g.ttl || h.free() <= 0 {
+			if exclude[h.id] || !h.placeable(now, g.ttl) || h.free() <= 0 {
 				continue
 			}
 			if h.warmFree() > 0 {
@@ -904,10 +955,10 @@ func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool) *host {
 		}
 	}
 	for _, h := range g.hosts {
-		if exclude[h.id] || now.Before(h.penaltyUntil) {
+		if exclude[h.id] || !h.placeable(now, g.ttl) {
 			continue
 		}
-		if now.Sub(h.lastSeen) > g.ttl || h.free() <= 0 {
+		if h.free() <= 0 {
 			continue
 		}
 		if preferWarm && h.warmFree() <= 0 {
@@ -1174,22 +1225,42 @@ func (g *Gateway) directScaleWorker() {
 	}
 }
 
-// evaluateDirectScaleOut sizes the fleet to current demand and requests a
-// resize only when that exceeds the grow-only watermark.
-func (g *Gateway) evaluateDirectScaleOut() {
-	queued := int(g.queued.Load())
+// fleetSnapshot is the demand view BOTH scaling directions read.
+//
+// One function on purpose. The 2026-08-16 incident was two implementations of
+// "how many hosts do we need" — this one, and a Prometheus recording rule —
+// disagreeing by a single host, with the shrinking side winning and deleting
+// the growing side's work. Directions that share their arithmetic cannot
+// contradict each other, which is a stronger guarantee than any amount of
+// tuning between two controllers.
+type fleetSnapshot struct {
+	live     int // hosts heartbeating within the TTL
+	occupied int // committed slots plus hibernated sandboxes across those hosts
+	queued   int // creates waiting for a slot
+	demand   int // hosts needed to hold occupied + queued + headroom
+}
 
+func (g *Gateway) fleetDemand() fleetSnapshot {
+	fs := fleetSnapshot{queued: int(g.queued.Load())}
 	now := time.Now()
-	live, occupied := 0, 0
 	g.mu.RLock()
 	for _, h := range g.hosts {
 		if now.Sub(h.lastSeen) > g.ttl {
 			continue
 		}
-		live++
-		occupied += h.committed() + h.hibernated
+		fs.live++
+		fs.occupied += h.committed() + h.hibernated
 	}
 	g.mu.RUnlock()
+	fs.demand = ceilDiv(fs.occupied+fs.queued+g.directHeadroom, g.directSlotsPerHost)
+	return fs
+}
+
+// evaluateDirectScaleOut sizes the fleet to current demand and requests a
+// resize only when that exceeds the grow-only watermark.
+func (g *Gateway) evaluateDirectScaleOut() {
+	fs := g.fleetDemand()
+	queued, live, occupied := fs.queued, fs.live, fs.occupied
 
 	if queued == 0 {
 		// Idle. Re-baseline the watermark down to the fleet's true size so the
@@ -1201,7 +1272,7 @@ func (g *Gateway) evaluateDirectScaleOut() {
 		return
 	}
 
-	demand := ceilDiv(occupied+queued+g.directHeadroom, g.directSlotsPerHost)
+	demand := fs.demand
 	desired := demand
 	if desired <= live {
 		// A non-empty queue proves the currently registered fleet cannot

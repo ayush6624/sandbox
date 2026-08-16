@@ -19,6 +19,18 @@ type Heartbeat struct {
 	// Addr is the host's TCP API address the gateway dials back (e.g. its
 	// tailnet IP:port). Must match the host's `serve --listen` address.
 	Addr string `json:"addr"`
+	// InstanceName is the provider instance this worker runs on (the GCE
+	// instance name, read from the metadata server). Scale-in needs it because
+	// a MIG resize-down lets the PROVIDER choose which instance dies, and that
+	// is never the one the gateway drained — removing a specific host requires
+	// deleteInstances naming it. HostID cannot stand in: it defaults to the
+	// hostname, which a resumed standby worker reports inconsistently (short
+	// name vs FQDN) and which is not the provider's identifier.
+	//
+	// Empty from a non-GCE or older worker, which makes that host ineligible
+	// for scale-in — the safe direction, since the alternative is deleting an
+	// instance we cannot name.
+	InstanceName string `json:"instance_name,omitempty"`
 	// ControlToken is the dedicated credential the gateway presents when
 	// calling Addr. It is never a public/client API credential.
 	ControlToken string `json:"control_token"`
