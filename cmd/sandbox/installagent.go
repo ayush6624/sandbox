@@ -44,6 +44,23 @@ AllowUsers sandbox
 HostKey /etc/ssh/ssh_host_ed25519_key
 `
 
+// sandboxSudoers must stay in sync with the same heredoc in
+// scripts/build-devbox-rootfs.sh. Guest sessions run as uid 1000
+// (cmd/sandboxd/guestuser_linux.go), which means a workload cannot install
+// packages, start a daemon, or otherwise provision the machine it was given —
+// and provisioning-at-runtime is the whole point of a sandbox. The isolation
+// boundary is the microVM (jailer + seccomp + per-sandbox tap), not the guest
+// uid, so root inside the guest is not a host escape.
+//
+// It does weaken one thing: sandboxd's privileged endpoints (/clock,
+// /identity, /ssh-key) are guarded by hostOnly, which checks the request
+// source is the guest's default gateway — and guest-root can alias that
+// address locally and reach them. Every one of those acts on the guest's own
+// VM, so the blast radius stays inside the sandbox that did it.
+const sandboxSudoers = `# Managed by sandbox install-agent — passwordless root inside the guest.
+sandbox ALL=(ALL) NOPASSWD: ALL
+`
+
 // User-facing commands and shells run as the sandbox account, so these are the
 // rc files read by `bash -l` on the /shell pty.
 const sandboxProfile = `# ~/.profile: sourced by login shells (sandboxd's /shell runs bash -l).
@@ -111,6 +128,7 @@ func installAgent(rootfs, agentBin string) error {
 	h.Write([]byte(sandboxdUnit))
 	h.Write([]byte(guestIdentityImageVersion))
 	h.Write([]byte(sandboxSSHDConfig))
+	h.Write([]byte(sandboxSudoers))
 	h.Write([]byte(sandboxProfile))
 	h.Write([]byte(sandboxBashrc))
 	sum := fmt.Sprintf("%x", h.Sum(nil))
@@ -216,6 +234,22 @@ systemctl disable serial-getty@ttyS0.service >/dev/null 2>&1 || true
 	}
 	if err := os.WriteFile(filepath.Join(sshDir, "sandbox.conf"), []byte(sandboxSSHDConfig), 0o644); err != nil {
 		return fmt.Errorf("write ssh config: %w", err)
+	}
+	// 0440 is mandatory: sudo refuses to read a group- or world-writable
+	// sudoers file, and it fails closed by disabling sudo entirely rather than
+	// by warning. Validate afterwards for the same reason — a syntax error here
+	// is not a degraded sudo, it is no sudo at all, discovered in the guest.
+	sudoersDir := filepath.Join(mnt, "etc/sudoers.d")
+	if err := os.MkdirAll(sudoersDir, 0o755); err != nil {
+		return fmt.Errorf("create sudoers dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(sudoersDir, "sandbox"), []byte(sandboxSudoers), 0o440); err != nil {
+		return fmt.Errorf("write sudoers: %w", err)
+	}
+	// `visudo -c` (not `-cf <file>`) parses /etc/sudoers *and* its includes, so
+	// it also proves the drop-in is actually reached from the main file.
+	if out, err := exec.Command("chroot", mnt, "visudo", "-c").CombinedOutput(); err != nil {
+		return fmt.Errorf("validate sudoers: %w: %s", err, out)
 	}
 	return nil
 }

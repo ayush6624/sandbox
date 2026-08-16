@@ -98,7 +98,7 @@ APT
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y \
-      python3 python3-pip python3-venv build-essential git make openssh-server \
+      python3 python3-pip python3-venv build-essential git make openssh-server sudo \
       htop vim nano tmux jq ripgrep fd-find bat tree ncdu wget unzip zip less rsync man-db
 
     # GitHub CLI from the official apt repo (not in the Ubuntu archive). The
@@ -135,6 +135,19 @@ APT
     passwd -l sandbox
     install -d -o sandbox -g sandbox -m 0755 /home/sandbox/app
   '
+
+  # Passwordless root INSIDE the guest, so a workload can provision the machine
+  # it was handed (install packages, run a daemon). The isolation boundary is
+  # the microVM, not the guest uid. Keep in sync with sandboxSudoers in
+  # cmd/sandbox/installagent.go, which repairs an older base image. 0440 is
+  # mandatory — sudo ignores a group-writable sudoers file and fails closed.
+  sudo install -d -m 0755 "$BUILD_DIR/etc/sudoers.d"
+  printf '%s\n%s\n' \
+    '# Managed by sandbox install-agent — passwordless root inside the guest.' \
+    'sandbox ALL=(ALL) NOPASSWD: ALL' \
+    | sudo tee "$BUILD_DIR/etc/sudoers.d/sandbox" > /dev/null
+  sudo chmod 0440 "$BUILD_DIR/etc/sudoers.d/sandbox"
+  sudo chroot "$BUILD_DIR" visudo -c
 
   # --- SSH server ---
   # Key-only login as the normal sandbox user. Host keys are deliberately not
