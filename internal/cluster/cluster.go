@@ -57,6 +57,13 @@ type Heartbeat struct {
 	// workers produce both values from one registry snapshot and gateways
 	// defensively clamp heartbeats from older releases.
 	SlotsFree *int `json:"slots_free,omitempty"`
+	// DemandSlots is user occupancy expressed in default-slot equivalents.
+	// Unlike SlotsUsed it accounts for large memory overrides; unlike
+	// SlotsTotal-SlotsFree it excludes disposable ready-pool VMs and placement
+	// gates (warming/release quarantine) that can force SlotsFree to zero without
+	// representing user demand. Pointer preserves compatibility with workers
+	// predating memory-aware fleet sizing.
+	DemandSlots *int `json:"demand_slots,omitempty"`
 	// WarmReady is the number of fully initialized hidden VMs that can be
 	// claimed without entering the normal clone path. Gateways prefer this
 	// capacity across hosts before falling back to ordinary free slots.

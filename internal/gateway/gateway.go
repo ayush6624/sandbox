@@ -57,19 +57,32 @@ type host struct {
 	// admission is binding or the host is still warming up (advertises 0).
 	// For old host binaries whose
 	// heartbeats lack the field, handleRegister falls back to total-used.
-	slotsFree  int
-	warmReady  int // worker-reported fully initialized VMs ready for atomic claim
-	hibernated int // idle sandboxes frozen to disk on the host (hold no slot)
+	slotsFree int
+	// demandSlots is worker-reported USER occupancy in default-slot
+	// equivalents. demandKnown distinguishes an old heartbeat from a genuine
+	// zero. It excludes disposable warm-pool VMs and placement quarantine.
+	demandSlots int
+	demandKnown bool
+	warmReady   int // worker-reported fully initialized VMs ready for atomic claim
+	hibernated  int // idle sandboxes frozen to disk on the host (hold no slot)
 	// reservedCount is set only on the COPY returned by a reservation: how many
 	// slots it covers. A fanout of N reserves N at once, so releasing it has to
 	// undo the same N.
 	reservedCount int
+	// reservationUnits is the autoscaling demand carried by this reservation,
+	// in default-sandbox slot equivalents. It is usually 1, but a large memory
+	// override can consume several default slots' worth of host memory.
+	reservationUnits int
 	// reserved counts creates dispatched to this host but not yet completed.
 	// Without it, a burst of concurrent creates all read the same stale
 	// slotsFree (heartbeats lag by seconds) and pile onto one bin-pack target
 	// until its pool exhausts. Reserving at pick time makes concurrent picks
 	// see each other, so they spread and cleanly 503 at capacity instead.
 	reserved int
+	// reservedUnits is the demand-equivalent counterpart to reserved. Keep it
+	// separate because placement consumes one tap/IP slot per sandbox while a
+	// large-memory sandbox can consume several default slots' worth of memory.
+	reservedUnits int
 	// warmReserved is the subset of reservations selected against warmReady.
 	// Keeping it separate lets concurrent placement spread across ready pools
 	// before falling back to ordinary clone capacity.
@@ -148,6 +161,25 @@ func (h *host) committed() int {
 	return n
 }
 
+// demandCommitted expresses current user occupancy in default-sandbox slot
+// equivalents. The worker's explicit value captures memory pressure that raw
+// sandbox count misses: eleven 4 GiB sandboxes consume roughly forty of a
+// 48-slot host's default-memory units. It deliberately excludes disposable
+// ready-pool VMs and placement quarantine. Reservations are added because the
+// worker heartbeat cannot have observed them yet; physical committed count is
+// the floor for tap/IP-bound fleets and legacy heartbeats.
+func (h *host) demandCommitted() int {
+	units := h.slotsUsed
+	if h.demandKnown {
+		units = h.demandSlots
+	}
+	units += h.reservedUnits
+	if physical := h.committed(); units < physical {
+		units = physical
+	}
+	return units
+}
+
 // Gateway routes the sandbox API across a fleet of hosts.
 type Gateway struct {
 	token             string // retained for compatibility with in-package tests
@@ -175,18 +207,18 @@ type Gateway struct {
 	queueWait time.Duration
 	queueMax  int
 	queued    atomic.Int64 // creates currently waiting; exported as a metric
+	// queuedUnits is queued demand in default-sandbox slot equivalents. Queue
+	// depth stays a request count for its public metric, while autoscaling can
+	// account for a 4 GiB request consuming several default slots of memory.
+	queuedUnits atomic.Int64
 	// rejected counts creates 503'd for capacity (queue full, or no host freed
 	// within queue-wait). The queue-depth gauge saturates at queueMax, so once
-	// a burst overflows the queue this counter is the ONLY signal of the
-	// excess demand — the autoscaler rule folds its rate back into
-	// workers_desired (rejected clients retry every Retry-After, so the rate
-	// approximates outstanding unqueued demand).
+	// a burst overflows the queue this counter is the only observable record of
+	// excess demand (rejected clients retry every Retry-After).
 	rejected atomic.Int64
 	// createsOK counts sandboxes the gateway successfully brought up (each
 	// release(landed=true)). Exported as sandbox_creates_total — a gateway-side
-	// aggregate on the gateway's own /metrics (scraped every 10s), so the
-	// autoscaler's lead term reads create RATE at 10s resolution instead of the
-	// 30s-federated per-host sandbox_creates_ok_total.
+	// aggregate on the gateway's own /metrics for burst-rate observability.
 	createsOK atomic.Int64
 	// slotFreed is replaced and the old channel closed whenever capacity may
 	// have appeared. Closing broadcasts to every queued create: a fresh worker
@@ -195,38 +227,41 @@ type Gateway struct {
 	slotFreedMu sync.Mutex
 	slotFreed   chan struct{}
 
-	// directScaler is the scale-out path for queue pressure, and where it is
-	// configured it is the SOLE writer that grows the group: the Nomad
-	// autoscaler is left to scale IN only, because two independent writers can
-	// ratchet the target far above demand.
+	// directScaler is the scale-out path for queue pressure. Together with the
+	// cordon/drain controller it makes the gateway the sole MIG writer; two
+	// independent writers can contradict each other and destroy live work.
 	//
 	// It is LEVEL-triggered, not edge-triggered. Every event that can change
 	// demand (a create entering the queue, a host heartbeat) requests a
 	// re-evaluation; evaluations coalesce through directDirty/directScalePending
 	// so a 160-create burst still costs one debounce and one resize. An earlier
 	// version fired only on the queue's 0 -> 1 edge, so demand that grew while
-	// the queue stayed non-empty had to wait for the Prometheus/Nomad loop —
-	// worth ~10 s of p95 on the canonical held burst, and up to ~189 s when it
-	// landed inside the autoscaler's scale-out blackout.
+	// the queue stayed non-empty had to wait for the former Prometheus/Nomad
+	// loop — worth ~10 s of p95 on the canonical held burst.
 	//
 	// directRequested is a grow-only watermark of the largest target already
 	// requested, so repeated evaluations during one burst do not re-issue
 	// shrinking or duplicate resizes. It re-baselines to the live host count
-	// once the queue empties; otherwise autoscaler scale-in would leave it
+	// once the queue empties; otherwise gateway scale-in would leave it
 	// pinned high and permanently suppress the next burst's scale-out.
 	directScaler       DirectScaler
 	directSlotsPerHost int
 	directHeadroom     int
-	directScalePending atomic.Bool
-	directDirty        atomic.Bool
-	directRequested    atomic.Int64
-	directScaleStarted atomic.Int64
-	directScaleFailed  atomic.Int64
+	// directMemPerSlotMIB converts resource overrides into the same default-slot
+	// equivalents used by fleetDemand. Zero keeps legacy one-request/one-slot
+	// behavior. directMemOverheadMIB mirrors the worker's per-VM admission
+	// charge on top of guest memory.
+	directMemPerSlotMIB  int64
+	directMemOverheadMIB int64
+	directScalePending   atomic.Bool
+	directDirty          atomic.Bool
+	directRequested      atomic.Int64
+	directScaleStarted   atomic.Int64
+	directScaleFailed    atomic.Int64
 
 	// Scale-IN state. Owned entirely by scaleInLoop's goroutine except the
 	// counters, so scaleInLowSince needs no lock: it is read and written by that
-	// one loop. See scalein.go for why this controller exists rather than the
-	// Nomad autoscaler.
+	// one loop. See scalein.go for why this replaced the Nomad autoscaler.
 	scaleInEnabled  bool
 	scaleInMin      int
 	scaleInAfter    time.Duration
@@ -237,10 +272,9 @@ type Gateway struct {
 	scaleInFailed   atomic.Uint64
 
 	// migTarget is the provider's own target worker count, polled when the
-	// scaler implements TargetSizer. Exported as sandbox_mig_target_size so the
-	// autoscaler's scale-in ceiling can be exact; migTargetKnown stays false
-	// until a poll succeeds, so a provider error publishes no series rather than
-	// a misleading zero.
+	// scaler implements TargetSizer. Exported as sandbox_mig_target_size for
+	// provider-state observability; migTargetKnown stays false until a poll
+	// succeeds, so a provider error publishes no misleading zero.
 	migTarget      atomic.Int64
 	migTargetKnown atomic.Bool
 
@@ -306,10 +340,8 @@ type DirectScaler interface {
 
 // TargetSizer is an optional DirectScaler capability: the provider's current
 // target worker count. When available the gateway exports it as
-// sandbox_mig_target_size, which is what the autoscaler's scale-in ceiling is
-// built from. A heartbeat-derived count is NOT a substitute — it also counts
-// resumed standby workers that sit outside the target, which is what let the
-// autoscaler scale out (from=5 to=6) past its cap on 2026-07-28.
+// sandbox_mig_target_size. A heartbeat-derived count is NOT a substitute: it
+// also counts resumed standby workers outside the provider target.
 type TargetSizer interface {
 	TargetSize(context.Context) (int, error)
 }
@@ -397,7 +429,7 @@ func (g *Gateway) validateCredentialDomains() error {
 	return nil
 }
 
-// ConfigureDirectScaleOut enables a queue 0 -> 1 scale-out trigger. The direct
+// ConfigureDirectScaleOut enables level-triggered queue scale-out. The direct
 // path is deliberately optional so non-GCE and local gateways are unchanged.
 func (g *Gateway) ConfigureDirectScaleOut(s DirectScaler, slotsPerHost, headroom int) error {
 	if s == nil {
@@ -413,6 +445,43 @@ func (g *Gateway) ConfigureDirectScaleOut(s DirectScaler, slotsPerHost, headroom
 	g.directSlotsPerHost = slotsPerHost
 	g.directHeadroom = headroom
 	return nil
+}
+
+// ConfigureDirectScaleMemory makes queued creates with a memory override count
+// by their admission charge instead of as one slot. perSlotMIB is the worker
+// memory budget divided by its configured slots (MEM_PER_SLOT_MIB in the fleet
+// deployment); overheadMIB is the per-VM VMM charge used by worker admission.
+// It is separate from ConfigureDirectScaleOut so existing non-fleet callers and
+// tests retain the legacy one-request/one-slot behavior unless they opt in.
+func (g *Gateway) ConfigureDirectScaleMemory(perSlotMIB, overheadMIB int64) error {
+	if perSlotMIB <= 0 {
+		return errors.New("direct scale memory per slot must be positive")
+	}
+	if overheadMIB < 0 {
+		return errors.New("direct scale memory overhead cannot be negative")
+	}
+	g.directMemPerSlotMIB = perSlotMIB
+	g.directMemOverheadMIB = overheadMIB
+	return nil
+}
+
+// createDemandUnits returns the number of default-slot equivalents a create
+// contributes to autoscaling demand. memMIB=0 is the worker template default,
+// which is exactly one configured slot. The worker remains the admission
+// authority; this is sizing arithmetic, not request validation.
+func (g *Gateway) createDemandUnits(memMIB int64) int {
+	if memMIB <= 0 || g.directMemPerSlotMIB <= 0 {
+		return 1
+	}
+	charge := memMIB + g.directMemOverheadMIB
+	if charge <= 0 {
+		return 1
+	}
+	units := int((charge + g.directMemPerSlotMIB - 1) / g.directMemPerSlotMIB)
+	if units < 1 {
+		return 1
+	}
+	return units
 }
 
 // ConfigureWorkerReleaseFile enables the persisted worker-release placement
@@ -625,6 +694,11 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if hb.SlotsFree != nil {
 		h.slotsFree = *hb.SlotsFree
 	}
+	h.demandSlots = h.slotsUsed // old worker: raw user count is the safe fallback
+	h.demandKnown = hb.DemandSlots != nil
+	if hb.DemandSlots != nil {
+		h.demandSlots = *hb.DemandSlots
+	}
 	// SlotsUsed and SlotsFree are sampled by the worker. Older releases
 	// obtained them with separate registry reads, so concurrent deletes could
 	// pair an older used count with newer free capacity (observed as used=7,
@@ -639,6 +713,12 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.slotsUsed > h.slotsTotal {
 		h.slotsUsed = h.slotsTotal
+	}
+	if h.demandSlots < h.slotsUsed {
+		h.demandSlots = h.slotsUsed
+	}
+	if h.demandSlots > h.slotsTotal {
+		h.demandSlots = h.slotsTotal
 	}
 	if h.warmReady < 0 {
 		h.warmReady = 0
@@ -725,13 +805,14 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, fmt.Errorf("read body: %w", err))
 		return
 	}
+	var createOpts client.CreateOpts
 	if len(raw) > 0 {
-		var probe client.CreateOpts
-		if err := json.Unmarshal(raw, &probe); err != nil {
+		if err := json.Unmarshal(raw, &createOpts); err != nil {
 			httpError(w, 400, fmt.Errorf("decode body: %w", err))
 			return
 		}
 	}
+	demandUnits := g.createDemandUnits(createOpts.MemMIB)
 
 	// One shared queue deadline across all attempts: a create that fails over
 	// twice must not wait 3× queueWait.
@@ -739,13 +820,13 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < maxCreateAttempts; attempt++ {
-		h := g.reserveHost(tried)
+		h := g.reserveHostDemand(tried, demandUnits)
 		if h == nil {
 			// No free slot right now — wait for one instead of failing. During a
-			// burst the queue depth itself feeds the autoscaler's scaling signal
+			// burst the queue depth itself feeds the gateway's scaling signal
 			// (sandbox_create_queue_depth), so waiting here is what gives the new
 			// host time to boot and absorb the queue.
-			h = g.awaitHost(r.Context(), deadline, tried)
+			h = g.awaitHostDemand(r.Context(), deadline, tried, demandUnits)
 		}
 		if h == nil {
 			break
@@ -844,7 +925,11 @@ func (g *Gateway) penalize(hostID string, d time.Duration, zeroFree bool) {
 // Returns a snapshot copy, or nil if no host has capacity. The caller MUST
 // release() exactly once.
 func (g *Gateway) reserveHost(exclude map[string]bool) *host {
-	return g.reserveHostMode(exclude, true)
+	return g.reserveHostDemand(exclude, 1)
+}
+
+func (g *Gateway) reserveHostDemand(exclude map[string]bool, demandUnits int) *host {
+	return g.reserveHostMode(exclude, true, demandUnits)
 }
 
 // reserveHostFor reserves `needed` slots for a snapshot-sourced create
@@ -888,8 +973,10 @@ func (g *Gateway) reserveHostFor(exclude map[string]bool, needed int, prefer str
 		return nil
 	}
 	best.reserved += needed
+	best.reservedUnits += needed
 	snap := *best
 	snap.reservedCount = needed
+	snap.reservationUnits = needed
 	return &snap
 }
 
@@ -913,6 +1000,15 @@ func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
 	} else {
 		h.reserved = 0
 	}
+	units := reserved.reservationUnits
+	if units <= 0 {
+		units = n
+	}
+	if h.reservedUnits >= units {
+		h.reservedUnits -= units
+	} else {
+		h.reservedUnits = 0
+	}
 	if landed {
 		for i := 0; i < n; i++ {
 			if h.slotsUsed < h.slotsTotal {
@@ -934,10 +1030,13 @@ func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
 // reserveHostOrdinary is used by snapshot adoption, which cannot consume a
 // default-create ready VM.
 func (g *Gateway) reserveHostOrdinary(exclude map[string]bool) *host {
-	return g.reserveHostMode(exclude, false)
+	return g.reserveHostMode(exclude, false, 1)
 }
 
-func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool) *host {
+func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool, demandUnits int) *host {
+	if demandUnits <= 0 {
+		demandUnits = 1
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
@@ -972,7 +1071,9 @@ func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool) *host {
 		return nil
 	}
 	best.reserved++
+	best.reservedUnits += demandUnits
 	snap := *best
+	snap.reservationUnits = demandUnits
 	if preferWarm {
 		best.warmReserved++
 		snap.reservationWarm = true
@@ -999,6 +1100,15 @@ func (g *Gateway) releaseReservation(reserved *host, landed bool) {
 	if h.reserved > 0 {
 		h.reserved--
 	}
+	units := reserved.reservationUnits
+	if units <= 0 {
+		units = 1
+	}
+	if h.reservedUnits >= units {
+		h.reservedUnits -= units
+	} else {
+		h.reservedUnits = 0
+	}
 	if reserved.reservationWarm && h.warmReserved > 0 {
 		h.warmReserved--
 	}
@@ -1013,8 +1123,9 @@ func (g *Gateway) releaseReservation(reserved *host, landed bool) {
 		if h.slotsUsed < h.slotsTotal {
 			h.slotsUsed++
 		}
-		if h.slotsFree > 0 {
-			h.slotsFree--
+		h.slotsFree -= units
+		if h.slotsFree < 0 {
+			h.slotsFree = 0
 		}
 	}
 	g.mu.Unlock()
@@ -1052,14 +1163,24 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 		if h.reserved > 0 {
 			h.reserved--
 		}
+		units := reserved.reservationUnits
+		if units <= 0 {
+			units = 1
+		}
+		if h.reservedUnits >= units {
+			h.reservedUnits -= units
+		} else {
+			h.reservedUnits = 0
+		}
 		if reserved.reservationWarm && h.warmReserved > 0 {
 			h.warmReserved--
 		}
 		if h.slotsUsed < h.slotsTotal {
 			h.slotsUsed++
 		}
-		if h.slotsFree > 0 {
-			h.slotsFree--
+		h.slotsFree -= units
+		if h.slotsFree < 0 {
+			h.slotsFree = 0
 		}
 		if reserved.reservationWarm && h.warmReady > 0 {
 			h.warmReady--
@@ -1130,7 +1251,13 @@ const queuePollInterval = 250 * time.Millisecond
 // exactly once), or nil when queueing is disabled, the queue is full, the
 // wait times out, or the client goes away.
 func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map[string]bool) *host {
-	return g.awaitHostWith(ctx, deadline, func() *host { return g.reserveHost(exclude) })
+	return g.awaitHostDemand(ctx, deadline, exclude, 1)
+}
+
+func (g *Gateway) awaitHostDemand(ctx context.Context, deadline time.Time, exclude map[string]bool, demandUnits int) *host {
+	return g.awaitHostWith(ctx, deadline, demandUnits, func() *host {
+		return g.reserveHostDemand(exclude, demandUnits)
+	})
 }
 
 // awaitHostWith is awaitHost with the placement rule supplied by the caller, so
@@ -1138,7 +1265,7 @@ func (g *Gateway) awaitHost(ctx context.Context, deadline time.Time, exclude map
 // That shared queue is the point: its depth is the scale-out signal
 // (sandbox_create_queue_depth), so a burst that never enqueues is a burst the
 // fleet never grows for.
-func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, reserve func() *host) *host {
+func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, demandUnits int, reserve func() *host) *host {
 	if g.queueWait <= 0 || g.queueMax <= 0 {
 		return nil
 	}
@@ -1151,12 +1278,17 @@ func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, reserve
 		g.queued.Add(-1)
 		return nil
 	}
+	if demandUnits <= 0 {
+		demandUnits = 1
+	}
+	g.queuedUnits.Add(int64(demandUnits))
 	// Level-triggered: notify on EVERY enqueue, not just the 0 -> 1 edge, so a
 	// burst that keeps the queue non-empty still re-sizes as it grows.
 	// Evaluations coalesce, so the extra notifies are nearly free.
 	g.notifyDirectScale()
 	defer func() {
 		g.queued.Add(-1)
+		g.queuedUnits.Add(-int64(demandUnits))
 		// Re-baseline the watermark once the queue drains.
 		g.notifyDirectScale()
 	}()
@@ -1234,14 +1366,18 @@ func (g *Gateway) directScaleWorker() {
 // contradict each other, which is a stronger guarantee than any amount of
 // tuning between two controllers.
 type fleetSnapshot struct {
-	live     int // hosts heartbeating within the TTL
-	occupied int // committed slots plus hibernated sandboxes across those hosts
-	queued   int // creates waiting for a slot
-	demand   int // hosts needed to hold occupied + queued + headroom
+	live        int // hosts heartbeating within the TTL
+	occupied    int // committed default-slot equivalents plus hibernated sandboxes
+	queued      int // creates waiting for a slot (request count)
+	queuedUnits int // queued default-slot equivalents (memory-aware)
+	demand      int // hosts needed to hold occupied + queuedUnits + headroom
 }
 
 func (g *Gateway) fleetDemand() fleetSnapshot {
-	fs := fleetSnapshot{queued: int(g.queued.Load())}
+	fs := fleetSnapshot{
+		queued:      int(g.queued.Load()),
+		queuedUnits: g.queueDemandUnits(),
+	}
 	now := time.Now()
 	g.mu.RLock()
 	for _, h := range g.hosts {
@@ -1249,11 +1385,22 @@ func (g *Gateway) fleetDemand() fleetSnapshot {
 			continue
 		}
 		fs.live++
-		fs.occupied += h.committed() + h.hibernated
+		fs.occupied += h.demandCommitted() + h.hibernated
 	}
 	g.mu.RUnlock()
-	fs.demand = ceilDiv(fs.occupied+fs.queued+g.directHeadroom, g.directSlotsPerHost)
+	fs.demand = ceilDiv(fs.occupied+fs.queuedUnits+g.directHeadroom, g.directSlotsPerHost)
 	return fs
+}
+
+func (g *Gateway) queueDemandUnits() int {
+	queued := int(g.queued.Load())
+	units := int(g.queuedUnits.Load())
+	// Tests and any in-process callers that seed the legacy queue counter
+	// directly still mean one unit per request.
+	if units < queued {
+		return queued
+	}
+	return units
 }
 
 // evaluateDirectScaleOut sizes the fleet to current demand and requests a
@@ -1402,7 +1549,7 @@ func hostOnly(addr string) string {
 // nil if none has free capacity. It BIN-PACKS: among hosts with free slots it
 // picks the fullest (fewest free), tie-broken by smaller host id for
 // determinism. Packing onto the fullest host lets other hosts drain to empty,
-// which is what makes autoscaler scale-in safe — an empty host can be removed
+// which is what makes gateway scale-in safe — an empty host can be removed
 // without evicting running sandboxes. (This is the deliberate inverse of a
 // spread/least-loaded policy, which would keep every host partially full and
 // never releasable.)

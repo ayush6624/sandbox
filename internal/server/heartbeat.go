@@ -136,7 +136,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	// Routed = running + hibernated: the gateway must route requests for a
 	// hibernated sandbox here so this host can wake it. Only running ones
 	// consume slots.
-	routed, free, err := s.reg.RoutedCapacity(ctx)
+	routed, free, demand, err := s.reg.RoutedCapacityDemand(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "heartbeat: snapshot routed capacity: %v\n", err)
 		return
@@ -214,6 +214,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	// same SQLite snapshot as SandboxIDs/SlotsUsed, so concurrent destroys
 	// cannot combine an older used count with newer free capacity.
 	hb.SlotsFree = intPtr(s.advertisedFreeSlots(free))
+	hb.DemandSlots = intPtr(demand)
 	b, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
 	if err != nil {

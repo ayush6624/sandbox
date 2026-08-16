@@ -15,10 +15,9 @@ import (
 // the library. Prometheus (on the control VM) scrapes this behind the same
 // bearer auth as every other endpoint; its scrape config carries the token.
 //
-// The autoscaler's scaling signal is derived downstream from these:
-// workers_desired = ceil((sandbox_slots_committed + headroom) / slots_per_host).
-// Only live hosts (seen within ttl) are counted, so a dead host's capacity
-// doesn't mask real demand.
+// The gateway itself owns both scaling directions. These series expose the
+// shared fleetDemand inputs so an operator can explain a resize. Only live
+// hosts (seen within ttl) are counted, so dead capacity cannot mask demand.
 func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	type hostMetric struct {
 		id                      string
@@ -28,6 +27,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		liveHosts             int
 		totalSlots, usedSlots int
 		committedSlots        int
+		demandSlots           int
 		freeSlots             int
 		warmReady             int
 		hibernated            int
@@ -47,6 +47,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		totalSlots += h.slotsTotal
 		usedSlots += h.slotsUsed
 		committedSlots += h.committed()
+		demandSlots += h.demandCommitted() + h.hibernated
 		freeSlots += h.free()
 		warmReady += h.warmFree()
 		hibernated += h.hibernated
@@ -70,14 +71,12 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_slots_total", "Total sandbox slots across live hosts.", totalSlots)
 	gauge("sandbox_slots_used", "Used sandbox slots across live hosts.", usedSlots)
 	gauge("sandbox_slots_committed", "Running and in-flight reserved sandbox slots across live hosts, clamped per host.", committedSlots)
+	gauge("sandbox_slots_demand", "Committed user demand across live hosts in default-slot equivalents, including hibernated inventory.", demandSlots)
 	// slots_free is host-reported allocatable capacity (minus in-flight
-	// reservations) — the truth to PLACE against. NB the autoscaler's recording
-	// rule does NOT use (slots_total - slots_free) for occupancy: a still-warming
+	// reservations) — the truth to PLACE against. fleetDemand does NOT use
+	// (slots_total - slots_free) for occupancy: a still-warming
 	// host reports slots_free=0 as a placement gate while running zero sandboxes,
-	// which total-free would misread as fully occupied and over-scale. The rule
-	// uses (slots_committed + hibernated) instead. slots_free is for placement
-	// only. slots_committed closes the scrape-time gap before worker heartbeats
-	// report creates already assigned by the gateway.
+	// which total-free would misread as fully occupied and over-scale.
 	gauge("sandbox_slots_free", "Allocatable sandbox slots across live hosts (host-reported).", freeSlots)
 	gauge("sandbox_warm_ready", "Fully initialized ready VMs available across live hosts.", warmReady)
 	gauge("sandbox_routes", "Number of sandbox-id -> host routes the gateway holds.", routes)
@@ -85,9 +84,9 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	gauge("sandbox_worker_release_mismatch", "Live workers gated from placement because their release is not current.", releaseMismatches)
 	fmt.Fprintf(&b, "# HELP sandbox_worker_release_info Expected worker release used for placement gating.\n# TYPE sandbox_worker_release_info gauge\nsandbox_worker_release_info{release=%q} 1\n", expectedRelease)
 	fmt.Fprintf(&b, "# HELP sandbox_create_rejected_total Creates 503'd for capacity (queue full or queue-wait expired). Retrying clients re-increment every Retry-After, so the rate approximates demand the saturated queue can no longer express.\n# TYPE sandbox_create_rejected_total counter\nsandbox_create_rejected_total %d\n", g.rejected.Load())
-	// Gateway-side aggregate of successful creates. Scraped at 10s (gateway
-	// /metrics), so rate() feeds the autoscaler's lead term at 10s resolution —
-	// far fresher than the 30s-federated per-host sandbox_creates_ok_total.
+	// Gateway-side aggregate of successful creates. Retained for burst-rate
+	// observability now that the gateway, rather than a Prometheus policy, owns
+	// MIG sizing.
 	fmt.Fprintf(&b, "# HELP sandbox_creates_total Sandboxes the gateway successfully brought up.\n# TYPE sandbox_creates_total counter\nsandbox_creates_total %d\n", g.createsOK.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_total Queue-triggered direct scale-out requests submitted to the scaler.\n# TYPE sandbox_direct_scale_out_total counter\nsandbox_direct_scale_out_total %d\n", g.directScaleStarted.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_failed_total Queue-triggered direct scale-out requests that failed.\n# TYPE sandbox_direct_scale_out_failed_total counter\nsandbox_direct_scale_out_failed_total %d\n", g.directScaleFailed.Load())
@@ -105,20 +104,19 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// live host count whenever the queue empties, so it can read lower than the
 	// fleet actually is.
 	gauge("sandbox_scale_out_requested", "Largest worker count the gateway has requested (grow-only watermark).", int(g.directRequested.Load()))
-	// The provider's OWN target worker count, and the authority the autoscaler's
-	// scale-in ceiling is built from. Capping on sandbox_hosts_live instead let
-	// the autoscaler scale out past its cap (from=5 to=6, measured 2026-07-28):
+	// The provider's OWN target worker count. Heartbeat-derived live count is not
+	// a substitute: it also includes resumed standby workers outside the target.
+	// Using it as a provider ceiling previously let scaling pass its cap:
 	// heartbeats also count resumed standby workers that sit outside the target,
-	// so hosts_live read 8 against a target of 5 and a latched max_over_time
-	// peak of 6 was a legal scale-up. Emitted only once a poll has succeeded, so
-	// a provider error publishes nothing rather than a zero that would collapse
-	// the ceiling and trigger a spurious scale-in.
+	// so hosts_live read 8 against a target of 5. Emitted only once a poll has
+	// succeeded, so a provider error publishes nothing rather than a false zero.
 	if g.migTargetKnown.Load() {
-		gauge("sandbox_mig_target_size", "Provider target worker count (authority for the autoscaler scale-in ceiling).", int(g.migTarget.Load()))
+		gauge("sandbox_mig_target_size", "Provider target worker count.", int(g.migTarget.Load()))
 	}
-	// Queued creates are demand without a slot — the recording rule adds this
-	// to slots_used so a burst pulls scale-up before any create lands.
+	// Queue depth remains a request count for clients/dashboards. The companion
+	// demand gauge weights memory-heavy requests in the units fleetDemand uses.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))
+	gauge("sandbox_create_queue_demand_slots", "Queued create demand in default-slot equivalents (memory-aware).", g.queueDemandUnits())
 	// Cross-host adopt on a route miss. suppressed{reason} is the load a
 	// hostname scan is NOT allowed to put on the workers: malformed = rejected
 	// on shape alone, cached = known-absent, throttled = fleet-wide dispatch

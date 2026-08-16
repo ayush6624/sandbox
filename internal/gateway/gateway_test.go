@@ -412,6 +412,16 @@ func TestRegisterFallsBackWithoutSlotsFree(t *testing.T) {
 	if f := g.hosts["new"].slotsFree; f != 0 {
 		t.Fatalf("explicit slotsFree = %d, want 0", f)
 	}
+	// Memory-aware worker: explicit demand can exceed raw sandbox count. It is
+	// independent of slots_free, which may be zero only because placement is
+	// quarantined while a fresh host warms.
+	post(`{"host_id":"memory","addr":"1.2.3.6:8080","slots_total":48,"slots_used":11,"slots_free":0,"demand_slots":40,"sandbox_ids":[]}`)
+	if h := g.hosts["memory"]; !h.demandKnown || h.demandCommitted() != 40 {
+		t.Fatalf("memory demand not learned from heartbeat: %+v", h)
+	}
+	if h := g.hosts["old"]; h.demandKnown || h.demandCommitted() != 10 {
+		t.Fatalf("legacy demand fallback = %+v, want raw used count 10", h)
+	}
 }
 
 func TestRegisterClampsHeartbeatFreeToTotalMinusUsed(t *testing.T) {
@@ -980,9 +990,11 @@ func TestMetricsExposition(t *testing.T) {
 		"sandbox_slots_used 15",
 		// h1 clamps 10 used + 20 reserved to 24; h2 contributes 5 + 4.
 		"sandbox_slots_committed 33",
+		"sandbox_slots_demand 33",
 		"sandbox_slots_free 15",
 		"sandbox_routes 2",
 		"sandbox_create_queue_depth 3",
+		"sandbox_create_queue_demand_slots 3",
 		"sandbox_direct_scale_out_total 0",
 		"sandbox_direct_scale_out_failed_total 0",
 		"sandbox_worker_release_mismatch 0",
@@ -1102,8 +1114,86 @@ func TestGrowingDemandRescalesWhileQueueStaysNonEmpty(t *testing.T) {
 	}
 }
 
+// Memory-heavy creates must be sized by the same admission units workers use,
+// not by raw sandbox count. At 4 GiB, one request consumes four 1180 MiB
+// default-slot equivalents (4096 guest + 156 VMM overhead).
+func TestFleetDemandAccountsForMemoryBoundOccupancyAndQueue(t *testing.T) {
+	// Eleven large user sandboxes plus two disposable ready VMs leave six
+	// default slots of memory. Removing the two ready VMs from 48-6 yields 40
+	// user-demand units, even though slotsUsed reports only eleven sandboxes.
+	g := liveGateway(&host{
+		id: "a", slotsTotal: 48, slotsUsed: 11, slotsFree: 6, warmReady: 2,
+		demandKnown: true, demandSlots: 40,
+	})
+	if err := g.ConfigureDirectScaleOut(&countingDirectScaler{}, 48, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ConfigureDirectScaleMemory(1180, 156); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.createDemandUnits(4096); got != 4 {
+		t.Fatalf("4096 MiB create demand = %d units, want 4", got)
+	}
+	if got := g.createDemandUnits(1024); got != 1 {
+		t.Fatalf("template-sized create demand = %d units, want 1", got)
+	}
+
+	g.queued.Store(3)
+	g.queuedUnits.Store(12)
+	fs := g.fleetDemand()
+	if fs.occupied != 40 || fs.queued != 3 || fs.queuedUnits != 12 {
+		t.Fatalf("memory demand snapshot = %+v, want occupied=40 queued=3 queuedUnits=12", fs)
+	}
+	if fs.demand != 2 {
+		t.Fatalf("memory demand = %d hosts, want 2 (52/48 units)", fs.demand)
+	}
+	body := gatewayMetrics(g)
+	for _, want := range []string{
+		"sandbox_slots_demand 40",
+		"sandbox_create_queue_depth 3",
+		"sandbox_create_queue_demand_slots 12",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("memory-aware metrics missing %q\n---\n%s", want, body)
+		}
+	}
+}
+
+// A queued request's weight must survive the whole queue lifetime and be
+// removed on cancellation; otherwise fleetDemand sees a transient one-slot
+// request or leaks demand after the client leaves.
+func TestQueuedMemoryDemandLifetime(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 48, slotsUsed: 48, slotsFree: 0})
+	g.queueWait, g.queueMax = time.Minute, 8
+	if err := g.ConfigureDirectScaleOut(&countingDirectScaler{}, 48, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ConfigureDirectScaleMemory(1180, 156); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.awaitHostDemand(ctx, g.queueDeadline(), nil, g.createDemandUnits(4096))
+	}()
+	deadline := time.Now().Add(time.Second)
+	for (g.queued.Load() != 1 || g.queuedUnits.Load() != 4) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got, units := g.queued.Load(), g.queuedUnits.Load(); got != 1 || units != 4 {
+		t.Fatalf("queued requests/units = %d/%d, want 1/4", got, units)
+	}
+	cancel()
+	<-done
+	if got, units := g.queued.Load(), g.queuedUnits.Load(); got != 0 || units != 0 {
+		t.Fatalf("queued requests/units after cancel = %d/%d, want 0/0", got, units)
+	}
+}
+
 // The watermark is grow-only: draining demand must never issue a shrinking
-// resize, because scale-in belongs to the Nomad autoscaler alone.
+// resize, because scale-in belongs to the gateway's cordon/drain controller.
 func TestDirectScaleOutNeverShrinks(t *testing.T) {
 	h := &host{id: "a", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
 	g := liveGateway(h)
@@ -1329,7 +1419,7 @@ func TestSnapshotCreateQueuesAndTriggersScaleOut(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go g.awaitHostWith(ctx, g.queueDeadline(), func() *host {
+	go g.awaitHostWith(ctx, g.queueDeadline(), 1, func() *host {
 		return g.reserveHostFor(nil, 1, "owner-that-is-full")
 	})
 

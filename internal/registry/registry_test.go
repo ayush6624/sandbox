@@ -820,6 +820,40 @@ func TestRoutedCapacityUsesSameRowsForUsedAndFree(t *testing.T) {
 	}
 }
 
+func TestRoutedCapacityDemandWeightsUserMemoryAndExcludesWarmPool(t *testing.T) {
+	r := testRegistryWithPools(t, Pools{
+		TapPrefix:  "fc",
+		TapMax:     48,
+		GuestIPMin: "172.16.0.10",
+		GuestIPMax: "172.16.0.57",
+		PortMin:    5200,
+		PortMax:    5391,
+	})
+	ctx := context.Background()
+	r.SetMemAccounting(MemAccounting{
+		TemplateMemMIB: 1024,
+		OverheadMIB:    156,
+		BudgetMIB:      48 * 1180,
+	})
+	if _, err := r.Create(ctx, "large", "", "/tmp/large.ext4", nil, "", 0, 2, 4096); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CreateWarm(ctx, "warm", "/tmp/warm.ext4", "", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	_, free, demand, err := r.RoutedCapacityDemand(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand != 4 {
+		t.Fatalf("user demand = %d, want 4 default-slot equivalents", demand)
+	}
+	if free != 43 {
+		t.Fatalf("free slots = %d, want 43 after large user + default warm VM", free)
+	}
+}
+
 func TestRoutedCapacityAvoidsDeleteBetweenHeartbeatReads(t *testing.T) {
 	r := testRegistryWithPools(t, Pools{
 		TapPrefix:  "fc",

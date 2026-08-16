@@ -308,7 +308,7 @@ scripts/              Host setup shell scripts
   unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
   opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
   and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, slots_free,
-  warm_ready, sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
+  demand_slots, warm_ready, sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
   `registry.FreeSlots`: tap/IP availability bounded by memory admission) — NOT
   `slots_total - slots_used`, which can overstate capacity when larger memory overrides are
   running; a host still building its golden snapshot advertises `slots_free=0` so fresh
@@ -333,12 +333,18 @@ scripts/              Host setup shell scripts
   to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
   host errors return 502 without retry. When no slot is free the create
   waits in a bounded queue (`--queue-wait`/`--queue-max`, defaults 240s/4096; depth exported as
-  `sandbox_create_queue_depth` and fed into the autoscaler signal) before 503ing with
+  `sandbox_create_queue_depth` and fed into the gateway's direct-scaling signal) before 503ing with
   Retry-After. Id-scoped requests (incl. `/exec/stream` + `/shell`) are
   reverse-proxied to the owning host (one cached proxy per host over a shared tuned
   transport) with the host's token injected; `GET /sandboxes` scatter-gathers in parallel.
+  Scale-out and scale-in read the SAME `fleetDemand()`: worker-reported `demand_slots`
+  converts committed user memory into default-slot equivalents (excluding disposable warm
+  VMs and placement quarantine), and queued `mem_mib` overrides are weighted by
+  `ceil((mem_mib + VM overhead) / MEM_PER_SLOT_MIB)`. This is what makes eleven 4 GiB
+  sandboxes size like ~40 default slots rather than eleven. The Nomad autoscaler is retired;
+  the gateway is the sole MIG writer and scale-in is cordon → drain → delete-by-name.
   Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The elastic fleet
-  (Nomad autoscaler + GCE MIG) lives in `infra/gcp/` — `SLOTS_PER_HOST` in `config.env` is
+  (gateway + GCE MIG) lives in `infra/gcp/` — `SLOTS_PER_HOST` in `config.env` is
   the source of truth for RUNNING capacity (taps/IPs/mem_budget_mib); `deploy-job.sh`
   generates those pools from it. Three knobs decouple the pools that used to all scale off
   `SLOTS_PER_HOST`: `PORTS_PER_HOST` (default 4× slots) sizes the port pool independently

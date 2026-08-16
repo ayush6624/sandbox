@@ -158,7 +158,7 @@ func (g *Gateway) serveSnapshotCreate(w http.ResponseWriter, r *http.Request, id
 	for attempt := 0; attempt < maxCreateAttempts; attempt++ {
 		h := g.reserveHostFor(tried, needed, owner)
 		if h == nil {
-			h = g.awaitHostWith(r.Context(), deadline, func() *host {
+			h = g.awaitHostWith(r.Context(), deadline, needed, func() *host {
 				return g.reserveHostFor(tried, needed, owner)
 			})
 		}

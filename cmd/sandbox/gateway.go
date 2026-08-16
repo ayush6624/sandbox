@@ -15,32 +15,34 @@ import (
 )
 
 var (
-	gwListen          string
-	gwToken           string
-	gwTokenFile       string
-	gwWorkerToken     string
-	gwWorkerTokenFile string
-	gwEdgeToken       string
-	gwEdgeTokenFile   string
-	gwTransportMode   string
-	gwTLSCertFile     string
-	gwTLSKeyFile      string
-	gwTTL             time.Duration
-	gwQueueWait       time.Duration
-	gwQueueMax        int
-	gwScaleProject    string
-	gwScaleZone       string
-	gwScaleMIG        string
-	gwScaleMax        int
-	gwScaleMin        int
-	gwScaleInAfterSec int
-	gwScaleSlots      int
-	gwScaleHeadroom   int
-	gwReleaseFile     string
-	gwIngressBucket   string
-	gwRawHost         string
-	gwRawMin          int
-	gwRawMax          int
+	gwListen           string
+	gwToken            string
+	gwTokenFile        string
+	gwWorkerToken      string
+	gwWorkerTokenFile  string
+	gwEdgeToken        string
+	gwEdgeTokenFile    string
+	gwTransportMode    string
+	gwTLSCertFile      string
+	gwTLSKeyFile       string
+	gwTTL              time.Duration
+	gwQueueWait        time.Duration
+	gwQueueMax         int
+	gwScaleProject     string
+	gwScaleZone        string
+	gwScaleMIG         string
+	gwScaleMax         int
+	gwScaleMin         int
+	gwScaleInAfterSec  int
+	gwScaleSlots       int
+	gwScaleHeadroom    int
+	gwScaleMemPerSlot  int64
+	gwScaleMemOverhead int64
+	gwReleaseFile      string
+	gwIngressBucket    string
+	gwRawHost          string
+	gwRawMin           int
+	gwRawMax           int
 )
 
 func gatewayCmd() *cobra.Command {
@@ -94,6 +96,8 @@ token to the caller and must therefore never be reachable with a client key.`,
 	cmd.Flags().IntVar(&gwScaleInAfterSec, "scale-in-after-sec", 0, "seconds demand must stay below fleet size before a host is cordoned (0 = 600)")
 	cmd.Flags().IntVar(&gwScaleSlots, "direct-scale-slots-per-host", 0, "sandbox slots supplied by each worker")
 	cmd.Flags().IntVar(&gwScaleHeadroom, "direct-scale-headroom", 0, "extra slots included in direct scale-out demand")
+	cmd.Flags().Int64Var(&gwScaleMemPerSlot, "direct-scale-mem-per-slot-mib", 0, "memory represented by one autoscaling slot (0 = count every create as one slot)")
+	cmd.Flags().Int64Var(&gwScaleMemOverhead, "direct-scale-mem-overhead-mib", 156, "per-sandbox VMM memory charge added to queued memory overrides")
 	cmd.Flags().StringVar(&gwReleaseFile, "worker-release-file", "", "persisted expected worker release used to gate stale allocations")
 	cmd.Flags().StringVar(&gwIngressBucket, "ingress-bucket", "", "GCS bucket for durable raw TCP allocations (empty disables E4)")
 	cmd.Flags().StringVar(&gwRawHost, "raw-public-host", "", "public hostname returned for raw TCP allocations")
@@ -167,6 +171,11 @@ func runGateway(cmd *cobra.Command, args []string) error {
 		}
 		if err := g.ConfigureDirectScaleOut(scaler, gwScaleSlots, gwScaleHeadroom); err != nil {
 			return err
+		}
+		if gwScaleMemPerSlot > 0 {
+			if err := g.ConfigureDirectScaleMemory(gwScaleMemPerSlot, gwScaleMemOverhead); err != nil {
+				return err
+			}
 		}
 		// Scale-in is opt-in on the minimum: without a floor the fleet would be
 		// allowed to drain to zero hosts, and an empty fleet cannot serve the

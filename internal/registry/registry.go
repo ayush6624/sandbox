@@ -1142,20 +1142,33 @@ func (r *Registry) ListRouted(ctx context.Context) ([]Sandbox, error) {
 // (for example) 7 running sandboxes while the later read reports 46 free
 // slots, an impossible 53/48 accounting state.
 func (r *Registry) RoutedCapacity(ctx context.Context) ([]Sandbox, int, error) {
+	routed, free, _, err := r.RoutedCapacityDemand(ctx)
+	return routed, free, err
+}
+
+// RoutedCapacityDemand is RoutedCapacity plus user occupancy expressed in
+// default-slot equivalents for fleet autoscaling. The value is derived from
+// the SAME rows as free capacity, accounts for memory overrides, and excludes
+// warming/preparing VMs because they are disposable capacity rather than user
+// demand. Starting/stopping user VMs remain demand even though they are not
+// routable during those transitions.
+func (r *Registry) RoutedCapacityDemand(ctx context.Context) ([]Sandbox, int, int, error) {
 	rows, err := r.rdb.QueryContext(ctx,
 		`SELECT `+sandboxCols+` FROM sandboxes WHERE status IN (?, ?, ?, ?, ?, ?) ORDER BY created_at DESC`,
 		StatusRunning, StatusHibernated, StatusPreparing, StatusWarming, StatusStarting, StatusStopping)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	all, err := collectSandboxes(rows)
 	rows.Close()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	occupied := 0
 	var committedMem int64
+	userOccupied := 0
+	var userCommittedMem int64
 	routed := make([]Sandbox, 0, len(all))
 	for _, sb := range all {
 		if sb.Status == StatusWarming || sb.Status == StatusPreparing ||
@@ -1175,9 +1188,23 @@ func (r *Registry) RoutedCapacity(ctx context.Context) ([]Sandbox, int, error) {
 		if mem == 0 {
 			mem = r.mem.TemplateMemMIB
 		}
-		committedMem += mem + r.mem.OverheadMIB
+		charge := mem + r.mem.OverheadMIB
+		committedMem += charge
+		if sb.Status == StatusRunning || sb.Status == StatusStarting || sb.Status == StatusStopping {
+			userOccupied++
+			userCommittedMem += charge
+		}
 	}
-	return routed, r.freeSlotsFor(occupied, committedMem), nil
+	demand := userOccupied
+	if slots := r.pools.Slots(); r.mem.BudgetMIB > 0 && slots > 0 && userCommittedMem > 0 {
+		// ceil(user memory / per-host budget * slots) avoids truncating a
+		// configured per-slot value when the budget is not evenly divisible.
+		memoryDemand := int((userCommittedMem*int64(slots) + r.mem.BudgetMIB - 1) / r.mem.BudgetMIB)
+		if memoryDemand > demand {
+			demand = memoryDemand
+		}
+	}
+	return routed, r.freeSlotsFor(occupied, committedMem), demand, nil
 }
 
 // Destroy removes a sandbox row outright, along with its port mappings.

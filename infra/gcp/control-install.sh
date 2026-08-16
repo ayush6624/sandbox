@@ -6,6 +6,7 @@
 # GW_TOKEN_PREV / GATEWAY_EDGE_TOKEN_PREV (optional: written as a second line of
 #   the matching token file so an overlap rotation survives a deploy)
 # PROM_PORT PROM_VERSION NOMAD_VERSION SANDBOX_RELEASE SLOTS_PER_HOST
+# MEM_PER_SLOT_MIB VM_MEMORY_OVERHEAD_MIB
 # HEADROOM_SLOTS SCALE_IN_AFTER_SEC PROJECT ZONE MIG_NAME MIG_MIN MIG_MAX
 # QUEUE_WAIT QUEUE_MAX INGRESS_BUCKET RAW_PUBLIC_HOST RAW_PORT_MIN RAW_PORT_MAX
 # REMOTE_DIR GRAFANA_VERSION GRAFANA_PORT
@@ -122,6 +123,8 @@ ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --direct-scale-min ${MIG_MIN} \
   --scale-in-after-sec ${SCALE_IN_AFTER_SEC:-600} \
   --direct-scale-slots-per-host ${SLOTS_PER_HOST} \
+  --direct-scale-mem-per-slot-mib ${MEM_PER_SLOT_MIB:-1180} \
+  --direct-scale-mem-overhead-mib ${VM_MEMORY_OVERHEAD_MIB:-156} \
   --direct-scale-headroom ${HEADROOM_SLOTS:-0} ${RAW_ARGS}
 # Single-writer invariant: the GATEWAY is the ONLY process that resizes the
 # production MIG, in both directions. It owns scale-out because its
