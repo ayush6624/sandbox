@@ -235,7 +235,7 @@ class ScenarioContext {
     // iterations and concurrency 96 the window is near-certain to be hit.
     this.held.delete(held.sandbox.sandboxId)
     try {
-      await held.sandbox.kill()
+      await held.sandbox.terminate()
     } catch (error) {
       // Put it back so killAll() still retries it during cleanup.
       this.held.set(held.sandbox.sandboxId, held)

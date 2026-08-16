@@ -167,7 +167,7 @@ async function killTracked(): Promise<void> {
   tracked.clear()
   await pool(16, toKill, async (sbx) => {
     try {
-      await sbx.kill()
+      await sbx.terminate()
     } catch {
       // Already gone (test killed it, or TTL reaped it) — that's fine.
     }

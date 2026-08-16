@@ -93,7 +93,7 @@ async function main(): Promise<void> {
         })
       )
     )
-    await Promise.all(boxes.map((b) => b?.kill().catch(() => {})))
+    await Promise.all(boxes.map((b) => b?.terminate().catch(() => {})))
     console.log(`  round ${round}/${ROUNDS} done (failures so far: ${failures.length})`)
   }
 

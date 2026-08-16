@@ -36,7 +36,7 @@ suite.test('list contains created sandboxes and drops killed ones', async (ctx) 
     listed.some((s) => s.sandboxId === sbx.sandboxId),
     'created sandbox must appear in list()'
   )
-  await sbx.kill()
+  await sbx.terminate()
   ctx.untrack(sbx)
   await eventually(
     async () => {
@@ -49,11 +49,11 @@ suite.test('list contains created sandboxes and drops killed ones', async (ctx) 
 
 suite.test('operations on a killed sandbox raise NotFoundError', async (ctx) => {
   const sbx = await ctx.createTracked()
-  await sbx.kill()
+  await sbx.terminate()
   ctx.untrack(sbx)
   await assertThrows(() => Sandbox.connect(sbx.sandboxId), 'NotFoundError', 'connect after kill')
   await assertThrows(() => sbx.commands.run('echo hi'), 'NotFoundError', 'exec after kill')
-  await assertThrows(() => sbx.kill(), 'NotFoundError', 'double kill')
+  await assertThrows(() => sbx.terminate(), 'NotFoundError', 'double kill')
 })
 
 suite.test('connect to a bogus id raises NotFoundError', async () => {

@@ -41,7 +41,7 @@ suite.test('hibernate + wake resteps the clock', async (ctx) => {
   const sbx = await ctx.createTracked()
   await assertClockFresh(sbx, 'before hibernate')
 
-  await sbx.hibernate()
+  await sbx.pause()
   assertEq(sbx.info.status, 'hibernated', 'hibernate must freeze the sandbox')
   // Let real time pass while frozen so a missing re-step is observable: a
   // woken guest without clock sync would read ~10s in the past.

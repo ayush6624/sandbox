@@ -96,7 +96,7 @@ async function main(): Promise<void> {
 
     console.log('\nssh login probe passed')
   } finally {
-    await sbx.kill().catch(() => {})
+    await sbx.terminate().catch(() => {})
     rmSync(dir, { recursive: true, force: true })
   }
 }

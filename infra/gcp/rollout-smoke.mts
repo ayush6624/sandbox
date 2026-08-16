@@ -78,7 +78,7 @@ try {
 } finally {
   if (sbx) {
     try {
-      await sbx.kill()
+      await sbx.terminate()
       ok('destroy', sbx.sandboxId.slice(0, 8))
     } catch (err) {
       bad('destroy', (err as Error).message)

@@ -115,7 +115,7 @@ suite.test('killed sandbox stops answering on its forwarded port', async (ctx) =
     timeoutMs: 15_000,
     what: 'server up before kill',
   })
-  await sbx.kill()
+  await sbx.terminate()
   ctx.untrack(sbx)
   await eventually(
     async () => {
@@ -145,7 +145,7 @@ suite.test('connecting to a forwarded port wakes a hibernated sandbox', async (c
   // REAL pin leak never clears, so this still fails loudly on a timeout.
   await eventually(
     async () => {
-      await sbx.hibernate()
+      await sbx.pause()
       return true // hibernate resolves undefined; eventually needs truthy
     },
     {

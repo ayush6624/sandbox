@@ -164,7 +164,7 @@ main().catch((err) => {
 
 async function cleanup(): Promise<number> {
   if (!cleanupPromise) {
-    cleanupPromise = Promise.allSettled(created.map((sandbox) => sandbox.kill()))
+    cleanupPromise = Promise.allSettled(created.map((sandbox) => sandbox.terminate()))
       .then((killed) => killed.filter((result) => result.status === 'rejected').length)
   }
   return cleanupPromise

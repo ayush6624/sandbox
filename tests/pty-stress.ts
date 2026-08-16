@@ -119,7 +119,7 @@ async function main(): Promise<void> {
       // Kill them all, so the NEXT round's sandboxes inherit these guest IPs.
       await Promise.all(
         boxes.map((s) =>
-          s.kill().catch((e: unknown) => {
+          s.terminate().catch((e: unknown) => {
             failures.push({
               where: `round ${round} kill`,
               error: e instanceof Error ? e.message : String(e),

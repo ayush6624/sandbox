@@ -67,7 +67,7 @@ suite.test(`burst: ${BURST} concurrent creates all come up usable`, async (ctx) 
   // Parallel teardown.
   const { ms: killMs } = await timed(() =>
     pool(12, sandboxes, async (sbx) => {
-      await sbx.kill()
+      await sbx.terminate()
       ctx.untrack(sbx)
     })
   )
@@ -115,7 +115,7 @@ suite.test('create while others are being killed (churny overlap)', async (ctx) 
   const [replacements] = await Promise.all([
     Promise.all(Array.from({ length: 6 }, () => ctx.createTracked())),
     pool(6, first, async (sbx) => {
-      await sbx.kill()
+      await sbx.terminate()
       ctx.untrack(sbx)
     }),
   ])

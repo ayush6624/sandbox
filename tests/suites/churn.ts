@@ -35,7 +35,7 @@ suite.test(`${CYCLES} sequential create→exec→kill cycles`, async (ctx) => {
       const sbx = await ctx.createTracked()
       const res = await sbx.commands.run(`echo cycle-${i}`)
       assertEq(res.stdout.trim(), `cycle-${i}`, `cycle #${i} exec`)
-      await sbx.kill()
+      await sbx.terminate()
       ctx.untrack(sbx)
     })
     cycleTimes.push(ms)
@@ -50,7 +50,7 @@ suite.test(`${BATCH_ROUNDS} rounds of ${BATCH_SIZE} parallel create→exec→kil
         const sbx = await ctx.createTracked()
         const res = await sbx.commands.run(`echo round-${round}-sbx-${i}`)
         assertEq(res.stdout.trim(), `round-${round}-sbx-${i}`, `round ${round} sandbox ${i}`)
-        await sbx.kill()
+        await sbx.terminate()
         ctx.untrack(sbx)
       })
     )
@@ -63,12 +63,12 @@ suite.test('immediate create-kill-create reuses cleanly', async (ctx) => {
   // racing with pool allocation.
   for (let i = 0; i < 5; i++) {
     const sbx = await ctx.createTracked()
-    await sbx.kill()
+    await sbx.terminate()
     ctx.untrack(sbx)
     const next = await ctx.createTracked()
     const res = await next.commands.run('echo reuse')
     assertEq(res.stdout.trim(), 'reuse', `reuse iteration ${i}`)
-    await next.kill()
+    await next.terminate()
     ctx.untrack(next)
   }
 })

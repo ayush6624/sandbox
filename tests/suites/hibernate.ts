@@ -1,5 +1,5 @@
 /**
- * Idle hibernation: manual freeze via sandbox.hibernate(), transparent
+ * Idle hibernation: manual freeze via sandbox.pause(), transparent
  * wake-on-exec with memory state intact, the per-sandbox
  * hibernate_after_sec override (auto-freeze), and destroy-while-frozen.
  *
@@ -27,7 +27,7 @@ suite.test('manual hibernate frees the sandbox and exec wakes it with state inta
   assertEq(planted.exitCode, 0, 'plant state')
   assert(parseInt(planted.stdout.trim(), 10) >= 1, 'background process must be running')
 
-  await sbx.hibernate()
+  await sbx.pause()
   assertEq(sbx.info.status, 'hibernated', 'hibernate() must update the handle status')
   assertEq(await status(sbx.sandboxId), 'hibernated', 'list() must show the frozen status')
 
@@ -48,9 +48,9 @@ suite.test('manual hibernate frees the sandbox and exec wakes it with state inta
 
 suite.test('hibernate is idempotent-ish: second call on a frozen sandbox fails cleanly', async (ctx) => {
   const sbx = await ctx.createTracked()
-  await sbx.hibernate()
+  await sbx.pause()
   // Not running → the API refuses rather than double-freezing.
-  await assertThrows(() => sbx.hibernate(), 'ConflictError', 'hibernate while hibernated')
+  await assertThrows(() => sbx.pause(), 'ConflictError', 'hibernate while hibernated')
   // Still wakeable afterwards.
   const res = await sbx.commands.run('echo ok')
   assertEq(res.stdout.trim(), 'ok', 'wake after failed double-hibernate')
@@ -80,8 +80,8 @@ suite.test('hibernateAfterMs: -1 round-trips as the never-hibernate sentinel', a
 
 suite.test('kill destroys a hibernated sandbox', async (ctx) => {
   const sbx = await ctx.createTracked()
-  await sbx.hibernate()
-  await sbx.kill()
+  await sbx.pause()
+  await sbx.terminate()
   ctx.untrack(sbx)
   await assertThrows(() => Sandbox.connect(sbx.sandboxId), 'NotFoundError', 'connect after kill-while-frozen')
 })

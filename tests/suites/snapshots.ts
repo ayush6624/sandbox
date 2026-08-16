@@ -79,7 +79,7 @@ suite.test('snapshot → kill source → restore resumes disk AND memory state',
   assertEq(alive.stdout.trim(), 'post-snapshot', 'source must keep running after snapshot')
 
   // Restore requires the source to be gone (it reuses the baked identity).
-  await sbx.kill()
+  await sbx.terminate()
   ctx.untrack(sbx)
 
   const { result: restored, ms: restoreMs } = await timed(() =>
@@ -103,7 +103,7 @@ suite.test('snapshot → kill source → restore resumes disk AND memory state',
   assert(c1 > 0, `counter must exist after restore, got ${c1}`)
   assert(c2 > c1, `counter must still be counting after restore (${c1} → ${c2})`)
 
-  await restored.kill()
+  await restored.terminate()
   ctx.untrack(restored)
 })
 
@@ -114,7 +114,7 @@ suite.test(`fanout ${FANOUT_N}: clones share prepared state, writes are isolated
   await sbx.files.write('/home/sandbox/shared.txt', 'from-the-source')
   const snap = await sbx.snapshot()
   createdSnapshots.push(snap.snapshotId)
-  await sbx.kill()
+  await sbx.terminate()
   ctx.untrack(sbx)
 
   const { result: clones, ms } = await timed(() => Sandbox.fanout(snap.snapshotId, FANOUT_N, opts))
@@ -156,7 +156,7 @@ suite.test(`fanout ${FANOUT_N}: clones share prepared state, writes are isolated
   })
 
   await pool(FANOUT_N, clones, async (clone) => {
-    await clone.kill()
+    await clone.terminate()
     ctx.untrack(clone)
   })
 })
@@ -165,7 +165,7 @@ suite.test('snapshot housekeeping: list contains ours, delete removes it', async
   const opts = hostOpts()
   const sbx = await createOnHost(ctx)
   const snap = await sbx.snapshot()
-  await sbx.kill()
+  await sbx.terminate()
   ctx.untrack(sbx)
 
   const listed = await Sandbox.listSnapshots(opts)
