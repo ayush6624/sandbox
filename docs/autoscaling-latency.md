@@ -271,8 +271,47 @@ autoscaler holds during a gateway outage instead of scaling to `MIG_MIN`.
 Still open: a *legitimate* scale-in remains destructive. `node_selector_strategy`
 is Nomad-blind (sandboxes are Firecracker VMs inside one task, not allocations),
 so the emptiest-host heuristic is statistical, and `node_purge` destroys the data
-disk with any hibernated sandbox not yet durable in GCS. Long-running workloads
-should pin `MIG_MIN` for the duration rather than rely on selection luck.
+disk with any hibernated sandbox not yet durable in GCS.
+
+#### Superseded: the autoscaler is gone (2026-08-17)
+
+The floor above was correct and it worked — the re-run measured `SandboxError`
+11 → 1 with the fleet holding at three hosts — but it was a splint. Two facts
+found during that run made the split ownership indefensible:
+
+- **The autoscaler's check was returning nothing at all.** `count.original:0`
+  with an empty `reason_history`, while the byte-identical query returned a
+  clean `2`/`3` from Prometheus on the same host — replayed over the whole run,
+  61 samples, never zero. So it was never a signal-driven controller; it was a
+  constant "drive to `MIG_MIN`" loop, invisible while the fleet sat at minimum
+  and destructive every time the gateway grew it. The `from=2 to=2` lines the
+  2026-07-28 verification read as "exactly the intended division of labour" were
+  the same defect, already present and already silent.
+- **Nomad structurally cannot select a victim here.** One system-job allocation
+  per worker regardless of occupancy.
+
+So scale-in moved to the gateway (`internal/gateway/scalein.go`), which is the
+only component that can see what a host holds. It never resizes down. It
+cordons the emptiest host (placement skips it; everything already there keeps
+serving), waits for it to hold zero sandboxes — running, hibernated, or
+mid-create — and then deletes **that instance by name** via `deleteInstances`.
+A resize-down would let GCE pick, and GCE's pick is never the drained one. Every
+step before the delete is reversible: demand returning uncordons rather than
+booting a replacement.
+
+With one writer the disagreement cannot recur, so
+`sandbox:workers_scale_in_ceiling` and `sandbox:workers_scale_out_floor` were
+deleted along with the policy. `sandbox:workers_desired` survives as the
+dashboard's view of the same arithmetic the gateway computes in `fleetDemand`,
+and is deliberately no longer a control input.
+
+Known gap, unchanged and now the biggest one: **demand is still counted in
+slots.** `SLOTS_PER_HOST=48` while a host holds ~11 of the 4 GiB sandboxes this
+workload uses — memory admission is the real ceiling (measured 2026-08-16:
+`mem_budget_mib` 56,640/host, hosts at 99.2%, 11/9/11 sandboxes). Sizing on
+committed memory instead is what would have prevented the original disagreement
+at its root, since the gateway's `live+1` nudge exists only to paper over the
+ratio being wrong.
 
 ### Current request path
 
