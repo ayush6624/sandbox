@@ -535,3 +535,53 @@ func TestListRejectsInvalidFilters(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// A template built from a container image IS a snapshot, so `source.templateId`
+// has to reach the clone path with that id — the spelling customers use for a
+// template must not silently create a default sandbox instead.
+func TestTemplateSourceClonesTheNamedTemplate(t *testing.T) {
+	var seen string
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/public-fields") {
+			seen = r.URL.Path
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/fanout"):
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `[{"id":"sb_1","status":"running"}]`)
+		case strings.HasSuffix(r.URL.Path, "/public-fields"):
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"id":"sb_1","status":"running"}`)
+		default:
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"sb_1","status":"running"}`)
+		}
+	})
+
+	create := func(body, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes", strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", key)
+		out := httptest.NewRecorder()
+		testHandler(t, legacy).ServeHTTP(out, req)
+		return out
+	}
+
+	if got := create(`{"source":{"type":"template","id":"tmpl_abc"}}`, "tmpl"); got.Code != http.StatusCreated {
+		t.Fatalf("template create=%d body=%s", got.Code, got.Body.String())
+	}
+	if seen != "/snapshots/tmpl_abc/fanout" {
+		t.Fatalf("worker path=%q, want the template cloned", seen)
+	}
+
+	// "default" stays reserved for the host's built-in image.
+	if got := create(`{"source":{"type":"template","id":"default"}}`, "default"); got.Code != http.StatusCreated {
+		t.Fatalf("default create=%d body=%s", got.Code, got.Body.String())
+	}
+	if seen != "/sandboxes" {
+		t.Fatalf("worker path=%q, want an ordinary create", seen)
+	}
+
+	if got := create(`{"source":{"type":"template"}}`, "empty"); got.Code != http.StatusBadRequest {
+		t.Fatalf("empty template id=%d, want 400", got.Code)
+	}
+}

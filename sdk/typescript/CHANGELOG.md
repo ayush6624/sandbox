@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.7.0 - 2026-08-16
+
+### Added
+
+- **Templates.** `source: { templateId }` now names a template built from a
+  container image (`sandbox template build --from-image <ref>`), not just the
+  reserved `'default'`. The image's filesystem becomes the guest's root
+  filesystem, so sandboxes start with your toolchain already installed; the
+  sandbox runs as the image's `USER`, in its `WORKDIR`, with its `ENV`.
+
+  No API surface changed — `{ templateId }` and `Sandbox.createFromSource` have
+  always existed, and the server previously rejected any id but `'default'` with
+  a 400. Servers older than this release still do, so a real template id needs a
+  server carrying template support.
+
+  A template id is a snapshot id, so `{ templateId }` and `{ snapshotId }` are
+  interchangeable and templates appear in the snapshot APIs. See
+  `docs/templates.md`.
+
 ## 2.6.0 - 2026-08-16
 
 ### Removed

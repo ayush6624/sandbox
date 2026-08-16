@@ -403,7 +403,11 @@ scripts/              Host setup shell scripts
   remove it. systemd sets one in the base image, which is why only template guests hit it.
   Resources are baked at build time (restores reject vcpu/mem overrides), and template
   creates are fan-out speed (~300 ms–1 s), not ready-pool speed — the pool and golden are
-  per-host and singular. See docs/templates.md.
+  per-host and singular. `source:{type:"template",id}` in v1 accepts a real template id
+  (apiv1 routes it to the same fanout as `snapshot`; `"default"` stays reserved for the
+  host's built-in image), so the SDK's long-standing `{templateId}` spelling works without
+  an SDK code change. `GET /v1/templates` still describes only the built-in one — listing
+  built templates needs a marker on the snapshot row and is not done. See docs/templates.md.
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
   `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
   `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override

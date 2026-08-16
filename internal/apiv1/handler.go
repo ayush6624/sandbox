@@ -210,8 +210,14 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 		legacyBody["vcpus"] = body.Resources.VCPU
 		legacyBody["mem_mib"] = body.Resources.MemoryMIB
 	}
+	// A template id IS a snapshot id — `sandbox template build` produces one and
+	// the two spellings name the same thing, a prepared filesystem to clone. The
+	// exception is the reserved id "default", which means the host's built-in
+	// template and so takes the ordinary create path.
+	fromSnapshot := source.Type == "snapshot" ||
+		(source.Type == "template" && source.ID != defaultTemplateID)
 	path := "/sandboxes"
-	if source.Type == "snapshot" {
+	if fromSnapshot {
 		path = "/snapshots/" + url.PathEscape(source.ID) + "/fanout"
 		legacyBody["count"] = 1
 	}
@@ -220,7 +226,7 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 		return Sandbox{}, rec.Code, legacyDetail(rec)
 	}
 	var raw registry.Sandbox
-	if source.Type == "snapshot" {
+	if fromSnapshot {
 		var list []registry.Sandbox
 		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != 1 {
 			return Sandbox{}, 502, "invalid batch-create response from worker"
@@ -760,9 +766,14 @@ func publicPort(sandboxID string, p registry.PortMapping) map[string]any {
 	return out
 }
 
+// defaultTemplateID is the reserved id for the host's built-in image — the one
+// `GET /v1/templates` describes. Every other template id is the snapshot id that
+// `sandbox template build` produced.
+const defaultTemplateID = "default"
+
 func template(vcpu, memoryMIB int64) map[string]any {
 	return map[string]any{
-		"id": "default", "revision": "host-default",
+		"id": defaultTemplateID, "revision": "host-default",
 		"resources": Resources{VCPU: vcpu, MemoryMIB: memoryMIB},
 	}
 }
@@ -778,8 +789,8 @@ func validateCreate(body createRequest) error {
 			return errors.New("default source must not include id")
 		}
 	case "template":
-		if source.ID != "default" {
-			return errors.New("only template id \"default\" is currently available")
+		if source.ID == "" {
+			return errors.New(`template source requires id ("` + defaultTemplateID + `" for the host's built-in template)`)
 		}
 	case "snapshot":
 		if source.ID == "" {

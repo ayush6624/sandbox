@@ -12,7 +12,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.6.0/sandbox-2.6.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.7.0/sandbox-2.7.0.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -346,6 +346,34 @@ Auth and routing failures reject with the same typed errors as the REST API —
 the server delivers them as WebSocket close codes (`4401` bad key →
 `AuthenticationError`, `4404` unknown sandbox → `NotFoundError`) instead of
 an opaque `1006`. Connecting to a hibernated sandbox wakes it transparently.
+
+### Templates (bring your own image)
+
+A template is a container image booted as a microVM: the image's filesystem
+becomes the guest's root filesystem, so every sandbox created from it starts
+with your toolchain already installed. Build one on the host with
+`sandbox template build --from-image <ref>`, then create against the id it
+prints.
+
+```ts
+// One template id, any number of sandboxes.
+const sandbox = await Sandbox.createFromSource({ templateId })
+const operation = await Sandbox.createMany({ count: 16, source: { templateId } })
+
+// `default` stays reserved for the host's built-in Node + Python image.
+const plain = await Sandbox.createFromSource({ templateId: 'default' })
+```
+
+The sandbox runs as the image's `USER` (root unless the image says otherwise),
+in its `WORKDIR`, with its `ENV` — so tools installed under a custom prefix are
+on `PATH` and scripts written for the image behave the same way they do in a
+container. Everything else is an ordinary sandbox: exec, files, pty, ports, SSH,
+pause/resume, TTL, usage.
+
+A template id *is* a snapshot id — `{ templateId }` and `{ snapshotId }` are two
+spellings of "clone this prepared filesystem" — so templates are also visible
+through the snapshot APIs below. Resources are fixed when the template is built;
+see `docs/templates.md` for the full picture.
 
 ### Snapshots and batch creation
 
