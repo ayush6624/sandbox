@@ -59,7 +59,7 @@ from harbor.environments.docker import (
     COMPOSE_PREBUILT_PATH,
 )
 from harbor.models.task.config import EnvironmentConfig, TaskOS
-from harbor.models.trial.paths import TrialPaths
+from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 from .sandbox_client import SandboxClient, acquire_with_backoff
 
@@ -375,8 +375,29 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
             sandbox.memory_mib or self._template_memory_mib,
         )
 
+        await self._bootstrap_dirs()
         await self._ensure_docker_ready()
         await self._stage_and_up(force_build)
+
+    async def _bootstrap_dirs(self) -> None:
+        """Create the session tree before anything else runs in the guest.
+
+        Every other guest command goes through `host_exec`, which sets the
+        compose directory as its cwd — including the one in `_stage_and_up`
+        that would have created it. So the very first command has to be
+        cwd-less, or the adapter can never bootstrap: sandboxd passes the
+        requested cwd straight to `cmd.Dir`, and Go reports a failed chdir as
+        `fork/exec /bin/bash: no such file or directory`, which reads as a guest
+        with no shell rather than a directory that isn't there yet.
+        """
+        client, sandbox_id = self._require()
+        result = await client.exec(
+            sandbox_id,
+            f"mkdir -p {shlex.quote(self._compose_dir)} "
+            f"{shlex.quote(self._environment_dir_guest)}",
+            timeout_sec=60,
+        )
+        result.check("bootstrap session directories")
 
     async def _ensure_docker_ready(self) -> None:
         """Wait for dockerd, which a snapshot-restored guest normally resumes
@@ -455,10 +476,46 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
                 f"{up.stdout} {up.stderr}"
             )
         await self._wait_for_main()
+        await self._ensure_harbor_dirs()
         # Prebuilt-image tasks have no build context, so their environment/ dir
         # has to land in the container after it is up. The base method no-ops
         # for build-from-Dockerfile tasks.
         await self._upload_environment_dir_after_start()
+
+    async def _ensure_harbor_dirs(self) -> None:
+        """Create Harbor's fixed directory tree inside the main service.
+
+        Harbor's own Docker backend gets /logs/{agent,verifier,artifacts} from
+        bind mounts it controls; a provider that runs the task's compose project
+        unmodified gets no such thing, so every provider backend creates them
+        itself after `up` (see blaxel.py, tensorlake.py). Skipping this does not
+        fail at `up` — it fails much later and misleadingly, when the agent
+        redirects its stdout into /logs/agent and the verifier's reward.txt has
+        nowhere to land, surfacing as DownloadVerifierDirError.
+        """
+        paths = EnvironmentPaths.for_os(self.os)
+        dirs = " ".join(
+            shlex.quote(str(path))
+            for path in (
+                paths.agent_dir,
+                paths.verifier_dir,
+                paths.artifacts_dir,
+                paths.tests_dir,
+                paths.solution_dir,
+            )
+        )
+        # 777 because the task's own image decides what user the agent and the
+        # verifier run as, and they both have to write here.
+        result = await self._compose_ops.exec(
+            f"mkdir -p {dirs} && chmod 777 {shlex.quote(str(paths.logs_dir))} "
+            f"{shlex.quote(str(paths.logs_dir))}/*",
+            timeout_sec=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"could not create Harbor directories in the main service: "
+                f"{result.stdout} {result.stderr}"
+            )
 
     async def _wait_for_main(self, timeout_sec: int = 120) -> None:
         deadline = asyncio.get_running_loop().time() + timeout_sec
