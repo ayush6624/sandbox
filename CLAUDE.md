@@ -651,7 +651,7 @@ scripts/              Host setup shell scripts
   `mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
   total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running
   sandbox's effective `mem_mib` + 156 MiB VMM overhead; hibernated VMs hold none. The
-  check runs inside the registry TX of `Create`/`CreateRestore`/**`Wake`** (waking
+  check runs inside the registry TX of `Create`/`CreateRestoreStarting`/**`Wake`** (waking
   re-commits the snapshot's baked memory; a rejected wake rolls back to hibernated and
   surfaces as 503 on agent-bound requests / close code 4503 on the shell WS), returns
   `ErrMemExhausted` (wraps `ErrPoolExhausted` so 503 + gateway failover fire unchanged),

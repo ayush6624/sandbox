@@ -47,7 +47,7 @@ const host = await sbx.exposePort(3000)         // e.g. "100.69.9.101:5203"
 console.log(await (await fetch(`http://${host}/`)).text())
 
 // 5. Clean up (or let the TTL reap it)
-await sbx.kill()
+await sbx.terminate()
 ```
 
 Long-running output streams as it happens:

@@ -114,7 +114,7 @@ const sbx = await Sandbox.create({ timeoutMs: 600_000 })
 await sbx.commands.run('pnpm create vite my-app')
 await sbx.files.write('/home/sandbox/app/index.js', code)
 const host = await sbx.exposePort(3000) // "your-server:5200"
-await sbx.kill()
+await sbx.terminate()
 ```
 
 See the [SDK README](sdk/typescript/README.md) for streaming exec, snapshots & fan-out, ports, and e2b migration.
