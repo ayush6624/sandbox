@@ -586,12 +586,32 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
             force_build=force_build,
         )
 
-        if self._use_prebuilt or self._image_prebaked:
-            # Nothing to build: either the task names a ready-made image, or this
-            # trial was cloned from a snapshot in which the image is already
-            # built. `up` below finds it by tag, which is why _project_name is
-            # derived from the task rather than the trial.
+        # Get the task's image into the guest, then snapshot the guest so later
+        # trials skip that step entirely. Which step it is depends on the task:
+        # Terminal-Bench 2.0 tasks mostly ship a published image
+        # (`docker_image` in task.toml, e.g. ghcr.io/laude-institute/...), so the
+        # per-trial cost is a PULL; tasks with only a Dockerfile pay a build.
+        # Both are worth caching and both must happen before `up`, so that the
+        # snapshot captures the image with no containers running — a clone then
+        # starts its own rather than resuming this trial's.
+        if self._image_prebaked:
+            # Cloned from this task's snapshot: the image is already here, and
+            # `up` finds it by tag — which is why _project_name is derived from
+            # the task rather than the trial.
             pass
+        elif self._use_prebuilt:
+            pull = await self._compose_ops._compose_exec(
+                ["pull", "--quiet"], timeout_sec=round(self.task_env_config.build_timeout_sec)
+            )
+            if pull.return_code != 0:
+                # Not fatal: `up` pulls implicitly too. Skip the snapshot so we
+                # never cache a guest whose image is missing or half-pulled.
+                self.logger.warning(
+                    "docker compose pull failed (up will retry): %s %s",
+                    pull.stdout, pull.stderr,
+                )
+            else:
+                await self._cache_task_snapshot()
         else:
             build = await self._compose_ops._compose_exec(
                 ["build"], timeout_sec=round(self.task_env_config.build_timeout_sec)
@@ -601,10 +621,6 @@ class SandboxEnvironment(ComposeServiceOpsMixin, BaseEnvironment):
                     f"docker compose build failed in sandbox {self._sandbox_id}: "
                     f"{build.stdout} {build.stderr}"
                 )
-            # Snapshot BEFORE `up`, so the cached image is captured without any
-            # running containers: a clone then starts its own, rather than
-            # resuming this trial's. Best-effort — a failure here costs the next
-            # trial a rebuild and nothing else.
             await self._cache_task_snapshot()
 
         up = await self._compose_ops._compose_exec(
