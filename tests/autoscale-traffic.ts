@@ -366,10 +366,20 @@ class ScenarioContext {
         const hosts = await getHosts()
         this.hostPeak = Math.max(this.hostPeak, hosts.filter((host) => host.alive).length)
         assertHostInvariants(hosts)
+        // Linearize the inventory assertion at the start of the list read.
+        // Creates publish into `held` as soon as POST /sandboxes returns, so a
+        // create can commit while this GET is already in flight. Requiring that
+        // newer id to appear in the older list snapshot is a false loss (seen
+        // under a 96-way warm burst: init exec and later delete both succeeded).
+        // Conversely, kill() removes an id before issuing DELETE; the second
+        // membership check below keeps an intentional concurrent delete from
+        // being mistaken for infrastructure loss.
+        const expected = new Map(this.held)
         const listed = await getSandboxes()
         const duplicates = duplicateIds(listed.map((sandbox) => sandbox.id))
         if (duplicates.length) throw new Error(`duplicate sandbox routes: ${duplicates.join(',')}`)
-        for (const held of this.held.values()) {
+        for (const [id, held] of expected) {
+          if (!this.held.has(id)) continue
           const routed = listed.find((sandbox) => sandbox.id === held.sandbox.sandboxId)
           if (!routed) throw new Error(`held sandbox ${held.sandbox.sandboxId} disappeared from gateway list`)
           if (held.host && routed.host_addr && routed.host_addr !== held.host) {

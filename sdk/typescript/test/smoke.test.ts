@@ -715,6 +715,13 @@ test('create with vcpus/memMib sends the resource overrides and surfaces them', 
   await plain.terminate()
 })
 
+test('create with sshPubkey sends the server ssh_pubkey field', async () => {
+  const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey sandbox-sdk-test'
+  const sbx = await Sandbox.create({ ...opts(), sshPubkey: key })
+  assert.equal(lastCreateBody?.ssh_pubkey, key)
+  await sbx.terminate()
+})
+
 test('hostInfo maps the /info payload to camelCase', async () => {
   const info = await Sandbox.hostInfo(opts())
   assert.deepEqual(info, {

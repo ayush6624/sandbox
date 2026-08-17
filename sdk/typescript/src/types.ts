@@ -58,6 +58,12 @@ export type SandboxFanoutOpts = SandboxBringUpOpts
 /** Options for {@link Sandbox.create}. */
 export interface SandboxCreateOpts extends SandboxRestoreOpts {
   /**
+   * OpenSSH public key installed in the sandbox user's `authorized_keys`
+   * before create returns. Must be one public-key line (for example,
+   * `ssh-ed25519 ...`). Omit when SSH login is not needed.
+   */
+  sshPubkey?: string
+  /**
    * Number of vCPUs for this sandbox. Omit for the host template's default.
    * Setting this (or {@link memMib}) forces a full cold boot (~2 s) instead
    * of the golden-snapshot hot path (~250 ms) — snapshots bake vcpus/mem at

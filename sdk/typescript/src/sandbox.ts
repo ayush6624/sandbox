@@ -120,6 +120,9 @@ export class Sandbox {
     if (opts.memMib !== undefined) {
       body.mem_mib = opts.memMib
     }
+    if (opts.sshPubkey !== undefined) {
+      body.ssh_pubkey = opts.sshPubkey
+    }
     const res = await client.request('POST', '/sandboxes', {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
       ...(Object.keys(body).length > 0 ? { json: body } : {}),
