@@ -54,28 +54,89 @@ idle CPU once I/O stopped dominating. Expected effect: remove ~474 ms of the
 integration and `tc-redirect-tap` exist for exactly it) and the netlink library
 is already in the module graph via those deps.
 
-**What it touches — this is the expensive part of the change, not the netns:**
+### Verified on hardware (2026-08-18), before writing code
 
-- `agentAuthority`/`dialAgentAuthority` (internal/server/proxy.go) — the host↔guest
-  pool is keyed on sandbox id already, which helps, but the dial target becomes a
-  per-netns host-side address rather than a guest IP from the pool.
-- `internal/server/portproxy.go` — "re-read the row for the CURRENT guest IP"
-  becomes "resolve the sandbox's netns endpoint"; the wake-on-connect and
-  activity-pinning logic is unchanged.
-- `registry` guest-IP pool — the per-host IP pool stops bounding concurrency the
-  way `guest_subnet_bits` documents; the ceiling becomes veth/netns count.
-- hibernation wake: the clone-path wake exists largely *because* identity moves.
-  With a stable guest IP, same-identity and clone-path wake converge, which
-  removes a whole branch.
-- `EnsureNetwork` gains per-netns setup/teardown; reconcile must clean orphaned
-  namespaces the way it cleans taps.
+Measured on a fleet worker (n2-standard-16), 16 namespaces each with NAT + clamp:
 
-**Risks to design for.** Per-netns NAT adds a translation hop to guest egress
-(measure throughput, and note the MSS clamp already lives in `EnsureNetwork`);
-netns creation/teardown must be reconciled or namespaces leak; and the guest's
-`/etc/resolv.conf` must keep pointing at something reachable from inside the
-namespace — see the pnp/c-ares note in CLAUDE.md, which is exactly the class of
-bug this could resurrect.
+| | |
+|---|---|
+| setup | **42.5 ms** per namespace (0.680 s / 16, sequential `ip` forks) |
+| teardown | 28.4 ms per namespace |
+| egress from the ns, source 172.16.0.2 | HTTP 301 in **41 ms** |
+| two namespaces egressing CONCURRENTLY from the SAME guest IP | both succeed |
+| host → guest fixed IP via the ns veth address | reachable (DNAT in-ns) |
+| UDP/53 from the guest's fixed source | rcode=0, real answers |
+
+So 42.5 ms of host syscalls replaces 367-447 ms of guest work, and it is host
+CPU (idle) rather than guest CPU (saturated).
+
+**Five things the experiment settled that were NOT safe to assume.** Three of
+them broke my first attempt outright:
+
+1. **The host's `mangle FORWARD` MSS clamp does not cover forwarding inside a
+   namespace** — measured 0 clamp rules in a fresh ns, while the veth is MTU 1500
+   against a 1460 host path. Every namespace needs its own clamp or every guest
+   re-acquires the exact problem the host clamp exists to fix. `xt_TCPMSS` does
+   load in-ns.
+2. **The host MASQUERADE is scoped `-s <guest subnet>` and so does not cover the
+   veth range.** Without a rule for it, ns egress leaves with an unroutable
+   source and silently times out — that is how the first attempt failed.
+3. **Host→guest cannot use DNAT on the host**: `PREROUTING` never sees
+   host-originated traffic. The DNAT belongs inside the namespace.
+4. **`jailer` v1.15.0 supports `--netns`** (confirmed against the binary on a
+   worker, not the docs), so the VMM can join the namespace holding its tap.
+5. **This needs NO guest-agent change and NO image rebake.** `runThawAgent`
+   (cmd/sandboxd/thaw.go) only reconfigures `eth0` when the MMDS document carries
+   a non-empty `gen`, and it handles `epoch_ms` on an independent branch. A clone
+   launched with an **epoch-only** MMDS document therefore keeps its baked
+   address and never announces, while still getting its clock stepped. So this
+   ships through ordinary `rollout.sh`, and the GARP/reidentify code in the guest
+   becomes dead-but-harmless, deletable later in a routine bake. This contradicts
+   the "both items are guest-side" claim at the top of this document.
+
+### Landed (`029c4cd`)
+
+- `internal/provisioner/netns.go` — `CreateNetns`/`DeleteNetns`/`ListNetns`/
+  `VethEndpoints`/`EnsureVethEgress`, carrying the exact command sequence proven
+  above.
+- `internal/vm/launcher.go` `LaunchRequest.NetnsPath` + `internal/vm/jailer.go`
+  passing `--netns`. Inert until a caller sets it.
+- `internal/server/reconcile.go` — per-row namespace teardown beside the tap, plus
+  an orphan sweep of `/var/run/netns`. Landed BEFORE any creator so the first
+  deploy cannot leak; refuses to sweep if the row list is unavailable, since it
+  could not then distinguish an orphan from a live sandbox.
+- `internal/provisioner/netns_test.go` — pins the address math against collision
+  over 120 consecutive allocations, the 15-byte interface-name limit, and the
+  three rules above (SNAT, in-ns DNAT, per-ns clamp).
+
+**Key simplification that keeps the remaining diff small:** `VethEndpoints`
+reuses the existing guest-IP pool as the **host-side** address, so every consumer
+of `sb.GuestIP` — the agent dial in `proxy.go`, `portproxy.go`'s dial,
+`waitForAgent`, `syncGuestClock`, `installSSHKey`, `initializeGuestIdentity` —
+keeps working untouched. Only the *meaning* of that address moves: from one
+configured inside the guest to one on the host end of the veth. The plan's
+worry about rewriting those call sites does not survive that choice.
+
+### What remains
+
+1. `EnsureNetwork` calls `EnsureVethEgress` with the veth subnet (needs a config
+   value for it — currently the only uncalled piece).
+2. Cold boot (`createCold`): fixed `GuestCIDR`, `CreateNetns` instead of
+   `CreateTap`, pass `NetnsPath` into `RunOptions`.
+3. Clone (`bringUpClone`): `CreateNetns`, drop `ListenARP`, drop
+   `CreateTapUnbridged`, and send MMDS **without** `ip`/`mac`/`gen` — `epoch_ms`
+   only, which is what makes the existing agent leave its address alone.
+4. `finishClone`: skip the reidentify wait, the bridge attach and
+   `PrimeGuestNetwork` in netns mode. This is where the 367-447 ms actually
+   disappears.
+5. Hibernation wake: check whether same-identity and clone-path wake really
+   converge once the address is stable — plausible, unverified.
+6. Once deployed and settled: delete `garp_linux.go`, `ListenARP`,
+   `WaitForIdentity`, `reidentifyMargin` and the second-margin retry in a bake.
+
+Steps 2-4 are the ones that move the number, and none of them are testable
+without hardware — which is why they are deliberately not in `029c4cd` rather
+than committed unverified.
 
 ## Part 2: defer the SSH host key until SSH is used
 
