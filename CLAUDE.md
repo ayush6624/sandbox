@@ -615,8 +615,17 @@ scripts/              Host setup shell scripts
   **That flatness was a DEFECT, not a property of fanout** — read it as
   "effective concurrency 1", diagnosed 2026-08-17 as the exclusive snapshot lock
   plus the v1 batch issuing N fanouts of one (see the two architecture notes on
-  shared snapshot locking and chunked batches). Re-measure this row: it is the
-  benchmark that proves the fix, and it has NOT been re-run on hardware yet.
+  shared snapshot locking and chunked batches).
+  **Re-measured on release `4407075` (2026-08-17), single worker
+  `10.160.0.50:8080`, from the control VM** — N=1/2/4/8/16 operation wall
+  **1016 / 1016 / 1513 / 2521 / 5042 ms**, all usable (31/31), per-sandbox
+  1063 → **323 ms**. So 16 went 12.219 s → **5.164 s (2.37x)** and the
+  per-sandbox figure stops tracking N as slope-756. It is still ~linear past
+  N=8 (2521 → 5042 for 8 → 16) because `fanoutParallelism` caps one call at 8
+  and further permits are only opportunistic — that is the NEXT ceiling, and
+  per docs/burst-absorption-plan.md do not raise it without a measured
+  reidentify-vs-concurrency curve. Artifact: `/tmp/batch-4407075.json` on the
+  control VM.
   **Always drive gateway-facing benchmarks from the control VM** — a laptop
   tunnel adds hundreds of ms of transport RTT that reads as VM-creation cost.
   Full report: `docs/benchmarks.md` (+ `docs/benchmark-report.html`); artifacts
