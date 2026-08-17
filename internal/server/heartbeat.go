@@ -133,6 +133,13 @@ func (s *Server) heartbeat(ctx context.Context) {
 }
 
 func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, hostID, advertise string) {
+	// A GCE suspend freezes this process, so the gap between heartbeat attempts
+	// is visible even though Linux boot age remains old. Close placement before
+	// sampling capacity: Nomad may reconnect the raw_exec allocation and only
+	// decide to relaunch it several seconds later. Routing stays advertised, but
+	// no new sandbox may land on the worker during that decision window.
+	resumeQuarantined := s.noteHeartbeatWake(time.Now())
+
 	// Routed = running + hibernated: the gateway must route requests for a
 	// hibernated sandbox here so this host can wake it. Only running ones
 	// consume slots.
@@ -213,7 +220,11 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	// storms and agent timeouts. RoutedCapacity calculated this value from the
 	// same SQLite snapshot as SandboxIDs/SlotsUsed, so concurrent destroys
 	// cannot combine an older used count with newer free capacity.
-	hb.SlotsFree = intPtr(s.advertisedFreeSlots(free))
+	advertisedFree := s.advertisedFreeSlots(free)
+	if resumeQuarantined {
+		advertisedFree = 0
+	}
+	hb.SlotsFree = intPtr(advertisedFree)
 	hb.DemandSlots = intPtr(demand)
 	b, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
