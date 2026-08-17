@@ -796,6 +796,38 @@ scripts/              Host setup shell scripts
   `GET /info` MaxMemMIB) is clamped to the budget. vcpus have NO sum guard by design:
   the Nomad task runs CPU *shares*, so contention degrades to fair-share slowdown —
   there is no CPU analogue of the OOM killer.
+- **Identical jailed VM inputs share ONE inode, because the page cache is keyed
+  on inode.** This is what made fanout scale with N, and it was invisible in
+  every obvious place. Each clone used to stage its own copy of the kernel image
+  and the snapshot's mem/state — files that are byte-identical across clones —
+  via `cp --reflink`. Reflink makes the copy free in disk SPACE (~1 ms for a
+  1 GiB file, measured) which is exactly why it looked harmless; but N copies are
+  N **inodes**, so N clones read the same gigabyte off the disk N times.
+  Measured on a fleet worker (2026-08-17): 16 concurrent cold reads of one 1 GiB
+  mem file took **33.7 s as 16 reflinked copies vs 2.9 s as 16 hardlinks**, and
+  `vmstat` during a 16-way fanout showed **~1% user CPU, 45-64% iowait,
+  ~500 MB/s reads** — it was never CPU or lock contention. `stageSharedReadonly`
+  now stages those inputs once per host and hardlinks them into each jail.
+  Three constraints that are easy to get wrong: the shared file must be a COPY
+  of the source, not a link to it, because staging chowns/chmods what it stages
+  and linking the original would rewrite the snapshot artifact's own 0600 mode
+  (guest memory must not become world-readable); it lives in a **0700 root-only**
+  directory and is root-owned 0444, exactly what the per-VM copies already were,
+  so jails reach it only via their own hardlinks; and identity is
+  **(path, size, mtime)** so a rebuilt kernel or golden cannot be served from a
+  stale copy. Any link failure falls back to a private copy — slower than
+  intended, never wrong. `ReconcileJailer` sweeps entries with **link count 1**
+  at startup so stale-mtime copies can't accumulate. The rootfs stays per-VM: it
+  is writable, so it cannot share an inode, and its reads are the next candidate.
+  Result on release `2e6ba08`, single worker: N=1/2/4/8/16/32 operation wall
+  **1017 / 511 / 509 / 1012 / 1515 / 3027 ms**, per-sandbox **764 ms -> 102 ms**,
+  raw fanout of 8 in **703 ms**. **The ceiling moved, it did not disappear**:
+  at 32-way the same `vmstat` shows iowait ~0-1% and ~58% GUEST cpu with ~4%
+  idle, i.e. the host is now saturated by the guests' own thaw work (eth0
+  reconfigure + GARP + Ed25519 keygen). 32 guests cannot do that in the time 8
+  guests take on 16 cores, so **constant-time fanout past ~8 needs less
+  per-guest thaw work, a ready pool, or more hosts — not a bigger
+  `fanoutParallelism`.**
 - **Task-cgroup delegation runs ONCE at serve startup, and serve's own forked
   helpers are not foreign processes.** `prepareCurrentCgroupDelegation`
   (internal/vm/jailer.go) refuses to delegate a task cgroup containing a process
