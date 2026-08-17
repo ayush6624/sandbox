@@ -305,6 +305,31 @@ func TestScaleInHoldsTheFloor(t *testing.T) {
 	}
 }
 
+// A deleted worker can heartbeat once more while GCE is stopping it. That
+// stale heartbeat must not make a target-at-floor fleet look large enough to
+// cordon or delete another real worker.
+func TestScaleInProviderTargetProtectsFloorFromStaleHeartbeat(t *testing.T) {
+	g, f := scaleInGateway(t, 2,
+		&host{id: "a", instanceName: "vm-a", slotsTotal: 10, slotsFree: 10},
+		&host{id: "b", instanceName: "vm-b", slotsTotal: 10, slotsFree: 10},
+		&host{id: "stale", instanceName: "vm-stale", slotsTotal: 10, slotsFree: 10},
+	)
+	g.migTarget.Store(2)
+	g.migTargetKnown.Store(true)
+	g.scaleInLowSince = time.Now().Add(-2 * time.Minute)
+
+	g.evaluateScaleIn(context.Background())
+	if got := g.drainingHostCount(); got != 0 {
+		t.Fatalf("target-at-floor fleet cordoned %d host(s)", got)
+	}
+
+	g.hosts["stale"].draining = true
+	g.retireDrainedHosts(context.Background())
+	if names := f.deletedNames(); len(names) != 0 {
+		t.Fatalf("target-at-floor fleet deleted %v using a stale heartbeat", names)
+	}
+}
+
 // A failed delete leaves the host cordoned for the next pass. It holds nothing,
 // so this costs money, not correctness — but it must not vanish from routing.
 func TestScaleInRetriesFailedDelete(t *testing.T) {

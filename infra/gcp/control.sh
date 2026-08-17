@@ -128,7 +128,7 @@ cmd_deploy() {
     "$DIR/edge-cert-renew.sh" \
     "${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/"
 
-  echo ">> install Nomad server + Prometheus + autoscaler + gateway on $NAME"
+  echo ">> install Nomad server + Prometheus + Grafana + gateway on $NAME"
   local control_release
   control_release="$(git -C "$REPO" rev-parse --short HEAD)"
   sshx "$NAME" \
@@ -171,7 +171,7 @@ cmd_status() {
       printf "   %-18s %s\n" "$u" "$(systemctl is-active $u 2>/dev/null)"; done' 2>/dev/null || true
   echo
   echo ">> Drive from laptop:"
-  echo "   SANDBOX_API_URL=http://${IP}:${GW_PORT} SANDBOX_API_KEY=${GATEWAY_TOKEN:-<token>}"
+  echo "   SANDBOX_API_URL=http://${IP}:${GW_PORT} SANDBOX_API_KEY=<from fleet-secrets.env>"
   echo "   Grafana: http://${tsip}:${GRAFANA_PORT} (dashboard: Sandbox / Sandbox Fleet)"
 }
 

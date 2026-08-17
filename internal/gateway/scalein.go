@@ -121,7 +121,7 @@ func (g *Gateway) evaluateScaleIn(ctx context.Context) {
 	if g.hasDrainingHost() {
 		return
 	}
-	if fs.live <= g.scaleInMin {
+	if fs.live <= g.scaleInMin || g.providerTargetAtFloor() {
 		return
 	}
 
@@ -197,7 +197,10 @@ func (g *Gateway) retireDrainedHosts(ctx context.Context) {
 	for _, t := range drained {
 		// Re-check the floor per removal: several hosts can finish draining
 		// between passes, and the fleet must not step under min on the way.
-		if g.liveHostCount() <= g.scaleInMin {
+		// A just-deleted worker can heartbeat once more before GCE stops it and
+		// inflate liveHostCount. The provider target is authoritative once known,
+		// so it independently closes that stale-heartbeat race at the floor.
+		if g.liveHostCount() <= g.scaleInMin || g.providerTargetAtFloor() {
 			return
 		}
 		delCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -221,6 +224,10 @@ func (g *Gateway) retireDrainedHosts(ctx context.Context) {
 			g.refreshMIGTarget(ctx, sizer)
 		}
 	}
+}
+
+func (g *Gateway) providerTargetAtFloor() bool {
+	return g.migTargetKnown.Load() && int(g.migTarget.Load()) <= g.scaleInMin
 }
 
 // uncordonAll clears every cordon and reports how many it cleared.

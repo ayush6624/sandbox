@@ -23,6 +23,7 @@ fail() {
 }
 
 gateway_fn="$(sed -n '/^cmd_gateway()/,/^}/p' "$CONTROL")"
+status_fn="$(sed -n '/^cmd_status()/,/^}/p' "$CONTROL")"
 for assignment in \
   "INGRESS_BUCKET='\${INGRESS_BUCKET:-}'" \
   "RAW_PUBLIC_HOST='\${EDGE_DOMAIN:-}'" \
@@ -37,5 +38,9 @@ do
   grep -Fq "$assignment" <<<"$gateway_fn" ||
     fail "gateway-only deploy does not pass $assignment"
 done
+
+if grep -Fq 'SANDBOX_API_KEY=${GATEWAY_TOKEN' <<<"$status_fn"; then
+  fail "control status prints the live gateway credential"
+fi
 
 echo "PASS: gateway-only deploy preserves scaling, raw ingress, and edge-credential configuration"
