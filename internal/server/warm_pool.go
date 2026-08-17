@@ -177,15 +177,11 @@ func waitWarmRetry(ctx context.Context, kick <-chan struct{}) bool {
 }
 
 func (s *Server) createWarmFromSnapshot(ctx context.Context, snap registry.Snapshot) (registry.Sandbox, error) {
-	stage := s.snapshotStageLock(snap.SourceRootfsPath)
-	stage.Lock()
-	if err := s.stageSnapshotRootfs(snap); err != nil {
-		stage.Unlock()
+	if err := s.ensureStagedRootfs(snap); err != nil {
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 	started := time.Now()
 	c := s.bringUpClone(ctx, snap, "", nil, -1, true)
-	stage.Unlock()
 	if c.err != nil {
 		return registry.Sandbox{}, c.err
 	}

@@ -429,6 +429,41 @@ scripts/              Host setup shell scripts
   host's built-in image), so the SDK's long-standing `{templateId}` spelling works without
   an SDK code change. `GET /v1/templates` still describes only the built-in one — listing
   built templates needs a marker on the snapshot row and is not done. See docs/templates.md.
+- **Snapshot consumers hold `snapshotLock(snapID)` SHARED, and the staged baked rootfs is
+  permanent.** Golden create, snapshot create, template create, fanout and hibernation wake
+  are all ONE mechanism — `bringUpClone` + `finishClone`, a Firecracker restore onto an
+  unbridged tap, GARP reidentify, then bridge. Cold boot (`createCold`) is the *exception*
+  path, reached only by vcpu/mem overrides, a missing golden, or a template build. What used
+  to differ was concurrency: `snapshotLock` was exclusive and held across the whole
+  bring-up, so every create from one snapshot ran strictly one at a time, while the golden
+  path took that lock not at all. The asymmetry was NOT a design decision about snapshots —
+  the only shared mutable state was `snap.SourceRootfsPath`, which Firecracker opens during
+  LoadSnapshot before `PATCH /drives` can relocate it, and which restore/fanout used to
+  stage per call and then **unlink** (so one consumer's unlink could race another's load).
+  Golden never paid the lock precisely because `stageSnapshotRootfs` leaves its staged file
+  in place. `ensureStagedRootfs` now does that for every snapshot, which is what lets
+  consumers (restore, fanout, and the diff-base readers in `snapshotSandbox` /
+  `planHibernateDiff`) take `RLock` while delete and metadata writes take `Lock`. Two
+  consequences to preserve: the staged path lives OUTSIDE `SnapshotDir`, so
+  `CleanupSnapshot` misses it and `removeStagedRootfs` must run on delete (skipping golden
+  and any path a live source sandbox still owns); and nothing may RLock the same snapshot id
+  twice in one goroutine — Go's RWMutex blocks new readers once a writer waits, so nesting
+  would deadlock. There is no such nesting today (it would already have been a hard deadlock
+  under the old exclusive lock). Fanout also no longer barriers between "resume all" and
+  "bridge all" — that barrier existed only to pick a moment to unlink the staged file, and
+  it made every clone wait for the slowest resume in the batch; `fanoutClones` runs each
+  clone's bring-up and finish as one pipeline, `limit` at a time.
+- **A snapshot-sourced v1 batch is chunked fanout, not N fanouts of one.** `POST
+  /v1/sandbox-batches` used to call `h.create` `count` times, and each of those posts
+  `/snapshots/{id}/fanout` with `count:1` — so with the exclusive snapshot lock above,
+  `max_parallelism` was a lie and the batch was dead-linear: measured 1015/1519/3034/6048/
+  12094/24191 ms for N=1/2/4/8/16/32, i.e. ~756 ms per sandbox with effective concurrency of
+  exactly 1 (a 15-sandbox batch took ~11.3 s). `runSnapshotBatch` now issues fanouts of up
+  to `fanoutChunk` (8) clones. Chunk, don't send one giant fanout: a single call cannot
+  exceed the worker's `fanoutParallelism` anyway, and the gateway reserves a whole fanout's
+  slots on ONE host — so an unchunked `count=100` could never be placed. `max_parallelism`
+  bounds clones in flight, capping both chunk size and concurrent chunks. Single creates
+  still send `count:1` (`TestSingleSnapshotCreateStillSendsCountOne`).
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
   `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
   `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override
@@ -577,6 +612,11 @@ scripts/              Host setup shell scripts
   refill-bound creates at 734 ms / 984 ms / 1.381 s; snapshot-source create p50
   **696 ms**; snapshot batch 1/2/4/8/16/32 all usable, flat at **~764 ms per
   sandbox** from N=4 up versus 6.464 s for the 32-way default baseline.
+  **That flatness was a DEFECT, not a property of fanout** — read it as
+  "effective concurrency 1", diagnosed 2026-08-17 as the exclusive snapshot lock
+  plus the v1 batch issuing N fanouts of one (see the two architecture notes on
+  shared snapshot locking and chunked batches). Re-measure this row: it is the
+  benchmark that proves the fix, and it has NOT been re-run on hardware yet.
   **Always drive gateway-facing benchmarks from the control VM** — a laptop
   tunnel adds hundreds of ms of transport RTT that reads as VM-creation cost.
   Full report: `docs/benchmarks.md` (+ `docs/benchmark-report.html`); artifacts

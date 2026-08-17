@@ -235,9 +235,7 @@ func (s *Server) snapshotStageLock(path string) *keyedMutex {
 
 // stageSnapshotRootfs makes sure the rootfs path baked into the snapshot
 // exists. The caller must hold snapshotStageLock(snap.SourceRootfsPath).
-// Unlike fan-out — which stages per call and removes it after — the golden
-// snapshot's staged file is left in place so every create doesn't re-pay the
-// copy.
+// The staged file is left in place so subsequent creates don't re-pay the copy.
 func (s *Server) stageSnapshotRootfs(snap registry.Snapshot) error {
 	if _, err := os.Stat(snap.SourceRootfsPath); err == nil {
 		return nil
@@ -245,19 +243,38 @@ func (s *Server) stageSnapshotRootfs(snap registry.Snapshot) error {
 	return s.cfg.Provisioner.CopyFileSparse(snap.RootfsPath, snap.SourceRootfsPath)
 }
 
+// ensureStagedRootfs stages the snapshot's baked rootfs path and LEAVES it
+// there, holding the stage lock only across the stat+copy.
+//
+// Firecracker opens the path recorded inside the snapshot during LoadSnapshot,
+// before the clone path can PATCH /drives onto its own CoW copy, so that path
+// must exist and be openable for the load window. Restore and fanout used to
+// stage it per call and unlink it afterwards, which made the path shared
+// MUTABLE state: a second consumer's load could race the first one's unlink.
+// snapshotLock(snapID) was the blunt guard for that, and it serialized every
+// create from one snapshot end to end — the golden path never paid it precisely
+// because its staged file is permanent. Making the file permanent for all
+// snapshots is what lets the snapshot lock drop to a read lock, so N creates
+// from one snapshot now run concurrently.
+//
+// The file is only created when absent, so a still-live source sandbox's own
+// rootfs is never touched. Cleanup moved to deleteSnapshotLocked.
+func (s *Server) ensureStagedRootfs(snap registry.Snapshot) error {
+	stage := s.snapshotStageLock(snap.SourceRootfsPath)
+	stage.Lock()
+	defer stage.Unlock()
+	return s.stageSnapshotRootfs(snap)
+}
+
 // createFromSnapshot brings up one identity-neutral clone of snap — the same
 // two-phase resume-then-bridge dance as fan-out, for a single sandbox.
 func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
-	stage := s.snapshotStageLock(snap.SourceRootfsPath)
-	stage.Lock()
-	if err := s.stageSnapshotRootfs(snap); err != nil {
-		stage.Unlock()
+	if err := s.ensureStagedRootfs(snap); err != nil {
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 
 	t0 := time.Now()
 	c := s.bringUpClone(ctx, snap, name, expiresAt, hibernateAfterSec, false)
-	stage.Unlock()
 	if c.err != nil {
 		return registry.Sandbox{}, c.err
 	}

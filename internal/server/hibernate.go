@@ -141,15 +141,17 @@ func (s *Server) planHibernateDiff(ctx context.Context, id string, m *vm.Machine
 	}
 	if v, ok := s.diffBase.Load(id); ok {
 		candidateID := v.(string)
+		// Shared: this only READS the parent. It must fence the parent's
+		// deletion, not other readers of it (restores/fanouts).
 		op := s.snapshotLock(candidateID)
-		op.Lock()
+		op.RLock()
 		if plan, valid := s.snapshotDiffPlan(ctx, candidateID); valid {
 			parentFull := ""
 			if plan.parent.ID != "" {
 				var err error
 				parentFull, err = s.materializeMem(ctx, plan.parent)
 				if err != nil {
-					op.Unlock()
+					op.RUnlock()
 					return hibernateDiffPlan{}
 				}
 			}
@@ -157,26 +159,26 @@ func (s *Server) planHibernateDiff(ctx context.Context, id string, m *vm.Machine
 				baseID:        plan.goldenID,
 				parentFullMem: parentFull,
 				goldenMem:     plan.goldenMemPath,
-				unlock:        op.Unlock,
+				unlock:        op.RUnlock,
 			}
 		}
-		op.Unlock()
+		op.RUnlock()
 	}
 	if v, ok := s.hibLineage.Load(id); ok {
 		lineage := v.(hibernationLineage)
 		op := s.snapshotLock(lineage.goldenID)
-		op.Lock()
+		op.RLock()
 		if _, err := os.Stat(lineage.parentFullMem); err == nil {
 			if goldenMem, _, err := s.ensureBaseLocal(ctx, lineage.goldenID); err == nil {
 				return hibernateDiffPlan{
 					baseID:        lineage.goldenID,
 					parentFullMem: lineage.parentFullMem,
 					goldenMem:     goldenMem,
-					unlock:        op.Unlock,
+					unlock:        op.RUnlock,
 				}
 			}
 		}
-		op.Unlock()
+		op.RUnlock()
 	}
 	return hibernateDiffPlan{}
 }

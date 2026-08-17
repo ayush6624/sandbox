@@ -585,3 +585,120 @@ func TestTemplateSourceClonesTheNamedTemplate(t *testing.T) {
 		t.Fatalf("empty template id=%d, want 400", got.Code)
 	}
 }
+
+// A snapshot-sourced batch must reach the worker as fanout calls carrying a
+// COUNT, not as `count` separate fanouts of one. Each single-clone fanout takes
+// the worker's per-snapshot lock for its whole bring-up, so N of them run
+// strictly one at a time — measured dead-linear at 756 ms per sandbox, i.e.
+// ~11.3 s for a 15-sandbox batch, with max_parallelism having no effect at all.
+func TestSnapshotBatchIssuesCountedFanouts(t *testing.T) {
+	var mu sync.Mutex
+	var counts []int
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/fanout"):
+			var body struct {
+				Count int `json:"count"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			counts = append(counts, body.Count)
+			mu.Unlock()
+			list := make([]string, body.Count)
+			for i := range list {
+				list[i] = fmt.Sprintf(`{"id":"sb_%d_%d","status":"running"}`, len(counts), i)
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, "[%s]", strings.Join(list, ","))
+		case strings.HasSuffix(r.URL.Path, "/public-fields"):
+			id := strings.Split(r.URL.Path, "/")[2]
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"id":%q,"status":"running"}`, id)
+		default:
+			t.Errorf("unexpected worker call %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	h := testHandler(t, legacy)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-batches",
+		strings.NewReader(`{"count":15,"sandbox":{"source":{"type":"snapshot","id":"snap_1"}}}`))
+	req.Header.Set("Idempotency-Key", "snap-batch")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("batch=%d body=%s", w.Code, w.Body.String())
+	}
+	var op Operation
+	if err := json.Unmarshal(w.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got := httptest.NewRecorder()
+		h.ServeHTTP(got, httptest.NewRequest("GET", "/v1/operations/"+op.ID, nil))
+		if err := json.Unmarshal(got.Body.Bytes(), &op); err != nil {
+			t.Fatal(err)
+		}
+		if op.CompletedAt != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if op.Status != "succeeded" || op.Succeeded != 15 {
+		t.Fatalf("operation=%+v", op)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// 15 clones at the default max_parallelism of 8 → chunks of 8 and 7, never
+	// fifteen calls of one.
+	if len(counts) != 2 {
+		t.Fatalf("worker saw %d fanout calls (%v), want 2 chunked calls", len(counts), counts)
+	}
+	total := 0
+	for _, n := range counts {
+		if n < 2 {
+			t.Fatalf("fanout call asked for %d clones (%v) — the batch is being serialized", n, counts)
+		}
+		total += n
+	}
+	if total != 15 {
+		t.Fatalf("fanout calls requested %d clones (%v), want 15", total, counts)
+	}
+	// Every index must be filled exactly once across chunks.
+	for i, result := range op.Results {
+		if result.Index != i || result.Sandbox == nil || result.Error != nil {
+			t.Fatalf("result[%d]=%+v", i, result)
+		}
+	}
+}
+
+// A single create keeps sending count:1 — the non-batch path is unchanged.
+func TestSingleSnapshotCreateStillSendsCountOne(t *testing.T) {
+	got := -1
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/fanout") {
+			var body struct {
+				Count int `json:"count"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			got = body.Count
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `[{"id":"sb_1","status":"running"}]`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"sb_1","status":"running"}`)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes",
+		strings.NewReader(`{"source":{"type":"snapshot","id":"snap_1"}}`))
+	req.Header.Set("Idempotency-Key", "one")
+	w := httptest.NewRecorder()
+	testHandler(t, legacy).ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create=%d body=%s", w.Code, w.Body.String())
+	}
+	if got != 1 {
+		t.Fatalf("single create sent count=%d, want 1", got)
+	}
+}

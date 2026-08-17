@@ -133,8 +133,10 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 	// chains that make deletion and cross-host restore fragile.
 	if v, ok := s.diffBase.Load(id); ok && !golden && vm.DiffCapable(m) {
 		candidateID := v.(string)
+		// Shared: the parent is only read here, so this fences its deletion
+		// without blocking concurrent restores/fanouts of the same parent.
 		candidateOp := s.snapshotLock(candidateID)
-		candidateOp.Lock()
+		candidateOp.RLock()
 		if plan, ok := s.snapshotDiffPlan(ctx, candidateID); ok {
 			if plan.parent.ID != "" {
 				parentFullPath, err = s.materializeMem(ctx, plan.parent)
@@ -145,10 +147,10 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 				goldenMemPath = plan.goldenMemPath
 				baseOp = candidateOp
 			} else {
-				candidateOp.Unlock()
+				candidateOp.RUnlock()
 			}
 		} else {
-			candidateOp.Unlock()
+			candidateOp.RUnlock()
 		}
 	}
 	// A machine woken from a differential hibernation has no public snapshot
@@ -159,7 +161,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		if v, ok := s.hibLineage.Load(id); ok {
 			lineage := v.(hibernationLineage)
 			candidateOp := s.snapshotLock(lineage.goldenID)
-			candidateOp.Lock()
+			candidateOp.RLock()
 			if _, statErr := os.Stat(lineage.parentFullMem); statErr == nil {
 				if goldenMem, _, baseErr := s.ensureBaseLocal(ctx, lineage.goldenID); baseErr == nil {
 					format, baseID = registry.FormatDiff, lineage.goldenID
@@ -168,15 +170,15 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 					baseOp = candidateOp
 					usingHibLineage = true
 				} else {
-					candidateOp.Unlock()
+					candidateOp.RUnlock()
 				}
 			} else {
-				candidateOp.Unlock()
+				candidateOp.RUnlock()
 			}
 		}
 	}
 	if baseOp != nil {
-		defer baseOp.Unlock()
+		defer baseOp.RUnlock()
 	}
 	snapType := vm.SnapshotFull
 	if format == registry.FormatDiff {
@@ -443,9 +445,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseCreate()
 
+	// Shared: any number of restores/fanouts may read one snapshot at once, and
+	// all of them still exclude delete/metadata writes.
 	snapshotOp := s.snapshotLock(snapID)
-	snapshotOp.Lock()
-	defer snapshotOp.Unlock()
+	snapshotOp.RLock()
+	defer snapshotOp.RUnlock()
 
 	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
@@ -453,7 +457,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A diff snapshot's mem file holds only dirty pages; Firecracker needs the
-	// rebased full file.
+	// rebased full file. Internally single-flighted, so concurrent restores of
+	// the same snapshot rebase it once.
 	if snap.MemPath, err = s.materializeMem(ctx, snap); err != nil {
 		httpError(w, 500, fmt.Errorf("materialize snapshot memory: %w", err))
 		return
@@ -466,35 +471,14 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t0 := time.Now()
-	stage := s.snapshotStageLock(snap.SourceRootfsPath)
-	stage.Lock()
-	stageLocked := true
-	defer func() {
-		if stageLocked {
-			stage.Unlock()
-		}
-	}()
-
-	// Firecracker opens the baked rootfs path during LoadSnapshot before the
-	// clone path patches the drive to its fresh CoW file. Stage the immutable
-	// snapshot rootfs there only for that load window. An old tap/IP may already
-	// belong to an unrelated sandbox; unlike the former 1:1 path, neither is
-	// reclaimed here.
-	stagedBaked := false
-	if _, statErr := os.Stat(snap.SourceRootfsPath); statErr != nil {
-		if err := s.cfg.Provisioner.CopyFileSparse(snap.RootfsPath, snap.SourceRootfsPath); err != nil {
-			httpError(w, 500, fmt.Errorf("stage snapshot rootfs at baked path: %w", err))
-			return
-		}
-		stagedBaked = true
+	// An old tap/IP may already belong to an unrelated sandbox; unlike the
+	// former 1:1 path, neither is reclaimed here.
+	if err := s.ensureStagedRootfs(snap); err != nil {
+		httpError(w, 500, fmt.Errorf("stage snapshot rootfs at baked path: %w", err))
+		return
 	}
 
 	c := s.bringUpClone(ctx, snap, body.Name, expiresAt, body.HibernateAfterSec, false)
-	if stagedBaked {
-		_ = s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath)
-	}
-	stage.Unlock()
-	stageLocked = false
 	if c.err != nil {
 		capacityOrHTTPError(w, 500, fmt.Errorf("restore clone: %w", c.err))
 		return
@@ -544,21 +528,27 @@ const reidentifyMargin = 1500 * time.Millisecond
 // the v1 batch cap (internal/apiv1 createBatch: count 1..100) so the two entry
 // points into the same machinery can't disagree. Unbounded, a single
 // authenticated call sized its own work: `count` registry transactions, rootfs
-// clones, VMMs and 30 s agent waits, with snapshotLock(snapID) held throughout.
+// clones, VMMs and 30 s agent waits, all under one snapshotLock(snapID).
 const maxFanoutCount = 100
 
 // fanoutParallelism caps how many of the host's create permits one fanout may
 // hold. The permits cover the whole batch (see handleFanout on why they cannot
 // be taken per clone under the snapshot lock), so this is deliberately a
 // fraction of a fleet host's budget (24): a large fanout paces itself without
-// starving ordinary creates. It also preserves the phase-1 concurrency the
-// hard-coded 8 used to give.
+// starving ordinary creates.
+//
+// It is also the ceiling worth raising LAST. The per-clone cost is dominated by
+// two waits inside finishClone — the guest's reidentify announce and its SSH
+// keygen — and both are guest-CPU-bound on a host running ~6:1 CPU
+// oversubscription. Past some concurrency the announce simply gets slower and
+// starts tripping finishClone's second margin, so this wants tuning against
+// measured reidentify latency, not a guess.
 const fanoutParallelism = 8
 
 // runBounded runs fn for indices [0,n) with at most limit concurrent calls and
-// returns when all have finished. Both fanout phases share it: phase 2 was
-// previously one unbounded goroutine per clone, each holding a 30 s agent wait,
-// so it undid the pacing phase 1 was careful about.
+// returns when all have finished. Fanout runs each clone's bring-up AND finish
+// through one call of this (see fanoutClones): finish holds a 30 s agent wait,
+// so it must be paced just as carefully as bring-up.
 func runBounded(limit, n int, fn func(i int)) {
 	if limit < 1 {
 		limit = 1
@@ -577,34 +567,61 @@ func runBounded(limit, n int, fn func(i int)) {
 	wg.Wait()
 }
 
-// finishClones runs fanout phase 2 with at most limit clones in flight: wait for
-// each clone's reidentify announce, bridge its tap, and wait for its agent. The
-// announce wait is per-clone inside finishClone, so fast clones bridge without
-// waiting on slow ones. Clones that never resumed are skipped (logged); clones
-// that fail to finish are destroyed, so a partial batch leaks nothing.
-func (s *Server) finishClones(ctx context.Context, snapID string, clones []*clone, limit int) []registry.Sandbox {
+// finishOne runs fanout phase 2 for one clone: wait for its reidentify
+// announce, bridge its tap, gate on its agent. A clone that never resumed is
+// skipped (logged); one that fails to finish is destroyed, so a partial batch
+// leaks nothing.
+func (s *Server) finishOne(ctx context.Context, snapID string, c *clone) (registry.Sandbox, bool) {
 	finish := s.finishCloneFn
 	if finish == nil {
 		finish = s.finishClone
 	}
+	if c == nil || c.err != nil {
+		if c != nil && c.err != nil {
+			fmt.Fprintf(os.Stderr, "[fanout %s] clone bring-up failed: %v\n", snapID, c.err)
+		}
+		return registry.Sandbox{}, false
+	}
+	if err := finish(ctx, c); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] fanout clone finish failed: %v\n", c.sb.ID, err)
+		_ = s.destroy(context.Background(), c.sb.ID)
+		return registry.Sandbox{}, false
+	}
+	return c.sb, true
+}
+
+// finishClones runs phase 2 for an already-resumed batch, at most limit in
+// flight. The announce wait is per-clone inside finishClone, so fast clones
+// bridge without waiting on slow ones.
+func (s *Server) finishClones(ctx context.Context, snapID string, clones []*clone, limit int) []registry.Sandbox {
 	live := make([]registry.Sandbox, 0, len(clones))
 	var mu sync.Mutex
 	runBounded(limit, len(clones), func(i int) {
-		c := clones[i]
-		if c == nil || c.err != nil {
-			if c != nil && c.err != nil {
-				fmt.Fprintf(os.Stderr, "[fanout %s] clone bring-up failed: %v\n", snapID, c.err)
-			}
-			return
+		if sb, ok := s.finishOne(ctx, snapID, clones[i]); ok {
+			mu.Lock()
+			live = append(live, sb)
+			mu.Unlock()
 		}
-		if err := finish(ctx, c); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] fanout clone finish failed: %v\n", c.sb.ID, err)
-			_ = s.destroy(context.Background(), c.sb.ID)
-			return
+	})
+	return live
+}
+
+// fanoutClones brings up and finishes each clone as ONE pipeline, at most limit
+// in flight, so a clone bridges as soon as its own guest announces instead of
+// waiting for the slowest resume in the batch. clones[i] is recorded for the
+// caller's capacity-vs-genuine failure classification.
+func (s *Server) fanoutClones(ctx context.Context, snapID string, snap registry.Snapshot, clones []*clone,
+	limit int, expiresAt *time.Time, hibernateAfterSec int) []registry.Sandbox {
+	live := make([]registry.Sandbox, 0, len(clones))
+	var mu sync.Mutex
+	runBounded(limit, len(clones), func(i int) {
+		c := s.bringUpClone(ctx, snap, "", expiresAt, hibernateAfterSec, false)
+		clones[i] = c
+		if sb, ok := s.finishOne(ctx, snapID, c); ok {
+			mu.Lock()
+			live = append(live, sb)
+			mu.Unlock()
 		}
-		mu.Lock()
-		live = append(live, c.sb)
-		mu.Unlock()
 	})
 	return live
 }
@@ -648,9 +665,8 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fail fast on a batch this host plainly cannot hold: otherwise the handler
-	// allocates, boots and tears down count−free clones a wave at a time —
-	// holding snapshotLock(snapID) against restores and deletes throughout —
-	// before reporting a capacity failure it could see up front. Advisory only
+	// allocates, boots and tears down count−free clones a wave at a time before
+	// reporting a capacity failure it could see up front. Advisory only
 	// (capacity moves under us, and warm/hibernated rows shift it); the
 	// per-clone registry admission stays the authority.
 	if free, err := s.reg.FreeSlots(ctx); err == nil && body.Count > free {
@@ -664,13 +680,15 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	// so one call could boot-storm a host already at its create ceiling.
 	//
 	// The permits are taken HERE, before snapshotLock and the stage lock, and
-	// held for the whole batch. That order is mandatory, not tidiness:
-	// handleRestore acquires createSem *then* snapshotLock, so acquiring under
-	// the snapshot lock instead would deadlock a fanout against a restore of
-	// the same snapshot (restore holds a permit and waits for the lock; fanout
-	// holds the lock and waits for permits). Only the first permit is waited
-	// for — the rest are opportunistic, because blocking for more while holding
-	// some lets two concurrent fanouts split a small budget and deadlock.
+	// held for the whole batch. Keep that order: every other consumer acquires
+	// createSem *then* the snapshot lock, and taking them the other way round
+	// makes a permit-holder wait on a lock-holder that is waiting for permits.
+	// (The consumers hold the snapshot lock shared now, so two READERS can no
+	// longer deadlock each other that way — but a pending exclusive holder, a
+	// delete or a metadata write, still makes the inverted order a hazard.)
+	// Only the first permit is waited for — the rest are opportunistic, because
+	// blocking for more while holding some lets two concurrent fanouts split a
+	// small budget and deadlock.
 	if err := s.acquireCreate(ctx); err != nil {
 		httpError(w, 499, fmt.Errorf("cancelled while queued for create slot: %w", err))
 		return
@@ -685,9 +703,11 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Shared, like handleRestore: concurrent fanouts of one snapshot are safe
+	// now that the staged rootfs is permanent, and they still exclude a delete.
 	snapshotOp := s.snapshotLock(snapID)
-	snapshotOp.Lock()
-	defer snapshotOp.Unlock()
+	snapshotOp.RLock()
+	defer snapshotOp.RUnlock()
 
 	snap, err := s.ensureSnapshotLocal(ctx, snapID)
 	if err != nil {
@@ -707,47 +727,20 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t0 := time.Now()
-	stage := s.snapshotStageLock(snap.SourceRootfsPath)
-	stage.Lock()
-	stageLocked := true
-	defer func() {
-		if stageLocked {
-			stage.Unlock()
-		}
-	}()
-
-	// Firecracker opens the snapshot's baked rootfs path during LoadSnapshot —
-	// before our per-clone PATCH /drives relocates it — so that path must exist
-	// and be openable. The source's own rootfs was deleted when it was killed, so
-	// stage the frozen rootfs there once (reflink, instant); remove it after all
-	// clones have loaded+resumed onto their own CoW copies. Unlinking is safe even
-	// if a 1:1 restore is running on it: open fds survive unlink on Linux.
-	stagedBaked := false
-	if _, statErr := os.Stat(snap.SourceRootfsPath); statErr != nil {
-		if err := s.cfg.Provisioner.CopyFileSparse(snap.RootfsPath, snap.SourceRootfsPath); err != nil {
-			httpError(w, 500, fmt.Errorf("stage snapshot rootfs at baked path: %w", err))
-			return
-		}
-		stagedBaked = true
+	if err := s.ensureStagedRootfs(snap); err != nil {
+		httpError(w, 500, fmt.Errorf("stage snapshot rootfs at baked path: %w", err))
+		return
 	}
 
-	// Phase 1 (parallel): bring each clone up on an UNBRIDGED tap and resume it.
-	// After resume the in-guest thaw agent reconfigures eth0 to the fresh IP/MAC
-	// off MMDS — no host contact and no bridge needed for that step.
+	// Each clone runs bring-up (resume on an UNBRIDGED tap; the in-guest thaw
+	// agent then reconfigures eth0 off MMDS) and finish (await the reidentify
+	// announce, bridge, gate on the agent) as ONE pipeline, `limit` of them at a
+	// time. These used to be two runBounded passes with a barrier between,
+	// which existed only so the staged baked rootfs could be unlinked at a known
+	// point; the file is permanent now, so the barrier bought nothing but
+	// wall-clock — every clone had to resume before any clone could bridge.
 	clones := make([]*clone, body.Count)
-	runBounded(limit, body.Count, func(i int) {
-		clones[i] = s.bringUpClone(ctx, snap, "", expiresAt, body.HibernateAfterSec, false)
-	})
-
-	// All clones have loaded+resumed onto their own CoW rootfs; the staged baked
-	// file is no longer needed (unlink is safe w.r.t. any still-open fds).
-	if stagedBaked {
-		_ = s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath)
-	}
-	stage.Unlock()
-	stageLocked = false
-
-	live := s.finishClones(ctx, snapID, clones, limit)
+	live := s.fanoutClones(ctx, snapID, snap, clones, limit, expiresAt, body.HibernateAfterSec)
 
 	fmt.Fprintf(os.Stderr, "[fanout %s] %d/%d clones live in %s\n",
 		snapID, len(live), body.Count, time.Since(t0).Round(time.Millisecond))
@@ -1029,7 +1022,29 @@ func (s *Server) deleteSnapshotLocked(ctx context.Context, id string) error {
 		go s.deleteSnapshotPayloadObjects(id)
 	}
 	_ = s.cfg.Provisioner.CleanupSnapshot(id)
+	s.removeStagedRootfs(ctx, snap)
 	return nil
+}
+
+// removeStagedRootfs drops the copy ensureStagedRootfs left at the snapshot's
+// baked rootfs path. That path lives outside SnapshotDir (it is the SOURCE
+// sandbox's rootfs path), so CleanupSnapshot does not cover it, and leaving it
+// would accumulate one file per restored-then-deleted snapshot.
+//
+// It is skipped while the source sandbox still owns that path — then the file
+// is a LIVE sandbox's rootfs that we never staged. Callers hold the snapshot's
+// exclusive lock, so no restore can be mid-load; and an unlink is safe against
+// still-open fds on Linux regardless.
+func (s *Server) removeStagedRootfs(ctx context.Context, snap registry.Snapshot) {
+	if snap.SourceRootfsPath == "" || snap.Golden {
+		return
+	}
+	if src, err := s.reg.Get(ctx, snap.SourceID); err == nil && src.RootfsPath == snap.SourceRootfsPath {
+		return
+	}
+	if err := s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "[snapshot %s] remove staged rootfs %s: %v\n", snap.ID, snap.SourceRootfsPath, err)
+	}
 }
 
 // deleteExpiredSnapshot repeats the expiry decision under the same operation

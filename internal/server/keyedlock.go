@@ -22,12 +22,12 @@ type keyedMutexes struct {
 }
 
 // keyedMutex is one key's mutex plus the reference count that keeps it in the
-// owning map. It intentionally mirrors the *sync.Mutex API (Lock/Unlock) so
-// call sites read the same as before.
+// owning map. It intentionally mirrors the *sync.RWMutex API so call sites read
+// the same as before; keys used only exclusively simply never call RLock.
 type keyedMutex struct {
 	owner *keyedMutexes
 	key   string
-	mu    sync.Mutex
+	mu    sync.RWMutex
 
 	// refs is guarded by owner.mu, never by mu: it is incremented before the
 	// caller blocks on Lock and decremented after it releases, so it counts
@@ -60,10 +60,26 @@ func (k *keyedMutexes) len() int {
 
 func (e *keyedMutex) Lock() { e.mu.Lock() }
 
+// RLock takes the key in shared mode. Concurrent readers proceed together and
+// still exclude every Lock holder, which is what the snapshot consumers need:
+// any number of restores/fanouts may read one snapshot at once, but none of
+// them may overlap a delete or a metadata write.
+func (e *keyedMutex) RLock() { e.mu.RLock() }
+
 // Unlock releases the mutex and drops this acquisition's reference, removing
 // the entry when it was the last one.
 func (e *keyedMutex) Unlock() {
 	e.mu.Unlock()
+	e.release()
+}
+
+// RUnlock releases a shared acquisition and drops its reference.
+func (e *keyedMutex) RUnlock() {
+	e.mu.RUnlock()
+	e.release()
+}
+
+func (e *keyedMutex) release() {
 	k := e.owner
 	k.mu.Lock()
 	e.refs--

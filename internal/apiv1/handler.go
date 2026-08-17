@@ -197,11 +197,23 @@ func (h *Handler) createSandbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sb)
 }
 
-func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, string) {
-	source := body.Source
+// normalizeSource fills in the default source type and reports whether the
+// request clones a snapshot.
+//
+// A template id IS a snapshot id — `sandbox template build` produces one and
+// the two spellings name the same thing, a prepared filesystem to clone. The
+// exception is the reserved id "default", which means the host's built-in
+// template and so takes the ordinary create path.
+func normalizeSource(source Source) (Source, bool) {
 	if source.Type == "" {
 		source.Type = "default"
 	}
+	fromSnapshot := source.Type == "snapshot" ||
+		(source.Type == "template" && source.ID != defaultTemplateID)
+	return source, fromSnapshot
+}
+
+func legacyCreateBody(body createRequest) map[string]any {
 	legacyBody := map[string]any{
 		"name":                body.Name,
 		"timeout_sec":         body.Lifecycle.TTLSeconds,
@@ -211,12 +223,12 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 		legacyBody["vcpus"] = body.Resources.VCPU
 		legacyBody["mem_mib"] = body.Resources.MemoryMIB
 	}
-	// A template id IS a snapshot id — `sandbox template build` produces one and
-	// the two spellings name the same thing, a prepared filesystem to clone. The
-	// exception is the reserved id "default", which means the host's built-in
-	// template and so takes the ordinary create path.
-	fromSnapshot := source.Type == "snapshot" ||
-		(source.Type == "template" && source.ID != defaultTemplateID)
+	return legacyBody
+}
+
+func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, string) {
+	source, fromSnapshot := normalizeSource(body.Source)
+	legacyBody := legacyCreateBody(body)
 	path := "/sandboxes"
 	if fromSnapshot {
 		path = "/snapshots/" + url.PathEscape(source.ID) + "/fanout"
@@ -236,13 +248,18 @@ func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, str
 	} else if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		return Sandbox{}, 502, "invalid create response from worker"
 	}
+	return h.annotate(r, raw, body, source)
+}
+
+// annotate persists the public source/metadata fields the worker API doesn't
+// know about and returns the finished public view.
+func (h *Handler) annotate(r *http.Request, raw registry.Sandbox, body createRequest, source Source) (Sandbox, int, string) {
 	fields := map[string]any{"source_type": source.Type, "source_id": source.ID, "metadata": nonNilMetadata(body.Metadata)}
 	annotated := h.call(r, http.MethodPatch, "/sandboxes/"+url.PathEscape(raw.ID)+"/public-fields", fields)
-	if annotated.Code >= 200 && annotated.Code < 300 {
-		_ = json.Unmarshal(annotated.Body.Bytes(), &raw)
-	} else {
+	if annotated.Code < 200 || annotated.Code >= 300 {
 		return Sandbox{}, annotated.Code, legacyDetail(annotated)
 	}
+	_ = json.Unmarshal(annotated.Body.Bytes(), &raw)
 	return publicSandbox(raw), http.StatusCreated, ""
 }
 
@@ -543,33 +560,33 @@ func (h *Handler) runBatch(parent *http.Request, id string, count, parallel int,
 	h.mu.Lock()
 	h.operations[id].Status = "running"
 	h.mu.Unlock()
-	sem := make(chan struct{}, parallel)
-	var wg sync.WaitGroup
-	for i := 0; i < count; i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			req := parent.Clone(parent.Context())
-			req.Header.Set(httpapi.RequestIDHeader, parent.Header.Get(httpapi.RequestIDHeader))
-			sb, status, detail := h.create(req, create)
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			op := h.operations[id]
-			if status == http.StatusCreated {
-				op.Succeeded++
-				op.Results[index] = BatchItem{Index: index, Sandbox: &sb}
-			} else {
-				op.Failed++
-				op.Results[index] = BatchItem{Index: index, Error: &httpapi.Problem{
-					Type: "https://sandbox.dev/problems/batch_item_failed", Title: http.StatusText(status),
-					Status: status, Detail: detail, Code: "batch_item_failed", RequestID: httpapi.RequestID(parent),
-				}}
-			}
-		}(i)
+
+	record := func(index int, sb Sandbox, status int, detail string) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		op := h.operations[id]
+		if status == http.StatusCreated {
+			op.Succeeded++
+			op.Results[index] = BatchItem{Index: index, Sandbox: &sb}
+			return
+		}
+		op.Failed++
+		op.Results[index] = BatchItem{Index: index, Error: &httpapi.Problem{
+			Type: "https://sandbox.dev/problems/batch_item_failed", Title: http.StatusText(status),
+			Status: status, Detail: detail, Code: "batch_item_failed", RequestID: httpapi.RequestID(parent),
+		}}
 	}
-	wg.Wait()
+	// A snapshot-sourced batch is ONE fanout, not `count` fanouts of one. Issuing
+	// them separately made max_parallelism a lie: every single-clone fanout takes
+	// the worker's per-snapshot lock for its whole bring-up, so N of them ran
+	// strictly one at a time (measured dead-linear: 756 ms × N, so a 15-sandbox
+	// batch took ~11.3 s). One fanout of N gets the worker's own batch
+	// parallelism instead.
+	if _, fromSnapshot := normalizeSource(create.Source); fromSnapshot && count > 1 {
+		h.runSnapshotBatch(parent, count, parallel, create, record)
+	} else {
+		h.runCreateBatch(parent, count, parallel, create, record)
+	}
 	now := time.Now()
 	h.mu.Lock()
 	op := h.operations[id]
@@ -583,6 +600,109 @@ func (h *Handler) runBatch(parent *http.Request, id string, count, parallel int,
 		op.Status = "partially_succeeded"
 	}
 	h.mu.Unlock()
+}
+
+type batchRecorder func(index int, sb Sandbox, status int, detail string)
+
+// runCreateBatch issues `count` independent creates, `parallel` at a time. This
+// is the right shape for the default source: those creates share no per-source
+// lock and are served from the host's ready pool.
+func (h *Handler) runCreateBatch(parent *http.Request, count, parallel int, create createRequest, record batchRecorder) {
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			sb, status, detail := h.create(h.forkRequest(parent), create)
+			record(index, sb, status, detail)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// fanoutChunk bounds how many clones one fanout call asks for. A single call is
+// capped at the worker's own fanoutParallelism, so a larger chunk buys no extra
+// worker-side concurrency — and it costs fleet spread, because the gateway
+// reserves a whole fanout's slots on ONE host. Chunking keeps both: each chunk
+// pipelines at full worker parallelism, and separate chunks can be placed on
+// different hosts.
+const fanoutChunk = 8
+
+// runSnapshotBatch clones `count` sandboxes using chunked fanout calls, then
+// annotates each result. max_parallelism bounds clones in flight, so it caps
+// both the chunk size and how many chunks run at once. A short chunk is
+// reported item-by-item: the worker returns however many clones came up, and
+// any shortfall is recorded as failed rather than silently dropped.
+func (h *Handler) runSnapshotBatch(parent *http.Request, count, parallel int, create createRequest, record batchRecorder) {
+	source, _ := normalizeSource(create.Source)
+	size := min(count, parallel, fanoutChunk)
+	concurrent := max(1, parallel/size)
+
+	sem := make(chan struct{}, concurrent)
+	var wg sync.WaitGroup
+	for offset := 0; offset < count; offset += size {
+		n := min(size, count-offset)
+		wg.Add(1)
+		go func(offset, n int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			h.fanoutChunkInto(parent, offset, n, create, source, record)
+		}(offset, n)
+	}
+	wg.Wait()
+}
+
+// fanoutChunkInto issues one fanout of n clones and records them at
+// [offset, offset+n).
+func (h *Handler) fanoutChunkInto(parent *http.Request, offset, n int, create createRequest, source Source, record batchRecorder) {
+	legacyBody := legacyCreateBody(create)
+	legacyBody["count"] = n
+
+	failAll := func(status int, detail string) {
+		for i := 0; i < n; i++ {
+			record(offset+i, Sandbox{}, status, detail)
+		}
+	}
+	rec := h.call(h.forkRequest(parent), http.MethodPost,
+		"/snapshots/"+url.PathEscape(source.ID)+"/fanout", legacyBody)
+	if rec.Code < 200 || rec.Code >= 300 {
+		failAll(rec.Code, legacyDetail(rec))
+		return
+	}
+	var list []registry.Sandbox
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		failAll(502, "invalid batch-create response from worker")
+		return
+	}
+	for i := len(list); i < n; i++ {
+		record(offset+i, Sandbox{}, 503, "worker returned fewer clones than requested")
+	}
+	if len(list) > n {
+		list = list[:n]
+	}
+
+	var wg sync.WaitGroup
+	for i, raw := range list {
+		wg.Add(1)
+		go func(index int, raw registry.Sandbox) {
+			defer wg.Done()
+			sb, status, detail := h.annotate(h.forkRequest(parent), raw, create, source)
+			record(index, sb, status, detail)
+		}(offset+i, raw)
+	}
+	wg.Wait()
+}
+
+// forkRequest clones the batch's parent request for one worker call, preserving
+// the request id so worker-side logs correlate with the operation.
+func (h *Handler) forkRequest(parent *http.Request) *http.Request {
+	req := parent.Clone(parent.Context())
+	req.Header.Set(httpapi.RequestIDHeader, parent.Header.Get(httpapi.RequestIDHeader))
+	return req
 }
 
 func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
