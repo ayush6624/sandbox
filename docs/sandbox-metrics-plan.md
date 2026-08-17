@@ -107,7 +107,7 @@ guest numbers answer host questions.
 | Host memory | same leaf, `memory.current` | **Already read** into `UsageSample.MemBytes` and then discarded. |
 | Network | `/sys/class/net/<tap>/statistics/{rx,tx}_{bytes,packets}` | Tap name is on the registry row (`Sandbox.TapDevice`). **Polarity inverts**: the tap's `rx` is the guest's `tx`. |
 | Disk I/O | same leaf, `io.stat` (`rbytes`/`wbytes`) | Only under the jailer, and only for devices the leaf accounts. |
-| Rootfs growth | `stat` the per-VM rootfs → `st_blocks × 512` | Real incremental bytes under reflink CoW. E2B has no equivalent. |
+| Rootfs growth | `stat` the per-VM rootfs → `st_blocks × 512` | Counts extents still SHARED with the golden base, so it reads ~2.2 GiB before a sandbox writes anything (measured) — its GROWTH is the sandbox's own bytes. E2B has no equivalent. |
 
 `memory.current` deserves a warning, because it is the number most likely to be
 mislabeled "memory used" and shipped: it is the VMM's charge, i.e. guest pages
@@ -203,9 +203,9 @@ off), started next to `usageSampler`:
   `internal/server/proxy.go` (`agentAuthority`) applies here exactly as it does
   to exec; a metrics poller with its own naively-keyed pool would reintroduce the
   `connection reset by peer` class of bug on a schedule;
-- guest part runs on a slower multiple of the tick (default every 2nd, i.e.
-  10 s) — the poll is itself observable in the tenant's own `cpu_used_pct`, and
-  halving that observer effect costs nothing;
+- guest part runs on EVERY tick. Decimating it was tried and reverted: it put
+  the guest fields on alternating samples, holing any chart and making `limit=1`
+  a coin flip, while the cost avoided was three `/proc` reads and a `statfs`;
 - an agent that 404s `/stats` (old baked sandboxd) degrades to host-only fields.
   Logged once per VM, never fatal — same pattern as `/clock`.
 
