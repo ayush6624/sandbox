@@ -140,6 +140,18 @@ cmd_roll() {
   "${GC[@]}" compute instance-groups managed rolling-action replace "$MIG_NAME" --zone="$ZONE" --max-unavailable=1
 }
 
+# Point future scale-outs at a new template without replacing today's workers.
+# This is the safe choice for metadata/startup-script-only changes when workers
+# may own running or durable hibernated sandboxes. Existing workers receive the
+# equivalent runtime guard through the Nomad system job and age out through the
+# gateway's ordinary cordon/drain/delete path.
+cmd_template() {
+  local tpl; tpl="$(template_name)"
+  create_template "$tpl"
+  echo ">> Set $MIG_NAME future instances to $tpl (no rolling replacement)"
+  "${GC[@]}" compute instance-groups managed set-instance-template "$MIG_NAME" --zone="$ZONE" --template="$tpl"
+}
+
 cmd_status() {
   "${GC[@]}" compute instance-groups managed describe "$MIG_NAME" --zone="$ZONE" \
     --format="table(name,targetSize,targetSuspendedSize,targetStoppedSize,standbyPolicy.mode)" 2>/dev/null || { echo "MIG $MIG_NAME not found"; return; }
@@ -155,9 +167,10 @@ cmd_down() {
 case "${1:-}" in
   init)    cmd_init ;;
   up)      cmd_up ;;
+  template) cmd_template ;;
   roll)    cmd_roll ;;
   standby) cmd_standby ;;
   status)  cmd_status ;;
   down)    cmd_down ;;
-  *) echo "usage: $0 {init|up|roll|standby|status|down}" >&2; exit 1 ;;
+  *) echo "usage: $0 {init|up|template|roll|standby|status|down}" >&2; exit 1 ;;
 esac
