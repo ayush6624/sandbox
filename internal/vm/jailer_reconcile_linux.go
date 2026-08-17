@@ -20,6 +20,9 @@ type JailerReconcileResult struct {
 	JailsRemoved        int
 	IdentitiesReleased  int
 	CgroupsRemoved      int
+	// SharedArtifactsRemoved counts shared staged inputs (kernel, snapshot
+	// mem/state) reclaimed because no jail links them any more.
+	SharedArtifactsRemoved int
 }
 
 // ReconcileJailer removes VMMs and reservations owned by a previous serve
@@ -100,7 +103,46 @@ func ReconcileJailer(cfg JailerConfig) (JailerReconcileResult, error) {
 		}
 		result.IdentitiesReleased++
 	}
+	result.SharedArtifactsRemoved = sweepSharedStage(cfg)
 	return result, nil
+}
+
+// sweepSharedStage drops shared staged artifacts (see stageSharedReadonly) that
+// no jail references any more — link count 1 means this directory holds the only
+// name for the inode. Every jail has just been removed above, so in practice
+// this reclaims the whole set; they are re-staged on demand by the next launch
+// at reflink cost (~1 ms), so nothing is lost by being aggressive.
+//
+// Entries keyed on a stale source mtime (a rebuilt kernel or golden) would
+// otherwise linger forever. Best-effort: a shared artifact that cannot be
+// removed is a wasted inode, never a correctness problem, and unlinking one a
+// live jail still links is harmless anyway — the inode survives until its last
+// link goes.
+func sweepSharedStage(cfg JailerConfig) int {
+	dir := filepath.Join(cfg.ChrootBaseDir, sharedStageDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Nlink != 1 {
+			continue
+		}
+		if err := os.Remove(path); err == nil {
+			removed++
+		}
+	}
+	return removed
 }
 
 func readPIDFile(path string) (int, error) {

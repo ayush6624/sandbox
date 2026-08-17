@@ -2,6 +2,8 @@ package vm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -436,7 +438,11 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		SnapshotState: "/snapshots/state",
 		UFFD:          "/run/uffd.socket",
 	}
-	if err := stageReadonly(req.KernelImage, filepath.Join(rootDir, paths.Kernel), cfg.TrustedOwnerUID); err != nil {
+	// The kernel and the snapshot's mem/state are identical for every VM, so they
+	// are staged once per host and hardlinked — see stageSharedReadonly for why
+	// per-VM copies are what made fanout scale with N. The rootfs is genuinely
+	// per-VM (writable) and cannot be shared.
+	if err := stageSharedReadonly(cfg, req.KernelImage, filepath.Join(rootDir, paths.Kernel), cfg.TrustedOwnerUID); err != nil {
 		cleanupJail()
 		return PreparedLaunch{}, fmt.Errorf("stage kernel: %w", err)
 	}
@@ -445,13 +451,13 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		return PreparedLaunch{}, fmt.Errorf("stage rootfs: %w", err)
 	}
 	if req.SnapshotMem != "" {
-		if err := stageReadonly(req.SnapshotMem, filepath.Join(rootDir, paths.SnapshotMem), cfg.TrustedOwnerUID); err != nil {
+		if err := stageSharedReadonly(cfg, req.SnapshotMem, filepath.Join(rootDir, paths.SnapshotMem), cfg.TrustedOwnerUID); err != nil {
 			cleanupJail()
 			return PreparedLaunch{}, fmt.Errorf("stage snapshot memory: %w", err)
 		}
 	}
 	if req.SnapshotState != "" {
-		if err := stageReadonly(req.SnapshotState, filepath.Join(rootDir, paths.SnapshotState), cfg.TrustedOwnerUID); err != nil {
+		if err := stageSharedReadonly(cfg, req.SnapshotState, filepath.Join(rootDir, paths.SnapshotState), cfg.TrustedOwnerUID); err != nil {
 			cleanupJail()
 			return PreparedLaunch{}, fmt.Errorf("stage snapshot state: %w", err)
 		}
@@ -941,6 +947,112 @@ func stageReadonly(src, dst string, trustedOwner int) error {
 		return err
 	}
 	return os.Chmod(dst, 0444)
+}
+
+// sharedStageMu serializes creation of a shared staged artifact. The copy runs
+// once per artifact per host, so a single mutex is not a throughput concern.
+var sharedStageMu sync.Mutex
+
+// stageSharedReadonly stages an immutable input that is IDENTICAL for every VM
+// — the kernel image, and a snapshot's memory and state files — as ONE file on
+// the host that every jail HARDLINKS.
+//
+// This is the difference between fanout scaling with N and not. The staged file
+// is read-only and byte-identical across clones, but the Linux page cache is
+// keyed on INODE, so giving each jail its own copy means N clones read N copies
+// of the same bytes off the disk. Reflink hides that in disk *space* (extents
+// are shared, the copy itself is ~1 ms) while doing nothing for cache: measured
+// on a fleet worker, 16 concurrent cold reads of one 1 GiB mem file took
+// 33.7 s as 16 reflinked copies versus 2.9 s as 16 hardlinks to one inode, and
+// a 16-way fanout sat at 45-64% iowait pulling ~500 MB/s. One inode means the
+// first clone faults the pages in and the rest hit RAM.
+//
+// The shared file is a COPY of the source, not a link to it, because a hardlink
+// shares the inode and this function must chown/chmod what it stages: linking
+// the original would rewrite the snapshot artifact's own ownership and mode
+// (guest memory is 0600 on disk and must stay that way). The shared copy lives
+// in a 0700 root-only directory, so the only paths that can reach it are the
+// hardlinks inside each jail — and it is root-owned 0444, exactly what the
+// per-VM copies already were.
+//
+// Identity is (source path, size, mtime): snapshot artifacts are immutable, and
+// keying on mtime+size means a rebuilt kernel or golden cannot be served from a
+// stale shared copy. Falls back to a private copy whenever linking cannot work
+// (different filesystem, link limit), so this can only be faster, never wrong.
+func stageSharedReadonly(cfg JailerConfig, src, dst string, trustedOwner int) error {
+	if err := validateRegularInput(src); err != nil {
+		return err
+	}
+	shared, err := sharedStagePath(cfg, src)
+	if err != nil {
+		// Cannot compute a shared identity (unstat-able source): stage privately.
+		return stageReadonly(src, dst, trustedOwner)
+	}
+	if err := ensureSharedStaged(shared, src, trustedOwner); err != nil {
+		return stageReadonly(src, dst, trustedOwner)
+	}
+	if err := os.Link(shared, dst); err != nil {
+		return stageReadonly(src, dst, trustedOwner)
+	}
+	return nil
+}
+
+// sharedStagePath names the shared copy from the source's path, size and mtime,
+// under a root-only directory on the jail filesystem (so hardlinking into a
+// jail can never be a cross-device operation).
+func sharedStagePath(cfg JailerConfig, src string) (string, error) {
+	st, err := os.Stat(src)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(src)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d", abs, st.Size(), st.ModTime().UnixNano())))
+	return filepath.Join(cfg.ChrootBaseDir, sharedStageDir, hex.EncodeToString(sum[:16])), nil
+}
+
+const sharedStageDir = ".shared"
+
+func ensureSharedStaged(shared, src string, trustedOwner int) error {
+	if _, err := os.Stat(shared); err == nil {
+		return nil
+	}
+	sharedStageMu.Lock()
+	defer sharedStageMu.Unlock()
+	if _, err := os.Stat(shared); err == nil {
+		return nil
+	}
+	// 0700: nothing but root may traverse to the shared artifacts. The jails
+	// reach them only through their own hardlinks, which do not consult this
+	// directory's mode.
+	if err := os.MkdirAll(filepath.Dir(shared), 0700); err != nil {
+		return err
+	}
+	if err := os.Chown(filepath.Dir(shared), trustedOwner, -1); err != nil {
+		return err
+	}
+	// Stage via a unique temp name + rename so a concurrent reader never sees a
+	// partially written artifact, and a crash leaves no half-copy behind.
+	tmp := fmt.Sprintf("%s.tmp.%d", shared, os.Getpid())
+	_ = os.Remove(tmp)
+	if err := reflinkOrCopy(src, tmp); err != nil {
+		return err
+	}
+	if err := os.Chown(tmp, trustedOwner, -1); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, 0444); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, shared); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func reflinkOrCopy(src, dst string) error {

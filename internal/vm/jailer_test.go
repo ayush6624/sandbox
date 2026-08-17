@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestProcessFamilyContainsOnlyAncestorChain(t *testing.T) {
@@ -486,5 +488,114 @@ func TestCgroupProcOursSurvivesParentCycle(t *testing.T) {
 	parent := func(pid int) int { return parents[pid] }
 	if cgroupProcOurs(500, self, processFamily(self, parent), parent) {
 		t.Fatal("a pid in a parent cycle must not be treated as ours")
+	}
+}
+
+// Read-only inputs that are identical for every VM must be staged ONCE and
+// hardlinked, not copied per VM. This is not a disk-space optimization: the
+// Linux page cache is keyed on inode, so per-VM copies make N clones read N
+// copies of the same bytes off the disk. Measured on a fleet worker, 16
+// concurrent cold reads of one 1 GiB snapshot mem file took 33.7s as 16
+// reflinked copies versus 2.9s as 16 hardlinks — and a 16-way fanout sat at
+// 45-64% iowait pulling ~500 MB/s.
+func TestStageSharedReadonlySharesOneInode(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "mem.bin")
+	want := []byte("snapshot memory contents")
+	if err := os.WriteFile(src, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := JailerConfig{ChrootBaseDir: filepath.Join(dir, "jailer"), TrustedOwnerUID: os.Getuid()}
+	if err := os.MkdirAll(cfg.ChrootBaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	inodes := map[uint64]int{}
+	for i := range 8 {
+		jail := filepath.Join(cfg.ChrootBaseDir, "firecracker", fmt.Sprintf("vm-%d", i), "root", "snapshots")
+		if err := os.MkdirAll(jail, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(jail, "memory")
+		if err := stageSharedReadonly(cfg, src, dst, cfg.TrustedOwnerUID); err != nil {
+			t.Fatalf("stage %d: %v", i, err)
+		}
+		got, err := os.ReadFile(dst)
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("staged content = %q (err %v), want %q", got, err, want)
+		}
+		st, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sys, ok := st.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Skip("no Stat_t on this platform")
+		}
+		inodes[uint64(sys.Ino)]++
+		if perm := st.Mode().Perm(); perm != 0o444 {
+			t.Fatalf("staged mode = %o, want 0444", perm)
+		}
+	}
+	if len(inodes) != 1 {
+		t.Fatalf("8 jails used %d distinct inodes, want 1 — page cache is per-inode, so copies defeat sharing", len(inodes))
+	}
+	for _, n := range inodes {
+		if n != 8 {
+			t.Fatalf("shared inode linked %d times, want 8", n)
+		}
+	}
+
+	// The SOURCE artifact must keep its own ownership and mode: guest memory is
+	// 0600 on disk. Hardlinking the original would have rewritten it.
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := srcInfo.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("source mode changed to %o; the shared copy must not be a link to the original", perm)
+	}
+}
+
+// A changed source (rebuilt kernel or golden) must not be served from a stale
+// shared copy: identity is (path, size, mtime).
+func TestStageSharedReadonlyRestagesChangedSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "vmlinux")
+	cfg := JailerConfig{ChrootBaseDir: filepath.Join(dir, "jailer"), TrustedOwnerUID: os.Getuid()}
+	if err := os.MkdirAll(cfg.ChrootBaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stage := func(name string) string {
+		jail := filepath.Join(cfg.ChrootBaseDir, name)
+		if err := os.MkdirAll(jail, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(jail, "kernel")
+		if err := stageSharedReadonly(cfg, src, dst, cfg.TrustedOwnerUID); err != nil {
+			t.Fatalf("stage %s: %v", name, err)
+		}
+		b, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	if err := os.WriteFile(src, []byte("kernel v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := stage("a"); got != "kernel v1" {
+		t.Fatalf("first stage = %q", got)
+	}
+	// Rewrite with a different size and a distinctly newer mtime.
+	if err := os.WriteFile(src, []byte("kernel version 2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(src, time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := stage("b"); got != "kernel version 2" {
+		t.Fatalf("after source change, stage = %q — a stale shared copy was reused", got)
 	}
 }

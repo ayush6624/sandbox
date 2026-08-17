@@ -9,6 +9,8 @@ type JailerReconcileResult struct {
 	JailsRemoved        int
 	IdentitiesReleased  int
 	CgroupsRemoved      int
+	// SharedArtifactsRemoved mirrors the Linux field; keep the two in sync.
+	SharedArtifactsRemoved int
 }
 
 func ReconcileJailer(JailerConfig) (JailerReconcileResult, error) {

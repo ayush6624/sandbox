@@ -128,9 +128,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reconcile jailed VMM state: %w", err)
 		}
-		fmt.Printf("jailer reconciliation: processes=%d jails=%d identities=%d cgroups=%d\n",
+		fmt.Printf("jailer reconciliation: processes=%d jails=%d identities=%d cgroups=%d shared=%d\n",
 			reconciled.ProcessesTerminated, reconciled.JailsRemoved,
-			reconciled.IdentitiesReleased, reconciled.CgroupsRemoved)
+			reconciled.IdentitiesReleased, reconciled.CgroupsRemoved,
+			reconciled.SharedArtifactsRemoved)
 	}
 
 	reg, err := registry.Open(cfg.DBPath, cfg.Pools)
