@@ -580,8 +580,28 @@ scripts/              Host setup shell scripts
   **Host keys are unique per sandbox and never baked into the image**: the base
   rootfs ships with none, and sandboxd's `POST /identity`
   (`initializeGuestIdentity`, cmd/sandboxd/identity.go) removes any inherited
-  ones and generates a fresh key on every independent create — so no two
-  sandboxes, golden clones included, can impersonate each other. **Ed25519
+  ones on every independent create — so no two sandboxes, golden clones
+  included, can impersonate each other. **The key is GENERATED LAZILY, on first
+  SSH use** (`ensureSSHHostKey`, called from sandboxd's `POST /ssh-key`), not at
+  create: create used to pay the `ssh-keygen` fork plus `restartSSHService` —
+  which SIGHUPs sshd then polls `/proc/net/tcp` every 1 ms for up to 500 ms
+  awaiting a replacement listener inode — measuring ~148 ms idle and ~685 ms
+  under a 16-way fanout, on sandboxes that overwhelmingly never use SSH, while a
+  32-way fanout is guest-CPU-bound. **Removal stays EAGER and so does stopping
+  the listener**, and that second part is the whole subtlety: deleting the key
+  files is not enough because a restored clone resumes a LIVE sshd that already
+  loaded the source's key into memory and would keep serving it. `stopSSHService`
+  is therefore strict about the OUTCOME rather than systemctl's exit code (it
+  verifies no inherited sshd master remains, SIGTERM then SIGKILL, and tolerates
+  "no such unit"), and `inheritedSSHDPID` guards against a stale `/run/sshd.pid`
+  and PID reuse — a restored guest resumes with whatever that file held at
+  snapshot time. Every SSH path reaches the lazy generation: `ssh_pubkey` at
+  create goes through `installSSHKey` (timeout raised 5 s → 30 s because the call
+  now does that work), and the CLI's hidden `ssh-proxy` ProxyCommand calls
+  `PrepareSSHTunnel` on EVERY connection, including plain `ssh`/`scp`/`rsync` via
+  the generated stanza. Consequence accepted: **:22 no longer listens the instant
+  a guest boots** (which is why socket activation was disabled) — first SSH use
+  pays ~150 ms. **Ed25519
   only** (~7 ms), and `sandbox.conf` pins `HostKey
   /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
   RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
