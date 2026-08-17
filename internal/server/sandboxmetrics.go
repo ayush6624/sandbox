@@ -410,6 +410,9 @@ var cpuUtilBuckets = []float64{1, 10, 25, 50, 75, 90, 100}
 func (s *Server) writeSandboxStatMetrics(b *strings.Builder) {
 	samples := s.stats.latest()
 	var hostMem, rootfs, rx, tx int64
+	var gMemUsed, gMemTotal, gDiskUsed, gDiskTotal, gProcs int64
+	var gLoad1 float64
+	var gReporting int
 	counts := make([]int64, len(cpuUtilBuckets))
 	var sum float64
 	for _, sm := range samples {
@@ -423,6 +426,23 @@ func (s *Server) writeSandboxStatMetrics(b *strings.Builder) {
 				counts[i]++
 			}
 		}
+		// Guest-reported fields are absent (zero) unless guest stats are on AND
+		// the agent answered, so a zero total means "no data", not "no memory".
+		// Summing only reporting sandboxes — and exporting how many those are —
+		// keeps a used/total ratio meaningful instead of silently diluted by
+		// sandboxes whose baked agent predates GET /stats.
+		if sm.MemTotalBytes == 0 {
+			continue
+		}
+		gReporting++
+		gMemUsed += sm.MemUsedBytes
+		gMemTotal += sm.MemTotalBytes
+		gDiskUsed += sm.DiskUsedBytes
+		gDiskTotal += sm.DiskTotalBytes
+		gProcs += int64(sm.Processes)
+		if sm.Load1 != nil {
+			gLoad1 += *sm.Load1
+		}
 	}
 	fmt.Fprintf(b, "# HELP sandbox_host_mem_bytes Sum of running sandboxes' VMM cgroup memory charge (guest pages touched).\n# TYPE sandbox_host_mem_bytes gauge\nsandbox_host_mem_bytes %d\n", hostMem)
 	fmt.Fprintf(b, "# HELP sandbox_rootfs_alloc_bytes Sum of per-VM rootfs blocks, including extents still shared with the golden base (so it counts that base once per sandbox; watch its growth, not its level).\n# TYPE sandbox_rootfs_alloc_bytes gauge\nsandbox_rootfs_alloc_bytes %d\n", rootfs)
@@ -433,4 +453,16 @@ func (s *Server) writeSandboxStatMetrics(b *strings.Builder) {
 	}
 	fmt.Fprintf(b, "sandbox_cpu_utilization_bucket{le=\"+Inf\"} %d\nsandbox_cpu_utilization_sum %.4f\nsandbox_cpu_utilization_count %d\n",
 		len(samples), sum, len(samples))
+
+	// The two things the host cannot see from outside the VM (guest memory
+	// actually in use, and free disk) plus guest load/process counts. The VMM
+	// cgroup charge above only ever grows without a balloon, so it cannot answer
+	// "are these sandboxes under memory pressure" or "is a sandbox filling its
+	// disk" — those are the questions a fleet operator asks first, and until now
+	// they were reachable only one sandbox at a time via GET /v1/sandboxes/{id}/metrics.
+	fmt.Fprintf(b, "# HELP sandbox_guest_stats_reporting Running sandboxes whose agent answered GET /stats on the last tick (denominator for the guest sums below).\n# TYPE sandbox_guest_stats_reporting gauge\nsandbox_guest_stats_reporting %d\n", gReporting)
+	fmt.Fprintf(b, "# HELP sandbox_guest_mem_bytes Guest-reported memory over reporting sandboxes.\n# TYPE sandbox_guest_mem_bytes gauge\nsandbox_guest_mem_bytes{state=\"used\"} %d\nsandbox_guest_mem_bytes{state=\"total\"} %d\n", gMemUsed, gMemTotal)
+	fmt.Fprintf(b, "# HELP sandbox_guest_disk_bytes Guest-reported rootfs disk over reporting sandboxes.\n# TYPE sandbox_guest_disk_bytes gauge\nsandbox_guest_disk_bytes{state=\"used\"} %d\nsandbox_guest_disk_bytes{state=\"total\"} %d\n", gDiskUsed, gDiskTotal)
+	fmt.Fprintf(b, "# HELP sandbox_guest_load1 Sum of reporting sandboxes' 1-minute load average.\n# TYPE sandbox_guest_load1 gauge\nsandbox_guest_load1 %.2f\n", gLoad1)
+	fmt.Fprintf(b, "# HELP sandbox_guest_processes Sum of reporting sandboxes' process counts.\n# TYPE sandbox_guest_processes gauge\nsandbox_guest_processes %d\n", gProcs)
 }

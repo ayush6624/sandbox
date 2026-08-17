@@ -1,0 +1,2173 @@
+{
+  "uid": "sandbox-hosts",
+  "title": "Sandbox Hosts",
+  "description": "Host-level view: fleet size and scaling, per-worker capacity and which pool binds, worker failure rates, the boot \u2192 capacity-advertised critical path, and release/process health. Per-host series arrive through the gateway's /metrics/hosts federation, which relabels every worker series with host=\"<id>\".",
+  "tags": [
+    "sandbox",
+    "hosts",
+    "capacity"
+  ],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "15m",
+      "1h",
+      "3h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d"
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "Sandbox dashboards",
+      "tags": [
+        "sandbox"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false,
+      "url": "",
+      "tooltip": ""
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Worker",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "sandbox-prom"
+        },
+        "query": {
+          "query": "label_values(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}, host)",
+          "refId": "VariableQuery"
+        },
+        "definition": "label_values(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}, host)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Fleet size and scaling",
+      "id": 1,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Live workers",
+      "id": 2,
+      "description": "Workers seen within the heartbeat TTL. Includes resumed standby workers that sit outside the MIG target, so it can legitimately exceed it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_hosts_live{job=\"sandbox-gateway\"}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Provider target",
+      "id": 3,
+      "description": "The MIG's own target worker count, polled by the gateway (the sole MIG writer). Absent rather than zero when the provider poll has never succeeded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox:workers_desired"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Draining",
+      "id": 4,
+      "description": "Workers cordoned for scale-in: still serving what they hold, accepting no new placements. One that stays cordoned is capacity being paid for and not used.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_hosts_draining{job=\"sandbox-gateway\"}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Release-gated workers",
+      "id": 5,
+      "description": "Live workers excluded from placement because their release is not the expected one. Non-zero mid-rollout is normal; non-zero afterwards is a half-deployed fleet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_worker_release_mismatch{job=\"sandbox-gateway\"}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Not golden-ready",
+      "id": 6,
+      "description": "Live workers without a staged golden snapshot. They cold-boot every create instead of cloning, and a still-warming worker advertises slots_free=0 by design.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_min(sandbox_hosts_live{job=\"sandbox-gateway\"} - scalar(sum(sandbox_golden_ready{job=\"sandbox-hosts\"})), 0)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Unscrapable workers",
+      "id": 7,
+      "description": "Live workers the gateway could not scrape for /metrics/hosts. Their per-host panels below go blank while the sandboxes on them keep running.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_min(sandbox_hosts_live{job=\"sandbox-gateway\"} - scalar(sum(sandbox_host_scrape_ok{job=\"sandbox-hosts\"})), 0)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Workers: live vs provider target",
+      "id": 8,
+      "description": "Heartbeat-live against the MIG target and the gateway's grow-only scale-out watermark. The watermark re-baselines to the live count when the queue empties, so it can read below the fleet's real size \u2014 it is diagnostic, not a scale-in floor.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_hosts_live{job=\"sandbox-gateway\"}",
+          "legendFormat": "heartbeat-live"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox:workers_desired",
+          "legendFormat": "provider target"
+        },
+        {
+          "refId": "C",
+          "expr": "sandbox_scale_out_requested{job=\"sandbox-gateway\"}",
+          "legendFormat": "scale-out watermark"
+        },
+        {
+          "refId": "D",
+          "expr": "sandbox_hosts_draining{job=\"sandbox-gateway\"}",
+          "legendFormat": "draining"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Fleet capacity vs demand",
+      "id": 9,
+      "description": "Placement trusts host-reported `slots_free`, never total \u2212 used: a warming worker reports zero free while running nothing, and a big-memory sandbox eats several slots' worth. Demand converts committed memory into default-slot equivalents.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_slots_total{job=\"sandbox-gateway\"}",
+          "legendFormat": "registered capacity"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_slots_committed{job=\"sandbox-gateway\"}",
+          "legendFormat": "committed"
+        },
+        {
+          "refId": "C",
+          "expr": "sandbox_slots_demand{job=\"sandbox-gateway\"}",
+          "legendFormat": "memory-weighted demand"
+        },
+        {
+          "refId": "D",
+          "expr": "sandbox_create_queue_demand_slots{job=\"sandbox-gateway\"}",
+          "legendFormat": "queued demand"
+        },
+        {
+          "refId": "E",
+          "expr": "sandbox_slots_free{job=\"sandbox-gateway\"}",
+          "legendFormat": "allocatable now"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scaling actions",
+      "id": 10,
+      "description": "Scale-out requests the gateway submitted to the provider, and the cordon \u2192 drain \u2192 delete-by-name path on the way down. cordons \u2212 removed \u2212 aborted should equal the draining count; delete failures leave a host cordoned and are retried.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(sandbox_direct_scale_out_total{job=\"sandbox-gateway\"}[$__rate_interval]))",
+          "legendFormat": "scale-out requests"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(sandbox_direct_scale_out_failed_total{job=\"sandbox-gateway\"}[$__rate_interval]))",
+          "legendFormat": "scale-out failed"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(sandbox_scale_in_cordons_total{job=\"sandbox-gateway\"}[$__rate_interval]))",
+          "legendFormat": "cordoned"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(increase(sandbox_scale_in_removed_total{job=\"sandbox-gateway\"}[$__rate_interval]))",
+          "legendFormat": "removed"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(increase(sandbox_scale_in_aborted_total{job=\"sandbox-gateway\"}[$__rate_interval]))",
+          "legendFormat": "aborted"
+        },
+        {
+          "refId": "F",
+          "expr": "sum(increase(sandbox_scale_in_failed_total{job=\"sandbox-gateway\"}[$__rate_interval]))",
+          "legendFormat": "delete failed"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Per-worker capacity",
+      "id": 11,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Worker capacity",
+      "id": 12,
+      "description": "Gateway's placement-eye view of each live worker: what it has, what it is using, what it will accept now, and how many ready VMs a create could claim instantly. Sorted by used slots \u2014 the top row is where the load is.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Slots used"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_host_slots_total{job=\"sandbox-gateway\",host=~\"$host\"}",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_host_slots_used{job=\"sandbox-gateway\",host=~\"$host\"}",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "sandbox_host_slots_free{job=\"sandbox-gateway\",host=~\"$host\"}",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "expr": "sandbox_host_warm_ready{job=\"sandbox-gateway\",host=~\"$host\"}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "job": true,
+              "instance": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "host": "Worker",
+              "Value #A": "Slots total",
+              "Value #B": "Slots used",
+              "Value #C": "Allocatable now",
+              "Value #D": "Ready VMs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Slot utilization by worker",
+      "id": 13,
+      "description": "Used over total slots. Bin-packing means the fullest eligible worker is picked first, so a spread of values is expected, not a balance problem.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 2,
+          "unit": "percentunit",
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.85
+              },
+              {
+                "color": "red",
+                "value": 0.97
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_host_slots_used{job=\"sandbox-gateway\",host=~\"$host\"} / clamp_min(sandbox_host_slots_total{job=\"sandbox-gateway\",host=~\"$host\"}, 1)",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Memory admission by worker",
+      "id": 14,
+      "description": "Committed guest memory (each sandbox's effective mem_mib + 156 MiB VMM overhead) over the host's budget. This is the check that returns 503 on create AND on wake, and it bounds slots_free.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 2,
+          "unit": "percentunit",
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.85
+              },
+              {
+                "color": "red",
+                "value": 0.97
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_committed_mem_mib{job=\"sandbox-hosts\",host=~\"$host\"} / clamp_min(sandbox_mem_budget_mib{job=\"sandbox-hosts\",host=~\"$host\"}, 1)",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Binding pool by worker",
+      "id": 15,
+      "description": "Which pool actually limits this worker: taps and IPs are held by running sandboxes (so hibernation releases them), ports are held by explicit mappings and stay reserved through hibernation \u2014 which makes the port pool the ceiling on TOTAL sandboxes, not running ones.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 2,
+          "unit": "percentunit",
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.85
+              },
+              {
+                "color": "red",
+                "value": 0.97
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_pool_used{job=\"sandbox-hosts\",host=~\"$host\"} / clamp_min(sandbox_pool_total{job=\"sandbox-hosts\",host=~\"$host\"}, 1)",
+          "legendFormat": "{{host}} / {{pool}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Allocatable slots by worker",
+      "id": 16,
+      "description": "Host-reported free capacity per worker. A worker sitting at zero while running nothing is warming (golden build) or gated, not full.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_slots_free{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Create concurrency saturation",
+      "id": 17,
+      "description": "Bring-ups holding a create-concurrency slot, over the per-host ceiling. At 1.0 a burst is queueing in-process \u2014 which is the point: it stops a boot storm from turning into fleet-wide agent-readiness timeouts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_create_inflight{job=\"sandbox-hosts\",host=~\"$host\"} / clamp_min(sandbox_create_concurrency{job=\"sandbox-hosts\",host=~\"$host\"}, 1)",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Per-worker inventory and failures",
+      "id": 18,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Inventory by worker",
+      "id": 19,
+      "description": "User-visible running sandboxes per worker, stacked to fleet total.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} running"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Hibernated by worker",
+      "id": 20,
+      "description": "Frozen inventory per worker. It holds no slot and no memory but its artifacts and host port live on that worker's disk, which is what makes scale-in a drain rather than a delete.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_hibernated{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ready pool by worker",
+      "id": 21,
+      "description": "Ready VMs available versus builds still gating. A worker that never reaches its target pool size is failing builds \u2014 see the failure panel.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_warming{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} ready"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_warm_preparing{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} preparing"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker failure rates (events/min)",
+      "id": 22,
+      "description": "Failures attributable to a host rather than to load. A single worker producing all the create errors is the signature of a host-local defect \u2014 the jailer io.max/device class of bug that once took a worker out of service while it still advertised capacity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sandbox_creates_error_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m]) * 60",
+          "legendFormat": "{{host}} create errors"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(sandbox_wake_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m]) * 60",
+          "legendFormat": "{{host}} wake failures"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(sandbox_warm_build_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m]) * 60",
+          "legendFormat": "{{host}} warm build failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Unflushed billing evidence by worker",
+      "id": 23,
+      "description": "Closed billable intervals still only on this worker's disk. A cordoned worker with a backlog must not be deleted \u2014 the bucket, not SQLite, is the billing record.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_usage_unflushed_intervals{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} unflushed"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_usage_intervals_open{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} open"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Per-worker resource footprint",
+      "id": 24,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest memory touched by worker",
+      "id": 25,
+      "description": "Sum of the VMM cgroup charges on each worker: what the host is really paying for its guests, as opposed to what admission charged.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_host_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Committed vs budgeted memory by worker",
+      "id": 26,
+      "description": "The admission ceiling and how close each worker is to it. Dashed budget lines that differ across workers mean mixed SLOTS_PER_HOST or MEM_PER_SLOT_MIB \u2014 check the deploy, not the load.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_committed_mem_mib{job=\"sandbox-hosts\",host=~\"$host\"} * 1048576",
+          "legendFormat": "{{host}} committed"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_mem_budget_mib{job=\"sandbox-hosts\",host=~\"$host\"} * 1048576",
+          "legendFormat": "{{host}} budget"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rootfs allocation by worker",
+      "id": 27,
+      "description": "Per-VM rootfs blocks on each worker's data disk, including extents still shared with the reflinked golden base. Growth is real consumption; the level is inflated by counting that base once per sandbox.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_rootfs_alloc_bytes{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest CPU by worker",
+      "id": 28,
+      "description": "Consumed CPU seconds per second (credited at interval close) against allocated vCPU-seconds. The ratio is the oversubscription each worker is actually running.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sandbox_cpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[10m])",
+          "legendFormat": "{{host}} consumed"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(sandbox_billable_vcpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[10m])",
+          "legendFormat": "{{host}} allocated"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest network by worker",
+      "id": 29,
+      "description": "Guest-perspective throughput per worker; also where NAT egress is being paid from.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sandbox_net_bytes_total{job=\"sandbox-hosts\",host=~\"$host\",dir=\"rx\"}[5m])",
+          "legendFormat": "{{host}} rx"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(sandbox_net_bytes_total{job=\"sandbox-hosts\",host=~\"$host\",dir=\"tx\"}[5m])",
+          "legendFormat": "{{host}} tx"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Boot to capacity: the autoscale critical path",
+      "id": 30,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Slowest worker: boot \u2192 capacity",
+      "id": 31,
+      "description": "Worst `sandbox_worker_ready_seconds` in the selection: GCE reporting RUNNING to advertising usable capacity. This \u2014 not the resize call \u2014 is what a burst waits on.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 5,
+        "x": 0,
+        "y": 65
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(sandbox_worker_ready_seconds{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Readiness by worker",
+      "id": 32,
+      "description": "Per-worker boot \u2192 capacity_advertised. A worker that adopted a baked golden data disk lands far below one that had to cold-build it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 5,
+        "y": 65
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 1,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_worker_ready_seconds{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Boot phase offsets",
+      "id": 33,
+      "description": "Each stage's offset from the boot anchor, contributed by three writers that cannot share memory (startup script, Nomad task run.sh, serve itself). `capacity_advertised` \u2014 not `first_heartbeat_ok` \u2014 is the moment new capacity is real: an unwarmed host heartbeats slots_free=0 on purpose.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 1,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_boot_phase_seconds{job=\"sandbox-hosts\",host=~\"$host\",phase!=\"kernel_boot\"}",
+          "legendFormat": "{{host}} / {{phase}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Readiness over time",
+      "id": 34,
+      "description": "Readiness of each worker as the fleet scales. These are absolute timestamps rather than rates, so the ordinary scrape interval still recovers millisecond boundaries \u2014 no special scrape needed for profiling.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "s",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_worker_ready_seconds{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "state-timeline",
+      "title": "Worker health gates",
+      "id": 35,
+      "description": "Per-worker gates: scrapable, golden staged, and whether the boot timeline belongs to this boot (a suspended-then-resumed standby keeps its original timeline, which is correct \u2014 it re-ran neither the startup script nor serve).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "NO",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "YES",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_host_scrape_ok{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} / scrape"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_golden_ready{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} / golden"
+        },
+        {
+          "refId": "C",
+          "expr": "sandbox_boot_timeline_is_boot{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}} / boot timeline"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Release and process health",
+      "id": 36,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Worker releases present",
+      "id": 37,
+      "description": "Distinct release SHAs running across the fleet. Anything but 1 means a rollout is in flight or stalled.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 82
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(count by (release) (sandbox_build_info{job=\"sandbox-hosts\",component=\"worker\"}))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Gateway / expected worker release",
+      "id": 38,
+      "description": "The gateway's own release and the worker release it gates placement on. The gateway is deployed FIRST by design \u2014 new gateway in front of old workers is the benign direction.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 4,
+        "y": 82
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_build_info{job=\"sandbox-gateway\",component=\"gateway\"}",
+          "legendFormat": "gateway {{release}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_worker_release_info{job=\"sandbox-gateway\"}",
+          "legendFormat": "expected {{release}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Youngest worker uptime",
+      "id": 39,
+      "description": "Time since the youngest worker's serve process started. A repeatedly resetting value is a crash-looping task, which reconcile makes safe but not free: it kills orphaned VMs and clears their rows.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 82
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(sandbox_uptime_seconds{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Guest telemetry failures (5m)",
+      "id": 40,
+      "description": "Utilization ticks where a running guest did not answer /stats, fleet-wide. Concentrated on one worker it is a host problem; spread evenly it is an image-pinned agent predating the endpoint.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 82
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(sandbox_guest_stat_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "state-timeline",
+      "title": "Worker release presence",
+      "id": 41,
+      "description": "Which release each worker is running, over time. This is the panel that shows a half-deployed fleet, the failure mode that once passed a REST smoke test while the interactive shell was broken everywhere.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 86
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_build_info{job=\"sandbox-hosts\",component=\"worker\",host=~\"$host\"}",
+          "legendFormat": "{{host}} \u00b7 {{release}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker process uptime",
+      "id": 42,
+      "description": "Per-worker serve uptime. A step down without a rollout is a restart; shutdown hibernates rather than destroys, so sandboxes survive it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 86
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_uptime_seconds{job=\"sandbox-hosts\",host=~\"$host\"}",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Reading this dashboard",
+      "id": 43,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "How per-host data gets here",
+      "id": 44,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 95
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Federation, not service discovery.** Prometheus scrapes only the gateway. The gateway holds each\nlive worker's address and token, scrapes their `/metrics`, and re-exports every series with\n`host=\"<id>\"` \u2014 so `job=\"sandbox-hosts\"` series are worker-sourced, and `job=\"sandbox-gateway\"` series\nare the gateway's own aggregates. The dynamic MIG needs no SD config. `sandbox_host_scrape_ok{host}`\nflags a worker the gateway could not reach; its panels go blank while its sandboxes keep running.\n\n**Two capacity vocabularies, on purpose.** `sandbox_host_slots_*` (gateway) is the placement view:\nwhat it will actually reserve against. `sandbox_pool_*` / `sandbox_committed_mem_mib` (worker) is the\nmechanism: which pool binds and how close admission is to its ceiling. Placement trusts host-reported\n`slots_free`; total \u2212 used overstates capacity when big-memory sandboxes are running.\n\n**The worker scrape is slower (30 s) than the gateway's (5 s)** because it fans out to every worker.\nPer-host panels are therefore coarser than the fleet ones \u2014 don't read a 5 s spike off them."
+      }
+    },
+    {
+      "type": "text",
+      "title": "Where to go next",
+      "id": 45,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 95
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**A burst that is not getting hosts** \u2192 *Fleet size and scaling*. Queued demand with a flat provider\ntarget means scale-out is not firing; a rising target with flat live workers means hosts are booting.\nContinue in *Boot to capacity* \u2014 that span, not the resize, is the latency.\n\n**A worker that will not take creates** \u2192 *Per-worker capacity*. Zero allocatable with zero running is\nwarming or release-gated (check the two stats up top), not full. Otherwise read the binding-pool\nbargauge: taps/IPs bound running sandboxes, ports bound running + hibernated.\n\n**One worker producing all the errors** \u2192 *Per-worker inventory and failures*. Host-local defects look\nexactly like this while the host still advertises capacity.\n\n**Before deleting a cordoned worker** \u2192 check its unflushed billing evidence and hibernated inventory.\nBoth live on that instance's disk.\n\n**Sandbox-side symptoms** (slow creates, starved guests, disk full, missing usage) belong on **Sandbox\nWorkload**; public ingress, TLS and raw port leases stay on **Sandbox Fleet**."
+      }
+    }
+  ]
+}

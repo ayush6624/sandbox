@@ -194,18 +194,40 @@ sha, so it cannot install some other release. Workers can roll to any published
 sha; rolling the gateway back means checking that commit out first. `rollout.sh`
 refuses up front instead of half-deploying.
 
-**Observe it** in Grafana at the URL printed by `./control.sh status`. The
-provisioned **Sandbox Fleet** dashboard separates live operational telemetry
-from offline benchmark evidence:
+**Observe it** in Grafana at the URL printed by `./control.sh status`. Three
+dashboards are provisioned from `grafana/dashboards/` (any JSON dropped there is
+picked up), cross-linked by the *Sandbox dashboards* dropdown:
+
+- **Sandbox Fleet** — the incident entry point: control-plane status, placement
+  capacity, scaling and drain mechanics, rollout safety, public ingress.
+- **Sandbox Workload** — the sandboxes themselves: inventory and lifecycle, the
+  create path and ready pool, what guests actually consume (CPU distribution,
+  guest-reported memory and disk, network, rootfs growth), billable volume and
+  ledger durability, id resolution.
+- **Sandbox Hosts** — the workers: per-host capacity and which pool binds,
+  memory admission, per-host failure rates, the boot → capacity-advertised
+  critical path, release and process health.
+
+Reading them:
 
 - gateway demand, queue, rejection, desired-worker, and scaling-owner signals
   refresh on the 10 s control-loop scrape;
 - per-worker pools, memory, create concurrency, lifecycle, release, and
-  readiness phases arrive through the 30 s federation scrape;
+  readiness phases arrive through the 30 s federation scrape, so don't read a
+  5 s spike off a per-host panel;
 - rollout panels compare the gateway's persisted expected worker release with
   releases actually serving, including workers gated from new placement;
+- guest-reported panels need `metrics_guest_stats` and an agent with
+  `GET /stats` — the agent is image-pinned, so missing coverage (visible as the
+  coverage stat and `sandbox_guest_stat_failures_total`) means rebake, not roll;
 - benchmark p50/p95/p99 values are reference text, not live samples. The
   service does not yet export request-duration histograms.
+
+`go test ./infra/gcp/grafana/` validates every provisioned dashboard: that each
+queried metric is one something actually exports, that each `job=` label is one
+Prometheus actually scrapes, and that no panel overlaps another. Grafana never
+checks an expression, and a typo renders as "No data" — indistinguishable from a
+quiet fleet.
 
 **Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` bound cost and fleet size;
 `SLOTS_PER_HOST` is the single source of truth for tap/IP capacity;

@@ -1,13 +1,27 @@
 {
   "uid": "sandbox-fleet",
   "title": "Sandbox Fleet",
-  "description": "Production health for the sandbox control plane, workload and lifecycle, placement capacity, worker fleet, releases, public ingress, and gateway-owned scaling.",
+  "description": "Fleet-wide production health: control plane, placement capacity, gateway-owned scaling and drain, rollout safety, and public ingress. Sandbox-level detail is on Sandbox Workload; per-worker detail is on Sandbox Hosts.",
   "tags": ["sandbox", "fleet", "autoscaling"],
   "timezone": "",
   "schemaVersion": 39,
-  "version": 5,
+  "version": 6,
   "editable": true,
   "refresh": "10s",
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "Sandbox dashboards",
+      "tags": ["sandbox"],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false,
+      "url": "",
+      "tooltip": ""
+    }
+  ],
   "time": { "from": "now-3h", "to": "now" },
   "timepicker": {
     "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"],

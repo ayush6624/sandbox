@@ -227,6 +227,39 @@ func TestSandboxStatMetricsAggregate(t *testing.T) {
 	}
 }
 
+// Guest sums must cover only the sandboxes that actually reported, and the
+// reporting count must ship with them: a sandbox whose baked agent 404s
+// GET /stats contributes zeros, so folding it into the denominator would make a
+// fleet-wide "guest memory used" ratio read low exactly when coverage is worst.
+func TestSandboxStatMetricsGuestAggregate(t *testing.T) {
+	s := testMeteringServer(t)
+	now := time.Unix(1700000000, 0)
+	s.stats.record("a", now, rawSample{vcpus: 1, guest: &agentapi.Stats{
+		MemTotalBytes: 1000, MemAvailableBytes: 250, DiskTotalBytes: 8000, DiskFreeBytes: 3000, Processes: 40,
+	}})
+	s.stats.record("b", now, rawSample{vcpus: 1, guest: &agentapi.Stats{
+		MemTotalBytes: 1000, MemAvailableBytes: 750, DiskTotalBytes: 8000, DiskFreeBytes: 6000, Processes: 2,
+	}})
+	s.stats.record("c", now, rawSample{vcpus: 1, memBytes: 512}) // old agent: no guest data
+
+	var b strings.Builder
+	s.writeSandboxStatMetrics(&b)
+	got := parseMetrics(t, b.String())
+	if got["sandbox_guest_stats_reporting"] != 2 {
+		t.Errorf("reporting = %d, want 2 (the silent agent is not a denominator)", got["sandbox_guest_stats_reporting"])
+	}
+	if got[`sandbox_guest_mem_bytes{state="used"}`] != 1000 || got[`sandbox_guest_mem_bytes{state="total"}`] != 2000 {
+		t.Errorf("guest mem used/total = %d/%d, want 1000/2000",
+			got[`sandbox_guest_mem_bytes{state="used"}`], got[`sandbox_guest_mem_bytes{state="total"}`])
+	}
+	if got[`sandbox_guest_disk_bytes{state="used"}`] != 7000 {
+		t.Errorf("guest disk used = %d, want 7000", got[`sandbox_guest_disk_bytes{state="used"}`])
+	}
+	if got["sandbox_guest_processes"] != 42 {
+		t.Errorf("processes = %d, want 42", got["sandbox_guest_processes"])
+	}
+}
+
 // THE regression test for this feature. Every host→guest path bumps the
 // activity tracker, which resets the idle-hibernation clock and pins the
 // sandbox running. A sampler that ran through one of those paths would freeze

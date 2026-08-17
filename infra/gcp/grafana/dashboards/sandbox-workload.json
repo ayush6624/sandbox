@@ -1,0 +1,2393 @@
+{
+  "uid": "sandbox-workload",
+  "title": "Sandbox Workload",
+  "description": "Sandbox-level view: inventory and lifecycle, the create path, what guests are actually consuming (CPU/memory/disk/network), billable volume, and id resolution. Aggregated across the fleet \u2014 no series is labelled with a sandbox id, by design (cardinality); per-sandbox detail is GET /v1/sandboxes/{id}/metrics.",
+  "tags": [
+    "sandbox",
+    "workload",
+    "guests"
+  ],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "15m",
+      "1h",
+      "3h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d"
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "Sandbox dashboards",
+      "tags": [
+        "sandbox"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false,
+      "url": "",
+      "tooltip": ""
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host",
+        "label": "Worker",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "sandbox-prom"
+        },
+        "query": {
+          "query": "label_values(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}, host)",
+          "refId": "VariableQuery"
+        },
+        "definition": "label_values(sandbox_host_scrape_ok{job=\"sandbox-hosts\"}, host)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Inventory",
+      "id": 1,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Running",
+      "id": 2,
+      "description": "User-visible running sandboxes, summed from the workers themselves (sandbox_running excludes hidden ready-pool VMs, unlike the gateway's slots_used).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Hibernated",
+      "id": 3,
+      "description": "Frozen to disk: holds a host port and its artifacts, no slot, no memory, no bill.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_hibernated{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "In transition",
+      "id": 4,
+      "description": "starting + stopping: bring-ups past validation and bounded teardowns. A number that will not fall means a create or destroy is wedged.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_starting{job=\"sandbox-hosts\",host=~\"$host\"}) + sum(sandbox_stopping{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Ready VMs available",
+      "id": 5,
+      "description": "Fully initialized hidden clones a create can claim in ~10 ms. Zero means every arrival pays the ~700 ms clone path.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_warming{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Ready VMs preparing",
+      "id": 6,
+      "description": "Ready-pool builds still completing launch/readiness/security gates; unclaimable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_warm_preparing{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Creates queued",
+      "id": 7,
+      "description": "Creates parked in the gateway's bounded queue waiting for a slot. Non-zero is the level-triggered scale-out signal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_create_queue_depth{job=\"sandbox-gateway\"}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sandbox inventory",
+      "id": 8,
+      "description": "User inventory (running, hibernated) plus transient worker states and hidden ready-pool VMs. Warm series are not user sandboxes but do consume slots and memory.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "running"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_hibernated{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "hibernated"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(sandbox_starting{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "starting"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(sandbox_stopping{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "stopping"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(sandbox_warming{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "warm ready"
+        },
+        {
+          "refId": "F",
+          "expr": "sum(sandbox_warm_preparing{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "warm preparing"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Lifecycle events (events/min)",
+      "id": 9,
+      "description": "Arrival and freeze/thaw churn. Wake failures roll a sandbox back to hibernated and surface to the client as 503 (or close code 4503 on the shell WebSocket).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_creates_total{job=\"sandbox-gateway\"}[2m])) * 60",
+          "legendFormat": "creates"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(sandbox_hibernations_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "hibernations"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(sandbox_wakes_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "wakes"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(sandbox_wake_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "wake failures"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Create path",
+      "id": 10,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Create success (1h)",
+      "id": 11,
+      "description": "Worker bring-ups that succeeded, of those attempted past validation. Capacity 503s are not counted here \u2014 see the rejection rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.98
+              },
+              {
+                "color": "green",
+                "value": 0.999
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(sandbox_creates_ok_total{job=\"sandbox-hosts\",host=~\"$host\"}[1h])) / clamp_min(sum(increase(sandbox_creates_ok_total{job=\"sandbox-hosts\",host=~\"$host\"}[1h])) + sum(increase(sandbox_creates_error_total{job=\"sandbox-hosts\",host=~\"$host\"}[1h])), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Ready-pool hit rate (1h)",
+      "id": 12,
+      "description": "Creates served from a ready VM rather than the clone fallback. This is the difference between a ~10 ms create and a ~700 ms one; size warm_pool_size off it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(sandbox_warm_claims_total{job=\"sandbox-hosts\",host=~\"$host\"}[1h])) / clamp_min(sum(increase(sandbox_warm_claims_total{job=\"sandbox-hosts\",host=~\"$host\"}[1h])) + sum(increase(sandbox_warm_misses_total{job=\"sandbox-hosts\",host=~\"$host\"}[1h])), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Capacity rejections (5m)",
+      "id": 13,
+      "description": "Creates 503'd because the queue was full or the queue wait expired. Retrying clients re-increment every Retry-After, so read it as demand the queue can no longer express.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(sandbox_create_rejected_total{job=\"sandbox-gateway\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Worker create errors (5m)",
+      "id": 14,
+      "description": "Bring-ups that failed after validation: agent-readiness timeout, clone failure, jailer/device problem. A non-zero count with free capacity is a host defect, not load.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(sandbox_creates_error_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Golden-ready workers",
+      "id": 15,
+      "description": "Workers with the golden snapshot staged. A worker without it cold-boots every create (~2 s) instead of cloning.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_golden_ready{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Create outcomes (events/min)",
+      "id": 16,
+      "description": "Successful creates versus the two failure classes. Capacity rejections are the gateway's; create errors are the workers'.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_creates_total{job=\"sandbox-gateway\"}[2m])) * 60",
+          "legendFormat": "creates ok"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(sandbox_creates_error_total{job=\"sandbox-hosts\",host=~\"$host\"}[2m])) * 60",
+          "legendFormat": "worker create errors"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(sandbox_create_rejected_total{job=\"sandbox-gateway\"}[2m])) * 60",
+          "legendFormat": "capacity rejections"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ready pool",
+      "id": 17,
+      "description": "Claims versus misses is the hit rate over time; build failures mean the pool cannot refill and every subsequent arrival falls back to the clone path.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_warming{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "ready available"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_warm_preparing{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "preparing"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(sandbox_warm_claims_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "claims/min"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(sandbox_warm_misses_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "misses/min"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(sandbox_warm_build_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "build failures/min"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue and admission pressure",
+      "id": 18,
+      "description": "Queue depth is a request count; demand slots weight memory-heavy requests the way the gateway's own scaling arithmetic does. In-flight versus the per-host concurrency ceiling shows whether workers are the bottleneck rather than capacity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_create_queue_depth{job=\"sandbox-gateway\"}",
+          "legendFormat": "queued requests"
+        },
+        {
+          "refId": "B",
+          "expr": "sandbox_create_queue_demand_slots{job=\"sandbox-gateway\"}",
+          "legendFormat": "queued demand slots"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(sandbox_create_inflight{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "create in-flight"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(sandbox_create_concurrency{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "in-flight ceiling"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Guest CPU",
+      "id": 19,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Mean sandbox CPU",
+      "id": 20,
+      "description": "Mean of per-sandbox CPU used as a percentage of its OWN allocated vCPUs, so 100% means a sandbox is using everything it was given.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_cpu_utilization_sum{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Idle sandboxes (\u22641%)",
+      "id": 21,
+      "description": "Resident sandboxes doing essentially nothing. They still hold a slot, a tap/IP and committed memory, so a large number is the case for a shorter hibernate_after_sec.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"1\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Busy sandboxes (>75%)",
+      "id": 22,
+      "description": "Sandboxes near or at their vCPU allocation. CPU is deliberately oversubscribed ~6:1, so this is where contention shows up first.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}) - sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"75\"}), 0)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Sampled sandboxes",
+      "id": 23,
+      "description": "Sandboxes in the utilization histogram. The sampler reads the cgroup leaf, tap counters and rootfs file \u2014 never the guest \u2014 so it neither counts as activity nor wakes a hibernated sandbox.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Guest telemetry coverage",
+      "id": 24,
+      "description": "Running sandboxes whose agent answered GET /stats, over all running. Below 1 means some guests carry an agent predating /stats (image-pinned \u2014 rebake) and the guest-reported panels below cover only part of the fleet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_guest_stats_reporting{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"}), 1)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-sandbox CPU utilization percentiles",
+      "id": 25,
+      "description": "Quantiles over the current population of sandboxes (a snapshot distribution, not a rate \u2014 the buckets are gauges reset each scrape). p99 pinned at 100% with a low mean is a few busy tenants, not a hot fleet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\"}))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.90, sum by (le) (sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\"}))",
+          "legendFormat": "p90"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\"}))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(sandbox_cpu_utilization_sum{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "mean"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU utilization distribution (share of sandboxes)",
+      "id": 26,
+      "description": "How the population splits by utilisation band. The idle band is the density opportunity; the top band is the contention risk.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"1\"}) / clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "\u22641% idle"
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"25\"}) - sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"1\"})) / clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "1-25%"
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"75\"}) - sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"25\"})) / clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "25-75%"
+        },
+        {
+          "refId": "D",
+          "expr": "(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}) - sum(sandbox_cpu_utilization_bucket{job=\"sandbox-hosts\",host=~\"$host\",le=\"75\"})) / clamp_min(sum(sandbox_cpu_utilization_count{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": ">75%"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Guest memory, disk and network",
+      "id": 27,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory: allocated vs touched vs in use",
+      "id": 28,
+      "description": "Three different numbers, and the gap between them is the whole overcommit case. Allocated is what admission charges (effective mem_mib + 156 MiB VMM overhead). Touched is the VMM cgroup charge, a high-water mark that never falls without a balloon device. In use is what the guest itself reports free/used \u2014 the only one that drops when a workload finishes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_committed_mem_mib{job=\"sandbox-hosts\",host=~\"$host\"}) * 1048576",
+          "legendFormat": "allocated (admission)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_host_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "touched (VMM charge)"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(sandbox_guest_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\",state=\"used\"})",
+          "legendFormat": "in use (guest-reported)"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(sandbox_guest_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\",state=\"total\"})",
+          "legendFormat": "guest total (reporting only)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Guest memory in use",
+      "id": 29,
+      "description": "Guest-reported used over total, across sandboxes that answered /stats. This is memory pressure inside the sandboxes, which the host's cgroup charge cannot see.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.92
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_guest_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\",state=\"used\"}) / clamp_min(sum(sandbox_guest_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\",state=\"total\"}), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Guest disk in use",
+      "id": 30,
+      "description": "Guest-reported rootfs used over total. A sandbox that fills its disk fails in confusing ways (npm installs, git clones) long before anything else alarms.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_guest_disk_bytes{job=\"sandbox-hosts\",host=~\"$host\",state=\"used\"}) / clamp_min(sum(sandbox_guest_disk_bytes{job=\"sandbox-hosts\",host=~\"$host\",state=\"total\"}), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Memory touched per sandbox",
+      "id": 31,
+      "description": "Mean VMM cgroup charge per running sandbox \u2014 the density figure to watch across releases (snapshot-sourced sandboxes share golden pages and measure well below default-sourced ones).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_host_mem_bytes{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"}), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Mean guest load / processes",
+      "id": 32,
+      "description": "Per reporting sandbox: 1-minute load average and process count. Load above the sandbox's vCPU count means work is queueing inside the guest.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_guest_load1{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_guest_stats_reporting{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "load1"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_guest_processes{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_guest_stats_reporting{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "processes"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Guest network throughput",
+      "id": 33,
+      "description": "From the guest's point of view (the tap's counters are swapped on the way in). Egress leaves via host NAT, so this is also the fleet's outbound bill.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_net_bytes_total{job=\"sandbox-hosts\",host=~\"$host\",dir=\"rx\"}[5m]))",
+          "legendFormat": "rx (into guests)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(sandbox_net_bytes_total{job=\"sandbox-hosts\",host=~\"$host\",dir=\"tx\"}[5m]))",
+          "legendFormat": "tx (out of guests)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rootfs growth",
+      "id": 34,
+      "description": "Only the GROWTH is the sandboxes' own consumption: the absolute sum counts the ~2.2 GiB reflinked golden base once per sandbox, so watch the slope, not the level.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "unit": "Bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "per sandbox (incl. shared base)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(deriv(sandbox_rootfs_alloc_bytes{job=\"sandbox-hosts\",host=~\"$host\"}[15m]))",
+          "legendFormat": "allocation growth"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_rootfs_alloc_bytes{job=\"sandbox-hosts\",host=~\"$host\"}) / clamp_min(sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"}), 1)",
+          "legendFormat": "per sandbox (incl. shared base)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Telemetry gaps (events/min)",
+      "id": 35,
+      "description": "Utilization ticks where a running guest did not answer /stats: an agent predating the endpoint, a timeout, or an unreachable guest. Host-side fields still record; the guest-reported panels above lose coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_guest_stat_failures_total{job=\"sandbox-hosts\",host=~\"$host\"}[5m])) * 60",
+          "legendFormat": "guest stat failures/min"
+        },
+        {
+          "refId": "B",
+          "expr": "clamp_min(sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"}) - sum(sandbox_guest_stats_reporting{job=\"sandbox-hosts\",host=~\"$host\"}), 0)",
+          "legendFormat": "running without guest data"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Billable volume",
+      "id": 36,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Billed vCPU rate",
+      "id": 37,
+      "description": "Allocated vCPU-seconds per second credited as intervals close \u2014 effectively the vCPU count the fleet is charging for. Billing is on ALLOCATION, not consumption.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_billable_vcpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[10m]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Billed memory rate",
+      "id": 38,
+      "description": "Allocated GiB credited per second as intervals close.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_billable_mem_mib_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[10m])) / 1024"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "CPU oversubscription",
+      "id": 39,
+      "description": "Allocated vCPU-seconds over consumed CPU seconds, both credited at interval close. ~6:1 is the intended design point; near 1:1 means guests are actually using their allocation and contention is real.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_billable_vcpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[30m])) / clamp_min(sum(rate(sandbox_cpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[30m])), 0.001)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Open intervals vs running",
+      "id": 40,
+      "description": "One open billable interval per running sandbox's VMM. A persistent gap either way means the ledger and the inventory disagree.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_usage_intervals_open{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "open"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Unflushed intervals",
+      "id": 41,
+      "description": "Closed billing evidence that exists only on a worker's local disk. Alert on this: a scale-in that deletes the instance destroys it, and the bucket \u2014 not SQLite \u2014 is the billing record.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_usage_unflushed_intervals{job=\"sandbox-hosts\",host=~\"$host\"})"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Billable volume over time",
+      "id": 42,
+      "description": "Allocated versus consumed, on the same axis in vCPU terms. Both are credited when an interval CLOSES, so a fleet of long-lived sandboxes shows these move in steps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(sandbox_billable_vcpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[10m]))",
+          "legendFormat": "vCPU allocated (billed)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(sandbox_cpu_seconds_total{job=\"sandbox-hosts\",host=~\"$host\"}[10m]))",
+          "legendFormat": "CPU consumed (recorded)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Usage ledger health",
+      "id": 43,
+      "description": "Open intervals should track running inventory; unflushed intervals should return to zero after each spool to the durability bucket.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sandbox_usage_intervals_open{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "intervals open"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "running sandboxes"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(sandbox_usage_unflushed_intervals{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "intervals unflushed"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Id resolution and wake",
+      "id": 44,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Routes vs inventory",
+      "id": 45,
+      "description": "The gateway rebuilds sandbox-id \u2192 host routing from heartbeats and holds no durable state. Routes should track running + hibernated; a shortfall is a sandbox nobody can reach, an excess is a stale route.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 70
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_routes{job=\"sandbox-gateway\"}",
+          "legendFormat": "gateway routes"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sandbox_running{job=\"sandbox-hosts\",host=~\"$host\"}) + sum(sandbox_hibernated{job=\"sandbox-hosts\",host=~\"$host\"})",
+          "legendFormat": "running + hibernated"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cross-host adopt (events/min)",
+      "id": 46,
+      "description": "A route miss is resolved by asking workers, and that probe is RATE-LIMITED: rising `throttled` with a low dispatch rate means something is probing ids, while rising wait timeouts means real adopts are slower than clients wait and 404s are being returned for sandboxes that exist.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 70
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sandbox_adopt_inflight{job=\"sandbox-gateway\"}",
+          "legendFormat": "in flight"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(sandbox_adopt_dispatched_total{job=\"sandbox-gateway\"}[5m]) * 60",
+          "legendFormat": "dispatched/min"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(sandbox_adopt_wait_timeout_total{job=\"sandbox-gateway\"}[5m]) * 60",
+          "legendFormat": "wait timeouts/min"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(sandbox_adopt_suppressed_total{job=\"sandbox-gateway\"}[5m]) * 60",
+          "legendFormat": "suppressed/min {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Wake latency, public ingress (seconds)",
+      "id": 47,
+      "description": "Measured at the edge: a request to a hibernated sandbox's public port thaws it before proxying. Only ingress-driven wakes are timed \u2014 API-driven wakes are not instrumented.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sandbox-prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 70
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 12
+          },
+          "min": 0,
+          "unit": "s",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sandbox_edge_wake_seconds_bucket{job=\"sandbox-edge\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sandbox_edge_wake_seconds_bucket{job=\"sandbox-edge\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(sandbox_edge_wake_seconds_bucket{job=\"sandbox-edge\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Reading this dashboard",
+      "id": 48,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "What is and is not here",
+      "id": 49,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**No sandbox-id labels, deliberately.** Every series is a host aggregate; a `sandbox_id` label at this\nchurn rate is a cardinality bomb. Per-sandbox history lives in a bounded in-memory ring on the owning\nworker and is read with `GET /v1/sandboxes/{id}/metrics` (`sandbox metrics <id>`) \u2014 lost on restart and\nwhen a sandbox moves hosts.\n\n**Allocation vs consumption.** *Billed* series are ALLOCATION (`vcpus`/`mem_mib` \u00d7 duration) and are\ncredited when an interval closes, so they move in steps. *Utilization* series are what a guest is\nactually using, sampled every 5 s. They are not meant to match.\n\n**Guest-reported panels depend on the baked agent.** `metrics_guest_stats` polls each guest's\n`GET /stats`; an agent predating it degrades silently to host-only fields. The coverage stat and\n`sandbox_guest_stat_failures_total` are how you see that \u2014 the agent is image-pinned, so the fix is a\nrebake, not a rollout.\n\n**Gaps.** There is no create-latency histogram (the 12 ms / 700 ms figures come from benchmark runs,\nnot from this dashboard), no per-sandbox network or disk quota accounting, and no API request-rate or\nerror-rate series for exec/files/shell."
+      }
+    },
+    {
+      "type": "text",
+      "title": "Where to go next",
+      "id": 50,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**A slow create** \u2192 *Create path*. Ready-pool hit rate near zero means arrivals are paying the clone\nfallback; that is pool sizing (`warm_pool_size`), not a defect. Queue depth above zero with rejections\nmeans the fleet is short of capacity \u2014 continue on **Sandbox Hosts** (scaling row).\n\n**A sandbox that feels starved** \u2192 *Guest CPU*. Compare p99 against the mean: a pinned p99 with a low\nmean is a few tenants at their own vCPU ceiling, which oversubscription cannot fix for them. Check\nmean guest load against vCPUs allocated.\n\n**A worker OOM or admission 503** \u2192 *Guest memory*. `allocated` is what admission charges against\n`mem_budget_mib`; `touched` is what the host is really paying. A large gap is headroom a balloon device\ncould reclaim (see CLAUDE.md, \"No memory overcommit\").\n\n**Missing money** \u2192 *Billable volume*. Unflushed intervals above zero for more than a spool cycle is\nthe one to page on: a scale-in deleting that instance destroys the evidence.\n\n**A 404 for a sandbox that exists** \u2192 *Id resolution*. 404 from the gateway is supposed to mean a\nproven absence; rising adopt wait timeouts or `suppressed{reason=\"throttled\"}` is how that guarantee\ndegrades under bulk churn."
+      }
+    }
+  ]
+}
