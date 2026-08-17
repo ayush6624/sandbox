@@ -641,7 +641,27 @@ scripts/              Host setup shell scripts
   "not resolvable yet" for sandboxes the gateway had just deleted itself, because
   a rate-limited adopt probe was the only way to prove absence; a completed
   destroy now records the absence in the gateway's negative cache.
-  **Memory density was NOT re-measured** on this release: `scripts/mem-density.sh`
+  **Memory density re-measured 2026-08-17 on release `2e6ba08`** (the
+  shared-inode change), directly from the 8 resident ready VMs on a live worker
+  — no drain needed, because `/proc/<pid>/smaps_rollup` answers it: **43.1 MiB
+  PSS per VM** (345 MiB for 8), Shared_Clean ~69 MiB, Private_Dirty ~31 MiB, and
+  **all 8 VMs map the SAME snapshot-memory inode**. That is ~44% below the
+  previous best figure (76.9 MiB snapshot-source) and ~53% below default-source
+  (91.0 MiB), and it is a second effect of sharing one inode: Firecracker maps
+  the mem file `MAP_PRIVATE`, so unwritten pages are shared page-cache pages —
+  but only WITHIN an inode, so the old per-VM copies meant clones were never
+  actually sharing guest memory the way these notes claimed.
+  **The gap this exposes is the important part: admission charges 1180 MiB per
+  running sandbox while a resident ready VM actually costs ~43 MiB PSS — ~27x.**
+  That, not physical RAM, is what caps `warm_pool_size` at 8. Do NOT simply
+  admit ready VMs more cheaply: PSS measures pages TOUCHED, and a pool sized past
+  the budget is safe only while its VMs stay idle — the risk lands at claim time,
+  when each guest may dirty its full `mem_mib`. Sizing a large pool therefore
+  needs claim-time headroom or a balloon/free-page-reporting device, which is the
+  prerequisite already noted under "No memory overcommit".
+  The older figures below predate all of this.
+  **Memory density was NOT re-measured** on the `c0d0c0f` release:
+  `scripts/mem-density.sh`
   requires the target worker to have zero sandboxes AND zero Firecracker
   processes, which the resident 8-VM ready pool makes impossible without draining
   a live worker. The last figures (release `9b6a9fc`) were 76.9 MiB PSS/VM
