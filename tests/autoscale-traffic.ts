@@ -52,8 +52,12 @@ const FLOOR_HOSTS = integerEnv('AUTOSCALE_FLOOR_HOSTS', 2, 1)
 const SLOTS_PER_HOST = integerEnv('AUTOSCALE_SLOTS_PER_HOST', 48, 1)
 const MAX_HOSTS = integerEnv('AUTOSCALE_MAX_HOSTS', 22, FLOOR_HOSTS)
 const MAX_LIVE_SANDBOXES = integerEnv('AUTOSCALE_MAX_LIVE_SANDBOXES', 512, 1)
-const MAX_CREATE_P95_MS = integerEnv('AUTOSCALE_MAX_CREATE_P95_MS', 30_000, 1)
-const MAX_CREATE_MS = integerEnv('AUTOSCALE_MAX_CREATE_MS', 60_000, MAX_CREATE_P95_MS)
+// Provider standby is deliberately disabled: GCE can replenish its pool by
+// suspending a busy member. Scale-out therefore includes ordinary instance
+// create + boot (observed p95 50.4s across three 160-create cycles), so the
+// acceptance bound describes that safe path rather than the old resume path.
+const MAX_CREATE_P95_MS = integerEnv('AUTOSCALE_MAX_CREATE_P95_MS', 60_000, 1)
+const MAX_CREATE_MS = integerEnv('AUTOSCALE_MAX_CREATE_MS', 90_000, MAX_CREATE_P95_MS)
 // Per-sandbox resource overrides, so a burst can be made MEMORY-bound rather
 // than slot-bound. That is the regime real workloads land in, and the one the
 // slot arithmetic gets wrong: with MEM_PER_SLOT_MIB=1180 a 48-slot host
