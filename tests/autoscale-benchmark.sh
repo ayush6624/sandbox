@@ -13,7 +13,8 @@
 #   POLL_MS           observer target interval (default 250)
 #   EXPECTED_RUNNING  required initial RUNNING instance count (default 2)
 #   EXPECTED_SUSPENDED_MIN required initial SUSPENDED count (default 2)
-#   EXPECTED_FREE_PER_HOST required free slots on each ready host (default 48)
+#   EXPECTED_FREE_PER_HOST required free + warm-ready capacity on each ready
+#                          host (default 48)
 #   TRACE_DIR         output directory (default timestamped under tests/results)
 #   MAX_BURST_COUNT   hard cap for BURST_COUNT (default 512)
 #   BENCHMARK_TIMEOUT_SEC wall-clock driver budget (default 10800)
@@ -240,8 +241,16 @@ trap 'exit 143' TERM
 initial_sandboxes="$(gateway_get /sandboxes)"
 initial_count="$(jq 'length' <<<"$initial_sandboxes")"
 if [ "$initial_count" -ne 0 ]; then
-  echo "error: gateway already has $initial_count sandboxes; refusing a destructive cleanup" >&2
-  exit 1
+  if [ "${AUTOSCALE_ALLOW_HIBERNATED_BASELINE:-}" != "$LIVE_ACK" ]; then
+    echo "error: gateway already has $initial_count sandboxes; refusing a destructive cleanup" >&2
+    exit 1
+  fi
+  active_baseline="$(jq '[.[] | select((.status // "") != "hibernated")] | length' \
+    <<<"$initial_sandboxes")"
+  if [ "$active_baseline" -ne 0 ]; then
+    echo "error: refusing a baseline with $active_baseline non-hibernated sandbox(es)" >&2
+    exit 1
+  fi
 fi
 CLEANUP_ARMED=1
 
@@ -262,7 +271,7 @@ bad_hosts="$(jq --argjson free "$EXPECTED_FREE_PER_HOST" \
   --arg release "$EXPECTED_WORKER_RELEASE" \
   '[.[] | select(.alive and (
     (.release_compatible | not) or (.release // "") != $release or
-    .slots_used != 0 or .free != $free
+    .slots_used != 0 or (.free + (.warm_ready // 0)) != $free
   ))] | length' \
   <<<"$initial_hosts")"
 ready_hosts="$(jq '[.[] | select(.alive)] | length' <<<"$initial_hosts")"
@@ -458,9 +467,10 @@ observe_loop() {
 emit "preflight" "$(jq -cn \
   --arg project "$PROJECT" --arg zone "$ZONE" --arg mig "$MIG_NAME" \
   --arg run_id "$BENCH_RUN_ID" \
+  --argjson initial_sandboxes "$initial_count" \
   --argjson burst_count "$BURST_COUNT" --argjson running "$initial_running" \
   --argjson suspended "$initial_suspended" --argjson free_per_host "$EXPECTED_FREE_PER_HOST" \
-  '{project:$project,zone:$zone,mig:$mig,run_id:$run_id,initial_sandboxes:0,burst_count:$burst_count,
+  '{project:$project,zone:$zone,mig:$mig,run_id:$run_id,initial_sandboxes:$initial_sandboxes,burst_count:$burst_count,
     initial_running:$running,initial_suspended:$suspended,free_per_host:$free_per_host}')"
 for source in mig nomad gateway; do
   observe_loop "$source" &

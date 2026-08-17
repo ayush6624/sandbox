@@ -196,7 +196,10 @@ export TRAFFIC_SCENARIOS="sawtooth-scale-cycle standby-refill-boundary held-burs
 
 The wrapper retains its existing `PROJECT`, `ZONE`, `MIG_NAME`,
 `GATEWAY_TOKEN`, and `WORKER_SSH_USER` requirements and refuses to start if
-the gateway is not empty or the fleet is not at the expected clean floor.
+the gateway has active sandboxes or the fleet is not at the expected clean
+floor. An existing hibernated-only baseline can be preserved by setting
+`AUTOSCALE_ALLOW_HIBERNATED_BASELINE` to the same explicit acknowledgement
+value as `LIVE_AUTOSCALE_BENCHMARK`; cleanup remains scoped to the run ID.
 Run a subset by changing `TRAFFIC_SCENARIOS`. The sawtooth defaults to three
 bursts and waits up to 22 minutes for scale-in between them (15-minute policy
 window plus late-scale-action and reconciliation headroom); tune only via the
