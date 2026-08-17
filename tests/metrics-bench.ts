@@ -332,11 +332,31 @@ async function hibernationIsUnaffected(): Promise<void> {
     if (froze) {
       check('hibernation', frozen!.samples.length > 0,
         `frozen sandbox kept ${frozen!.samples.length} sample(s) and reads without waking`)
-      const stale = frozen!.samples.at(-1)!.timestamp.getTime()
-      await sleep(12_000)
+
+      // Let the series settle before asserting it is quiescent. The status flips
+      // to hibernated before the VM is actually gone, so a tick already in
+      // flight can still record one truthful sample after the first read that
+      // sees "hibernated" — asserting instantaneous equality there measures the
+      // freeze boundary, not whether sampling stopped.
+      let last = frozen!.samples.at(-1)!.timestamp.getTime()
+      let settled = false
+      for (let i = 0; i < 6 && !settled; i++) {
+        await sleep(8_000)
+        const now = (await sbx.metrics()).samples.at(-1)!.timestamp.getTime()
+        settled = now === last
+        last = now
+      }
+      check('hibernation', settled, 'the series stopped advancing once the sandbox was frozen')
+
+      // Now it is quiescent: repeated reads over a span longer than the sampling
+      // interval must not produce a single new sample, which is what proves the
+      // read neither samples nor wakes.
+      await sleep(15_000)
       const again = await sbx.metrics()
-      check('hibernation', again.samples.at(-1)!.timestamp.getTime() === stale,
-        'reading a frozen sandbox produced no new samples — the read did not wake it')
+      check('hibernation', again.samples.at(-1)!.timestamp.getTime() === last,
+        `${Math.round(15_000 / 1000)}s of repeated reads on a frozen sandbox added no samples — reads do not wake it`)
+      check('hibernation', again.state === 'hibernated',
+        'the frozen sandbox is still reported hibernated after being read')
     }
 
     // Any agent-bound request wakes it; that is a new VM, so the counters

@@ -207,6 +207,54 @@ same release:
 | `ssh_pubkey` create plus real SSH login | 12/12 keys, unique host keys, root refused |
 | v1 contract and SDK v1 fleet probes | passed |
 
+## Per-sandbox utilization
+
+**Release `9abf627`, 2026-08-17**, measured from the control VM with
+`tests/metrics-bench.ts` (27/27 checks, artifact
+`tests/results/metrics-bench-final.json`). Every figure is CAUSED by a known
+workload in a real guest and compared against what that workload implies, not
+against a constant.
+
+| Property | Measured |
+|---|---|
+| First sample available after create | **2.03 s** (create itself 77 ms) |
+| One busy core, 2 allocated vCPUs | **50.6%** (expected ~50%) |
+| Both cores busy | **100.0%** |
+| Idle sandbox | **0.8%** |
+| 256 MiB guest write → rootfs growth | **+256.1 MiB** |
+| 256 MiB guest write → guest `disk_used` | **+256 MiB** |
+| 64 MiB guest download → guest `net_rx` | **+64.3 MiB** (tx +0.07 MiB) |
+| 384 MiB touched then freed → `host_mem_bytes` | **+816 MiB**, released **0.9 MiB** |
+| Same moment, guest `mem_used` | **194 / 985 MiB** |
+| Metrics read latency, 8 sandboxes × 10 rounds | p50 **8 ms** / p95 **13 ms** |
+| `limit=1` current-reading call | **4 ms** |
+| Idle hibernation with sampling on (60 s window) | froze at **60.07 s** |
+| `vmm_generation` across freeze/wake | 1 → 2, counters restart (0.38 s < 8.89 s) |
+
+Four properties this campaign pinned down, each of which had been asserted
+incorrectly somewhere before it was measured:
+
+- **`host_mem_bytes` is a high-water mark, not live usage.** A guest that
+  touched 384 MiB and freed it released 0.9 MiB of the host's charge. Without a
+  balloon device the pages never come back, which is why the guest-reported
+  `mem_used_bytes` exists and why the two must never be conflated.
+- **`rootfs_alloc_bytes` counts extents still shared with the golden base**, so
+  it reads ~2.1–2.2 GiB before a sandbox writes anything. Only its growth is
+  that sandbox's own consumption; summing the level across a host counts the
+  shared base once per sandbox.
+- **Sampling does not suppress idle hibernation.** A sandbox with a 60 s idle
+  window and no client traffic beyond the metrics reads themselves froze at
+  60.07 s, then produced no further samples and was not woken by repeated reads.
+  This is the regression the whole design is arranged to avoid.
+- **Guest polling must run on every tick.** Polling every second tick left the
+  guest fields on alternating samples, putting holes in any chart and making
+  `limit=1` a coin flip. The poll is three `/proc` reads and a `statfs`;
+  completeness is worth far more than the cost avoided.
+
+Fleet health during the campaign: `sandbox_guest_stat_failures_total` was **0**
+on both workers, and all 27 checks ran with the fleet returning to zero
+sandboxes afterwards.
+
 ## Committed evidence
 
 Current-release lifecycle and burst artifacts:

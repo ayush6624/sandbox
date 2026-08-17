@@ -1,7 +1,9 @@
 # Sandbox stats: surfacing live resource utilization
 
-Status: **phases 1–3 implemented, not yet deployed.** Phase 4 remains a
-plan. Companion to `docs/usage-metering-plan.md`, which covers the *billing*
+Status: **phases 1–3 shipped and fleet-verified** (release `9abf627`,
+2026-08-17: rebaked worker + golden images, MIG rolled, guest stats on,
+27/27 benchmark checks — see the utilization table in `docs/benchmarks.md`).
+Phase 4 remains a plan. Companion to `docs/usage-metering-plan.md`, which covers the *billing*
 half of the same question and is already shipped.
 
 What landed:

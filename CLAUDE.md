@@ -171,14 +171,19 @@ fleet reports fine with zero local credentials.
 **Still laptop-bound (NOT deployments):** `edge.sh` and `control.sh up` need
 project-level roles (`compute.loadBalancerAdmin`, `compute.securityAdmin`,
 `secretmanager.admin`, `serviceusage`, `setIamPolicy`) that `sandbox-control-sa`
-does not have and that we cannot grant ourselves. `mig.sh` and `bake-image.sh`
-are *nearly* delegable — `roles/compute.instanceAdmin.v1` (which the control SA
-has) already covers `images.create`/`disks.create`/`instanceGroupManagers.*`, and
-`bake-image.sh` creates its VMs with `--no-service-account`, so it needs no
-`actAs` at all; `mig.sh` line 108 attaches `sandbox-fleet-sa`, so it needs
-`roles/iam.serviceAccountUser` on that SA (an SA-resource-scoped binding, which
-`iam.serviceAccountAdmin` can set — not yet applied). These are rare
-provisioning one-offs, not code deploys.
+does not have and that we cannot grant ourselves. `mig.sh` and `bake-image.sh` **are delegable and were both run from the
+control VM on 2026-08-17** (worker + golden rebake, then `mig.sh roll`):
+`roles/compute.instanceAdmin.v1` covers
+`images.create`/`disks.create`/`instanceGroupManagers.*`, `bake-image.sh` creates
+its VMs with `--no-service-account` so it needs no `actAs`, and the
+`roles/iam.serviceAccountUser` binding on `sandbox-fleet-sa` that `mig.sh`
+line 108 needs IS now in place (template creation succeeded). Two gotchas:
+`bake-image.sh` SSHes to the bake VM's external IP with `SSH_PUBLIC_KEY` from
+`config.env`, so on the control VM run it as
+`SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)" ./bake-image.sh bake`, and note
+`gcloud iam service-accounts get-iam-policy` fails there (IAM API disabled), so
+verify the binding by using it, not by reading it. These are rare provisioning
+one-offs, not code deploys.
 
 Why this exists rather than the three steps it wraps: the previously documented
 path (`make gcs-release && infra/gcp/deploy-job.sh`) rolls the **workers only**,
@@ -680,6 +685,32 @@ scripts/              Host setup shell scripts
   same hazard at the riskiest moment. `tests/pty-stress.ts` and `tests/sshkey-probe.ts`
   drive both shapes across churn rounds; `internal/server/agentpool_test.go` pins the
   pool-key behavior directly.
+- **Per-sandbox utilization is sampled host-side and lives only in RAM**
+  (`internal/server/sandboxmetrics.go`; wire types in `internal/metricsapi`).
+  It answers what a sandbox is CONSUMING, as opposed to the ledger below, which
+  bills what it is ALLOCATED. A ticker (`metrics_interval_sec`, default 5 s)
+  reads each running VM's jailer cgroup leaf (`cpu.stat`, `memory.current`), its
+  tap counters and its rootfs `st_blocks`, and — when `metrics_guest_stats` is
+  on — polls the guest agent's `GET /stats` for the two things the host cannot
+  see: memory actually in use and free disk. Served by
+  `GET /v1/sandboxes/{id}/metrics` from a bounded ring
+  (`metrics_history`, default 360 samples ≈ 30 min), never from SQLite and never
+  from Prometheus with a sandbox label — `/metrics` gets host AGGREGATES only,
+  including `sandbox_cpu_utilization` (a histogram, the only thing that measures
+  whether the ~6:1 CPU oversubscription is safe). **The sampler is deliberately
+  routed around the activity tracker and never calls `ensureRunning`**: a poll on
+  the ordinary agent path would reset every sandbox's idle-hibernation clock and
+  silently stop the fleet from ever freezing. `vmm_generation` marks counter
+  resets, since a wake/restore replaces the VMM and restarts them at zero.
+  Two measured facts that are easy to get wrong: `host_mem_bytes` is guest pages
+  TOUCHED and does not fall when the guest frees (0.9 MiB released after a
+  384 MiB alloc/free), and `rootfs_alloc_bytes` includes extents still shared
+  with the golden base, so it reads ~2.2 GiB on a sandbox that has written
+  nothing — watch its growth, not its level. **`sandboxd`'s `/stats` is
+  image-pinned**, so enabling guest stats needs a rebake + MIG roll; watch
+  `sandbox_guest_stat_failures_total` to catch a half-rolled fleet, which
+  otherwise looks identical to the feature being off. See
+  docs/sandbox-metrics-plan.md and the utilization table in docs/benchmarks.md.
 - **Billable usage is a ledger keyed on the VMM lifetime, and it outlives the
   sandbox.** One `usage_intervals` row per Firecracker process that served a
   user-visible sandbox (`internal/registry/usage.go`), opened at `MarkRunning`
