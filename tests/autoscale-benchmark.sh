@@ -148,6 +148,15 @@ gateway_hosts() {
   curl -fsS -H "Authorization: Bearer $GATEWAY_CONTROL_TOKEN" "$GATEWAY_URL/internal/v1/hosts"
 }
 
+# Consume the complete Prometheus response before returning a value. With
+# `set -o pipefail`, exiting awk at the first match closes curl's pipe early;
+# once /metrics outgrew curl's write buffer that made a healthy preflight fail
+# with curl exit 23 (write error) before the benchmark started.
+metric_value() {
+  local metric="$1"
+  awk -v metric="$metric" '$1 == metric { value=$2 } END { if (value != "") print value }'
+}
+
 owned_sandbox_ids() {
   jq -r --arg run "$BENCH_RUN_ID" '
     .[] | select(
@@ -280,7 +289,7 @@ if [ "$ready_hosts" -ne "$EXPECTED_RUNNING" ] || [ "$bad_hosts" -ne 0 ]; then
   exit 1
 fi
 
-initial_queue="$(gateway_get /metrics | awk '$1 == "sandbox_create_queue_depth" {print $2; exit}')"
+initial_queue="$(gateway_get /metrics | metric_value sandbox_create_queue_depth)"
 if [ "${initial_queue:-unknown}" != "0" ]; then
   echo "error: gateway create queue is not empty (depth=${initial_queue:-unknown})" >&2
   exit 1
@@ -430,7 +439,7 @@ observe_gateway() {
   done
 
   metrics="$(gateway_get /metrics 2>/dev/null)" || return
-  queue="$(awk '$1 == "sandbox_create_queue_depth" {print $2; exit}' <<<"$metrics")"
+  queue="$(metric_value sandbox_create_queue_depth <<<"$metrics")"
   if [ -n "$queue" ] && [ "$queue" != "$LAST_QUEUE" ]; then
     LAST_QUEUE="$queue"
     emit "gateway_queue_depth" "$(jq -cn --argjson depth "$queue" '{depth:$depth}')"
