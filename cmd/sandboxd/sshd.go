@@ -40,6 +40,20 @@ func sshdBinary() (string, error) {
 // port-22 listener, so a create that returns has SSH serving the key it just
 // generated. An image without sshd is not an error: the template simply has no
 // SSH, and `sandbox ssh` against it fails on its own terms.
+// stopOwnSSHD stops the agent-owned sshd so a clone cannot serve the host key it
+// inherited from the template. A guest that never started one is the normal
+// case, not an error.
+func stopOwnSSHD() {
+	sshdMu.Lock()
+	defer sshdMu.Unlock()
+	if sshdProc == nil || sshdProc.Process == nil {
+		return
+	}
+	_ = sshdProc.Process.Kill()
+	_ = sshdProc.Wait()
+	sshdProc = nil
+}
+
 func restartOwnSSHD() error {
 	path, err := sshdBinary()
 	if err != nil {

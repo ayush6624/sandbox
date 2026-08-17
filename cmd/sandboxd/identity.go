@@ -31,6 +31,9 @@ var (
 	}
 	reloadSSHDirect      = reloadSSHWithSignal
 	identityRestartDelay = 100 * time.Millisecond
+	// sshdPIDPath is where sshd records its master pid; a variable so tests can
+	// exercise the stop path without a real sshd.
+	sshdPIDPath = "/run/sshd.pid"
 )
 
 func handleGuestIdentity(w http.ResponseWriter, r *http.Request) {
@@ -69,8 +72,12 @@ func initializeGuestIdentity(sandboxID string) error {
 	guestIdentityMu.Lock()
 	defer guestIdentityMu.Unlock()
 
+	// Marker match alone is idempotent now: this call only REMOVES inherited
+	// state, which is idempotent by nature. It deliberately does not require
+	// sshHostKeysPresent() any more — after rotation there is no host key, by
+	// design, until ensureSSHHostKey generates one on first SSH use.
 	if marker, err := os.ReadFile(guestIdentityMarker); err == nil &&
-		strings.TrimSpace(string(marker)) == sandboxID && sshHostKeysPresent() {
+		strings.TrimSpace(string(marker)) == sandboxID {
 		return nil
 	}
 
@@ -87,31 +94,129 @@ func initializeGuestIdentity(sandboxID string) error {
 	if err := os.Remove(authorizedKeysPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove inherited authorized_keys: %w", err)
 	}
-	// A template built from a container image need not contain OpenSSH. There
-	// is then no host key to rotate and no sshd to impersonate, so the
-	// uniqueness this call exists to guarantee is vacuous: record the identity
-	// and let SSH access fail later with its own error rather than failing
-	// every create for this template.
-	if _, err := exec.LookPath("ssh-keygen"); err != nil {
-		log.Print("identity: no ssh-keygen in this image; skipping host key rotation")
-		return writeIdentityMarker(sandboxID)
+	// Removing the key FILES is not sufficient and this is the whole reason the
+	// old code generated eagerly: a restored clone resumes a LIVE sshd that
+	// already loaded the source's host key into memory, so it would keep serving
+	// it and one sandbox could impersonate another. Stop that listener. It is a
+	// signal, not a keygen and not a 500 ms listener poll, and on a cold boot
+	// there is nothing running to stop (the base image ships no host key, so
+	// sshd never came up).
+	if err := stopSSHService(); err != nil {
+		return fmt.Errorf("stop inherited ssh service: %w", err)
 	}
-	// Every /etc/ssh/ssh_host_* file was just removed, so ssh-keygen has nothing
-	// to overwrite and cannot prompt; runIdentityCommand also leaves Stdin nil,
-	// which exec wires to /dev/null, so it can never block on input either.
-	if err := runIdentityCommand("ssh-keygen", "-q", "-t", "ed25519", "-f", sshHostKeyPath("ed25519"), "-N", ""); err != nil {
-		return fmt.Errorf("generate ssh host key: %w", err)
+	return writeIdentityMarker(sandboxID)
+}
+
+// ensureSSHHostKey generates this sandbox's unique Ed25519 host key and brings
+// sshd up, on first SSH use rather than on every create.
+//
+// Create used to pay this unconditionally, and it is not cheap: the Ed25519
+// keygen itself is ~7 ms, but the `ssh-keygen` fork plus restartSSHService —
+// which SIGHUPs sshd and then polls /proc/net/tcp every 1 ms for up to 500 ms
+// waiting for a replacement listener inode — measured ~148 ms idle and ~685 ms
+// under a 16-way fanout. Most sandboxes never use SSH, so that was per-clone
+// work spent on nothing; a 32-way fanout is guest-CPU-bound, so it came
+// straight off the fanout's critical path.
+//
+// The uniqueness guarantee is unchanged. initializeGuestIdentity still removes
+// every inherited key and stops the inherited listener EAGERLY, so a sandbox
+// can never serve a key it did not generate itself — it simply has no SSH at
+// all until this runs.
+func ensureSSHHostKey() error {
+	guestIdentityMu.Lock()
+	defer guestIdentityMu.Unlock()
+
+	// A template built from a container image need not contain OpenSSH. There is
+	// then no host key to generate and no sshd to impersonate, so SSH access
+	// fails on its own terms rather than failing this call.
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		log.Print("identity: no ssh-keygen in this image; skipping host key generation")
+		return nil
 	}
 	if !sshHostKeysPresent() {
-		return errors.New("generate ssh host key: ssh-keygen produced no private host key")
+		// Every /etc/ssh/ssh_host_* file was removed at rotation, so ssh-keygen
+		// has nothing to overwrite and cannot prompt; runIdentityCommand also
+		// leaves Stdin nil, which exec wires to /dev/null, so it can never block
+		// on input either.
+		if err := runIdentityCommand("ssh-keygen", "-q", "-t", "ed25519", "-f", sshHostKeyPath("ed25519"), "-N", ""); err != nil {
+			return fmt.Errorf("generate ssh host key: %w", err)
+		}
+		if !sshHostKeysPresent() {
+			return errors.New("generate ssh host key: ssh-keygen produced no private host key")
+		}
 	}
+	// Unconditional, not only after generating: rotation stopped sshd, so a
+	// second call with a key already on disk still has to bring the listener up.
 	if err := restartSSHService(); err != nil {
-		return fmt.Errorf("restart ssh service: %w", err)
-	}
-	if err := writeIdentityMarker(sandboxID); err != nil {
-		return err
+		return fmt.Errorf("start ssh service: %w", err)
 	}
 	return nil
+}
+
+// stopSSHService stops the sshd a clone inherited from its snapshot.
+//
+// Best-effort about HOW, strict about the OUTCOME. This is deliberately not
+// "trust systemctl's exit code": the failure here is fatal to the create,
+// because a listener still holding an inherited key is the impersonation this
+// rotation exists to prevent — so it asserts that no inherited sshd master
+// process remains rather than that a command reported success. A benign non-zero
+// exit (no such unit, no service manager) must not fail a create, and a
+// *successful*-looking stop that left the process up must.
+func stopSSHService() error {
+	// A template guest has no service manager: sandboxd owns sshd directly.
+	if initMode() {
+		stopOwnSSHD()
+		return nil
+	}
+	// Prefer the service manager, because it is deterministic about respawn: a
+	// bare SIGTERM can leave systemd restarting a unit whose Restart= policy
+	// counts the signal as a failure, and it would then fail repeatedly with no
+	// host key and burn the unit's start limit.
+	_ = runIdentityCommand("systemctl", "stop", "ssh.service")
+
+	pid, ok := inheritedSSHDPID()
+	if !ok {
+		return nil // nothing running — the ordinary cold-boot case
+	}
+	// systemd absent or the unit unknown: signal the master pid directly.
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("signal inherited sshd pid %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, still := inheritedSSHDPID(); !still {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			// Escalate once before giving up; a create must not proceed while an
+			// inherited key is still being served.
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			if _, still := inheritedSSHDPID(); still {
+				return fmt.Errorf("inherited sshd pid %d still serving after stop", pid)
+			}
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// inheritedSSHDPID reports the sshd master process recorded in /run/sshd.pid,
+// and whether one is actually alive and really is sshd (guarding against PID
+// reuse and a stale pid file, which a restored guest can easily carry).
+func inheritedSSHDPID() (int, bool) {
+	rawPID, err := os.ReadFile(sshdPIDPath)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil || pid <= 1 {
+		return 0, false
+	}
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil || strings.TrimSpace(string(comm)) != "sshd" {
+		return 0, false
+	}
+	return pid, true
 }
 
 func restartSSHService() error {
@@ -163,7 +268,7 @@ func restartSSHService() error {
 }
 
 func reloadSSHWithSignal() error {
-	const pidPath = "/run/sshd.pid"
+	pidPath := sshdPIDPath
 	rawPID, err := os.ReadFile(pidPath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", pidPath, err)

@@ -116,6 +116,15 @@ func handleSSHKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("public_key must be a single line"))
 		return
 	}
+	// The host key is generated HERE, not at create: /identity removes what a
+	// clone inherited and stops the inherited listener, but generating a fresh
+	// key plus restarting sshd cost ~148 ms per create (~685 ms under a 16-way
+	// fanout) on the overwhelming majority of sandboxes that never use SSH.
+	// This is the first point where SSH is actually wanted.
+	if err := ensureSSHHostKey(); err != nil {
+		httpError(w, 500, fmt.Errorf("prepare ssh host key: %w", err))
+		return
+	}
 	if err := withGuestFilesystem(func() error {
 		if err := os.MkdirAll(sshDir, 0o700); err != nil {
 			return fmt.Errorf("mkdir %s: %w", sshDir, err)

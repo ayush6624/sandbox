@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -70,7 +71,12 @@ func keygenTarget(t *testing.T, args []string) string {
 	return target
 }
 
-func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
+// Rotation must REMOVE every inherited credential and STOP the inherited
+// listener, on every distinct sandbox, and must not generate a key — generation
+// moved to first SSH use (ensureSSHHostKey). Stopping is the load-bearing half:
+// a restored clone resumes a live sshd that already holds the source's host key
+// in memory, so deleting the key files alone would leave it serving them.
+func TestInitializeGuestIdentityRemovesInheritedStateWithoutGenerating(t *testing.T) {
 	dir := setupIdentityEnv(t)
 
 	oldKey := filepath.Join(dir, "ssh", "ssh_host_ed25519_key")
@@ -81,15 +87,15 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	generations, reloads := 0, 0
+	generations, stops := 0, 0
 	runIdentityCommand = func(name string, args ...string) error {
 		switch name {
 		case "ssh-keygen":
 			generations++
 			return os.WriteFile(keygenTarget(t, args), []byte("unique"), 0o600)
 		case "systemctl":
-			if len(args) > 0 && args[0] == "reload" {
-				reloads++
+			if len(args) > 0 && args[0] == "stop" {
+				stops++
 			}
 			return nil
 		default:
@@ -100,27 +106,88 @@ func TestInitializeGuestIdentityRotatesOncePerSandbox(t *testing.T) {
 	if err := initializeGuestIdentity("sandbox-one"); err != nil {
 		t.Fatal(err)
 	}
-	if generations != 1 || reloads != 1 {
-		t.Fatalf("first initialization commands = generations %d, reloads %d", generations, reloads)
+	if generations != 0 {
+		t.Fatalf("create generated %d host keys; generation must be deferred to first SSH use", generations)
+	}
+	if stops != 1 {
+		t.Fatalf("inherited sshd stops = %d, want 1 — a live sshd keeps serving the key it already loaded", stops)
+	}
+	if _, err := os.Stat(oldKey); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inherited host key was not removed: %v", err)
 	}
 	if _, err := os.Stat(authorizedKeysPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("inherited authorized_keys was not removed: %v", err)
 	}
+
+	// Same sandbox: idempotent. Note this must hold with NO host key present,
+	// which is exactly the state rotation now leaves behind.
 	if err := initializeGuestIdentity("sandbox-one"); err != nil {
 		t.Fatal(err)
 	}
-	if generations != 1 || reloads != 1 {
-		t.Fatalf("same identity was not idempotent: generations %d, reloads %d", generations, reloads)
+	if stops != 1 {
+		t.Fatalf("same identity was not idempotent: stops %d", stops)
 	}
+	// A different sandbox id (a clone) must rotate again.
 	if err := initializeGuestIdentity("sandbox-two"); err != nil {
 		t.Fatal(err)
 	}
-	if generations != 2 || reloads != 2 {
-		t.Fatalf("clone identity did not rotate: generations %d, reloads %d", generations, reloads)
+	if stops != 2 {
+		t.Fatalf("clone identity did not rotate: stops %d", stops)
+	}
+	if generations != 0 {
+		t.Fatalf("rotation generated %d host keys, want 0", generations)
 	}
 }
 
-func TestInitializeGuestIdentityGeneratesEd25519HostKeyOnly(t *testing.T) {
+// The generation that create no longer does must happen on first SSH use, still
+// Ed25519-only, and must bring the listener back up (rotation stopped it).
+func TestEnsureSSHHostKeyGeneratesOnceAndStartsSSHD(t *testing.T) {
+	dir := setupIdentityEnv(t)
+
+	generations, restarts := 0, 0
+	runIdentityCommand = func(name string, args ...string) error {
+		switch name {
+		case "ssh-keygen":
+			generations++
+			return os.WriteFile(keygenTarget(t, args), []byte("unique"), 0o600)
+		case "systemctl":
+			if len(args) > 0 && (args[0] == "restart" || args[0] == "reload") {
+				restarts++
+			}
+			return nil
+		default:
+			return errors.New("unexpected command")
+		}
+	}
+
+	if err := ensureSSHHostKey(); err != nil {
+		t.Fatal(err)
+	}
+	if generations != 1 {
+		t.Fatalf("first SSH use generated %d keys, want 1", generations)
+	}
+	if restarts == 0 {
+		t.Fatal("sshd was not started; rotation stopped it, so SSH would not serve")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ssh", "ssh_host_ed25519_key")); err != nil {
+		t.Fatalf("host key missing after ensureSSHHostKey: %v", err)
+	}
+
+	// Second call must not regenerate — a rotated key must never be replaced
+	// under a live session — but must still ensure the listener is up.
+	before := restarts
+	if err := ensureSSHHostKey(); err != nil {
+		t.Fatal(err)
+	}
+	if generations != 1 {
+		t.Fatalf("second SSH use regenerated the host key: generations %d", generations)
+	}
+	if restarts <= before {
+		t.Fatal("second call did not ensure sshd was running")
+	}
+}
+
+func TestGuestIdentityGeneratesEd25519HostKeyOnly(t *testing.T) {
 	dir := setupIdentityEnv(t)
 
 	var got []string
@@ -132,7 +199,7 @@ func TestInitializeGuestIdentityGeneratesEd25519HostKeyOnly(t *testing.T) {
 		return os.WriteFile(keygenTarget(t, args), []byte("unique"), 0o600)
 	}
 
-	if err := initializeGuestIdentity("sandbox-ed25519"); err != nil {
+	if err := ensureSSHHostKey(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,5 +290,60 @@ func TestValidSandboxIdentity(t *testing.T) {
 		if validSandboxIdentity(id) {
 			t.Errorf("validSandboxIdentity(%q) = true", id)
 		}
+	}
+}
+
+// The stop path guards against a stale pid file and PID reuse, both of which a
+// restored guest carries easily: /run is a fresh tmpfs on a cold boot but a
+// snapshot-restored guest resumes with whatever /run/sshd.pid held at snapshot
+// time. Trusting it blindly would either fail creates (signalling a stranger) or
+// silently skip the stop (leaving an inherited key served).
+func TestInheritedSSHDPIDRejectsStalePIDAndReuse(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := sshdPIDPath
+	t.Cleanup(func() { sshdPIDPath = oldPath })
+	sshdPIDPath = filepath.Join(dir, "sshd.pid")
+
+	// No pid file at all: the ordinary cold-boot case.
+	if _, ok := inheritedSSHDPID(); ok {
+		t.Fatal("reported an sshd with no pid file present")
+	}
+	// A pid that is not running.
+	if err := os.WriteFile(sshdPIDPath, []byte("999999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inheritedSSHDPID(); ok {
+		t.Fatal("stale pid file was treated as a live sshd")
+	}
+	// A live pid that is NOT sshd — this test process. This is the PID-reuse
+	// guard: signalling it would kill an unrelated process.
+	if err := os.WriteFile(sshdPIDPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inheritedSSHDPID(); ok {
+		t.Fatal("a live non-sshd process was treated as the inherited sshd")
+	}
+	// Garbage, and pid <= 1.
+	for _, bad := range []string{"", "not-a-pid", "0", "1", "-5"} {
+		if err := os.WriteFile(sshdPIDPath, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := inheritedSSHDPID(); ok {
+			t.Fatalf("pid file %q was accepted", bad)
+		}
+	}
+}
+
+// A guest with no sshd running must not fail its create, however systemctl exits.
+func TestStopSSHServiceToleratesNoRunningSSHD(t *testing.T) {
+	dir := t.TempDir()
+	oldPath, oldRun := sshdPIDPath, runIdentityCommand
+	t.Cleanup(func() { sshdPIDPath, runIdentityCommand = oldPath, oldRun })
+	sshdPIDPath = filepath.Join(dir, "sshd.pid")
+	runIdentityCommand = func(string, ...string) error {
+		return errors.New("Failed to stop ssh.service: Unit ssh.service not loaded")
+	}
+	if err := stopSSHService(); err != nil {
+		t.Fatalf("stop with no sshd and a failing systemctl: %v", err)
 	}
 }

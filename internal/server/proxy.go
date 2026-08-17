@@ -372,7 +372,13 @@ func installSSHKey(ctx context.Context, guestIP, pubkey string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second, Transport: guestOneShotTransport}
+	// 30 s, not 5 s: this call now also does the guest's Ed25519 host-key
+	// generation and sshd start, which /identity deliberately stopped doing on
+	// every create (~148 ms idle, ~685 ms under a 16-way fanout, on sandboxes
+	// that mostly never use SSH). Guest CPU is the fanout bottleneck, so under a
+	// burst that work can be scheduled late, and 5 s sat close enough to the
+	// tail to turn a slow key into a failed create.
+	client := &http.Client{Timeout: 30 * time.Second, Transport: guestOneShotTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("install ssh key on %s: %w", guestIP, err)
