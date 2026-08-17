@@ -4,7 +4,7 @@ Plain `gcloud` scripts for the sandbox fleet on GCP, all in **Mumbai
 (`asia-south1`)**. Two paths:
 
 1. **Autoscaling fleet (production)** — a control VM + a Managed Instance Group
-   of workers, resized automatically by the Nomad Autoscaler. See
+   of workers, resized directly by the gateway. See
    **[Autoscaling fleet](#autoscaling-fleet)** below.
 2. **Static debug VMs** — hand-named throwaway VMs (`vms.sh` + `fleet-deploy.sh`).
    Good for one-off debugging; documented under
@@ -14,11 +14,11 @@ Plain `gcloud` scripts for the sandbox fleet on GCP, all in **Mumbai
 
 ## Autoscaling fleet
 
-The elastic fleet: `sandbox gateway` places sandboxes and exposes a `/metrics`
-scaling signal; Prometheus turns it into `sandbox:workers_desired`; the Nomad
-Autoscaler resizes a worker MIG to match. Workers run `sandbox serve` as a Nomad
-**system job**, so a newly-booted worker starts serving within seconds of
-joining the cluster.
+The elastic fleet: `sandbox gateway` places sandboxes, computes memory-aware
+demand, and changes the worker MIG target in both directions. Prometheus and
+Grafana observe that decision; they do not actuate it. Nomad only schedules
+`sandbox serve` as a **system job**, so a newly booted worker starts serving
+after joining the cluster.
 
 For the latency model, comparison with Modal's published architecture, and the
 next implementation steps (level-triggered direct scaling, tap recycling,
@@ -53,14 +53,14 @@ Grafana dashboard includes edge health, wake latency, errors, and raw leases.
 **Topology** (all in `asia-south1-a`, VPC-internal):
 
 - **`sandbox-control`** — one small non-spot VM: Nomad server + `sandbox gateway`
-  (:9090) + Prometheus (:9091) + nomad-autoscaler. Reserved static internal IP;
+  (:9090) + Prometheus (:9091) + Grafana. Reserved static internal IP;
   Tailscale for laptop access + a **subnet router** advertising the VPC subnet
   (so the laptop can reach sandbox forwarded ports on the VPC-internal workers,
   which are *not* on the tailnet).
 - **`sandbox-workers`** — a MIG of `n2-standard-8` Firecracker hosts built from
   the baked `sandbox-worker` image. **Non-spot by default** (running sandboxes
   must not be preempted); set `WORKER_SPOT=true` for a cheap, evictable dev
-  fleet. The autoscaler owns the MIG size between `MIG_MIN` and `MIG_MAX`.
+  fleet. The gateway owns the MIG size between `MIG_MIN` and `MIG_MAX`.
 
 **Bring-up** (from `infra/gcp`, after `cp config.env.example config.env` + edit):
 
@@ -73,7 +73,7 @@ Grafana dashboard includes edge health, wake latency, errors, and raw leases.
 # control plane
 ./control.sh up                      # SA + static IP + create the control VM
 #   approve the advertised subnet route in the Tailscale admin console (one-time)
-./control.sh deploy                  # gateway + nomad server + prometheus + autoscaler
+./control.sh deploy                  # gateway + nomad server + Prometheus + Grafana
 
 # workers + the serve job
 make -C ../.. gcs-release             # build + upload binaries to gs://$RELEASE_BUCKET/releases/<sha>/
@@ -140,7 +140,7 @@ a code change cannot affect. So `--fast`:
 - runs the GCS upload and the gateway push **concurrently** — they don't depend
   on each other, and previously the binary crossed the network twice in series;
 - restarts **only the gateway** (`control.sh gateway`, `SECTIONS=gateway`)
-  instead of reinstalling nomad-server/prometheus/autoscaler/grafana, which are
+  instead of reinstalling Nomad server/Prometheus/Grafana, which are
   version-pinned and unaffected by a code deploy;
 - compiles **once** (the old path ran `build-linux` twice);
 - polls convergence every 2 s instead of 10 s, and skips the smoke check that has
@@ -207,98 +207,42 @@ from offline benchmark evidence:
 - benchmark p50/p95/p99 values are reference text, not live samples. The
   service does not yet export request-duration histograms.
 
-**Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` (bounds + cost guardrail),
-`SLOTS_PER_HOST` (the **single source of truth** for per-host capacity —
-`deploy-job.sh` *generates* the pools in `devbox-gcp.json` from it: taps = IPs
-= N, ports = 4N so hibernated port-holds and extra exposed ports never bind
-capacity, plus `mem_budget_mib = N×1180` so `mem_mib` overrides are admitted
-against the host's real memory — a big-mem sandbox consumes multiple slots'
-worth of `slots_free` and can never OOM the cgroup; max 200 per the /24 guest
-subnet), `HEADROOM_SLOTS` (free slots kept
-ahead of demand), `SCALE_DOWN_WINDOW` (how long demand must stay low before
-scale-in), `STANDBY_SUSPENDED_SIZE`/`STANDBY_STOPPED_SIZE` (pre-created standby
-VMs; the MIG resumes suspended workers before starting stopped workers, then
-falls back to fresh create+boot; apply to a live MIG with `./mig.sh standby`), and
-`QUEUE_WAIT`/`QUEUE_MAX` (the gateway's create queue — wait must cover standby
-start → nomad join → golden-snapshot build → fresh-worker placement quarantine,
-up to ~4 min). `deploy-job.sh` generates `placement_delay_sec` as
-`STANDBY_INITIAL_DELAY + PLACEMENT_DELAY_HEADROOM_SEC` (180 + 30 seconds by
-default). Fresh refill workers register and route immediately but advertise
-zero free slots until that Linux boot age, giving the MIG time to suspend them
-before they can receive traffic. Linux uptime includes suspended time, so a
-resumed standby advertises capacity immediately. The defaults size the
-fleet for **1000 concurrent sandboxes**: n2-standard-16 workers × 48 slots ×
-MIG_MAX=22. Scale-up is immediate; scale-down waits out the window.
+**Scaling knobs** (`config.env`): `MIG_MIN`/`MIG_MAX` bound cost and fleet size;
+`SLOTS_PER_HOST` is the single source of truth for tap/IP capacity;
+`MEM_PER_SLOT_MIB` turns each host's memory budget into slot equivalents;
+`HEADROOM_SLOTS` keeps placeable capacity ahead of demand;
+`SCALE_IN_AFTER_SEC` is the low-demand window before a reversible cordon; and
+`QUEUE_WAIT`/`QUEUE_MAX` bound queued creates. The default maximum is 22 × 48 =
+1056 ordinary sandboxes, while larger `mem_mib` requests consume proportionally
+more demand and admission capacity.
 
-**Standby policy decision:** keep the full standby pool suspended rather than
-mixed with stopped workers. Demand is predictable, so replenish suspended
-capacity ahead of forecast bursts; preserving initialized worker memory gives
-the fastest scale-out. Stopped standby remains supported as a cheaper fallback,
-but the production configuration intentionally sets its target to zero.
+**Scaling ownership:** the gateway is the only production actuator. Its
+memory-aware `fleetDemand()` drives target growth; low demand cordons the
+emptiest eligible host, waits until it holds no running, hibernated, or
+mid-create sandboxes, then deletes that exact MIG instance by name. Prometheus
+records the provider target as `sandbox:workers_desired`, and Nomad schedules
+one system allocation per live worker, but neither resizes the MIG. The retired
+Nomad Autoscaler remains disabled and its configuration is removed.
 
-**Scale-out confirmation is deliberately short-circuited.** The gce-mig target
-polls for MIG-wide stability after each resize, and the policy is frozen in
-`StateScaling` for that whole window — every evaluation inside it is dropped with
-`skipping scaling, target still scaling`. So the confirmation budget is really a
-*scale-up blackout*, and the upstream default (15 attempts × 10 s = 150 s) blocked
-a second wave of hosts mid-burst while always ending in
-`failed to confirm scale out GCE Instance Group: reached retry limit` — with a
-standby pool, MIG stability is unreachable by construction, since the pool spends
-~190 s replenishing a replacement suspended worker in the background. We don't
-need GCE's confirmation (readiness shows up on the gateway heartbeat, measured by
-`sandbox_worker_ready_seconds`), so `AUTOSCALER_RETRY_ATTEMPTS` defaults to `3`
-(30 s). Failing fast is safe: a failed confirm returns the policy to Idle **without
-cooldown**, and the next evaluation no-ops unless demand actually grew, because the
-resize already moved the MIG's target size.
+**Provider standby is forbidden.** GCE's `SCALE_OUT_POOL` policy is another
+controller even without a GCE Autoscaler: it replenishes its reserve by
+suspending or stopping an arbitrary running group member, with no view of
+sandbox occupancy. A live benchmark on 2026-08-17 caught it suspending a worker
+that held 40 sandboxes. `STANDBY_SUSPENDED_SIZE` and
+`STANDBY_STOPPED_SIZE` must both remain zero; `mig.sh` rejects non-zero values
+and enforces `MANUAL` standby mode. Scale-out therefore creates normal MIG
+members whose full boot/readiness path is visible and attributable.
 
-This needs **autoscaler ≥ 0.4.8** — older builds ignore `retry_attempts` and keep
-the 150 s blackout — so `AUTOSCALER_VERSION` is now `0.5.0`. **`config.env` is
-gitignored: bump `AUTOSCALER_VERSION` (and optionally add
-`AUTOSCALER_RETRY_ATTEMPTS`) in your live `config.env`, then
-`./control.sh install`**; `control-install.sh` compares the installed binary's
-version and re-fetches on mismatch, and warns if the pin is too old for the key.
-(It previously guarded the download with `command -v nomad-autoscaler ||`, so a
-version bump alone silently kept the old binary.)
-
-**Scale-in freezes running sandboxes on the removed host**: server shutdown
-hibernates them (diff snapshots — a full host freezes inside the 120 s stop
-window), so they come back wakeable if that VM ever starts again (standby-pool
-stop/start does exactly this); on a *deleted* instance the frozen state goes
-with the disk, and only saved snapshots survive via GCS durability. Bin-pack
-placement + the window minimize how often scale-in hits an in-use host.
-
-**Scaling ownership:** Nomad Autoscaler is the sole writer of the production
-MIG target. The gateway has an optional direct GCE scale-out capability for
-non-Nomad deployments, but `control-install.sh` deliberately does not enable
-it. Enabling both writers caused target-size overshoot after churn because each
-acted on a different view of in-flight capacity.
-
-**Burst behavior** end to end: a burst first lands on `HEADROOM_SLOTS` of free
-capacity; overflow creates wait in the gateway's bounded queue
-(`QUEUE_WAIT`/`QUEUE_MAX`) instead of 503ing, and the queue depth itself feeds
-`sandbox:workers_desired` — computed from **effective occupancy**
-(`slots_used + hibernated`, NOT `slots_total − slots_free`: a warming host
-advertises `slots_free=0` as a placement gate while running zero sandboxes, and
-`total − free` misread that as a full host, inflating desired by ~one host) — so
-the autoscaler scales up
-immediately; the MIG resumes suspended standby workers first, then starts
-stopped workers, and finally creates fresh VMs when both pools run dry. A fresh
-host advertises `slots_free=0` until both its golden snapshot is built and its
-boot-age placement quarantine expires, so it is neither boot-stormed with cold
-creates nor selected for traffic while the MIG is about to move it into the
-standby pool; each host also bounds concurrent bring-ups
-(`create_concurrency`; the fleet explicitly uses 24, while the general default
-remains 2×cores capped at 16). When warm-up completes the worker immediately
-heartbeats its real capacity, and that heartbeat broadcasts a retry to all
-gateway waiters. Worker heartbeats also carry the deployed release. Before
-submitting a new Nomad job, `deploy-job.sh` persists that release in the
-gateway; a resumed worker still running an older allocation keeps its existing
-sandbox routes but is forced to `slots_free=0` until Nomad starts the current
-allocation. This prevents a burst from landing on a serve process that the
-system-job rollout is about to terminate. A create that still hits a stale host
-gets failed over to the next host by the gateway (up to 3 attempts) before it
-would ever surface an error. Only a burst that outruns queue-wait + MIG_MAX
-sees 503s (with Retry-After).
+**Burst behavior:** a burst first consumes headroom, then waits in the gateway's
+bounded queue. Queue reservations and memory-weighted request demand cause the
+gateway to raise the MIG target immediately. A fresh worker advertises no free
+capacity until its golden snapshot and initial ready pool have settled; there
+is no extra boot-age delay now that the provider cannot suspend it. Each worker
+bounds concurrent bring-ups, and the capacity heartbeat wakes queued requests.
+The expected worker release also gates placement during rollouts. A create that
+hits a worker disappearing between selection and dispatch is retried on another
+eligible host; only demand beyond `MIG_MAX` or `QUEUE_WAIT` surfaces a capacity
+error with `Retry-After`.
 
 **Teardown:** `./mig.sh down` then `./control.sh down` (the reserved IP, SAs, and
 buckets persist — remove with `gcloud` if you're fully done).
@@ -313,10 +257,10 @@ span (resize → the new host advertises capacity), which dominates. The readine
 span is instrumented per stage and exported on every host's `/metrics`, federated
 to Prometheus with a `host` label:
 
-Prometheus scrapes gateway demand every 10 seconds and Nomad Autoscaler submits
-both scale-out and scale-in actions. Gateway direct-scale counters must remain
-zero on this fleet; a non-zero value means a second MIG writer was accidentally
-enabled.
+Prometheus scrapes gateway state every 10 seconds. The gateway submits both
+scale-out and scale-in actions; its direct-scale and drain counters are the
+authoritative action history. `sandbox_mig_target_size` is provider intent,
+while `sandbox_hosts_live` is the heartbeat-visible fleet.
 
 ```promql
 sandbox_worker_ready_seconds                  # headline: kernel boot -> capacity advertised
@@ -357,11 +301,9 @@ curl -sH "Authorization: Bearer $HOST_TOKEN" http://<worker-ip>:8080/metrics | g
 
 Grafana: the **Autoscale: worker readiness** row on the Sandbox Fleet dashboard.
 
-Two caveats. `/run` is tmpfs, so the file is per-boot: a **stopped** standby
-worker produces a full fresh timeline, while a **resumed suspended** worker keeps
-its original boot's phases — correct, because a resumed worker re-runs neither the
-startup script nor `serve`, and its readiness path is just resume → network →
-next heartbeat. And a host that never warms has no `capacity_advertised`, so
+Two caveats. `/run` is tmpfs, so a normal new worker produces a full fresh
+timeline; an operator-initiated process restart can omit earlier boot phases.
+A host that never warms has no `capacity_advertised`, so
 `sandbox_worker_ready_seconds` is absent rather than misleadingly 0.
 
 ---

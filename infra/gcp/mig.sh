@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # The autoscaled worker fleet: a Managed Instance Group of Firecracker hosts
-# built from the baked $WORKER_IMAGE_FAMILY image. The Nomad Autoscaler (on the
-# control VM) owns the MIG's size — do NOT attach a GCE autoscaler.
+# built from the baked $WORKER_IMAGE_FAMILY image. The gateway owns the MIG's
+# target size and named scale-in deletions — do NOT attach a GCE autoscaler or
+# enable a MIG scale-out standby pool.
 #
 #   ./mig.sh init      # release bucket + grant the fleet SA read on it; firewall check
-#   ./mig.sh up        # create instance template + MIG at MIG_MIN (+ standby pool)
+#   ./mig.sh up        # create instance template + MIG at MIG_MIN
 #   ./mig.sh roll       # new template from the current image + rolling replace
-#   ./mig.sh standby   # (re)apply the standby-pool policy to a live MIG
+#   ./mig.sh standby   # enforce disabled/manual standby policy on a live MIG
 #   ./mig.sh status    # MIG + managed instances
 #   ./mig.sh down       # delete the MIG (keeps templates)
 #
@@ -39,12 +40,11 @@ spot_args() {
   fi
 }
 
-# Standby pool: pre-created VMs kept SUSPENDED and/or STOPPED next to the group.
-# In scale-out-pool mode a resize (the Nomad Autoscaler's scale-up) resumes a
-# suspended VM first, then starts a stopped VM, instead of paying the full
-# create+boot path. The MIG replenishes both pools in the background. Suspended
-# VMs preserve RAM/device state; stopped VMs preserve disks only. The initial
-# delay lets startup-worker.sh + Nomad + sandbox serve finish initialization.
+# GCE's scale-out-pool standby policy is not occupancy-aware. Replenishing the
+# pool can suspend or stop an arbitrary RUNNING member even while the gateway is
+# routing sandboxes to it. That destroyed 40 live sandboxes in the 2026-08-17
+# autoscale benchmark. Keep the provider in manual mode; capacity comes online
+# through ordinary gateway-owned target growth.
 standby_args() {
   local stopped="${STANDBY_STOPPED_SIZE:-0}"
   local suspended="${STANDBY_SUSPENDED_SIZE:-0}"
@@ -53,8 +53,10 @@ standby_args() {
     return 1
   fi
   if [ $((stopped + suspended)) -gt 0 ]; then
-    echo "--stopped-size=$stopped --suspended-size=$suspended --standby-policy-mode=scale-out-pool --standby-policy-initial-delay=${STANDBY_INITIAL_DELAY:-180}"
+    echo "error: GCE standby is unsafe for sandbox workers; set STANDBY_SUSPENDED_SIZE=0 and STANDBY_STOPPED_SIZE=0" >&2
+    return 1
   fi
+  echo "--stopped-size=0 --suspended-size=0 --standby-policy-mode=manual"
 }
 
 cmd_init() {
@@ -114,26 +116,20 @@ create_template() {
 cmd_up() {
   local tpl; tpl="$(template_name)"
   create_template "$tpl"
-  echo ">> Create MIG $MIG_NAME at size ${MIG_MIN:-1} (Nomad Autoscaler owns size hereafter)"
+  echo ">> Create MIG $MIG_NAME at size ${MIG_MIN:-1} (gateway owns size hereafter)"
   # shellcheck disable=SC2046
   "${GC[@]}" compute instance-groups managed create "$MIG_NAME" \
     --zone="$ZONE" --template="$tpl" --size="${MIG_MIN:-1}" \
     $(standby_args)
-  echo ">> MIG up. The autoscaler resizes it from the sandbox:workers_desired signal."
-  if [ $((${STANDBY_STOPPED_SIZE:-0} + ${STANDBY_SUSPENDED_SIZE:-0})) -gt 0 ]; then
-    echo ">> Standby pool: ${STANDBY_SUSPENDED_SIZE:-0} suspended + ${STANDBY_STOPPED_SIZE:-0} stopped VMs (scale-out-pool mode)."
-  fi
+  echo ">> MIG up. The gateway resizes it from memory-aware live demand and queue pressure."
 }
 
 cmd_standby() {
-  echo ">> Apply standby policy to $MIG_NAME (suspended-size=${STANDBY_SUSPENDED_SIZE:-0}, stopped-size=${STANDBY_STOPPED_SIZE:-0})"
-  if [ $((${STANDBY_STOPPED_SIZE:-0} + ${STANDBY_SUSPENDED_SIZE:-0})) -gt 0 ]; then
-    # shellcheck disable=SC2046
-    "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" $(standby_args)
-  else
-    "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" \
-      --stopped-size=0 --suspended-size=0 --standby-policy-mode=manual
-  fi
+  local args
+  args="$(standby_args)"
+  echo ">> Disable provider standby policy on $MIG_NAME"
+  # shellcheck disable=SC2086
+  "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" $args
 }
 
 cmd_roll() {

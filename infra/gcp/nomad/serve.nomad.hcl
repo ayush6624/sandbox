@@ -27,14 +27,10 @@ job "sandbox-serve" {
   }
 
   group "serve" {
-    # MIG standby workers are intentionally disconnected while suspended.
-    # Without a disconnect policy Nomad immediately marks their allocations
-    # lost/stop. The still-running old serve process then resumes first, can
-    # accept creates, and is killed when Nomad installs its replacement.
-    #
-    # Keep the original allocation through the longest practical suspension.
-    # A genuinely replaced MIG instance gets a new Nomad node and therefore its
-    # own system allocation; it does not need this allocation to be replaced.
+    # Provider standby is disabled because it can suspend busy workers. Keep a
+    # long disconnect policy as defense for transient control-plane partitions
+    # and explicit operator maintenance: a genuinely replaced MIG instance gets
+    # a new Nomad node and therefore its own system allocation.
     # Nomad 1.7 names these settings directly on the group. Nomad 1.8 folds
     # them into disconnect { lost_after, replace, reconcile }; keep the legacy
     # form until the fleet upgrades its pinned Nomad version.
@@ -151,8 +147,8 @@ EOT
       env {
         # Nomad interpolates node attributes here; the VPC-internal IP is the
         # client's fingerprinted primary address. node.unique.id is persisted
-        # in the Nomad client state, so it remains identical when a suspended
-        # worker resumes and when a new serve allocation replaces the old one.
+        # in the Nomad client state, so it remains identical when a serve
+        # allocation is replaced on the same worker.
         # Do not derive the gateway host ID from hostname: GCE can expose the
         # short name before guest initialization and the FQDN afterward.
         NODE_IP       = "${attr.unique.network.ip-address}"

@@ -5,7 +5,7 @@
   "tags": ["sandbox", "fleet", "autoscaling"],
   "timezone": "",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 5,
   "editable": true,
   "refresh": "10s",
   "time": { "from": "now-3h", "to": "now" },
@@ -229,7 +229,7 @@
     },
     {
       "type": "timeseries", "title": "Workers: heartbeat-live vs MIG target", "id": 35,
-      "description": "MIG target is authoritative provider intent; heartbeat-live is what the gateway sees. Target above live is bring-up lag. Live above target is deletion/TTL or resumed-standby lag—not extra desired demand. The request watermark re-baselines after the queue clears.",
+      "description": "MIG target is authoritative provider intent; heartbeat-live is what the gateway sees. Target above live is boot/readiness lag. Live above target is drain/delete or heartbeat-TTL lag—not extra desired demand. Provider standby must remain MANUAL with zero suspended/stopped targets.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 40 },
       "fieldConfig": { "defaults": { "min": 0, "decimals": 0, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 12 } }, "overrides": [] },
@@ -358,7 +358,7 @@
     },
     {
       "type": "timeseries", "title": "Worker process uptime", "id": 23,
-      "description": "Drops identify process replacement during a rollout or crash. A suspended worker retains process uptime across resume.",
+      "description": "Drops identify process replacement during a rollout, crash, or unexpected host power transition. Provider standby is disabled, so an unexplained reset is actionable.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
       "fieldConfig": { "defaults": { "min": 0, "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 5 } }, "overrides": [] },
@@ -372,7 +372,7 @@
     },
     {
       "type": "stat", "title": "Slowest worker: boot → capacity", "id": 24,
-      "description": "Current workers only. The July stopped-standby path measured about 26s; 60s and 120s are operational warning/critical boundaries, not an SLO.",
+      "description": "Current workers only. This is the ordinary create/boot → Nomad → golden/ready-pool path; 60s and 120s are operational warning/critical boundaries, not an SLO.",
       "datasource": { "type": "prometheus", "uid": "sandbox-prom" },
       "gridPos": { "h": 8, "w": 5, "x": 0, "y": 70 },
       "fieldConfig": { "defaults": { "unit": "s", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 60 }, { "color": "red", "value": 120 }] } }, "overrides": [] },
@@ -430,7 +430,7 @@
       "gridPos": { "h": 10, "w": 12, "x": 0, "y": 87 },
       "options": {
         "mode": "markdown",
-        "content": "1. **Establish service health.** Gateway and edge scrapes should be healthy; worker scrape, golden-readiness, and release gates explain partial capacity.\n2. **Measure user impact.** Check create errors/rejections, wake failures, starting/stopping backlog, and ingress errors/latency.\n3. **Inspect workload state.** Running, hibernated, transient lifecycle, routes, and warm inventory show what the fleet is serving.\n4. **Check placement constraints.** Allocatable slots, per-worker memory admission, binding pools, and create concurrency identify the bottleneck.\n5. **Then inspect scaling.** Compare the provider MIG target with heartbeat-live workers and weighted demand. For scale-in, cordons must resolve as removed or aborted without deletion failures.\n6. **Protect rollout and billing durability.** Release mismatches gate placement; unflushed usage intervals must not persist.\n\nNomad schedules the worker system job, but **Nomad Autoscaler is retired**. The gateway alone writes the worker MIG size in both directions."
+        "content": "1. **Establish service health.** Gateway and edge scrapes should be healthy; worker scrape, golden-readiness, and release gates explain partial capacity.\n2. **Measure user impact.** Check create errors/rejections, wake failures, starting/stopping backlog, and ingress errors/latency.\n3. **Inspect workload state.** Running, hibernated, transient lifecycle, routes, and warm inventory show what the fleet is serving.\n4. **Check placement constraints.** Allocatable slots, per-worker memory admission, binding pools, and create concurrency identify the bottleneck.\n5. **Then inspect scaling.** Compare the provider MIG target with heartbeat-live workers and weighted demand. For scale-in, cordons must resolve as removed or aborted without deletion failures.\n6. **Protect rollout and billing durability.** Release mismatches gate placement; unflushed usage intervals must not persist.\n\nNomad schedules the worker system job, but **Nomad Autoscaler is retired**. The gateway alone writes the worker MIG size in both directions. GCE standby must remain **MANUAL** with zero suspended/stopped targets because its scale-out pool can power down a busy member."
       }
     },
     {

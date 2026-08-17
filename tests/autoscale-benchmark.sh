@@ -12,7 +12,8 @@
 #   BURST_COUNT       create count and concurrency (default 160)
 #   POLL_MS           observer target interval (default 250)
 #   EXPECTED_RUNNING  required initial RUNNING instance count (default 2)
-#   EXPECTED_SUSPENDED_MIN required initial SUSPENDED count (default 2)
+#   EXPECTED_SUSPENDED_MIN required initial SUSPENDED count (default 0;
+#                          production provider standby is disabled)
 #   EXPECTED_FREE_PER_HOST required free + warm-ready capacity on each ready
 #                          host (default 48)
 #   TRACE_DIR         output directory (default timestamped under tests/results)
@@ -57,7 +58,7 @@ BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-10800}"
 CLEANUP_TIMEOUT_SEC="${CLEANUP_TIMEOUT_SEC:-120}"
 POLL_MS="${POLL_MS:-250}"
 EXPECTED_RUNNING="${EXPECTED_RUNNING:-2}"
-EXPECTED_SUSPENDED_MIN="${EXPECTED_SUSPENDED_MIN:-2}"
+EXPECTED_SUSPENDED_MIN="${EXPECTED_SUSPENDED_MIN:-0}"
 EXPECTED_FREE_PER_HOST="${EXPECTED_FREE_PER_HOST:-48}"
 # Per-call ceiling for the observers' gcloud invocations. The observer loop is
 # sequential, so one stalled call stops that timeline permanently and every
@@ -268,14 +269,19 @@ if [ "$initial_count" -ne 0 ]; then
 fi
 CLEANUP_ARMED=1
 
-# Establish the exact benchmark shape before starting the observer. Suspended
-# workers cannot reveal their in-memory Nomad release until resumed; the trace's
-# allocation and release-compatible host transitions verify that part.
+# Establish the exact benchmark shape before starting the observer. Production
+# keeps provider standby disabled, so any suspended worker is unexpected unless
+# a caller explicitly opts into a non-zero minimum for an older fleet.
 initial_mig="$(gcloud compute instance-groups managed list-instances "$MIG_NAME" \
   --project="$PROJECT" --zone="$ZONE" --format=json)"
 initial_running="$(jq '[.[] | select(.instanceStatus == "RUNNING")] | length' <<<"$initial_mig")"
 initial_suspended="$(jq '[.[] | select(.instanceStatus == "SUSPENDED")] | length' <<<"$initial_mig")"
-if [ "$initial_running" -ne "$EXPECTED_RUNNING" ] || [ "$initial_suspended" -lt "$EXPECTED_SUSPENDED_MIN" ]; then
+standby_ok=0
+if { [ "$EXPECTED_SUSPENDED_MIN" -eq 0 ] && [ "$initial_suspended" -eq 0 ]; } ||
+  { [ "$EXPECTED_SUSPENDED_MIN" -gt 0 ] && [ "$initial_suspended" -ge "$EXPECTED_SUSPENDED_MIN" ]; }; then
+  standby_ok=1
+fi
+if [ "$initial_running" -ne "$EXPECTED_RUNNING" ] || [ "$standby_ok" -ne 1 ]; then
   echo "error: need exactly $EXPECTED_RUNNING RUNNING and at least $EXPECTED_SUSPENDED_MIN SUSPENDED workers; got $initial_running and $initial_suspended" >&2
   exit 1
 fi

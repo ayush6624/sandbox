@@ -41,6 +41,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 UNIT="$DIR/control-install.sh"
 GW="$DIR/../../internal/gateway"
+MIG="$DIR/mig.sh"
 
 fail() {
   echo "error: $1" >&2
@@ -70,6 +71,19 @@ if grep -q 'ExecStart=/usr/local/bin/nomad-autoscaler' "$UNIT"; then
 fi
 grep -q 'systemctl disable --now nomad-autoscaler' "$UNIT" ||
   fail "control-install.sh must keep removing a previously installed nomad-autoscaler"
+
+# GCE's scale-out standby pool is also a second controller: it replenishes its
+# reserve by suspending/stopping an arbitrary running member without knowing
+# whether that host owns sandboxes. It must stay in manual mode with zero pool.
+if grep -q -- '--standby-policy-mode=scale-out-pool' "$MIG"; then
+  fail "mig.sh can enable GCE scale-out standby, which may suspend a busy worker"
+fi
+grep -q -- '--standby-policy-mode=manual' "$MIG" ||
+  fail "mig.sh does not explicitly keep the MIG standby policy in manual mode"
+grep -q 'STANDBY_SUSPENDED_SIZE="0"' "$DIR/config.env.example" ||
+  fail "config.env.example enables suspended standby"
+grep -q 'STANDBY_STOPPED_SIZE="0"' "$DIR/config.env.example" ||
+  fail "config.env.example enables stopped standby"
 
 # 4. Scale-in must remove a NAMED instance. A resize-down lets GCE choose the
 #    victim, which is never the host that was drained — that is the whole bug

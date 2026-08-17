@@ -406,38 +406,21 @@ const heldBurst: Scenario = {
   },
 }
 
-const standbyRefillBoundary: Scenario = {
-  name: 'standby-refill-boundary',
+const providerPowerSafety: Scenario = {
+  name: 'provider-power-safety',
   async run(ctx) {
     if (!TIMELINE_FILE) {
-      throw new Error('AUTOSCALE_TIMELINE is required for standby refill lifecycle proof')
+      throw new Error('AUTOSCALE_TIMELINE is required for provider power-state proof')
     }
     const started = Date.now()
     const count = integerEnv(
-      'AUTOSCALE_REFILL_PRESSURE',
+      'AUTOSCALE_PROVIDER_PRESSURE',
       FLOOR_HOSTS * SLOTS_PER_HOST + 64,
       1
     )
-    await ctx.createMany(count, 'refill')
-    await ctx.holdAndProbe(integerEnv('AUTOSCALE_REFILL_HOLD_MS', 240_000, 181_000))
-    const placementDelayMs = integerEnv('AUTOSCALE_PLACEMENT_DELAY_MS', 210_000, 1_000)
-    const settleDeadline =
-      Date.now() + integerEnv('AUTOSCALE_REFILL_SETTLE_MS', 240_000, 1_000)
-    for (;;) {
-      ctx.assertHealthy()
-      const pending = pendingStandbyRefillSuspensions(
-        readTimeline(TIMELINE_FILE),
-        started,
-        placementDelayMs
-      )
-      if (!pending.length) break
-      if (Date.now() >= settleDeadline) {
-        throw new Error(
-          `fresh refills did not reach SUSPENDED before settle deadline: ${pending.join(', ')}`
-        )
-      }
-      await ctx.holdAndProbe(Math.min(5_000, settleDeadline - Date.now()))
-    }
+    await ctx.createMany(count, 'provider-power')
+    await ctx.holdAndProbe(integerEnv('AUTOSCALE_PROVIDER_HOLD_MS', 45_000, 5_000))
+    assertProviderPowerSafety(readTimeline(TIMELINE_FILE), started)
   },
 }
 
@@ -756,7 +739,7 @@ function perHostCapacity(): number {
 const ALL: Scenario[] = [
   sawtooth,
   scaleInDrain,
-  standbyRefillBoundary,
+  providerPowerSafety,
   snapshotFanoutResume,
   heldBurst,
   gradualRamp,
@@ -983,27 +966,14 @@ function readTimeline(path: string): TimelineEvent[] {
   }
 }
 
-/**
- * Proves that newly created standby-refill instances never become placement
- * eligible during GCE's 180s initial-delay boundary. Instance names present
- * before the scenario are resumed standbys and are intentionally eligible
- * immediately; only names first observed after scenario start are refill VMs.
- *
- * For every refill VM, correlate MIG instance name -> Nomad node id -> gateway
- * host id. Any capacity heartbeat must be at least placementDelayMs after the
- * MIG first reports the instance being created. The production gate uses
- * Linux boot age, so Nomad task StartedAt is deliberately not the delay
- * anchor: startup work consumes part of the gate.
- *
- * A refill still creating or suspending is pending lifecycle work, not a hard
- * violation. The caller keeps holding and probing live sandboxes until this
- * returns no pending instances or its bounded settle deadline expires.
- */
-function pendingStandbyRefillSuspensions(
+// GCE SCALE_OUT_POOL is an independent power-state controller: while
+// replenishing standby it suspended a worker that held 40 live sandboxes. The
+// provider must stay in MANUAL mode with zero standby targets, and no instance
+// may enter a power-down transition while pressure is held.
+function assertProviderPowerSafety(
   events: TimelineEvent[],
-  scenarioStartedMs: number,
-  placementDelayMs: number
-): string[] {
+  scenarioStartedMs: number
+): void {
   const migEvents = events.filter((event) => event.event === 'mig_instance_state')
   const baseline = new Set(
     migEvents
@@ -1018,73 +988,31 @@ function pendingStandbyRefillSuspensions(
       .filter((name) => name && !baseline.has(name))
   )
   if (!fresh.size) {
-    throw new Error('standby refill proof observed no newly created MIG instance')
+    throw new Error('provider power-state proof observed no newly created MIG instance')
   }
 
-  const pending: string[] = []
-  for (const instance of fresh) {
-    const firstMigObserved = migEvents
-      .filter(
-        (event) =>
-          event.ts_ms >= scenarioStartedMs &&
-          event.data.instance === instance
-      )
-      .map((event) => event.ts_ms)
-      .sort((a, b) => a - b)[0]
-    if (!Number.isFinite(firstMigObserved)) {
-      throw new Error(`fresh refill ${instance} has no MIG creation observation`)
-    }
-
-    const instanceMigEvents = migEvents.filter(
-      (event) =>
-        event.ts_ms >= scenarioStartedMs &&
-        event.data.instance === instance
-    )
-    const terminal = instanceMigEvents.find(
-      (event) =>
-        event.data.status === 'TERMINATED' ||
-        event.data.status === 'STOPPED' ||
-        event.data.current_action === 'ABANDONING' ||
-        event.data.current_action === 'DELETING'
-    )
-    if (terminal) {
-      throw new Error(
-        `fresh refill ${instance} entered terminal state ` +
-        `${String(terminal.data.status)}/${String(terminal.data.current_action)}`
-      )
-    }
-
-    const suspended = instanceMigEvents.some((event) => event.data.status === 'SUSPENDED')
-
-    const nodeEvent = events.find(
-      (event) =>
-        event.event === 'nomad_node_state' &&
-        String(event.data.name ?? '').split('.')[0] === instance
-    )
-    if (!nodeEvent) {
-      pending.push(`${instance} (awaiting Nomad registration)`)
-      continue
-    }
-    const nodeID = String(nodeEvent.data.node_id ?? '')
-
-    const eligible = events
-      .filter(
-        (event) =>
-          event.event === 'gateway_host_eligible_observed' &&
-          event.data.host_id === nodeID &&
-          event.ts_ms >= scenarioStartedMs
-      )
-      .map((event) => event.ts_ms)
-      .sort((a, b) => a - b)[0]
-    if (eligible !== undefined && eligible - firstMigObserved < placementDelayMs) {
-      throw new Error(
-        `fresh refill ${instance} advertised capacity ${eligible - firstMigObserved}ms after ` +
-        `first MIG creation observation; placement delay requires >=${placementDelayMs}ms`
-      )
-    }
-    if (!suspended) pending.push(`${instance} (awaiting SUSPENDED)`)
+  const targetViolation = events.find((event) =>
+    event.event === 'mig_target' &&
+    event.ts_ms >= scenarioStartedMs &&
+    (Number(event.data.target_suspended_size ?? 0) !== 0 ||
+      Number(event.data.target_stopped_size ?? 0) !== 0)
+  )
+  if (targetViolation) {
+    throw new Error(`provider standby target became non-zero: ${JSON.stringify(targetViolation.data)}`)
   }
-  return pending
+
+  const powerDown = migEvents.find((event) =>
+    event.ts_ms >= scenarioStartedMs &&
+    (['SUSPENDED', 'STOPPED', 'TERMINATED'].includes(String(event.data.status ?? '')) ||
+      ['SUSPENDING', 'STOPPING', 'DELETING', 'ABANDONING'].includes(
+        String(event.data.current_action ?? '')
+      ))
+  )
+  if (powerDown) {
+    throw new Error(
+      `provider powered down a worker while load was held: ${JSON.stringify(powerDown.data)}`
+    )
+  }
 }
 
 async function assertCleanGateway(): Promise<void> {
