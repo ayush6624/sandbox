@@ -20,6 +20,8 @@
 #   MAX_BURST_COUNT   hard cap for BURST_COUNT (default 512)
 #   BENCHMARK_TIMEOUT_SEC wall-clock driver budget (default 10800)
 #   CLEANUP_TIMEOUT_SEC bounded run-owned cleanup budget (default 120)
+#   GATEWAY_PREFLIGHT_TIMEOUT_SEC authenticated gateway readiness budget after
+#                     a deploy/restart (default 60)
 #   TRAFFIC_SCENARIOS space-separated autoscale-traffic.ts scenarios. When set,
 #                     run that correctness suite instead of the legacy one-shot
 #                     burst.
@@ -56,6 +58,7 @@ BURST_COUNT="${BURST_COUNT:-160}"
 MAX_BURST_COUNT="${MAX_BURST_COUNT:-512}"
 BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-10800}"
 CLEANUP_TIMEOUT_SEC="${CLEANUP_TIMEOUT_SEC:-120}"
+GATEWAY_PREFLIGHT_TIMEOUT_SEC="${GATEWAY_PREFLIGHT_TIMEOUT_SEC:-60}"
 POLL_MS="${POLL_MS:-250}"
 EXPECTED_RUNNING="${EXPECTED_RUNNING:-2}"
 EXPECTED_SUSPENDED_MIN="${EXPECTED_SUSPENDED_MIN:-0}"
@@ -108,7 +111,8 @@ else
   exit 1
 fi
 for value in "$BURST_COUNT" "$MAX_BURST_COUNT" "$BENCHMARK_TIMEOUT_SEC" \
-  "$CLEANUP_TIMEOUT_SEC" "$POLL_MS" "$EXPECTED_RUNNING" "$EXPECTED_FREE_PER_HOST"; do
+  "$CLEANUP_TIMEOUT_SEC" "$GATEWAY_PREFLIGHT_TIMEOUT_SEC" "$POLL_MS" \
+  "$EXPECTED_RUNNING" "$EXPECTED_FREE_PER_HOST"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
     echo "error: count, polling, running-host, and free-slot values must be positive integers" >&2
     exit 1
@@ -253,7 +257,21 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-initial_sandboxes="$(gateway_get /sandboxes)"
+# systemctl restart returns before a Type=simple gateway has bound its socket.
+# A benchmark commonly follows a temporary scale-window deploy immediately;
+# retry the two authenticated control surfaces instead of recording a false
+# empty trace from that sub-second readiness race.
+gateway_deadline=$((SECONDS + GATEWAY_PREFLIGHT_TIMEOUT_SEC))
+initial_sandboxes=""
+initial_hosts=""
+until initial_sandboxes="$(gateway_get /sandboxes 2>/dev/null)" &&
+  initial_hosts="$(gateway_hosts 2>/dev/null)"; do
+  if [ "$SECONDS" -ge "$gateway_deadline" ]; then
+    echo "error: gateway was not authenticated-ready within ${GATEWAY_PREFLIGHT_TIMEOUT_SEC}s" >&2
+    exit 1
+  fi
+  sleep 1
+done
 initial_count="$(jq 'length' <<<"$initial_sandboxes")"
 if [ "$initial_count" -ne 0 ]; then
   if [ "${AUTOSCALE_ALLOW_HIBERNATED_BASELINE:-}" != "$LIVE_ACK" ]; then
@@ -286,7 +304,6 @@ if [ "$initial_running" -ne "$EXPECTED_RUNNING" ] || [ "$standby_ok" -ne 1 ]; th
   exit 1
 fi
 
-initial_hosts="$(gateway_hosts)"
 bad_hosts="$(jq --argjson free "$EXPECTED_FREE_PER_HOST" \
   --arg release "$EXPECTED_WORKER_RELEASE" \
   '[.[] | select(.alive and (

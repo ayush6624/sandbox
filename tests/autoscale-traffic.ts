@@ -605,11 +605,11 @@ const sawtooth: Scenario = {
   async run(ctx) {
     const cycles = integerEnv('AUTOSCALE_SAWTOOTH_CYCLES', 3, 2)
     const burst = integerEnv('AUTOSCALE_SAWTOOTH_BURST', FLOOR_HOSTS * SLOTS_PER_HOST + 64, 1)
-    // SCALE_DOWN_WINDOW is 15m, but its clock can be reset by a late scale-up
-    // action and the ensuing GCE/Nomad/gateway reconciliation needs additional
-    // time after the target changes. The first live run proved 16m from
-    // sandbox cleanup was too short: targetSize had reached 2, but host
-    // liveness had not converged. Keep seven minutes of control-plane headroom.
+    // Production's scale-down window is normally 10m, but a benchmark may
+    // explicitly shorten it. Its clock can be reset by a late scale-up action,
+    // and GCE/Nomad/gateway reconciliation needs additional time after the
+    // target changes. Keep the conservative 22m ceiling; waitFor exits as soon
+    // as the physical and gateway views are stable at the floor.
     const waitMs = integerEnv('AUTOSCALE_SCALE_IN_WAIT_MS', 22 * 60_000, 1_000)
     for (let cycle = 0; cycle < cycles; cycle++) {
       const before = (await getHosts()).filter((host) => host.alive).length
