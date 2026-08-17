@@ -601,7 +601,26 @@ scripts/              Host setup shell scripts
   `PrepareSSHTunnel` on EVERY connection, including plain `ssh`/`scp`/`rsync` via
   the generated stanza. Consequence accepted: **:22 no longer listens the instant
   a guest boots** (which is why socket activation was disabled) — first SSH use
-  pays ~150 ms. **Ed25519
+  pays ~150 ms.
+  **Measured, and the honest result is that this did NOT speed fanout up.**
+  Release `cd65a29`, fleet worker: the `identity` phase fell from 108-135 ms to
+  **15-17 ms** idle (266-317 ms → 37-48 ms under a 32-way fanout), but fanout
+  wall-clock was unchanged — **2567 ms vs 2575 ms at N=32** — because
+  `reidentify` expanded to absorb the freed CPU (367-447 ms idle vs 316-380 ms
+  before; 665-675 ms loaded vs 551-564 ms). Per-clone total went 648-676 ms →
+  637-665 ms, i.e. nothing. **The lesson is the useful part: the guest is
+  saturated during reidentify, so removing OTHER guest work just hands the time
+  to reidentify.** Keep the change — it removes ~100 ms of real guest CPU per
+  clone, which matters for burst CPU headroom and pool refill cost — but the only
+  thing that will move fanout latency is eliminating reidentify itself
+  (docs/guest-identity-cost-plan.md, Part 1: netns per VM).
+  A first attempt at this deferral was *worse than useless* and worth not
+  repeating: it ran `systemctl stop ssh.service` unconditionally, and that D-Bus
+  round trip costs ~120 ms in-guest — about what the eager keygen it replaced
+  cost. `stopSSHService` must check for a live sshd FIRST (`inheritedSSHDPIDFn`),
+  and the common case is that there is none, because the golden is itself built
+  by a cold boot that has no host key and so never starts sshd.
+  **Ed25519
   only** (~7 ms), and `sandbox.conf` pins `HostKey
   /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
   RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
