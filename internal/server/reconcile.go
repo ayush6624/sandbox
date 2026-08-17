@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -79,6 +81,7 @@ func (s *Server) reconcile(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "reconcile: list ports for %s: %v\n", sb.ID, err)
 		}
 		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
+		_ = s.cfg.Provisioner.DeleteNetns(sb.ID)
 		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 		// A crash mid-hibernate can leave artifacts behind a still-'running' row.
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(sb.ID))
@@ -87,6 +90,53 @@ func (s *Server) reconcile(ctx context.Context) {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "reconcile: cleaned up stale sandbox %s (pid %d)\n", sb.ID, sb.PID)
+	}
+	s.reconcileNetns(ctx)
+}
+
+// reconcileNetns drops per-VM network namespaces no row claims. They are bind
+// mounts under /var/run/netns, so like taps they outlive a serve crash — and
+// unlike taps nothing else would ever notice them, so a leak is permanent.
+// Sweeping the directory (rather than only the rows above) is what covers a
+// crash between row deletion and teardown.
+func (s *Server) reconcileNetns(ctx context.Context) {
+	if s.cfg.Provisioner == nil {
+		return
+	}
+	names, err := provisioner.ListNetns()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reconcile: list network namespaces: %v\n", err)
+		return
+	}
+	if len(names) == 0 {
+		return
+	}
+	// Hibernated rows keep their namespace: they are wakeable, and the wake
+	// reuses it rather than rebuilding it.
+	live := map[string]bool{}
+	if rows, err := s.reg.All(ctx); err == nil {
+		for _, sb := range rows {
+			live[provisioner.NetnsName(sb.ID)] = true
+		}
+	} else {
+		// Without the row list we cannot tell an orphan from a live namespace,
+		// and deleting a live one would cut a running sandbox off the network.
+		fmt.Fprintf(os.Stderr, "reconcile: skip namespace sweep, cannot list rows: %v\n", err)
+		return
+	}
+	removed := 0
+	for _, name := range names {
+		if live[name] {
+			continue
+		}
+		if out, err := exec.Command("ip", "netns", "del", name).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "reconcile: delete orphan netns %s: %v: %s\n", name, err, out)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		fmt.Fprintf(os.Stderr, "reconcile: removed %d orphaned network namespace(s)\n", removed)
 	}
 }
 

@@ -34,6 +34,12 @@ type LaunchRequest struct {
 	UFFDHostPath   string
 	Vcpus          int64
 	MemMIB         int64
+	// NetnsPath is the network namespace the VMM must join (jailer --netns).
+	// Empty keeps the shared-bridge behaviour: the tap lives in the host
+	// namespace and a clone re-identifies itself from MMDS. Set, the tap lives
+	// inside this namespace with the guest's address fixed, so no
+	// re-identification happens at all — see internal/provisioner/netns.go.
+	NetnsPath string
 }
 
 // LaunchPaths are the paths visible to Firecracker after preparation. HostAPI

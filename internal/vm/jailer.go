@@ -1435,6 +1435,10 @@ func jailerArgs(cfg JailerConfig, req LaunchRequest, uid, gid int, apiPath strin
 		// containing the required rbps=/wbps= tokens.
 		"--parent-cgroup", filepath.Join(cfg.CgroupParent, req.VMID),
 	}
+	// The tap lives inside the namespace, so the VMM has to be there to see it.
+	if req.NetnsPath != "" {
+		args = append(args, "--netns", req.NetnsPath)
+	}
 	args = append(args,
 		"--resource-limit", fmt.Sprintf("no-file=%d", cfg.NoFile),
 		"--resource-limit", fmt.Sprintf("fsize=%d", cfg.FileSize),
