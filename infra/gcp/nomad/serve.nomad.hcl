@@ -74,6 +74,25 @@ job "sandbox-serve" {
 #!/bin/bash
 set -euo pipefail
 cd "$${NOMAD_TASK_DIR}"
+# Defense for a rolling transition from an older worker template: Ubuntu may
+# queue apt-daily-upgrade during boot. A serving worker is an immutable release
+# appliance, so stop and permanently mask every automatic package mutation
+# path before this allocation exposes capacity. startup-worker.sh performs the
+# same admission check earlier on workers built from the current template.
+package_update_units=(
+  apt-daily.timer
+  apt-daily-upgrade.timer
+  apt-daily.service
+  apt-daily-upgrade.service
+  unattended-upgrades.service
+)
+systemctl mask --now "$${package_update_units[@]}"
+for unit in "$${package_update_units[@]}"; do
+  if systemctl is-active --quiet "$unit"; then
+    printf 'refusing worker admission: %s is still active\n' "$unit" >&2
+    exit 1
+  fi
+done
 chmod +x bin/sandbox bin/sandboxd
 install -d -o root -g root -m 0755 /mnt/sandbox-data/jailer
 umask 077

@@ -180,6 +180,35 @@ start_nomad_after_admission() {
   fi
 }
 
+# Workers are immutable release appliances. Ubuntu's apt timers are unsafe on
+# them: a newly-created VM can run a catch-up apt-daily-upgrade after Nomad has
+# admitted the host, replace/re-exec systemd and cycle host services underneath
+# live Firecracker guests. Mask both the timers and their services, and stop a
+# job that was already queued during early boot, before Nomad may advertise any
+# capacity. The Nomad task repeats this guard for workers booted from an older
+# image/template during a rolling transition.
+disable_automatic_package_updates() {
+  local units=(
+    apt-daily.timer
+    apt-daily-upgrade.timer
+    apt-daily.service
+    apt-daily-upgrade.service
+    unattended-upgrades.service
+  )
+  local unit
+
+  if ! systemctl mask --now "${units[@]}"; then
+    fatal "could not mask automatic package-update units"
+    return 1
+  fi
+  for unit in "${units[@]}"; do
+    if systemctl is-active --quiet "$unit"; then
+      fatal "$unit is still active; refusing worker admission"
+      return 1
+    fi
+  done
+}
+
 # Unit tests source the functions without executing the GCE startup flow.
 if [ "${STARTUP_WORKER_LIB_ONLY:-0}" = 1 ]; then
   return 0 2>/dev/null || exit 0
@@ -189,6 +218,10 @@ set -euxo pipefail
 exec > >(tee -a /var/log/startup-script.log) 2>&1
 
 phase startup_script_entered
+
+# Do this before storage preparation as well as before Nomad: no background OS
+# mutation is allowed to race worker admission.
+disable_automatic_package_updates
 
 # Nomad is intentionally left disabled across reboots. The metadata startup
 # script is the admission controller: it starts Nomad only after validating the

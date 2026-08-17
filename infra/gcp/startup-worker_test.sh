@@ -106,6 +106,7 @@ test_validate_data_disk_mount() {
 SYSTEMCTL_LOG="$TEST_DIR/systemctl.log"
 TEST_DISABLE_STATUS=0
 TEST_START_STATUS=0
+TEST_MASK_STATUS=0
 TEST_ACTIVE_STATUS=1
 
 systemctl() {
@@ -113,9 +114,30 @@ systemctl() {
   case "$1" in
     disable) return "$TEST_DISABLE_STATUS" ;;
     start) return "$TEST_START_STATUS" ;;
+    mask) return "$TEST_MASK_STATUS" ;;
     is-active) return "$TEST_ACTIVE_STATUS" ;;
     *) return 2 ;;
   esac
+}
+
+test_package_update_admission_gate() {
+  : > "$SYSTEMCTL_LOG"
+  TEST_ACTIVE_STATUS=1
+  disable_automatic_package_updates
+  grep -q '^mask --now apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service$' "$SYSTEMCTL_LOG" ||
+    fail "startup must stop and mask every automatic package-update unit"
+
+  TEST_MASK_STATUS=1
+  if disable_automatic_package_updates > /dev/null 2>&1; then
+    fail "startup must fail when package-update units cannot be masked"
+  fi
+  TEST_MASK_STATUS=0
+
+  TEST_ACTIVE_STATUS=0
+  if disable_automatic_package_updates > /dev/null 2>&1; then
+    fail "startup must fail while any package-update unit remains active"
+  fi
+  TEST_ACTIVE_STATUS=1
 }
 
 test_nomad_admission_gate() {
@@ -141,16 +163,18 @@ test_nomad_admission_gate() {
 
 test_admission_order() {
   local hold_line
+  local updates_line
   local disk_line
   local start_line
 
+  updates_line="$(awk '$0 == "disable_automatic_package_updates" { print NR }' "$DIR/startup-worker.sh")"
   hold_line="$(awk '$0 == "hold_nomad_for_admission" { print NR }' "$DIR/startup-worker.sh")"
   disk_line="$(awk '$0 == "prepare_data_disk \"$XFS_DEV\" \"$XFS_MNT\" /etc/fstab" { print NR }' "$DIR/startup-worker.sh")"
   start_line="$(awk '$0 == "start_nomad_after_admission" { print NR }' "$DIR/startup-worker.sh")"
 
-  [ -n "$hold_line" ] && [ -n "$disk_line" ] && [ -n "$start_line" ] ||
-    fail "startup flow must contain the Nomad hold, disk admission, and Nomad start"
-  [ "$hold_line" -lt "$disk_line" ] && [ "$disk_line" -lt "$start_line" ] ||
+  [ -n "$updates_line" ] && [ -n "$hold_line" ] && [ -n "$disk_line" ] && [ -n "$start_line" ] ||
+    fail "startup flow must contain package-update quarantine, Nomad hold, disk admission, and Nomad start"
+  [ "$updates_line" -lt "$hold_line" ] && [ "$hold_line" -lt "$disk_line" ] && [ "$disk_line" -lt "$start_line" ] ||
     fail "Nomad must remain stopped until after data-disk admission"
   if grep -q 'systemctl enable.*nomad' "$DIR/startup-worker.sh"; then
     fail "Nomad must remain disabled across reboots"
@@ -159,6 +183,7 @@ test_admission_order() {
 
 test_replace_fstab_mount
 test_validate_data_disk_mount
+test_package_update_admission_gate
 test_nomad_admission_gate
 test_admission_order
 

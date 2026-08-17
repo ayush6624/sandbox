@@ -103,6 +103,13 @@ cmd_bake() {
   echo ">> [5/6] cleanup (build artifacts, logs, ssh host keys, machine-id)"
   sshx 'sudo bash -s' <<'CLEANUP'
 set -e
+# Worker images are immutable. Mask catch-up package timers in the image itself
+# so they cannot race the metadata startup script on first boot. The startup
+# admission path and Nomad task repeat this check as defense in depth.
+systemctl mask --now \
+  apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service \
+  unattended-upgrades.service
 rm -rf /opt/fc/rootfs-build /tmp/src.tgz /home/*/sandbox/bin 2>/dev/null || true
 apt-get clean
 truncate -s0 /var/log/startup-script.log 2>/dev/null || true
