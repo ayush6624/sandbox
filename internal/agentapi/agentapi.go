@@ -156,6 +156,26 @@ type SSHKeyRequest struct {
 	PublicKey string `json:"public_key"` // one authorized_keys line, e.g. "ssh-ed25519 AAAA... user@host"
 }
 
+// Stats is the guest's own view of its resources, polled by the host's
+// utilization sampler (GET /stats). It carries only what the host cannot see
+// from outside the VM: the hypervisor's cgroup charge is guest pages TOUCHED,
+// which never falls when the guest frees memory, and the rootfs is an opaque
+// block device from the host's side. Everything else — CPU, network, allocated
+// disk blocks — the host measures for itself and is not asked for here.
+//
+// Absent fields read as zero. An agent predating this endpoint 404s it, and
+// the host degrades to its own host-side fields rather than failing the tick.
+type Stats struct {
+	MemTotalBytes int64 `json:"mem_total_bytes"`
+	// MemAvailableBytes is MemAvailable, not MemFree: page cache is reclaimable,
+	// so MemFree reads as "almost out of memory" on any guest that has done I/O.
+	MemAvailableBytes int64   `json:"mem_available_bytes"`
+	DiskTotalBytes    int64   `json:"disk_total_bytes"`
+	DiskFreeBytes     int64   `json:"disk_free_bytes"`
+	Load1             float64 `json:"load1"`
+	Processes         int     `json:"processes"`
+}
+
 // DirEntry is one row of a directory listing.
 type DirEntry struct {
 	Name  string    `json:"name"`

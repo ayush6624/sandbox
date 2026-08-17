@@ -261,6 +261,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sandboxes/{sandbox_id}/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sandbox_id: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Live resource utilization for one sandbox.
+         * @description A time series of what the sandbox is CONSUMING, as distinct from
+         *     `/usage`, which reports what it is BILLED (allocation). Samples are
+         *     taken on the owning host every few seconds and kept in a bounded
+         *     in-memory window, so this answers for recent history only: it does not
+         *     survive a worker restart, and a sandbox that moved hosts starts a fresh
+         *     series. Reading is passive — it never wakes a hibernated sandbox, which
+         *     keeps its samples and simply stops producing new ones.
+         *
+         *     Empty until the first sample is collected, which takes a few seconds
+         *     after create.
+         */
+        get: operations["getSandboxMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/operations": {
         parameters: {
             query?: never;
@@ -449,6 +480,60 @@ export interface components {
             metadata: {
                 [key: string]: string;
             };
+        };
+        /**
+         * @description One sampling tick. Host-measured fields are always present; the
+         *     guest-reported ones (`mem_*`, `disk_*`, `load1`, `processes`) are absent
+         *     unless the worker polls the in-guest agent for them.
+         */
+        MetricSample: {
+            /** Format: date-time */
+            timestamp: string;
+            /**
+             * @description Counts the VMs that have served this sandbox. Every counter here
+             *     belongs to a VM, not to the sandbox: a resume or restore replaces it
+             *     and restarts them at zero. A changed generation is the signal that
+             *     the counters below reset.
+             */
+            vmm_generation: number;
+            /** @description Allocated vCPUs — the denominator of cpu_used_pct. */
+            cpu_count: number;
+            /**
+             * @description CPU consumed over the tick as a percentage of ALLOCATED vCPUs, so
+             *     100 means the sandbox is using everything it was given. 0 on the
+             *     first sample of a generation, which has no predecessor.
+             */
+            cpu_used_pct: number;
+            /** @description CPU seconds consumed by this VM since it started. */
+            cpu_seconds_total: number;
+            /**
+             * @description Host memory charged to the sandbox: guest pages TOUCHED. It does not
+             *     fall when the guest frees memory, so it is a high-water mark of cost
+             *     rather than a measure of what the workload is using — for that, see
+             *     mem_used_bytes.
+             */
+            host_mem_bytes: number;
+            /** @description Blocks the sandbox's root disk actually occupies (copy-on-write */
+            rootfs_alloc_bytes: number;
+            /** @description Bytes received by the guest on its current VM. */
+            net_rx_bytes: number;
+            /** @description Bytes sent by the guest on its current VM. */
+            net_tx_bytes: number;
+            mem_total_bytes?: number;
+            /** @description Guest memory in use (total minus available). Reclaimable page cache counts as available. */
+            mem_used_bytes?: number;
+            disk_total_bytes?: number;
+            disk_used_bytes?: number;
+            load1?: number;
+            processes?: number;
+        };
+        SandboxMetrics: {
+            /** @description Oldest first. Empty when no sample has been collected yet. */
+            samples: components["schemas"]["MetricSample"][];
+            /** @description The sandbox's status when the samples were read. */
+            state: string;
+            /** @description Nominal seconds between samples. */
+            interval_seconds: number;
         };
         UsageTotals: {
             intervals: number;
@@ -1055,6 +1140,34 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UsageReport"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getSandboxMetrics: {
+        parameters: {
+            query?: {
+                from?: string;
+                to?: string;
+                /** @description Keep at most this many of the NEWEST samples. `limit=1` is the current reading. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                sandbox_id: components["parameters"]["SandboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sandbox's recent utilization samples, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SandboxMetrics"];
                 };
             };
             default: components["responses"]["Problem"];

@@ -5,11 +5,11 @@
  */
 export interface SandboxOpts {
   /** Base URL of the sandbox API, e.g. `http://100.99.183.74:8080`. Defaults to `SANDBOX_API_URL`. */
-  apiUrl?: string
+  apiUrl?: string;
   /** API key sent as `Authorization: Bearer <key>`. Defaults to `SANDBOX_API_KEY`. */
-  apiKey?: string
+  apiKey?: string;
   /** Default per-request timeout in milliseconds (default 30 000; sandbox creation uses 90 000). */
-  requestTimeoutMs?: number
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -18,16 +18,16 @@ export interface SandboxOpts {
  */
 export interface SandboxBringUpOpts extends SandboxOpts {
   /** Auto-delete lifetime. Preferred over the legacy {@link timeoutMs} name. */
-  ttlMs?: number
+  ttlMs?: number;
   /** Idle duration before automatic pause. Preferred over {@link hibernateAfterMs}. */
-  idleTimeoutMs?: number
+  idleTimeoutMs?: number;
   /**
    * Auto-destroy the sandbox after this many milliseconds (rounded up to
    * whole seconds). Omit for no expiry. Can be changed later with
    * `sandbox.setTimeout(ms)`.
    */
   /** @deprecated Use ttlMs. */
-  timeoutMs?: number
+  timeoutMs?: number;
   /**
    * Override the host's idle-hibernation window for this sandbox, in
    * milliseconds (rounded up to whole seconds): after this long with no API
@@ -36,7 +36,7 @@ export interface SandboxBringUpOpts extends SandboxOpts {
    * to never hibernate. Omit to inherit the host's default.
    */
   /** @deprecated Use idleTimeoutMs. */
-  hibernateAfterMs?: number
+  hibernateAfterMs?: number;
 }
 
 /** Options for {@link Sandbox.restore}. */
@@ -46,14 +46,14 @@ export interface SandboxRestoreOpts extends SandboxBringUpOpts {
    * lookup key — purely a label shown in listings. Can be changed later with
    * `sandbox.rename(name)`.
    */
-  name?: string
+  name?: string;
 }
 
 /**
  * Options for {@link Sandbox.fanout}. Unlike a restore, clones are not
  * individually named — the API applies one body to all N of them.
  */
-export type SandboxFanoutOpts = SandboxBringUpOpts
+export type SandboxFanoutOpts = SandboxBringUpOpts;
 
 /** Options for {@link Sandbox.create}. */
 export interface SandboxCreateOpts extends SandboxRestoreOpts {
@@ -62,75 +62,75 @@ export interface SandboxCreateOpts extends SandboxRestoreOpts {
    * before create returns. Must be one public-key line (for example,
    * `ssh-ed25519 ...`). Omit when SSH login is not needed.
    */
-  sshPubkey?: string
+  sshPubkey?: string;
   /**
    * Number of vCPUs for this sandbox. Omit for the host template's default.
    * Setting this (or {@link memMib}) forces a full cold boot (~2 s) instead
    * of the golden-snapshot hot path (~250 ms) — snapshots bake vcpus/mem at
    * snapshot time, so an override can't be served from one.
    */
-  vcpus?: number
+  vcpus?: number;
   /**
    * Guest memory in MiB for this sandbox. Omit for the host template's
    * default. Same cold-boot cost as {@link vcpus}.
    */
-  memMib?: number
+  memMib?: number;
 }
 
 /** Raw sandbox object as returned by the REST API (snake_case). */
 export interface ApiSandbox {
-  id: string
-  name?: string
-  pid: number
-  vm_id: string
-  socket_path: string
-  tap_device: string
-  guest_ip: string
-  rootfs_path: string
-  status: string
-  created_at: string
-  expires_at?: string
-  hibernate_after_sec?: number
+  id: string;
+  name?: string;
+  pid: number;
+  vm_id: string;
+  socket_path: string;
+  tap_device: string;
+  guest_ip: string;
+  rootfs_path: string;
+  status: string;
+  created_at: string;
+  expires_at?: string;
+  hibernate_after_sec?: number;
   /**
    * Effective vCPU count — current servers always send it (the template
    * default is filled in when no override was set). Absent only with older
    * servers that omitted unset overrides.
    */
-  vcpus?: number
+  vcpus?: number;
   /** Effective guest memory in MiB; same presence rules as {@link vcpus}. */
-  mem_mib?: number
-  base_snapshot_id?: string
-  host_addr?: string
-  ports?: ApiPortMapping[]
+  mem_mib?: number;
+  base_snapshot_id?: string;
+  host_addr?: string;
+  ports?: ApiPortMapping[];
 }
 
 /** Raw host info as returned by `GET /info` (snake_case). */
 export interface ApiHostInfo {
-  default_vcpus: number
-  default_mem_mib: number
-  max_vcpus: number
-  max_mem_mib: number
-  hot_create: boolean
-  hibernate_after_sec: number
-  host_id?: string
+  default_vcpus: number;
+  default_mem_mib: number;
+  max_vcpus: number;
+  max_mem_mib: number;
+  hot_create: boolean;
+  hibernate_after_sec: number;
+  host_id?: string;
 }
 
 /** Host template defaults and limits, as returned by {@link Sandbox.hostInfo}. */
 export interface HostInfo {
   /** vCPUs a sandbox runs with when created without a `vcpus` override. */
-  defaultVcpus: number
+  defaultVcpus: number;
   /** Guest memory in MiB when created without a `memMib` override. */
-  defaultMemMib: number
+  defaultMemMib: number;
   /** Largest accepted per-sandbox `vcpus` override. */
-  maxVcpus: number
+  maxVcpus: number;
   /** Largest accepted per-sandbox `memMib` override. */
-  maxMemMib: number
+  maxMemMib: number;
   /** Whether creates are served from a pre-booted golden snapshot. */
-  hotCreate: boolean
+  hotCreate: boolean;
   /** Host default idle-hibernation window in seconds (0 = disabled). */
-  hibernateAfterSec: number
+  hibernateAfterSec: number;
   /** Host identity in fleet mode; absent standalone. */
-  hostId?: string
+  hostId?: string;
 }
 
 /**
@@ -138,14 +138,14 @@ export interface HostInfo {
  * (snake_case). Worker-control-gated; see {@link FleetClient}.
  */
 export interface ApiFleetHost {
-  id: string
-  addr: string
-  slots_total: number
-  slots_used: number
-  hibernated: number
-  free: number
-  alive: boolean
-  last_seen_ms_ago: number
+  id: string;
+  addr: string;
+  slots_total: number;
+  slots_used: number;
+  hibernated: number;
+  free: number;
+  alive: boolean;
+  last_seen_ms_ago: number;
 }
 
 /**
@@ -154,227 +154,227 @@ export interface ApiFleetHost {
  */
 export interface FleetHostInfo {
   /** Host identity, as it registers itself with the gateway. */
-  hostId: string
+  hostId: string;
   /** Address the gateway proxies to, and where this host's forwarded ports live. */
-  addr: string
+  addr: string;
   /** Slots this host advertises in total (its tap/IP pool size). */
-  slotsTotal: number
+  slotsTotal: number;
   /** Slots occupied by running sandboxes. */
-  slotsUsed: number
+  slotsUsed: number;
   /** Hibernated sandboxes on this host — addressable, but holding no slot. */
-  hibernated: number
+  hibernated: number;
   /**
    * Slots the gateway will actually place onto: tap/IP availability bounded by
    * memory admission, so it can be lower than `slotsTotal - slotsUsed` when
    * large-memory sandboxes are running.
    */
-  free: number
+  free: number;
   /** Whether the host's heartbeat is still within the gateway's TTL. */
-  alive: boolean
+  alive: boolean;
   /** Age of the host's last heartbeat in milliseconds. */
-  lastSeenMsAgo: number
+  lastSeenMsAgo: number;
 }
 
 /** Raw port mapping as returned by the REST API (snake_case). */
 export interface ApiPortMapping {
-  guest_port: number
-  host_port?: number
-  public_port?: number
-  mode?: 'host_port' | 'url' | 'both' | 'raw'
-  url?: string
+  guest_port: number;
+  host_port?: number;
+  public_port?: number;
+  mode?: "host_port" | "url" | "both" | "raw";
+  url?: string;
 }
 
 /** Controls whether exposure also reserves a worker-local host port. */
 export interface PortExposeOpts {
   /** True for legacy host:port plus URL; false for URL-only. Server default when omitted. */
-  hostPort?: boolean
+  hostPort?: boolean;
 }
 
 export interface RawPortMapping {
-  guestPort: number
-  publicHost: string
-  publicPort: number
-  address: string
+  guestPort: number;
+  publicHost: string;
+  publicPort: number;
+  address: string;
 }
 
 /** Raw snapshot object as returned by the REST API (snake_case). */
 export interface ApiSnapshot {
-  id: string
-  name?: string
-  source_id: string
-  tap_device: string
-  guest_ip: string
-  mem_path: string
-  state_path: string
-  rootfs_path: string
-  created_at: string
-  golden?: boolean
-  format?: string
-  base_id?: string
-  vcpus?: number
-  mem_mib?: number
+  id: string;
+  name?: string;
+  source_id: string;
+  tap_device: string;
+  guest_ip: string;
+  mem_path: string;
+  state_path: string;
+  rootfs_path: string;
+  created_at: string;
+  golden?: boolean;
+  format?: string;
+  base_id?: string;
+  vcpus?: number;
+  mem_mib?: number;
 }
 
 /** A saved point-in-time image of a sandbox that can be restored. */
 export interface SnapshotInfo {
   /** Unique snapshot id (pass to {@link Sandbox.restore}). */
-  snapshotId: string
+  snapshotId: string;
   /** Display name; absent when the snapshot is unnamed. */
-  name?: string
+  name?: string;
   /** Id of the sandbox this snapshot was taken from. */
-  sourceId: string
+  sourceId: string;
   /** Creation time. */
-  createdAt: Date
+  createdAt: Date;
   /**
    * True for the server-managed pristine snapshot that hot creates are cloned
    * from (at most one per host). It shows up in {@link Sandbox.listSnapshots}
    * like any other snapshot — hide or badge it in a UI, and don't delete it:
    * creates fall back to cold boot until the server next restarts.
    */
-  golden?: boolean
+  golden?: boolean;
   /**
    * How the artifacts are stored: `'full'` (self-contained) or `'diff'` (a
    * delta against {@link baseId}, which must still exist to restore). Absent
    * on snapshots taken before the diff format existed — treat as `'full'`.
    */
-  format?: 'full' | 'diff'
+  format?: "full" | "diff";
   /** Snapshot this one is a delta against; absent when `format` is `'full'`. */
-  baseId?: string
+  baseId?: string;
   /**
    * vCPUs baked into the snapshot. Firecracker fixes resources at snapshot
    * time, so every restore and clone runs with these — which is why
    * {@link Sandbox.restore} and {@link Sandbox.fanout} reject overrides.
    * Absent means the source ran the host template's default.
    */
-  vcpus?: number
+  vcpus?: number;
   /** Guest memory in MiB baked into the snapshot; same presence rules as {@link vcpus}. */
-  memMib?: number
+  memMib?: number;
 }
 
 /** One forwarded port: guest port → host port. */
 export interface PortMapping {
   /** Port inside the guest. */
-  guestPort: number
+  guestPort: number;
   /** Host port forwarding to it; absent for URL-only exposure. */
-  hostPort?: number
+  hostPort?: number;
   /** Addressability mode reported by the server. */
-  mode?: 'host_port' | 'url' | 'both' | 'raw'
+  mode?: "host_port" | "url" | "both" | "raw";
   /** Public ingress URL when the worker is configured with an ingress domain. */
-  url?: string
+  url?: string;
   /** Fleet-wide public TCP port for raw ingress, when allocated. */
-  publicPort?: number
+  publicPort?: number;
 }
 
 /** Information about a sandbox, as returned by {@link Sandbox.list}. */
 export interface SandboxInfo {
   /** Unique sandbox id. */
-  sandboxId: string
+  sandboxId: string;
   /** Display name; absent when the sandbox is unnamed. */
-  name?: string
+  name?: string;
   /** Host PID of the firecracker process. */
-  pid: number
+  pid: number;
   /** Firecracker VM id. */
-  vmId: string
+  vmId: string;
   /** Host tap device backing the sandbox network. */
-  tapDevice: string
+  tapDevice: string;
   /** IP of the guest on the sandbox bridge. */
-  guestIp: string
+  guestIp: string;
   /** Path of the per-VM rootfs copy on the host. */
-  rootfsPath: string
+  rootfsPath: string;
   /** Firecracker API socket path on the host. */
-  socketPath: string
+  socketPath: string;
   /** Sandbox status: `"running"`, or `"hibernated"` (frozen to disk; the next request wakes it). */
-  status: string
+  status: string;
   /** Creation time. */
-  createdAt: Date
+  createdAt: Date;
   /** When the sandbox will be auto-destroyed; absent when it has no TTL. */
-  expiresAt?: Date
+  expiresAt?: Date;
   /**
    * Per-sandbox idle-hibernation window in seconds (-1 = never hibernate);
    * absent when the sandbox inherits the host default.
    */
-  hibernateAfterSec?: number
+  hibernateAfterSec?: number;
   /**
    * Effective vCPU count the sandbox runs with. Current servers always
    * report it (the template default is filled in when no override was set);
    * absent only when talking to an older server — treat that as "template
    * default" and look it up via {@link Sandbox.hostInfo}.
    */
-  vcpus?: number
+  vcpus?: number;
   /** Effective guest memory in MiB; same presence rules as {@link vcpus}. */
-  memMib?: number
+  memMib?: number;
   /**
    * Golden snapshot this sandbox was cloned from (a hot create). Absent for
    * cold boots, restores, and fan-out clones. Its presence is what makes a
    * snapshot of this sandbox storable as a space-efficient diff.
    */
-  baseSnapshotId?: string
+  baseSnapshotId?: string;
   /**
    * Address of the machine hosting this sandbox. Set when talking to a fleet
    * gateway (forwarded ports live on the host, not the gateway); absent when
    * talking to a host directly, where the API hostname already is the host.
    */
-  hostAddr?: string
+  hostAddr?: string;
   /** Explicitly exposed ports, including public URLs when ingress is configured. */
-  ports?: PortMapping[]
+  ports?: PortMapping[];
 }
 
 /** Result of a command executed via `sandbox.commands.run()`. */
 export interface CommandResult {
   /** Captured standard output. */
-  stdout: string
+  stdout: string;
   /** Captured standard error. */
-  stderr: string
+  stderr: string;
   /** Exit code of the command (always 0 here — non-zero exits throw {@link CommandExitError}). */
-  exitCode: number
+  exitCode: number;
   /** Wall-clock duration of the command in milliseconds. */
-  durationMs: number
+  durationMs: number;
 }
 
 /** Options for `sandbox.commands.run()`. */
 export interface CommandRunOpts {
   /** Working directory inside the guest (default `/home/sandbox/app`). */
-  cwd?: string
+  cwd?: string;
   /** Extra environment variables for the command. */
-  envs?: Record<string, string>
+  envs?: Record<string, string>;
   /** Time budget for the command in milliseconds (default 60 000). */
-  timeoutMs?: number
+  timeoutMs?: number;
   /**
    * Called with each stdout chunk as the command produces it. Providing
    * `onStdout` or `onStderr` switches to the streaming exec endpoint; the
    * returned {@link CommandResult} still carries the full output.
    */
-  onStdout?: (data: string) => void
+  onStdout?: (data: string) => void;
   /** Called with each stderr chunk as the command produces it. */
-  onStderr?: (data: string) => void
+  onStderr?: (data: string) => void;
 }
 
 /** A directory entry returned by `sandbox.files.list()`. */
 export interface EntryInfo {
   /** Base name of the entry. */
-  name: string
+  name: string;
   /** Whether the entry is a regular file or a directory. */
-  type: 'file' | 'dir'
+  type: "file" | "dir";
   /** Size in bytes. */
-  size: number
+  size: number;
   /** Unix mode string, e.g. `-rw-r--r--`. */
-  mode: string
+  mode: string;
   /** Last modification time. */
-  modifiedAt: Date
+  modifiedAt: Date;
 }
 
 /** Result of `sandbox.files.write()`. */
 export interface WriteInfo {
   /** Absolute path that was written inside the guest. */
-  path: string
+  path: string;
   /** Number of bytes written. */
-  bytes: number
+  bytes: number;
 }
 
 /** Options for `sandbox.files.read()`. */
 export interface ReadOpts {
   /** `'text'` (default) decodes the file as UTF-8; `'bytes'` returns a `Uint8Array`. */
-  format?: 'text' | 'bytes'
+  format?: "text" | "bytes";
 }
 
 /** Converts a raw API snapshot object to the public {@link SnapshotInfo} shape. */
@@ -383,14 +383,14 @@ export function toSnapshotInfo(raw: ApiSnapshot): SnapshotInfo {
     snapshotId: raw.id,
     sourceId: raw.source_id,
     createdAt: new Date(raw.created_at),
-  }
-  if (raw.name) info.name = raw.name
-  if (raw.golden) info.golden = true
-  if (raw.format === 'full' || raw.format === 'diff') info.format = raw.format
-  if (raw.base_id) info.baseId = raw.base_id
-  if (raw.vcpus) info.vcpus = raw.vcpus
-  if (raw.mem_mib) info.memMib = raw.mem_mib
-  return info
+  };
+  if (raw.name) info.name = raw.name;
+  if (raw.golden) info.golden = true;
+  if (raw.format === "full" || raw.format === "diff") info.format = raw.format;
+  if (raw.base_id) info.baseId = raw.base_id;
+  if (raw.vcpus) info.vcpus = raw.vcpus;
+  if (raw.mem_mib) info.memMib = raw.mem_mib;
+  return info;
 }
 
 /** Converts a raw gateway host entry to the public {@link FleetHostInfo} shape. */
@@ -404,7 +404,7 @@ export function toFleetHostInfo(raw: ApiFleetHost): FleetHostInfo {
     free: raw.free,
     alive: raw.alive,
     lastSeenMsAgo: raw.last_seen_ms_ago,
-  }
+  };
 }
 
 /** Converts a raw API host info object to the public {@link HostInfo} shape. */
@@ -416,9 +416,9 @@ export function toHostInfo(raw: ApiHostInfo): HostInfo {
     maxMemMib: raw.max_mem_mib,
     hotCreate: raw.hot_create,
     hibernateAfterSec: raw.hibernate_after_sec,
-  }
-  if (raw.host_id) info.hostId = raw.host_id
-  return info
+  };
+  if (raw.host_id) info.hostId = raw.host_id;
+  return info;
 }
 
 /** Converts a raw API sandbox object to the public {@link SandboxInfo} shape. */
@@ -433,23 +433,139 @@ export function toSandboxInfo(raw: ApiSandbox): SandboxInfo {
     socketPath: raw.socket_path,
     status: raw.status,
     createdAt: new Date(raw.created_at),
-  }
-  if (raw.name) info.name = raw.name
-  if (raw.expires_at) info.expiresAt = new Date(raw.expires_at)
-  if (raw.hibernate_after_sec) info.hibernateAfterSec = raw.hibernate_after_sec
-  if (raw.vcpus) info.vcpus = raw.vcpus
-  if (raw.mem_mib) info.memMib = raw.mem_mib
-  if (raw.base_snapshot_id) info.baseSnapshotId = raw.base_snapshot_id
-  if (raw.host_addr) info.hostAddr = raw.host_addr
+  };
+  if (raw.name) info.name = raw.name;
+  if (raw.expires_at) info.expiresAt = new Date(raw.expires_at);
+  if (raw.hibernate_after_sec) info.hibernateAfterSec = raw.hibernate_after_sec;
+  if (raw.vcpus) info.vcpus = raw.vcpus;
+  if (raw.mem_mib) info.memMib = raw.mem_mib;
+  if (raw.base_snapshot_id) info.baseSnapshotId = raw.base_snapshot_id;
+  if (raw.host_addr) info.hostAddr = raw.host_addr;
   if (raw.ports) {
     info.ports = raw.ports.map((m) => {
-      const port: PortMapping = { guestPort: m.guest_port }
-      if (m.host_port !== undefined) port.hostPort = m.host_port
-      if (m.mode !== undefined) port.mode = m.mode
-      if (m.url !== undefined) port.url = m.url
-      if (m.public_port !== undefined) port.publicPort = m.public_port
-      return port
-    })
+      const port: PortMapping = { guestPort: m.guest_port };
+      if (m.host_port !== undefined) port.hostPort = m.host_port;
+      if (m.mode !== undefined) port.mode = m.mode;
+      if (m.url !== undefined) port.url = m.url;
+      if (m.public_port !== undefined) port.publicPort = m.public_port;
+      return port;
+    });
   }
-  return info
+  return info;
+}
+
+/** Raw metrics sample as returned by the REST API (snake_case). */
+export interface ApiMetricSample {
+  timestamp: string;
+  vmm_generation: number;
+  cpu_count: number;
+  cpu_used_pct: number;
+  cpu_seconds_total: number;
+  host_mem_bytes: number;
+  rootfs_alloc_bytes: number;
+  net_rx_bytes: number;
+  net_tx_bytes: number;
+  mem_total_bytes?: number;
+  mem_used_bytes?: number;
+  disk_total_bytes?: number;
+  disk_used_bytes?: number;
+  load1?: number;
+  processes?: number;
+}
+
+/** Raw metrics response as returned by the REST API (snake_case). */
+export interface ApiSandboxMetrics {
+  samples: ApiMetricSample[];
+  state: string;
+  interval_seconds: number;
+}
+
+/**
+ * One sampling tick of a sandbox's resource consumption.
+ *
+ * Host-measured fields are always present. The guest-reported ones
+ * ({@link memUsedBytes}, {@link diskUsedBytes}, {@link load1},
+ * {@link processes}) are absent unless the deployment polls the in-guest agent.
+ */
+export interface MetricSample {
+  timestamp: Date;
+  /**
+   * Counts the VMs that have served this sandbox. Every counter below belongs
+   * to a VM, not to the sandbox: a resume or restore replaces it and restarts
+   * them at zero, so a changed generation is the signal that they reset.
+   */
+  vmmGeneration: number;
+  /** Allocated vCPUs — the denominator of {@link cpuUsedPct}. */
+  cpuCount: number;
+  /**
+   * CPU used over the tick as a percentage of ALLOCATED vCPUs, so 100 means the
+   * sandbox is using everything it was given. 0 on the first sample of a
+   * generation, which has no predecessor to compare against.
+   */
+  cpuUsedPct: number;
+  /** CPU seconds consumed by the current VM since it started. */
+  cpuSecondsTotal: number;
+  /**
+   * Host memory charged to the sandbox: guest pages touched. It does not fall
+   * when the guest frees memory, so it is a high-water mark of cost rather than
+   * a measure of what the workload is using — for that see {@link memUsedBytes}.
+   */
+  hostMemBytes: number;
+  /** Blocks the sandbox's root disk occupies; grows as it writes (copy-on-write). */
+  rootfsAllocBytes: number;
+  /** Bytes received by the guest on its current VM. */
+  netRxBytes: number;
+  /** Bytes sent by the guest on its current VM. */
+  netTxBytes: number;
+  memTotalBytes?: number;
+  /** Guest memory in use. Reclaimable page cache counts as available, not used. */
+  memUsedBytes?: number;
+  diskTotalBytes?: number;
+  diskUsedBytes?: number;
+  load1?: number;
+  processes?: number;
+}
+
+/** A sandbox's recent utilization samples. */
+export interface SandboxMetrics {
+  /** Oldest first. Empty until the first sample is collected. */
+  samples: MetricSample[];
+  /** The sandbox's status when the samples were read. */
+  state: string;
+  /** Nominal seconds between samples. */
+  intervalSeconds: number;
+}
+
+/** Converts a raw metrics response to the public {@link SandboxMetrics} shape. */
+export function toSandboxMetrics(raw: ApiSandboxMetrics): SandboxMetrics {
+  return {
+    state: raw.state,
+    intervalSeconds: raw.interval_seconds,
+    samples: (raw.samples ?? []).map((s) => {
+      const sample: MetricSample = {
+        timestamp: new Date(s.timestamp),
+        vmmGeneration: s.vmm_generation,
+        cpuCount: s.cpu_count,
+        cpuUsedPct: s.cpu_used_pct,
+        cpuSecondsTotal: s.cpu_seconds_total,
+        hostMemBytes: s.host_mem_bytes,
+        rootfsAllocBytes: s.rootfs_alloc_bytes,
+        netRxBytes: s.net_rx_bytes,
+        netTxBytes: s.net_tx_bytes,
+      };
+      // Guest fields stay absent rather than defaulting to 0, which would read
+      // as "no memory in use" for a deployment that doesn't poll the agent.
+      if (s.mem_total_bytes !== undefined)
+        sample.memTotalBytes = s.mem_total_bytes;
+      if (s.mem_used_bytes !== undefined)
+        sample.memUsedBytes = s.mem_used_bytes;
+      if (s.disk_total_bytes !== undefined)
+        sample.diskTotalBytes = s.disk_total_bytes;
+      if (s.disk_used_bytes !== undefined)
+        sample.diskUsedBytes = s.disk_used_bytes;
+      if (s.load1 !== undefined) sample.load1 = s.load1;
+      if (s.processes !== undefined) sample.processes = s.processes;
+      return sample;
+    }),
+  };
 }

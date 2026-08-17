@@ -61,6 +61,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/connect/{port}", h.connectPort)
 	mux.HandleFunc("GET /v1/usage", h.listUsage)
 	mux.HandleFunc("GET /v1/sandboxes/{id}/usage", h.getSandboxUsage)
+	mux.HandleFunc("GET /v1/sandboxes/{id}/metrics", h.getSandboxMetrics)
 }
 
 // prepareSSHAccess and connectPort are CLI data-plane adapters. Keeping their
@@ -682,6 +683,28 @@ func (h *Handler) listPortForwards(w http.ResponseWriter, r *http.Request) {
 		out[i] = publicPort(r.PathValue("id"), port)
 	}
 	writeJSON(w, 200, map[string]any{"port_forwards": out})
+}
+
+// getSandboxMetrics forwards the owning host's utilization series unchanged.
+// The worker payload is already in the public vocabulary (see server.Sample),
+// so an adapter struct here would be a second copy to keep in sync, and the
+// window/limit parameters mean the same thing on both sides.
+//
+// It routes by id like every other id-scoped read, so on a fleet it reaches the
+// host that holds the samples — and only that host has them: the series lives
+// in the worker's memory, so a sandbox that moved hosts starts a fresh one.
+func (h *Handler) getSandboxMetrics(w http.ResponseWriter, r *http.Request) {
+	path := "/sandboxes/" + url.PathEscape(r.PathValue("id")) + "/metrics"
+	if q := r.URL.RawQuery; q != "" {
+		path += "?" + q
+	}
+	rec := h.call(r, http.MethodGet, path, nil)
+	if !translateError(w, r, rec) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(rec.Body.Bytes())
 }
 
 func (h *Handler) call(parent *http.Request, method, path string, body any) *responseRecorder {

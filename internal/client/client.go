@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/metricsapi"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -202,6 +203,22 @@ func (c *Client) Get(ctx context.Context, id string) (registry.Sandbox, error) {
 		return registry.Sandbox{}, err
 	}
 	return sb, nil
+}
+
+// Metrics reads a sandbox's recent utilization samples. limit keeps that many
+// of the NEWEST samples (0 = the host's default cap), so limit=1 is the current
+// reading. The series lives in the owning worker's memory, so this answers for
+// recent history only and never for a sandbox that has moved hosts.
+func (c *Client) Metrics(ctx context.Context, id string, limit int) (metricsapi.SandboxMetrics, error) {
+	path := "/sandboxes/" + url.PathEscape(id) + "/metrics"
+	if limit > 0 {
+		path += "?limit=" + strconv.Itoa(limit)
+	}
+	var out metricsapi.SandboxMetrics
+	if err := c.do(ctx, "GET", path, nil, &out); err != nil {
+		return metricsapi.SandboxMetrics{}, err
+	}
+	return out, nil
 }
 
 // Rename sets a sandbox's display name; "" clears it.

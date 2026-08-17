@@ -41,6 +41,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("GET /stats", handleStats)
 	mux.HandleFunc("POST /exec", handleExec)
 	mux.HandleFunc("POST /exec/stream", handleExecStream)
 	mux.HandleFunc("GET /files", handleReadFile)

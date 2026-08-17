@@ -105,6 +105,23 @@ type Config struct {
 	// WarmPoolSize keeps this many fully isolated golden clones ready to claim.
 	// They consume normal VM capacity; 0 disables prewarming.
 	WarmPoolSize int `json:"warm_pool_size"`
+	// MetricsIntervalSec samples each running sandbox's CPU/memory/network/disk
+	// from the host (cgroup leaf, tap counters, rootfs blocks) for
+	// GET /sandboxes/{id}/metrics and the /metrics aggregates. It never
+	// contacts the guest, so it neither counts as activity nor wakes a
+	// hibernated sandbox. 0 = default 5 seconds; negative disables sampling.
+	// MetricsHistory bounds the retained per-sandbox ring (0 = 360 samples,
+	// i.e. 30 minutes at the default interval).
+	MetricsIntervalSec int `json:"metrics_interval_sec"`
+	MetricsHistory     int `json:"metrics_history"`
+	// MetricsGuestStats additionally polls each running guest's sandboxd for
+	// the two things the host cannot see from outside the VM: memory actually
+	// in use (the hypervisor's charge only ever grows) and free disk. The poll
+	// runs on every second sampling tick and is deliberately routed around the
+	// activity tracker, so it neither delays idle hibernation nor wakes a
+	// frozen sandbox. Needs an agent with GET /stats — the agent is
+	// image-pinned, so a fleet must rebake before enabling this.
+	MetricsGuestStats bool `json:"metrics_guest_stats"`
 	// Data-plane fan-in caps. They bound forwarded-port accepts and CONNECT
 	// tunnels together, so a sandbox's budget is the same however traffic
 	// reaches it. Each connection costs a goroutine, a dial budget, an activity

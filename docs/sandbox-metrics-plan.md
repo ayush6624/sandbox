@@ -1,7 +1,25 @@
 # Sandbox stats: surfacing live resource utilization
 
-Status: **plan, nothing implemented.** Companion to `docs/usage-metering-plan.md`,
-which covers the *billing* half of the same question and is already shipped.
+Status: **phases 1–3 implemented, not yet deployed.** Phase 4 remains a
+plan. Companion to `docs/usage-metering-plan.md`, which covers the *billing*
+half of the same question and is already shipped.
+
+What landed:
+
+- **Phase 1** (host-side): `internal/server/sandboxmetrics.go` — sampler, ring,
+  `GET /sandboxes/{id}/metrics`, `GET /v1/sandboxes/{id}/metrics`, and the
+  aggregate `/metrics` series. Config: `metrics_interval_sec`,
+  `metrics_history`. Ships with an ordinary `rollout.sh`.
+- **Phase 2** (guest-side): `cmd/sandboxd/stats.go` — `GET /stats`, merged into
+  the sample behind `metrics_guest_stats` (default **off**). The agent is
+  image-pinned, so this needs `bake-image.sh bake && golden` plus a MIG roll
+  before the flag can be turned on.
+- **Phase 3** (clients): `api/openapi.yaml` + regenerated `api-v1.ts`, SDK
+  `sandbox.metrics()`, CLI `sandbox metrics <id>`, `docs/api-v1.md`. The SDK
+  version is deliberately **not** bumped — releasing is its own five-step ritual.
+
+The wire types live in `internal/metricsapi` so the worker, the CLI client and
+the v1 adapter share one definition.
 
 ## What this is not
 

@@ -1,10 +1,10 @@
-export { Sandbox } from './sandbox.js'
-export { Commands } from './commands.js'
-export { Files } from './files.js'
-export { Pty, PtyHandle } from './pty.js'
-export type { PtyCreateOpts } from './pty.js'
-export { FleetClient, FleetHostsCollection } from './fleet.js'
-export type { FleetClientOptions } from './fleet.js'
+export { Sandbox } from "./sandbox.js";
+export { Commands } from "./commands.js";
+export { Files } from "./files.js";
+export { Pty, PtyHandle } from "./pty.js";
+export type { PtyCreateOpts } from "./pty.js";
+export { FleetClient, FleetHostsCollection } from "./fleet.js";
+export type { FleetClientOptions } from "./fleet.js";
 export {
   SandboxClient,
   ClientSandbox,
@@ -15,7 +15,7 @@ export {
   OperationsCollection,
   PortForwardsCollection,
   UsageCollection,
-} from './v1.js'
+} from "./v1.js";
 export type {
   SandboxClientOptions,
   SandboxSource,
@@ -39,7 +39,7 @@ export type {
   UsageTotals,
   UsageReport,
   UsageQueryOptions,
-} from './v1.js'
+} from "./v1.js";
 export {
   SandboxError,
   AuthenticationError,
@@ -48,8 +48,8 @@ export {
   CapacityError,
   TimeoutError,
   CommandExitError,
-} from './errors.js'
-export type { ProblemDetails } from './errors.js'
+} from "./errors.js";
+export type { ProblemDetails } from "./errors.js";
 export type {
   SandboxOpts,
   SandboxBringUpOpts,
@@ -68,4 +68,6 @@ export type {
   EntryInfo,
   WriteInfo,
   ReadOpts,
-} from './types.js'
+  MetricSample,
+  SandboxMetrics,
+} from "./types.js";

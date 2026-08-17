@@ -100,6 +100,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_wakes_total", "Sandboxes successfully thawed from hibernation.", s.met.wakes.Load())
 	counter("sandbox_wake_failures_total", "Wake attempts that rolled back to hibernated.", s.met.wakeFailures.Load())
 
+	// Per-sandbox utilization, aggregated. Same cardinality rule as above: the
+	// series itself is per-sandbox, what leaves this host is not.
+	s.writeSandboxStatMetrics(&b)
+
 	// Worker boot/readiness timeline — the autoscale critical path, per stage.
 	s.writeBootPhaseMetrics(&b)
 

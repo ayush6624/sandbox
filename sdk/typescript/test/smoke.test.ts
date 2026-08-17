@@ -170,6 +170,46 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
 
+  if (req.method === 'GET' && /^\/sandboxes\/[^/]+\/metrics$/.test(path)) {
+    const limit = Number(url.searchParams.get('limit') ?? '0')
+    const samples = [
+      {
+        timestamp: '2026-06-10T12:00:00Z',
+        vmm_generation: 1,
+        cpu_count: 2,
+        cpu_used_pct: 0,
+        cpu_seconds_total: 1,
+        host_mem_bytes: 100,
+        rootfs_alloc_bytes: 200,
+        net_rx_bytes: 10,
+        net_tx_bytes: 20,
+      },
+      {
+        timestamp: '2026-06-10T12:00:05Z',
+        vmm_generation: 1,
+        cpu_count: 2,
+        cpu_used_pct: 42.5,
+        cpu_seconds_total: 5.25,
+        host_mem_bytes: 150,
+        rootfs_alloc_bytes: 250,
+        net_rx_bytes: 30,
+        net_tx_bytes: 40,
+        mem_total_bytes: 1000,
+        mem_used_bytes: 750,
+        disk_total_bytes: 8000,
+        disk_used_bytes: 5000,
+        load1: 1.5,
+        processes: 42,
+      },
+    ]
+    sendJson(res, 200, {
+      samples: limit > 0 ? samples.slice(-limit) : samples,
+      state: 'running',
+      interval_seconds: 5,
+    })
+    return
+  }
+
   if (req.method === 'POST' && path === '/sandboxes') {
     const raw = (await readBody(req)).toString()
     lastCreateBody = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined
@@ -1187,4 +1227,37 @@ test('errors carry the HTTP status they came from', async () => {
       return true
     }
   )
+})
+
+// Utilization is a different question from billing: what the sandbox is
+// CONSUMING, not what it is charged for. Guest-reported fields stay absent
+// rather than defaulting to 0, which would read as "no memory in use".
+test('metrics return a utilization series with optional guest fields', async () => {
+  const sbx = await Sandbox.create(opts())
+  const metrics = await sbx.metrics()
+
+  assert.equal(metrics.state, 'running')
+  assert.equal(metrics.intervalSeconds, 5)
+  assert.equal(metrics.samples.length, 2)
+
+  const [first, latest] = metrics.samples
+  assert.deepEqual(first.timestamp, new Date('2026-06-10T12:00:00Z'))
+  assert.equal(first.cpuUsedPct, 0)
+  // Host-only sample: the guest was not polled, so those fields are absent.
+  assert.equal(first.memUsedBytes, undefined)
+  assert.equal(first.load1, undefined)
+
+  assert.equal(latest.cpuUsedPct, 42.5)
+  assert.equal(latest.cpuCount, 2)
+  assert.equal(latest.hostMemBytes, 150)
+  assert.equal(latest.netRxBytes, 30)
+  assert.equal(latest.memUsedBytes, 750)
+  assert.equal(latest.diskUsedBytes, 5000)
+  assert.equal(latest.load1, 1.5)
+  assert.equal(latest.processes, 42)
+
+  // limit keeps the NEWEST samples, so limit:1 is the current reading.
+  const current = await sbx.metrics({ limit: 1 })
+  assert.equal(current.samples.length, 1)
+  assert.equal(current.samples[0].cpuUsedPct, 42.5)
 })

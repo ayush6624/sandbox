@@ -129,6 +129,64 @@ Five properties clients should rely on:
 queries every host instead of routing by ID. The id-scoped route cannot — it
 routes to an owner that no longer exists — and returns 404 pointing here.
 
+## Live utilization
+
+`GET /v1/sandboxes/{id}/metrics` returns a time series of what a sandbox is
+**consuming**, which is a different question from what it is **billed**
+(`/usage`, above, which charges allocation). Samples are taken on the owning
+host every few seconds:
+
+```json
+{
+  "samples": [
+    {
+      "timestamp": "2026-08-17T12:00:05Z",
+      "vmm_generation": 1,
+      "cpu_count": 2,
+      "cpu_used_pct": 42.5,
+      "cpu_seconds_total": 5.25,
+      "host_mem_bytes": 268435456,
+      "rootfs_alloc_bytes": 41943040,
+      "net_rx_bytes": 30720,
+      "net_tx_bytes": 40960,
+      "mem_used_bytes": 786432000,
+      "mem_total_bytes": 1041661952,
+      "disk_used_bytes": 5000000000,
+      "disk_total_bytes": 8000000000,
+      "load1": 1.5,
+      "processes": 42
+    }
+  ],
+  "state": "running",
+  "interval_seconds": 5
+}
+```
+
+- **The window is recent, not historical.** Samples live in the owning worker's
+  memory and are bounded (30 minutes at the default interval). They do not
+  survive a worker restart, and a sandbox that moved hosts starts a fresh
+  series. For long-term trends, scrape the deployment's `/metrics` — which
+  exports these aggregated per host, deliberately without a sandbox label.
+- `samples` is **empty** for the first few seconds of a sandbox's life, before
+  the first tick. That is a normal state, not an error.
+- `limit` keeps that many of the **newest** samples, so `?limit=1` is the
+  current reading. `from`/`to` bound the window.
+- **Reading is passive.** It never resumes a paused sandbox: a hibernated one
+  keeps its samples, stops producing new ones, and reports `state: hibernated`.
+- `cpu_used_pct` is a percentage of **allocated** vCPUs, so 100 means the
+  sandbox is using everything it was given. It is 0 on the first sample of a
+  generation, which has no predecessor to difference against.
+- `host_mem_bytes` is the host's memory charge — guest pages *touched*. It does
+  not fall when the guest frees memory, so it is a high-water mark of cost.
+  `mem_used_bytes` is the guest's own view and is the one a workload cares
+  about.
+- Every counter belongs to a **VM**, not to a sandbox: a resume or restore
+  replaces the VM and restarts them at zero. `vmm_generation` changes when that
+  happens, so a reset is self-describing rather than a counter mysteriously
+  going backwards.
+- The guest-reported fields (`mem_*`, `disk_*`, `load1`, `processes`) are
+  **absent**, not zero, on deployments that do not poll the in-guest agent.
+
 ## Internal compatibility contract
 
 Fleet coordination is not part of the public OpenAPI document. New

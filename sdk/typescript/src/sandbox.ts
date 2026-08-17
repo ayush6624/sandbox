@@ -1,12 +1,23 @@
-import { ApiClient, CREATE_REQUEST_TIMEOUT_MS } from './client.js'
-import { Commands } from './commands.js'
-import { SandboxError } from './errors.js'
-import { Files } from './files.js'
-import { Pty } from './pty.js'
-import { ClientSandbox, Operation, SandboxClient } from './v1.js'
-import type { CreateManyOptions, CreateSandboxOptions, SandboxSource } from './v1.js'
-import { toHostInfo, toSandboxInfo, toSnapshotInfo } from './types.js'
+import { ApiClient, CREATE_REQUEST_TIMEOUT_MS } from "./client.js";
+import { Commands } from "./commands.js";
+import { SandboxError } from "./errors.js";
+import { Files } from "./files.js";
+import { Pty } from "./pty.js";
+import { ClientSandbox, Operation, SandboxClient } from "./v1.js";
 import type {
+  CreateManyOptions,
+  CreateSandboxOptions,
+  SandboxSource,
+} from "./v1.js";
+import {
+  toHostInfo,
+  toSandboxInfo,
+  toSandboxMetrics,
+  toSnapshotInfo,
+} from "./types.js";
+import type {
+  ApiSandboxMetrics,
+  SandboxMetrics,
   ApiHostInfo,
   ApiPortMapping,
   ApiSandbox,
@@ -21,7 +32,7 @@ import type {
   SandboxOpts,
   SandboxRestoreOpts,
   SnapshotInfo,
-} from './types.js'
+} from "./types.js";
 
 /**
  * Builds the JSON body shared by create/restore/fanout from the options they
@@ -30,23 +41,23 @@ import type {
  * hibernation default).
  */
 function bringUpBody(opts: {
-  ttlMs?: number
-  idleTimeoutMs?: number
-  timeoutMs?: number
-  hibernateAfterMs?: number
+  ttlMs?: number;
+  idleTimeoutMs?: number;
+  timeoutMs?: number;
+  hibernateAfterMs?: number;
 }): Record<string, number | string> {
-  const body: Record<string, number | string> = {}
-  const ttlMs = opts.ttlMs ?? opts.timeoutMs
-  const idleTimeoutMs = opts.idleTimeoutMs ?? opts.hibernateAfterMs
+  const body: Record<string, number | string> = {};
+  const ttlMs = opts.ttlMs ?? opts.timeoutMs;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? opts.hibernateAfterMs;
   if (ttlMs !== undefined) {
-    body.timeout_sec = Math.ceil(ttlMs / 1000)
+    body.timeout_sec = Math.ceil(ttlMs / 1000);
   }
   if (idleTimeoutMs !== undefined) {
     // -1 is the "never hibernate" sentinel, passed through unscaled.
     body.hibernate_after_sec =
-      idleTimeoutMs < 0 ? -1 : Math.ceil(idleTimeoutMs / 1000)
+      idleTimeoutMs < 0 ? -1 : Math.ceil(idleTimeoutMs / 1000);
   }
-  return body
+  return body;
 }
 
 /**
@@ -67,30 +78,30 @@ function bringUpBody(opts: {
  */
 export class Sandbox {
   /** Unique id of this sandbox. */
-  readonly sandboxId: string
+  readonly sandboxId: string;
   /** Run commands inside the sandbox. */
-  readonly commands: Commands
+  readonly commands: Commands;
   /** Read, write, and list files inside the sandbox. */
-  readonly files: Files
+  readonly files: Files;
   /** Interactive PTY shells inside the sandbox (WebSocket-backed). */
-  readonly pty: Pty
+  readonly pty: Pty;
   /** Static info captured when the sandbox handle was created. */
-  readonly info: SandboxInfo
+  readonly info: SandboxInfo;
 
-  private readonly client: ApiClient
+  private readonly client: ApiClient;
   /** Known guest → host port mappings, used by the synchronous getHost(). */
-  private readonly portCache = new Map<number, number>()
+  private readonly portCache = new Map<number, number>();
   /** Known public ingress URLs, used by the synchronous getUrl(). */
-  private readonly urlCache = new Map<number, string>()
+  private readonly urlCache = new Map<number, string>();
 
   private constructor(client: ApiClient, info: SandboxInfo) {
-    this.client = client
-    this.info = info
-    this.sandboxId = info.sandboxId
-    this.commands = new Commands(client, info.sandboxId)
-    this.files = new Files(client, info.sandboxId)
-    this.pty = new Pty(client, info.sandboxId)
-    this.rememberPorts(info.ports ?? [])
+    this.client = client;
+    this.info = info;
+    this.sandboxId = info.sandboxId;
+    this.commands = new Commands(client, info.sandboxId);
+    this.files = new Files(client, info.sandboxId);
+    this.pty = new Pty(client, info.sandboxId);
+    this.rememberPorts(info.ports ?? []);
   }
 
   /**
@@ -109,26 +120,26 @@ export class Sandbox {
    * @throws {CapacityError} when the fleet has no free slot (retryable).
    */
   static async create(opts: SandboxCreateOpts = {}): Promise<Sandbox> {
-    const client = new ApiClient(opts)
-    const body = bringUpBody(opts)
+    const client = new ApiClient(opts);
+    const body = bringUpBody(opts);
     if (opts.name !== undefined) {
-      body.name = opts.name
+      body.name = opts.name;
     }
     if (opts.vcpus !== undefined) {
-      body.vcpus = opts.vcpus
+      body.vcpus = opts.vcpus;
     }
     if (opts.memMib !== undefined) {
-      body.mem_mib = opts.memMib
+      body.mem_mib = opts.memMib;
     }
     if (opts.sshPubkey !== undefined) {
-      body.ssh_pubkey = opts.sshPubkey
+      body.ssh_pubkey = opts.sshPubkey;
     }
-    const res = await client.request('POST', '/sandboxes', {
+    const res = await client.request("POST", "/sandboxes", {
       timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
       ...(Object.keys(body).length > 0 ? { json: body } : {}),
-    })
-    const raw = (await res.json()) as ApiSandbox
-    return new Sandbox(client, toSandboxInfo(raw))
+    });
+    const raw = (await res.json()) as ApiSandbox;
+    return new Sandbox(client, toSandboxInfo(raw));
   }
 
   /**
@@ -143,18 +154,20 @@ export class Sandbox {
       baseUrl: opts.apiUrl,
       apiKey: opts.apiKey,
       requestTimeoutMs: opts.requestTimeoutMs,
-    })
-    return client.sandboxes.create({ ...opts, source })
+    });
+    return client.sandboxes.create({ ...opts, source });
   }
 
   /** Starts a typed batch-create operation through the v1 API. */
-  static async createMany(opts: CreateManyOptions & SandboxOpts): Promise<Operation<ClientSandbox>> {
+  static async createMany(
+    opts: CreateManyOptions & SandboxOpts,
+  ): Promise<Operation<ClientSandbox>> {
     const client = new SandboxClient({
       baseUrl: opts.apiUrl,
       apiKey: opts.apiKey,
       requestTimeoutMs: opts.requestTimeoutMs,
-    })
-    return client.sandboxes.createMany(opts)
+    });
+    return client.sandboxes.createMany(opts);
   }
 
   /**
@@ -162,11 +175,14 @@ export class Sandbox {
    *
    * @throws {NotFoundError} when no sandbox with that id exists.
    */
-  static async connect(sandboxId: string, opts: SandboxOpts = {}): Promise<Sandbox> {
-    const client = new ApiClient(opts)
-    const res = await client.request('GET', `/sandboxes/${sandboxId}`)
-    const raw = (await res.json()) as ApiSandbox
-    return new Sandbox(client, toSandboxInfo(raw))
+  static async connect(
+    sandboxId: string,
+    opts: SandboxOpts = {},
+  ): Promise<Sandbox> {
+    const client = new ApiClient(opts);
+    const res = await client.request("GET", `/sandboxes/${sandboxId}`);
+    const raw = (await res.json()) as ApiSandbox;
+    return new Sandbox(client, toSandboxInfo(raw));
   }
 
   /**
@@ -176,32 +192,33 @@ export class Sandbox {
    * answer comes from one live host (hosts share a template config).
    */
   static async hostInfo(opts: SandboxOpts = {}): Promise<HostInfo> {
-    const client = new ApiClient(opts)
-    const res = await client.request('GET', '/info')
-    const raw = (await res.json()) as ApiHostInfo
-    return toHostInfo(raw)
+    const client = new ApiClient(opts);
+    const res = await client.request("GET", "/info");
+    const raw = (await res.json()) as ApiHostInfo;
+    return toHostInfo(raw);
   }
-
 
   /**
    * Lists all sandboxes — `running` and `hibernated` alike (a hibernated
    * sandbox is still addressable; its next request wakes it).
    */
   static async list(opts: SandboxOpts = {}): Promise<SandboxInfo[]> {
-    const client = new ApiClient(opts)
-    const res = await client.request('GET', '/sandboxes')
-    const raw = (await res.json()) as ApiSandbox[] | null
-    return (raw ?? []).map(toSandboxInfo)
+    const client = new ApiClient(opts);
+    const res = await client.request("GET", "/sandboxes");
+    const raw = (await res.json()) as ApiSandbox[] | null;
+    return (raw ?? []).map(toSandboxInfo);
   }
 
   /**
    * Destroys a sandbox by id without needing a `Sandbox` instance.
    */
-  static async terminate(sandboxId: string, opts: SandboxOpts = {}): Promise<void> {
-    const client = new ApiClient(opts)
-    await client.request('DELETE', `/sandboxes/${sandboxId}`)
+  static async terminate(
+    sandboxId: string,
+    opts: SandboxOpts = {},
+  ): Promise<void> {
+    const client = new ApiClient(opts);
+    await client.request("DELETE", `/sandboxes/${sandboxId}`);
   }
-
 
   /**
    * Restores a brand-new sandbox from a snapshot, resuming it from the saved
@@ -225,18 +242,25 @@ export class Sandbox {
    *                         by its source sandbox or an earlier restore.
    */
   /** @deprecated Use Sandbox.createFromSource({ snapshotId }, opts). */
-  static async restore(snapshotId: string, opts: SandboxRestoreOpts = {}): Promise<Sandbox> {
-    const client = new ApiClient(opts)
-    const body = bringUpBody(opts)
+  static async restore(
+    snapshotId: string,
+    opts: SandboxRestoreOpts = {},
+  ): Promise<Sandbox> {
+    const client = new ApiClient(opts);
+    const body = bringUpBody(opts);
     if (opts.name !== undefined) {
-      body.name = opts.name
+      body.name = opts.name;
     }
-    const res = await client.request('POST', `/snapshots/${snapshotId}/restore`, {
-      timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
-      ...(Object.keys(body).length > 0 ? { json: body } : {}),
-    })
-    const raw = (await res.json()) as ApiSandbox
-    return new Sandbox(client, toSandboxInfo(raw))
+    const res = await client.request(
+      "POST",
+      `/snapshots/${snapshotId}/restore`,
+      {
+        timeoutMs: opts.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
+        ...(Object.keys(body).length > 0 ? { json: body } : {}),
+      },
+    );
+    const raw = (await res.json()) as ApiSandbox;
+    return new Sandbox(client, toSandboxInfo(raw));
   }
 
   /**
@@ -260,34 +284,48 @@ export class Sandbox {
    * @returns One {@link Sandbox} per clone that came up successfully.
    */
   /** @deprecated Use Sandbox.createMany({ count, source: { snapshotId }, ...opts }). */
-  static async fanout(snapshotId: string, count: number, opts: SandboxFanoutOpts = {}): Promise<Sandbox[]> {
-    if (!Number.isInteger(count) || count < 1) throw new Error('count must be a positive integer')
-    const client = new ApiClient(opts)
-    const res = await client.request('POST', `/snapshots/${snapshotId}/fanout`, {
-      // The server holds the request open until every clone is up; scale with count.
-      timeoutMs: opts.requestTimeoutMs ?? Math.max(CREATE_REQUEST_TIMEOUT_MS, count * 3_000),
-      json: { count, ...bringUpBody(opts) },
-    })
-    const raw = (await res.json()) as ApiSandbox[]
-    return raw.map((r) => new Sandbox(client, toSandboxInfo(r)))
+  static async fanout(
+    snapshotId: string,
+    count: number,
+    opts: SandboxFanoutOpts = {},
+  ): Promise<Sandbox[]> {
+    if (!Number.isInteger(count) || count < 1)
+      throw new Error("count must be a positive integer");
+    const client = new ApiClient(opts);
+    const res = await client.request(
+      "POST",
+      `/snapshots/${snapshotId}/fanout`,
+      {
+        // The server holds the request open until every clone is up; scale with count.
+        timeoutMs:
+          opts.requestTimeoutMs ??
+          Math.max(CREATE_REQUEST_TIMEOUT_MS, count * 3_000),
+        json: { count, ...bringUpBody(opts) },
+      },
+    );
+    const raw = (await res.json()) as ApiSandbox[];
+    return raw.map((r) => new Sandbox(client, toSandboxInfo(r)));
   }
 
   /**
    * Lists all saved snapshots on the host.
    */
   static async listSnapshots(opts: SandboxOpts = {}): Promise<SnapshotInfo[]> {
-    const client = new ApiClient(opts)
-    const res = await client.request('GET', '/snapshots')
-    const raw = (await res.json()) as ApiSnapshot[] | null
-    return (raw ?? []).map(toSnapshotInfo)
+    const client = new ApiClient(opts);
+    const res = await client.request("GET", "/snapshots");
+    const raw = (await res.json()) as ApiSnapshot[] | null;
+    return (raw ?? []).map(toSnapshotInfo);
   }
 
   /**
    * Deletes a snapshot and its on-disk artifacts.
    */
-  static async deleteSnapshot(snapshotId: string, opts: SandboxOpts = {}): Promise<void> {
-    const client = new ApiClient(opts)
-    await client.request('DELETE', `/snapshots/${snapshotId}`)
+  static async deleteSnapshot(
+    snapshotId: string,
+    opts: SandboxOpts = {},
+  ): Promise<void> {
+    const client = new ApiClient(opts);
+    await client.request("DELETE", `/snapshots/${snapshotId}`);
   }
 
   /**
@@ -296,14 +334,18 @@ export class Sandbox {
   static async renameSnapshot(
     snapshotId: string,
     name: string,
-    opts: SandboxOpts = {}
+    opts: SandboxOpts = {},
   ): Promise<SnapshotInfo> {
-    const client = new ApiClient(opts)
-    const res = await client.request('POST', `/snapshots/${snapshotId}/rename`, {
-      json: { name },
-    })
-    const raw = (await res.json()) as ApiSnapshot
-    return toSnapshotInfo(raw)
+    const client = new ApiClient(opts);
+    const res = await client.request(
+      "POST",
+      `/snapshots/${snapshotId}/rename`,
+      {
+        json: { name },
+      },
+    );
+    const raw = (await res.json()) as ApiSnapshot;
+    return toSnapshotInfo(raw);
   }
 
   /**
@@ -317,13 +359,13 @@ export class Sandbox {
    * @throws {SandboxError} when the port has not been exposed yet.
    */
   getHost(port: number): string {
-    const hostPort = this.portCache.get(port)
+    const hostPort = this.portCache.get(port);
     if (hostPort === undefined) {
       throw new SandboxError(
-        `Guest port ${port} is not forwarded to the host. Call \`await sandbox.exposePort(${port})\` first.`
-      )
+        `Guest port ${port} is not forwarded to the host. Call \`await sandbox.exposePort(${port})\` first.`,
+      );
     }
-    return `${this.hostname}:${hostPort}`
+    return `${this.hostname}:${hostPort}`;
   }
 
   /**
@@ -333,13 +375,13 @@ export class Sandbox {
    * or after {@link exposePort}/{@link listPorts} on this instance.
    */
   getUrl(port: number): string {
-    const url = this.urlCache.get(port)
+    const url = this.urlCache.get(port);
     if (url === undefined) {
       throw new SandboxError(
-        `Guest port ${port} has no public ingress URL. Expose it and configure the worker ingress_domain first.`
-      )
+        `Guest port ${port} has no public ingress URL. Expose it and configure the worker ingress_domain first.`,
+      );
     }
-    return url
+    return url;
   }
 
   /**
@@ -347,7 +389,7 @@ export class Sandbox {
    * fleet mode (the gateway annotates responses with it), else the API host.
    */
   private get hostname(): string {
-    return this.info.hostAddr ?? this.client.apiHostname
+    return this.info.hostAddr ?? this.client.apiHostname;
   }
 
   /**
@@ -362,17 +404,20 @@ export class Sandbox {
    * @throws {NotFoundError} when the sandbox no longer exists (killed or expired).
    */
   async refresh(): Promise<SandboxInfo> {
-    const res = await this.client.request('GET', `/sandboxes/${this.sandboxId}`)
-    const fresh = toSandboxInfo((await res.json()) as ApiSandbox)
+    const res = await this.client.request(
+      "GET",
+      `/sandboxes/${this.sandboxId}`,
+    );
+    const fresh = toSandboxInfo((await res.json()) as ApiSandbox);
     // Drop fields the server no longer reports (e.g. a cleared TTL) before
     // copying the new ones over, so `info` never keeps a stale value.
-    const bag = this.info as unknown as Record<string, unknown>
+    const bag = this.info as unknown as Record<string, unknown>;
     for (const key of Object.keys(bag)) {
-      if (!(key in fresh)) delete bag[key]
+      if (!(key in fresh)) delete bag[key];
     }
-    Object.assign(this.info, fresh)
-    this.rememberPorts(fresh.ports ?? [])
-    return this.info
+    Object.assign(this.info, fresh);
+    this.rememberPorts(fresh.ports ?? []);
+    return this.info;
   }
 
   /**
@@ -382,45 +427,63 @@ export class Sandbox {
    * @param guestPort Port a service listens on inside the sandbox.
    * @returns The externally reachable `host:port` string.
    */
-  async exposePort(guestPort: number, opts: PortExposeOpts = {}): Promise<string> {
-    const body: { guest_port: number; host_port?: boolean } = { guest_port: guestPort }
-    if (opts.hostPort !== undefined) body.host_port = opts.hostPort
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/ports`, {
-      json: body,
-    })
-    const raw = (await res.json()) as ApiPortMapping
+  async exposePort(
+    guestPort: number,
+    opts: PortExposeOpts = {},
+  ): Promise<string> {
+    const body: { guest_port: number; host_port?: boolean } = {
+      guest_port: guestPort,
+    };
+    if (opts.hostPort !== undefined) body.host_port = opts.hostPort;
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/ports`,
+      {
+        json: body,
+      },
+    );
+    const raw = (await res.json()) as ApiPortMapping;
     if (raw.host_port !== undefined) {
-      this.portCache.set(raw.guest_port, raw.host_port)
+      this.portCache.set(raw.guest_port, raw.host_port);
     }
-    if (raw.url) this.urlCache.set(raw.guest_port, raw.url)
-    if (raw.host_port !== undefined) return `${this.hostname}:${raw.host_port}`
-    if (raw.url) return raw.url
-    throw new SandboxError('Server created a URL-only exposure without returning its public URL')
+    if (raw.url) this.urlCache.set(raw.guest_port, raw.url);
+    if (raw.host_port !== undefined) return `${this.hostname}:${raw.host_port}`;
+    if (raw.url) return raw.url;
+    throw new SandboxError(
+      "Server created a URL-only exposure without returning its public URL",
+    );
   }
 
   /** Allocates a fleet-wide public raw TCP address for a non-HTTP service. SSH is CLI-owned. */
   async exposeRawPort(guestPort: number): Promise<RawPortMapping> {
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/raw-ports`, {
-      json: { guest_port: guestPort },
-    })
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/raw-ports`,
+      {
+        json: { guest_port: guestPort },
+      },
+    );
     const raw = (await res.json()) as {
-      guest_port: number
-      public_host: string
-      public_port: number
-    }
+      guest_port: number;
+      public_host: string;
+      public_port: number;
+    };
     return {
       guestPort: raw.guest_port,
       publicHost: raw.public_host,
       publicPort: raw.public_port,
       address: `${raw.public_host}:${raw.public_port}`,
-    }
+    };
   }
 
   /** Removes an exposure and releases its worker-local and raw public ports. */
   async unexposePort(guestPort: number): Promise<void> {
-    await this.client.request('DELETE', `/sandboxes/${this.sandboxId}/ports/${guestPort}`)
-    this.portCache.delete(guestPort)
-    this.urlCache.delete(guestPort)
+    await this.client.request(
+      "DELETE",
+      `/sandboxes/${this.sandboxId}/ports/${guestPort}`,
+    );
+    this.portCache.delete(guestPort);
+    this.urlCache.delete(guestPort);
   }
 
   /**
@@ -428,24 +491,27 @@ export class Sandbox {
    * cache used by {@link getHost}.
    */
   async listPorts(): Promise<PortMapping[]> {
-    const res = await this.client.request('GET', `/sandboxes/${this.sandboxId}/ports`)
-    const raw = (await res.json()) as ApiPortMapping[] | null
+    const res = await this.client.request(
+      "GET",
+      `/sandboxes/${this.sandboxId}/ports`,
+    );
+    const raw = (await res.json()) as ApiPortMapping[] | null;
     const mappings = (raw ?? []).map((m) => {
-      const mapping: PortMapping = { guestPort: m.guest_port }
-      if (m.host_port !== undefined) mapping.hostPort = m.host_port
-      if (m.mode !== undefined) mapping.mode = m.mode
-      if (m.url !== undefined) mapping.url = m.url
-      if (m.public_port !== undefined) mapping.publicPort = m.public_port
-      return mapping
-    })
-    this.rememberPorts(mappings)
-    return mappings
+      const mapping: PortMapping = { guestPort: m.guest_port };
+      if (m.host_port !== undefined) mapping.hostPort = m.host_port;
+      if (m.mode !== undefined) mapping.mode = m.mode;
+      if (m.url !== undefined) mapping.url = m.url;
+      if (m.public_port !== undefined) mapping.publicPort = m.public_port;
+      return mapping;
+    });
+    this.rememberPorts(mappings);
+    return mappings;
   }
 
   private rememberPorts(mappings: PortMapping[]): void {
     for (const m of mappings) {
-      if (m.hostPort !== undefined) this.portCache.set(m.guestPort, m.hostPort)
-      if (m.url !== undefined) this.urlCache.set(m.guestPort, m.url)
+      if (m.hostPort !== undefined) this.portCache.set(m.guestPort, m.hostPort);
+      if (m.url !== undefined) this.urlCache.set(m.guestPort, m.url);
     }
   }
 
@@ -457,11 +523,15 @@ export class Sandbox {
    *                  seconds); `0` removes the timeout.
    */
   async setTimeout(timeoutMs: number): Promise<void> {
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/timeout`, {
-      json: { timeout_sec: Math.ceil(timeoutMs / 1000) },
-    })
-    const raw = (await res.json()) as ApiSandbox
-    this.info.expiresAt = raw.expires_at ? new Date(raw.expires_at) : undefined
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/timeout`,
+      {
+        json: { timeout_sec: Math.ceil(timeoutMs / 1000) },
+      },
+    );
+    const raw = (await res.json()) as ApiSandbox;
+    this.info.expiresAt = raw.expires_at ? new Date(raw.expires_at) : undefined;
   }
 
   /**
@@ -469,11 +539,15 @@ export class Sandbox {
    * a free-form label shown in listings — not unique and not a lookup key.
    */
   async rename(name: string): Promise<void> {
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/rename`, {
-      json: { name },
-    })
-    const raw = (await res.json()) as ApiSandbox
-    this.info.name = raw.name
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/rename`,
+      {
+        json: { name },
+      },
+    );
+    const raw = (await res.json()) as ApiSandbox;
+    this.info.name = raw.name;
   }
 
   /**
@@ -486,12 +560,16 @@ export class Sandbox {
    * @returns Metadata for the saved snapshot, including its `snapshotId`.
    */
   async snapshot(opts: { name?: string } = {}): Promise<SnapshotInfo> {
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/snapshot`, {
-      timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
-      ...(opts.name !== undefined ? { json: { name: opts.name } } : {}),
-    })
-    const raw = (await res.json()) as ApiSnapshot
-    return toSnapshotInfo(raw)
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/snapshot`,
+      {
+        timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+        ...(opts.name !== undefined ? { json: { name: opts.name } } : {}),
+      },
+    );
+    const raw = (await res.json()) as ApiSnapshot;
+    return toSnapshotInfo(raw);
   }
 
   /**
@@ -503,26 +581,64 @@ export class Sandbox {
    */
   /** Pauses this sandbox while preserving its identity and runtime state. */
   async pause(): Promise<void> {
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/hibernate`, {
-      timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
-    })
-    const raw = (await res.json()) as ApiSandbox
-    this.info.status = raw.status
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/hibernate`,
+      {
+        timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+      },
+    );
+    const raw = (await res.json()) as ApiSandbox;
+    this.info.status = raw.status;
   }
 
   /** Explicitly resumes a paused sandbox without changing its identity. */
   async resume(): Promise<void> {
-    const res = await this.client.request('POST', `/sandboxes/${this.sandboxId}/resume`, {
-      timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
-    })
-    const raw = (await res.json()) as ApiSandbox
-    this.info.status = raw.status
+    const res = await this.client.request(
+      "POST",
+      `/sandboxes/${this.sandboxId}/resume`,
+      {
+        timeoutMs: CREATE_REQUEST_TIMEOUT_MS,
+      },
+    );
+    const raw = (await res.json()) as ApiSandbox;
+    this.info.status = raw.status;
+  }
+
+  /**
+   * Reads this sandbox's recent resource utilization — what it is consuming,
+   * as distinct from what it is billed for.
+   *
+   * Samples are taken on the host every few seconds and kept in a bounded
+   * recent window, so this is a live view, not a historical record: it does not
+   * survive a worker restart. Reading is passive and never resumes a paused
+   * sandbox, which keeps its samples and stops producing new ones.
+   *
+   * Expect an empty array for the first few seconds of a sandbox's life, before
+   * the first sample is collected.
+   *
+   * @param opts `from`/`to` bound the window; `limit` keeps that many of the
+   *             NEWEST samples, so `{ limit: 1 }` is the current reading.
+   */
+  async metrics(
+    opts: { from?: Date; to?: Date; limit?: number } = {},
+  ): Promise<SandboxMetrics> {
+    const query: Record<string, string> = {};
+    if (opts.from) query.from = opts.from.toISOString();
+    if (opts.to) query.to = opts.to.toISOString();
+    if (opts.limit !== undefined) query.limit = String(opts.limit);
+    const res = await this.client.request(
+      "GET",
+      `/sandboxes/${this.sandboxId}/metrics`,
+      { query },
+    );
+    return toSandboxMetrics((await res.json()) as ApiSandboxMetrics);
   }
 
   /**
    * Destroys this sandbox and releases its resources on the host.
    */
   async terminate(): Promise<void> {
-    await this.client.request('DELETE', `/sandboxes/${this.sandboxId}`)
+    await this.client.request("DELETE", `/sandboxes/${this.sandboxId}`);
   }
 }

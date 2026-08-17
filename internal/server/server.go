@@ -79,6 +79,13 @@ type Config struct {
 	// kill), releasing their slot; any agent-bound request wakes them.
 	// 0 disables idle hibernation. See hibernate.go.
 	HibernateAfter time.Duration
+	// MetricsInterval samples per-sandbox utilization (sandboxmetrics.go).
+	// 0 = default 5s, <0 = off. MetricsHistory bounds the retained ring.
+	MetricsInterval time.Duration
+	MetricsHistory  int
+	// MetricsGuestStats polls each guest's sandboxd for its own memory/disk
+	// view. See config.MetricsGuestStats; requires a rebaked agent.
+	MetricsGuestStats bool
 	// UFFDRestore restores same-identity hibernation wakes with the userfaultfd
 	// memory backend (lazy page-in) instead of the eager File backend. See
 	// config.UFFDRestore and uffd_linux.go.
@@ -223,6 +230,9 @@ type Server struct {
 	// Prometheus counters (monotonic; reset only on a server restart).
 	met serverMetrics
 
+	// stats holds the bounded per-sandbox utilization series (sandboxmetrics.go).
+	stats *sandboxStats
+
 	// startedAt stamps process start so /metrics can export uptime.
 	startedAt time.Time
 	// bootAge reads Linux boot age (/proc/uptime, CLOCK_BOOTTIME semantics).
@@ -294,7 +304,8 @@ func New(cfg Config, reg *registry.Registry) *Server {
 		snapshotUploads: map[string]*backgroundUpload{},
 		chunksUploaded:  map[string]bool{}, act: newActivityTracker(),
 		hibUploads: map[string]*backgroundUpload{},
-		startedAt:  time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder()}
+		startedAt:  time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder(),
+		stats: newSandboxStats(cfg.MetricsHistory)}
 	sem := cfg.CreateConcurrency
 	if sem <= 0 {
 		sem = 2 * runtime.NumCPU()
@@ -414,6 +425,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Advances every open billable interval's heartbeat, bounding what a host
 	// crash can lose to one tick.
 	go s.usageSampler(ctx)
+	if every := s.metricsInterval(); s.cfg.MetricsInterval >= 0 {
+		go s.sampleLoop(ctx, every)
+	}
 	if s.usagePut != nil {
 		go s.usageSpooler(ctx)
 	}
@@ -463,6 +477,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	// sandboxes it bills, so neither is id-resolved against the sandbox table.
 	mux.HandleFunc("GET /usage", s.handleUsage)
 	mux.HandleFunc("GET /sandboxes/{id}/usage", s.handleSandboxUsage)
+	mux.HandleFunc("GET /sandboxes/{id}/metrics", s.handleSandboxMetrics)
 	mux.HandleFunc("POST /sandboxes", s.handleCreate)
 	mux.HandleFunc("GET /sandboxes", s.handleList)
 	mux.HandleFunc("GET /sandboxes/{id}", s.handleGet)

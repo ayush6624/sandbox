@@ -35,6 +35,7 @@ sudo ./sandbox up                                    # POST /sandboxes → print
 sudo ./sandbox list                                  # GET /sandboxes
 sudo ./sandbox down <id>                             # DELETE /sandboxes/<id>
 sudo ./sandbox hibernate <id>                        # freeze an idle sandbox to disk (next exec wakes it)
+sudo ./sandbox metrics <id>                          # recent cpu/mem/disk/net utilization samples
 sudo ./sandbox rename <id> "my devbox"               # set a sandbox's display name ("" clears)
 sudo ./sandbox exec <id> -- "node --version"         # run a command in the guest
 sudo ./sandbox shell <id>                            # interactive PTY shell (WebSocket) in the guest

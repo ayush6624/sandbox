@@ -281,6 +281,35 @@ paths:
           description: A page of this sandbox's usage intervals with totals.
           content: {application/json: {schema: {$ref: '#/components/schemas/UsageReport'}}}
         default: {$ref: '#/components/responses/Problem'}
+  /v1/sandboxes/{sandbox_id}/metrics:
+    parameters: [{$ref: '#/components/parameters/SandboxId'}]
+    get:
+      tags: [Usage]
+      operationId: getSandboxMetrics
+      summary: Live resource utilization for one sandbox.
+      description: |
+        A time series of what the sandbox is CONSUMING, as distinct from
+        `/usage`, which reports what it is BILLED (allocation). Samples are
+        taken on the owning host every few seconds and kept in a bounded
+        in-memory window, so this answers for recent history only: it does not
+        survive a worker restart, and a sandbox that moved hosts starts a fresh
+        series. Reading is passive — it never wakes a hibernated sandbox, which
+        keeps its samples and simply stops producing new ones.
+
+        Empty until the first sample is collected, which takes a few seconds
+        after create.
+      parameters:
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+        - name: limit
+          in: query
+          description: Keep at most this many of the NEWEST samples. `limit=1` is the current reading.
+          schema: {type: integer, minimum: 1, maximum: 1000}
+      responses:
+        '200':
+          description: The sandbox's recent utilization samples, oldest first.
+          content: {application/json: {schema: {$ref: '#/components/schemas/SandboxMetrics'}}}
+        default: {$ref: '#/components/responses/Problem'}
   /v1/operations:
     get:
       tags: [Operations]
@@ -450,6 +479,53 @@ components:
         cpu_seconds: {type: number}
         end_reason: {type: string, enum: [destroy, hibernate, expire, shutdown, vm_exit, crash]}
         metadata: {type: object, additionalProperties: {type: string}, description: "The sandbox's labels while this interval was accruing. An open interval tracks the sandbox's current labels; a closed one is history and is never rewritten."}
+    MetricSample:
+      type: object
+      description: |
+        One sampling tick. Host-measured fields are always present; the
+        guest-reported ones (`mem_*`, `disk_*`, `load1`, `processes`) are absent
+        unless the worker polls the in-guest agent for them.
+      required: [timestamp, vmm_generation, cpu_count, cpu_used_pct, cpu_seconds_total, host_mem_bytes, rootfs_alloc_bytes, net_rx_bytes, net_tx_bytes]
+      properties:
+        timestamp: {type: string, format: date-time}
+        vmm_generation:
+          type: integer
+          description: |
+            Counts the VMs that have served this sandbox. Every counter here
+            belongs to a VM, not to the sandbox: a resume or restore replaces it
+            and restarts them at zero. A changed generation is the signal that
+            the counters below reset.
+        cpu_count: {type: integer, description: Allocated vCPUs — the denominator of cpu_used_pct.}
+        cpu_used_pct:
+          type: number
+          description: |
+            CPU consumed over the tick as a percentage of ALLOCATED vCPUs, so
+            100 means the sandbox is using everything it was given. 0 on the
+            first sample of a generation, which has no predecessor.
+        cpu_seconds_total: {type: number, description: CPU seconds consumed by this VM since it started.}
+        host_mem_bytes:
+          type: integer
+          description: |
+            Host memory charged to the sandbox: guest pages TOUCHED. It does not
+            fall when the guest frees memory, so it is a high-water mark of cost
+            rather than a measure of what the workload is using — for that, see
+            mem_used_bytes.
+        rootfs_alloc_bytes: {type: integer, description: Blocks the sandbox's root disk actually occupies (copy-on-write, so this grows as it writes).}
+        net_rx_bytes: {type: integer, description: Bytes received by the guest on its current VM.}
+        net_tx_bytes: {type: integer, description: Bytes sent by the guest on its current VM.}
+        mem_total_bytes: {type: integer}
+        mem_used_bytes: {type: integer, description: Guest memory in use (total minus available). Reclaimable page cache counts as available.}
+        disk_total_bytes: {type: integer}
+        disk_used_bytes: {type: integer}
+        load1: {type: number}
+        processes: {type: integer}
+    SandboxMetrics:
+      type: object
+      required: [samples, state, interval_seconds]
+      properties:
+        samples: {type: array, items: {$ref: '#/components/schemas/MetricSample'}, description: Oldest first. Empty when no sample has been collected yet.}
+        state: {type: string, description: The sandbox's status when the samples were read.}
+        interval_seconds: {type: number, description: Nominal seconds between samples.}
     UsageTotals:
       type: object
       required: [intervals, open_intervals, duration_seconds, vcpu_seconds, memory_mib_seconds, cpu_seconds]
