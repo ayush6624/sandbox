@@ -77,6 +77,7 @@ fi
 echo ">> sync $REPO -> $TARGET:~/$REMOTE_SRC"
 rsync -az --delete \
   --exclude 'node_modules/' --exclude '/bin/' --exclude 'graphify-out/' \
+  --exclude 'tests/results/' \
   --exclude '*.tgz' --exclude '/production_*' --exclude '.DS_Store' \
   -e "ssh ${SSH_OPTS[*]}" \
   "$REPO/" "${TARGET}:${REMOTE_SRC}/"
