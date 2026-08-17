@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -112,6 +113,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	jailerCfg := jailerConfigFrom(cfg)
 	if jailerCfg != nil {
+		// FIRST, before this process forks anything: delegate the task cgroup.
+		// Every jailed launch needs it, and the per-launch path can only do it
+		// while serve's own short-lived helpers (cp, ip, iptables) are sitting
+		// in that cgroup looking like foreign processes. Best-effort — the
+		// launch path still does it and still decides.
+		if err := vm.PrepareCgroupDelegation(*jailerCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "cgroup delegation deferred to first launch: %v\n", err)
+		}
 		if _, err := checkJailerPrerequisites(cfg); err != nil {
 			return fmt.Errorf("jailer prerequisites: %w", err)
 		}

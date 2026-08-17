@@ -787,6 +787,32 @@ scripts/              Host setup shell scripts
   `GET /info` MaxMemMIB) is clamped to the budget. vcpus have NO sum guard by design:
   the Nomad task runs CPU *shares*, so contention degrades to fair-share slowdown —
   there is no CPU analogue of the OOM killer.
+- **Task-cgroup delegation runs ONCE at serve startup, and serve's own forked
+  helpers are not foreign processes.** `prepareCurrentCgroupDelegation`
+  (internal/vm/jailer.go) refuses to delegate a task cgroup containing a process
+  it does not control — correct, but `currentProcessFamily()` walks only
+  ANCESTORS, so every helper serve forks (`cp --reflink` in CloneRootfs, `ip
+  tuntap add`/`ip link set` in CreateTapUnbridged, iptables in EnsureNetwork)
+  read as foreign because they are DESCENDANTS. That made delegation a race
+  against our own subprocesses, and it failed closed in the worst possible way:
+  the refusal happens before serve is moved into the `sandbox-control` leaf, so
+  the `base(rel) == controlLeaf` short-circuit never engages and **every later
+  launch re-runs the same losing race** — one transient `cp` at the wrong moment
+  takes the host out permanently. Cold boot then fails downstream with
+  `configure VM cgroup memory.max: permission denied` because `subtree_control`
+  was never enabled, which is the symptom you actually see. This shipped and
+  broke the fleet on 2026-08-17: it stayed latent for as long as the snapshot
+  stage lock *accidentally* serialized every golden-derived bring-up (hot creates
+  AND warm-pool builds all share the golden's `SourceRootfsPath`), and surfaced
+  fleet-wide the moment that serialization was removed — 8 concurrent warm builds
+  guarantee a helper is in the cgroup. Two fixes, both needed: `cgroupProcOurs`
+  accepts serve's descendants as well as its ancestors (a foreign tenant still
+  fails closed), and `vm.PrepareCgroupDelegation` runs from `serve` **before this
+  process forks anything** so the common case never races at all. A pid that
+  exited between reading `cgroup.procs` and the move is success, not failure
+  (ESRCH/ENOENT). The lesson generalizes: **removing a lock in this codebase can
+  expose latent races in code you did not touch** — the accidental serialization
+  was load-bearing.
 - **Creates are bounded and capacity-classed.** A per-host semaphore
   (`"create_concurrency"` in the config; 0 = min(2×NumCPU, 16)) gates every bring-up
   (hot clone, cold boot, 1:1 restore) so a burst queues in-process instead of

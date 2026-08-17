@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -1080,6 +1081,27 @@ func validateCgroupParent(cfg JailerConfig) error {
 	return nil
 }
 
+// PrepareCgroupDelegation performs the task-cgroup delegation ONCE, at serve
+// startup, before anything else can fork. Every jailed launch needs it done,
+// and the per-launch path (jailerProcessLauncher.Prepare) still calls it — but
+// by then serve has forked helpers into the task cgroup, so the check below has
+// to reason about them. Doing it first means it runs against a quiet cgroup
+// containing only serve and its supervisor, which is the state the check was
+// written for.
+//
+// Best-effort by design: the per-launch path remains authoritative, so a
+// failure here is logged and startup continues rather than refusing to serve a
+// host that might still be fine (a dev box outside a bounded cgroup, say).
+// Once it succeeds, `base(rel) == controlLeaf` short-circuits every later call.
+func PrepareCgroupDelegation(cfg JailerConfig) error {
+	cfg.defaults()
+	if cfg.CgroupParent != "" {
+		return nil // explicitly configured; nothing to delegate
+	}
+	_, err := prepareCurrentCgroupDelegation(cfg)
+	return err
+}
+
 // prepareCurrentCgroupDelegation turns the current Nomad task cgroup into an
 // aggregate parent: serve is moved into a control leaf, then cpu/memory/pids/io
 // are delegated to sibling per-VM leaves created by jailer. This preserves the
@@ -1109,11 +1131,30 @@ func prepareCurrentCgroupDelegation(cfg JailerConfig) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read task cgroup.procs: %w", err)
 	}
+	// Accept our own ancestors (the Nomad shell supervisor) and our own
+	// DESCENDANTS; reject anything else. The descendant case is not a
+	// loosening for convenience — serve forks short-lived helpers constantly
+	// (`cp --reflink` in CloneRootfs, `ip tuntap add`/`ip link set` in
+	// CreateTapUnbridged, iptables in EnsureNetwork) and they land in this
+	// cgroup because they are our children. currentProcessFamily() walks only
+	// ANCESTORS, so every one of them read as foreign and refused delegation.
+	//
+	// That made delegation a race against our own subprocesses, and it failed
+	// closed in the worst possible way: the refusal happens before serve is
+	// moved into the control leaf, so the `base(rel) == controlLeaf`
+	// short-circuit above never engages and EVERY later launch re-runs the
+	// same losing race. One transient `cp` at the wrong moment took the host
+	// out permanently — observed fleet-wide the moment concurrent warm-pool
+	// builds stopped being accidentally serialized by the snapshot stage lock.
 	allowed := currentProcessFamily()
+	self := os.Getpid()
 	var taskPIDs []int
 	for _, field := range strings.Fields(string(procs)) {
 		pid, parseErr := strconv.Atoi(field)
-		if parseErr != nil || !allowed[pid] {
+		if parseErr != nil {
+			return "", fmt.Errorf("task cgroup %s contains unparseable pid %q; refusing delegation", rel, field)
+		}
+		if !cgroupProcOurs(pid, self, allowed, processParentPID) {
 			return "", fmt.Errorf("task cgroup %s contains foreign process %s; refusing delegation", rel, field)
 		}
 		taskPIDs = append(taskPIDs, pid)
@@ -1137,15 +1178,22 @@ func prepareCurrentCgroupDelegation(cfg JailerConfig) (string, error) {
 		return "", fmt.Errorf("create serve control cgroup: %w", err)
 	}
 	// The production Nomad task may contain a tiny shell supervisor in the
-	// serve process's direct ancestor chain. Move that trusted process family
-	// together so the aggregate task cgroup is empty before enabling
-	// controllers. Any peer or unrelated process still fails closed above.
-	self := os.Getpid()
+	// serve process's direct ancestor chain, plus any helper we have forked.
+	// Move that trusted process family together so the aggregate task cgroup is
+	// empty before enabling controllers. Any peer or unrelated process still
+	// fails closed above.
 	for _, pid := range taskPIDs {
 		if pid == self {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(control, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0600); err != nil {
+			// A forked helper is short-lived by nature and may well have exited
+			// between reading cgroup.procs and this write; the kernel reports
+			// ESRCH/ENOENT for a pid that is gone. That is success, not failure
+			// — it is no longer in the cgroup we are trying to empty.
+			if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return "", fmt.Errorf("move serve supervisor %d into control cgroup: %w", pid, err)
 		}
 	}
@@ -1164,6 +1212,21 @@ func prepareCurrentCgroupDelegation(cfg JailerConfig) (string, error) {
 
 func currentProcessFamily() map[int]bool {
 	return processFamily(os.Getpid(), processParentPID)
+}
+
+// cgroupProcOurs reports whether pid is a process this serve controls: itself,
+// one of its ancestors (the Nomad shell supervisor), or one of its descendants
+// (a forked helper such as `cp --reflink`, `ip tuntap add`, or iptables).
+// Anything else is a foreign tenant and must fail delegation closed.
+//
+// ancestors is serve's own ancestor set; parent resolves a pid's parent so the
+// descendant walk is injectable for tests.
+func cgroupProcOurs(pid, self int, ancestors map[int]bool, parent func(int) int) bool {
+	if ancestors[pid] {
+		return true
+	}
+	// pid is ours iff serve appears in pid's ancestor chain.
+	return processFamily(pid, parent)[self]
 }
 
 func processFamily(pid int, parent func(int) int) map[int]bool {

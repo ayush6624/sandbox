@@ -444,3 +444,47 @@ func assertSameInode(t *testing.T, a, b string) {
 		t.Fatalf("%s and %s are not the same rootfs inode", a, b)
 	}
 }
+
+// Delegation must accept the processes serve controls and refuse everything
+// else. serve forks short-lived helpers (`cp --reflink` in CloneRootfs, `ip
+// tuntap add` in CreateTapUnbridged, iptables in EnsureNetwork) and they land
+// in the task cgroup as its children. Treating them as foreign made delegation
+// a race against our own subprocesses that failed closed permanently: the
+// refusal happens before serve moves into the control leaf, so the short-circuit
+// never engages and every later launch re-runs the same losing race.
+func TestCgroupProcOursAcceptsOwnFamilyAndRefusesForeign(t *testing.T) {
+	const self = 100
+	// 1 -> 50 (supervisor) -> 100 (serve) -> 300 (cp) -> 301 (grandchild)
+	// 900 is an unrelated tenant under a different root.
+	parents := map[int]int{50: 1, 100: 50, 300: 100, 301: 300, 900: 800, 800: 1}
+	parent := func(pid int) int { return parents[pid] }
+	ancestors := processFamily(self, parent)
+
+	for _, tc := range []struct {
+		name string
+		pid  int
+		want bool
+	}{
+		{"serve itself", self, true},
+		{"shell supervisor (ancestor)", 50, true},
+		{"forked helper (child)", 300, true},
+		{"helper's child (grandchild)", 301, true},
+		{"unrelated tenant", 900, false},
+		{"unrelated tenant's parent", 800, false},
+		{"pid that no longer resolves", 4242, false},
+	} {
+		if got := cgroupProcOurs(tc.pid, self, ancestors, parent); got != tc.want {
+			t.Errorf("%s: cgroupProcOurs(%d) = %v, want %v", tc.name, tc.pid, got, tc.want)
+		}
+	}
+}
+
+// A cycle in the parent chain must not hang or wrongly claim ownership.
+func TestCgroupProcOursSurvivesParentCycle(t *testing.T) {
+	const self = 100
+	parents := map[int]int{100: 1, 500: 501, 501: 500}
+	parent := func(pid int) int { return parents[pid] }
+	if cgroupProcOurs(500, self, processFamily(self, parent), parent) {
+		t.Fatal("a pid in a parent cycle must not be treated as ours")
+	}
+}
