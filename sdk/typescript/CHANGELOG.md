@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.8.0 - 2026-08-17
+
+### Added
+
+- **Sandbox metrics.** `sandbox.metrics()` returns a time series of what a
+  sandbox is *consuming* — CPU, memory, disk and network — as opposed to what
+  it is *billed* for, which is allocation and lives in the usage API.
+
+  ```ts
+  const { samples } = await sbx.metrics({ limit: 1 })
+  const now = samples[0]
+  console.log(now.cpuUsedPct, now.memUsedBytes, now.diskUsedBytes)
+  ```
+
+  `from`/`to` bound the window and `limit` keeps that many of the newest
+  samples, so `{ limit: 1 }` is the current reading. Samples are collected on
+  the host every few seconds and kept in a bounded recent window, so this is a
+  live view rather than a historical record: it does not survive a worker
+  restart, and it is empty for the first couple of seconds of a sandbox's life,
+  before the first sample exists. Reading is passive and never resumes a paused
+  sandbox, which keeps its samples and stops producing new ones.
+
+  Two fields are easy to misread, so they are named for what they actually are.
+  `hostMemBytes` is the memory the *host* is charged — guest pages touched —
+  and it does not fall when the guest frees memory (measured: a guest that
+  touched 384 MiB and freed it released under 1 MiB), so it is a high-water
+  mark of cost. `memUsedBytes` is the guest's own view and is the one a
+  workload cares about. Likewise `rootfsAllocBytes` includes blocks still
+  shared with the image the sandbox was cloned from, so it starts around
+  2.2 GiB; its growth is what the sandbox wrote.
+
+  Every counter belongs to a VM rather than to the sandbox, and a resume or
+  restore replaces that VM and restarts them at zero. `vmmGeneration` changes
+  when that happens, so a reset is self-describing instead of appearing as a
+  counter that mysteriously went backwards.
+
+  The guest-reported fields (`memTotalBytes`, `memUsedBytes`,
+  `diskTotalBytes`, `diskUsedBytes`, `load1`, `processes`) are **absent rather
+  than zero** on deployments whose servers do not poll the in-guest agent, so
+  check for `undefined` rather than treating `0` as "nothing in use". Servers
+  older than this release do not implement the endpoint at all.
+
 ## 2.7.0 - 2026-08-16
 
 ### Added
