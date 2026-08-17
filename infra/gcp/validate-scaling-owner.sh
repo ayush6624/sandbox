@@ -85,6 +85,15 @@ grep -q 'STANDBY_SUSPENDED_SIZE="0"' "$DIR/config.env.example" ||
 grep -q 'STANDBY_STOPPED_SIZE="0"' "$DIR/config.env.example" ||
   fail "config.env.example enables stopped standby"
 
+# Updating the template under GCE's default PROACTIVE policy is itself a
+# destructive writer: set-instance-template immediately substitutes live VMs.
+# The non-disruptive template command must switch to OPPORTUNISTIC first.
+template_policy_line="$(awk '/^cmd_template\(\)/ { in_template=1 } in_template && /update-policy-type=opportunistic/ { print NR; exit }' "$MIG")"
+template_set_line="$(awk '/^cmd_template\(\)/ { in_template=1 } in_template && /managed set-instance-template/ { print NR; exit }' "$MIG")"
+[ -n "$template_policy_line" ] && [ -n "$template_set_line" ] &&
+  [ "$template_policy_line" -lt "$template_set_line" ] ||
+  fail "mig.sh template updates must set OPPORTUNISTIC policy before changing the template"
+
 # 4. Scale-in must remove a NAMED instance. A resize-down lets GCE choose the
 #    victim, which is never the host that was drained — that is the whole bug
 #    this design exists to avoid.

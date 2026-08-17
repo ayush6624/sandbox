@@ -149,6 +149,12 @@ cmd_template() {
   local tpl; tpl="$(template_name)"
   create_template "$tpl"
   echo ">> Set $MIG_NAME future instances to $tpl (no rolling replacement)"
+  # set-instance-template obeys the group's update policy. With GCE's default
+  # PROACTIVE policy it immediately starts substitutions even though no
+  # rolling-action was requested. Flip the policy first so this command really
+  # does affect only future creates/repairs.
+  "${GC[@]}" compute instance-groups managed update "$MIG_NAME" --zone="$ZONE" \
+    --update-policy-type=opportunistic
   "${GC[@]}" compute instance-groups managed set-instance-template "$MIG_NAME" --zone="$ZONE" --template="$tpl"
 }
 
