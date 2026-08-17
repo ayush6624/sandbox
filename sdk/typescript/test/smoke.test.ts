@@ -1240,7 +1240,8 @@ test('metrics return a utilization series with optional guest fields', async () 
   assert.equal(metrics.intervalSeconds, 5)
   assert.equal(metrics.samples.length, 2)
 
-  const [first, latest] = metrics.samples
+  const first = metrics.samples[0]!
+  const latest = metrics.samples[1]!
   assert.deepEqual(first.timestamp, new Date('2026-06-10T12:00:00Z'))
   assert.equal(first.cpuUsedPct, 0)
   // Host-only sample: the guest was not polled, so those fields are absent.
@@ -1259,5 +1260,5 @@ test('metrics return a utilization series with optional guest fields', async () 
   // limit keeps the NEWEST samples, so limit:1 is the current reading.
   const current = await sbx.metrics({ limit: 1 })
   assert.equal(current.samples.length, 1)
-  assert.equal(current.samples[0].cpuUsedPct, 42.5)
+  assert.equal(current.samples[0]!.cpuUsedPct, 42.5)
 })

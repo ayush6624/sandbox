@@ -511,7 +511,12 @@ export interface MetricSample {
    * a measure of what the workload is using — for that see {@link memUsedBytes}.
    */
   hostMemBytes: number;
-  /** Blocks the sandbox's root disk occupies; grows as it writes (copy-on-write). */
+  /**
+   * Blocks the sandbox's root disk occupies, INCLUDING those still shared with
+   * the image it was copy-on-write cloned from (~2.2 GiB before it writes
+   * anything). Its GROWTH is what this sandbox wrote; the absolute value is not
+   * disk it exclusively consumes.
+   */
   rootfsAllocBytes: number;
   /** Bytes received by the guest on its current VM. */
   netRxBytes: number;

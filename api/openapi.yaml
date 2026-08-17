@@ -510,7 +510,14 @@ components:
             fall when the guest frees memory, so it is a high-water mark of cost
             rather than a measure of what the workload is using — for that, see
             mem_used_bytes.
-        rootfs_alloc_bytes: {type: integer, description: Blocks the sandbox's root disk actually occupies (copy-on-write, so this grows as it writes).}
+        rootfs_alloc_bytes:
+          type: integer
+          description: |
+            Blocks the sandbox's root disk occupies, INCLUDING those still
+            shared with the image it was copy-on-write cloned from — about
+            2.2 GiB before the sandbox has written anything. Watch its growth,
+            which is what this sandbox wrote; the absolute value is not disk
+            it exclusively consumes.
         net_rx_bytes: {type: integer, description: Bytes received by the guest on its current VM.}
         net_tx_bytes: {type: integer, description: Bytes sent by the guest on its current VM.}
         mem_total_bytes: {type: integer}

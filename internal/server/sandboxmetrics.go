@@ -313,9 +313,14 @@ func readInt64File(path string) int64 {
 	return v
 }
 
-// allocatedBytes is what the rootfs actually occupies, not its apparent size:
-// every per-VM rootfs is a sparse reflink clone of the same ~2 GB base, so
-// apparent size is identical for every sandbox and tells an operator nothing.
+// allocatedBytes is the blocks the rootfs occupies, not its apparent size:
+// every per-VM rootfs is a sparse reflink clone of the same base, so apparent
+// size is identical for every sandbox and tells an operator nothing.
+//
+// st_blocks counts extents still SHARED with that base, so the absolute figure
+// starts at roughly the base's size (~2.2 GiB, measured) and only its growth is
+// the sandbox's own writes. That is the honest reading of this number, and the
+// host aggregate below inherits the same caveat.
 func allocatedBytes(path string) int64 {
 	if path == "" {
 		return 0
@@ -410,7 +415,7 @@ func (s *Server) writeSandboxStatMetrics(b *strings.Builder) {
 		}
 	}
 	fmt.Fprintf(b, "# HELP sandbox_host_mem_bytes Sum of running sandboxes' VMM cgroup memory charge (guest pages touched).\n# TYPE sandbox_host_mem_bytes gauge\nsandbox_host_mem_bytes %d\n", hostMem)
-	fmt.Fprintf(b, "# HELP sandbox_rootfs_alloc_bytes Sum of per-VM rootfs blocks allocated on the data disk.\n# TYPE sandbox_rootfs_alloc_bytes gauge\nsandbox_rootfs_alloc_bytes %d\n", rootfs)
+	fmt.Fprintf(b, "# HELP sandbox_rootfs_alloc_bytes Sum of per-VM rootfs blocks, including extents still shared with the golden base (so it counts that base once per sandbox; watch its growth, not its level).\n# TYPE sandbox_rootfs_alloc_bytes gauge\nsandbox_rootfs_alloc_bytes %d\n", rootfs)
 	fmt.Fprintf(b, "# HELP sandbox_net_bytes_total Guest network bytes since each sandbox's current VMM started.\n# TYPE sandbox_net_bytes_total gauge\nsandbox_net_bytes_total{dir=\"rx\"} %d\nsandbox_net_bytes_total{dir=\"tx\"} %d\n", rx, tx)
 	fmt.Fprintf(b, "# HELP sandbox_cpu_utilization Per-sandbox CPU used as a percentage of its allocated vCPUs.\n# TYPE sandbox_cpu_utilization histogram\n")
 	for i, bound := range cpuUtilBuckets {

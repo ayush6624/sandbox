@@ -513,7 +513,13 @@ export interface components {
              *     mem_used_bytes.
              */
             host_mem_bytes: number;
-            /** @description Blocks the sandbox's root disk actually occupies (copy-on-write */
+            /**
+             * @description Blocks the sandbox's root disk occupies, INCLUDING those still
+             *     shared with the image it was copy-on-write cloned from — about
+             *     2.2 GiB before the sandbox has written anything. Watch its growth,
+             *     which is what this sandbox wrote; the absolute value is not disk
+             *     it exclusively consumes.
+             */
             rootfs_alloc_bytes: number;
             /** @description Bytes received by the guest on its current VM. */
             net_rx_bytes: number;

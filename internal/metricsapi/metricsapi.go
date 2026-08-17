@@ -32,8 +32,11 @@ type Sample struct {
 	// never come back, so this is a high-water mark of what the host is paying
 	// — deliberately not named mem_used, which is a guest number phase 2 adds.
 	HostMemBytes int64 `json:"host_mem_bytes"`
-	// RootfsAllocBytes is the per-VM rootfs's allocated blocks. Under reflink
-	// CoW this is the sandbox's real incremental cost on the shared data disk.
+	// RootfsAllocBytes is the blocks the per-VM rootfs file occupies, which
+	// INCLUDES those still shared with the golden base it was reflinked from —
+	// measured at ~2.2 GiB for a fresh sandbox that has written nothing. Only
+	// its GROWTH is this sandbox's own consumption; summing the absolute value
+	// across a host counts the shared base once per sandbox.
 	RootfsAllocBytes int64 `json:"rootfs_alloc_bytes"`
 	// Net counters are from the GUEST's perspective: the tap's rx is the
 	// guest's tx, so they are swapped on the way in.

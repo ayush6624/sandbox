@@ -146,7 +146,7 @@ host every few seconds:
       "cpu_used_pct": 42.5,
       "cpu_seconds_total": 5.25,
       "host_mem_bytes": 268435456,
-      "rootfs_alloc_bytes": 41943040,
+      "rootfs_alloc_bytes": 2334523392,
       "net_rx_bytes": 30720,
       "net_tx_bytes": 40960,
       "mem_used_bytes": 786432000,
@@ -177,9 +177,14 @@ host every few seconds:
   sandbox is using everything it was given. It is 0 on the first sample of a
   generation, which has no predecessor to difference against.
 - `host_mem_bytes` is the host's memory charge — guest pages *touched*. It does
-  not fall when the guest frees memory, so it is a high-water mark of cost.
+  not fall when the guest frees memory, so it is a high-water mark of cost
+  (measured: a guest that touched 384 MiB and freed it released 0 MiB).
   `mem_used_bytes` is the guest's own view and is the one a workload cares
   about.
+- `rootfs_alloc_bytes` includes blocks still **shared** with the image the
+  sandbox was cloned from, so it starts around 2.2 GiB and is not disk the
+  sandbox exclusively consumes. Its **growth** is what the sandbox wrote
+  (measured: +248 MiB for a 256 MiB write).
 - Every counter belongs to a **VM**, not to a sandbox: a resume or restore
   replaces the VM and restarts them at zero. `vmm_generation` changes when that
   happens, so a reset is self-describing rather than a counter mysteriously
