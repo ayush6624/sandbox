@@ -95,6 +95,11 @@ need() {
 for tool in curl gcloud jq nomad ssh flock sha256sum timeout; do need "$tool"; done
 if test -x "$SDK_DIR/node_modules/.bin/tsx"; then
   TSX="$SDK_DIR/node_modules/.bin/tsx"
+elif test -x "$REPO/tests/node_modules/.bin/tsx"; then
+  # The harness owns tsx in tests/package.json. Production source syncs omit
+  # every node_modules tree, and operators commonly install only the tests
+  # package on the control VM, so do not require a duplicate SDK install.
+  TSX="$REPO/tests/node_modules/.bin/tsx"
 elif command -v tsx >/dev/null 2>&1; then
   TSX="$(command -v tsx)"
 else
