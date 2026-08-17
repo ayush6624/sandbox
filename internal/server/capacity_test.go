@@ -183,6 +183,52 @@ func TestFanoutFailsFastBeyondFreeCapacity(t *testing.T) {
 	}
 }
 
+// Public restore is a new sandbox, not a claim on the source sandbox's old
+// host identity. Pool resources are intentionally reused after destroy, so a
+// snapshot that insists on its baked tap/IP becomes randomly unrestorable as
+// soon as ordinary traffic takes either resource.
+func TestRestoreDoesNotReclaimBakedNetworkIdentity(t *testing.T) {
+	s, reg := capacityTestServer(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	sourceRootfs := filepath.Join(dir, "source.ext4")
+	if err := os.WriteFile(sourceRootfs, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := reg.Create(ctx, "source", "", sourceRootfs, nil, "", 0, 1, 512)
+	if err != nil {
+		t.Fatalf("create source identity: %v", err)
+	}
+	mem, state, frozen, err := s.cfg.Provisioner.SnapshotPaths("snap-identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string]string{mem: "memory", state: "state", frozen: "frozen-rootfs"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reg.CreateSnapshot(ctx, registry.Snapshot{
+		ID: "snap-identity", SourceID: source.ID, TapDevice: source.TapDevice,
+		GuestIP: source.GuestIP, MemPath: mem, StatePath: state,
+		RootfsPath: frozen, SourceRootfsPath: sourceRootfs, CreatedAt: time.Now(),
+		Format: registry.FormatFull, Vcpus: 1, MemMIB: 512,
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/snapshots/snap-identity/restore", strings.NewReader(`{}`))
+	r.SetPathValue("id", "snap-identity")
+	s.handleRestore(w, r)
+	// The fake test host cannot launch Firecracker, so the request eventually
+	// fails during tap/VM bring-up. It must get past identity allocation: the old
+	// implementation returned 409 here before doing any bring-up work.
+	if w.Code == 409 || strings.Contains(w.Body.String(), "source sandbox still running") {
+		t.Fatalf("restore tried to reclaim baked identity: status=%d body=%s", w.Code, w.Body)
+	}
+}
+
 // TestFanoutWaitsForCreateBudget: fanout bring-ups run on the same host-wide
 // create budget as handleCreate and handleRestore — it used to bypass createSem
 // entirely, so one call could boot-storm a host already at its ceiling. The

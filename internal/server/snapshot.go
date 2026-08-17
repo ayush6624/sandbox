@@ -24,9 +24,9 @@ import (
 // sandbox so it keeps running. The resulting snapshot can be restored later
 // into a new sandbox via POST /snapshots/{id}/restore.
 //
-// The source must be killed (or expire) before a restore can use the snapshot:
-// the snapshot bakes in the guest IP and tap name, so a restore reuses both and
-// would collide with the still-running source.
+// Public restore/fanout use identity-neutral clone loading: the snapshot's
+// baked network identity is replaced before its tap joins the bridge, so the
+// source may still exist and its old tap/IP may be reused safely.
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	// The body is optional (older clients send none); tolerate EOF.
 	var body struct {
@@ -400,8 +400,9 @@ func (s *Server) flattenSnapshotDiff(parentFullPath, goldenMemPath, layerPath st
 
 // handleRestore boots a brand-new sandbox from a snapshot by loading its memory
 // + device state and resuming — skipping kernel boot, init, and agent startup.
-// The new sandbox reuses the snapshot's tap and guest IP (baked into the
-// snapshot) and is allocated a fresh host port.
+// The new sandbox gets fresh tap/IP/port resources. Firecracker initially loads
+// the baked device state on an unbridged tap; StartClone + the thaw agent replace
+// that identity from MMDS before finishClone joins it to the shared bridge.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	snapID := r.PathValue("id")
@@ -464,14 +465,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	id := uuid.NewString()
-	lifecycle := s.wakeLock(id)
-	lifecycle.Lock()
-	defer lifecycle.Unlock()
-	// The disk path is baked into the snapshot, so the restored VM's rootfs must
-	// live exactly there — Firecracker reattaches the block device by that path.
-	rootfsPath := snap.SourceRootfsPath
-	stage := s.snapshotStageLock(rootfsPath)
+	t0 := time.Now()
+	stage := s.snapshotStageLock(snap.SourceRootfsPath)
 	stage.Lock()
 	stageLocked := true
 	defer func() {
@@ -480,125 +475,38 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Insert the row first: its partial unique indexes gate on the snapshot's
-	// tap + guest IP, so a restore fails cleanly (before any disk work) if the
-	// source or a prior restore is still live.
-	sb, err := s.reg.CreateRestoreStarting(ctx, id, body.Name, rootfsPath, snap.TapDevice, snap.GuestIP, expiresAt, body.HibernateAfterSec, snap.Vcpus, snap.MemMIB)
-	if err != nil {
-		// Port-pool exhaustion is capacity (503); identity conflicts stay 409.
-		capacityOrHTTPError(w, 409, fmt.Errorf("registry restore: %w", err))
-		return
-	}
-
-	tRoot := time.Now()
-	if err := s.cfg.Provisioner.CopyFileSparse(snap.RootfsPath, rootfsPath); err != nil {
-		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("copy snapshot rootfs: %w", err))
-		return
-	}
-	rootfsMS := time.Since(tRoot).Milliseconds()
-
-	if err := s.cfg.Provisioner.CreateTap(sb.TapDevice); err != nil {
-		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("create tap: %w", err))
-		return
-	}
-	if snap.GuestMAC != "" {
-		if err := s.cfg.Provisioner.PrimeGuestNetwork(sb.TapDevice, sb.GuestIP, snap.GuestMAC); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] restore: prime snapshot network (ARP fallback remains): %v\n", id, err)
+	// Firecracker opens the baked rootfs path during LoadSnapshot before the
+	// clone path patches the drive to its fresh CoW file. Stage the immutable
+	// snapshot rootfs there only for that load window. An old tap/IP may already
+	// belong to an unrelated sandbox; unlike the former 1:1 path, neither is
+	// reclaimed here.
+	stagedBaked := false
+	if _, statErr := os.Stat(snap.SourceRootfsPath); statErr != nil {
+		if err := s.cfg.Provisioner.CopyFileSparse(snap.RootfsPath, snap.SourceRootfsPath); err != nil {
+			httpError(w, 500, fmt.Errorf("stage snapshot rootfs at baked path: %w", err))
+			return
 		}
+		stagedBaked = true
 	}
 
-	opts := s.restoreOptions(sb)
-	opts.RootfsPath = rootfsPath
-
-	tLoad := time.Now()
-	m, rt, err := vm.NewMachineFromSnapshot(s.vmCtx, opts, snap.MemPath, snap.StatePath, false)
-	if err != nil {
-		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("new machine from snapshot: %w", err))
-		return
+	c := s.bringUpClone(ctx, snap, body.Name, expiresAt, body.HibernateAfterSec, false)
+	if stagedBaked {
+		_ = s.cfg.Provisioner.RemoveRootfs(snap.SourceRootfsPath)
 	}
-	if err := vm.Start(s.vmCtx, m); err != nil {
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("load snapshot + resume: %w", err))
-		return
-	}
-	// Firecracker has opened the baked drive. A fanout may now safely unlink a
-	// temporary staging entry without invalidating this VM's open descriptor.
 	stage.Unlock()
 	stageLocked = false
-	loadMS := time.Since(tLoad).Milliseconds()
-
-	pid, err := vm.PID(m)
-	if err != nil {
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("pid: %w", err))
+	if c.err != nil {
+		capacityOrHTTPError(w, 500, fmt.Errorf("restore clone: %w", c.err))
 		return
 	}
-
-	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
-		s.pf.CloseSandbox(id)
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		httpError(w, 500, fmt.Errorf("finish start: %w", err))
+	if err := s.finishClone(ctx, c); err != nil {
+		_ = s.destroy(context.Background(), c.sb.ID)
+		httpError(w, 500, fmt.Errorf("finish restore clone: %w", err))
 		return
 	}
-
-	s.machines.Store(id, m)
-	if vm.DiffCapable(m) {
-		// The restored machine's freshly reset bitmap tracks this snapshot.
-		// snapshotDiffPlan will either flatten it to the snapshot's golden
-		// ancestor or safely fall back to full when no such ancestry exists.
-		s.diffBase.Store(id, snap.ID)
-	}
-	s.act.touch(id)
-	s.watchMachine(id, m, "restored VM")
-
-	// Let the thaw agent step the guest's snapshot-stale wall clock now,
-	// instead of NTP stepping it minutes forward later mid-exec.
-	if err := vm.PushEpoch(ctx, rt.SocketPath); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] push epoch to mmds: %v\n", id, err)
-	}
-
-	// The agent is restored already-running in guest memory; it just needs the
-	// network to settle (gratuitous ARP on the new tap). This is the win over
-	// cold boot, where the agent has to start from scratch.
-	tAgent := time.Now()
-	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
-		_ = s.destroyLocked(context.Background(), id)
-		httpError(w, 500, fmt.Errorf("restored but agent never became ready: %w", err))
-		return
-	}
-	agentMS := time.Since(tAgent).Milliseconds()
-	// Deterministic clock step before the sandbox is handed out (the MMDS
-	// push above is polled and can lag the readiness gate by a tick).
-	tClock := time.Now()
-	syncGuestClock(ctx, sb.GuestIP)
-	clockMS := time.Since(tClock).Milliseconds()
-	tIdentity := time.Now()
-	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
-		_ = s.destroyLocked(context.Background(), id)
-		httpError(w, 500, fmt.Errorf("restored but identity initialization failed: %w", err))
-		return
-	}
-	identityMS := time.Since(tIdentity).Milliseconds()
-	if err := s.reg.MarkRunning(ctx, id); err != nil {
-		_ = s.destroyLocked(context.Background(), id)
-		httpError(w, 500, fmt.Errorf("publish restored sandbox: %w", err))
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[%s] restored from %s: rootfs_cp=%dms load+resume=%dms agent=%dms clock=%dms identity=%dms\n",
-		id, snapID, rootfsMS, loadMS, agentMS, clockMS, identityMS)
-
-	sb.PID = pid
-	sb.VMID = rt.VMID
-	sb.SocketPath = rt.SocketPath
-	sb.Status = registry.StatusRunning
-	s.meterStart(ctx, sb)
-	writeJSON(w, 201, s.effectiveResources(sb))
+	fmt.Fprintf(os.Stderr, "[%s] restored identity-neutral from %s in %s\n",
+		c.sb.ID, snapID, time.Since(t0).Round(time.Millisecond))
+	writeJSON(w, 201, s.effectiveResources(c.sb))
 }
 
 // clone is one in-flight fan-out clone between Phase 1 (resume) and Phase 2 (bridge).

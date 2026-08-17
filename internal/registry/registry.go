@@ -117,16 +117,17 @@ type RawPortMapping struct {
 }
 
 // Snapshot is a saved point-in-time image of a sandbox (Firecracker memory +
-// device state plus a frozen rootfs copy) that a new sandbox can be restored
-// from. TapDevice and GuestIP are recorded because the snapshot bakes them in:
-// a restore must recreate the same tap and reuse the same guest IP.
+// device state plus a frozen rootfs copy). The device state bakes in the source
+// network identity, but public restore/fanout replace it on an unbridged tap
+// before joining the shared bridge.
 type Snapshot struct {
 	ID string `json:"id"`
 	// Name is a free-form display label, settable at snapshot time and via
 	// POST /snapshots/{id}/rename. Not unique, not a lookup key; "" = unnamed.
 	Name     string `json:"name,omitempty"`
 	SourceID string `json:"source_id"`
-	// TapDevice and GuestIP are reused on restore (baked into the snapshot).
+	// TapDevice and GuestIP are the baked source identity retained for snapshot
+	// compatibility and same-sandbox recovery; public clones allocate fresh ones.
 	TapDevice string `json:"tap_device"`
 	GuestIP   string `json:"guest_ip"`
 	// GuestMAC is the NIC identity baked into the snapshot. New snapshots
