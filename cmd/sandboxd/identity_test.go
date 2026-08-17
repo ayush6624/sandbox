@@ -87,6 +87,13 @@ func TestInitializeGuestIdentityRemovesInheritedStateWithoutGenerating(t *testin
 		t.Fatal(err)
 	}
 
+	// Pretend a live inherited sshd is present, which is what makes the stop
+	// mandatory; its comm check cannot be faked with a real pid.
+	oldProbe := inheritedSSHDPIDFn
+	t.Cleanup(func() { inheritedSSHDPIDFn = oldProbe })
+	live := true
+	inheritedSSHDPIDFn = func() (int, bool) { return 4242, live }
+
 	generations, stops := 0, 0
 	runIdentityCommand = func(name string, args ...string) error {
 		switch name {
@@ -96,6 +103,7 @@ func TestInitializeGuestIdentityRemovesInheritedStateWithoutGenerating(t *testin
 		case "systemctl":
 			if len(args) > 0 && args[0] == "stop" {
 				stops++
+				live = false // the stop worked
 			}
 			return nil
 		default:
@@ -127,7 +135,9 @@ func TestInitializeGuestIdentityRemovesInheritedStateWithoutGenerating(t *testin
 	if stops != 1 {
 		t.Fatalf("same identity was not idempotent: stops %d", stops)
 	}
-	// A different sandbox id (a clone) must rotate again.
+	// A different sandbox id (a clone) must rotate again. Present it with a live
+	// inherited sshd, as a snapshot-restored clone has.
+	live = true
 	if err := initializeGuestIdentity("sandbox-two"); err != nil {
 		t.Fatal(err)
 	}
@@ -345,5 +355,30 @@ func TestStopSSHServiceToleratesNoRunningSSHD(t *testing.T) {
 	}
 	if err := stopSSHService(); err != nil {
 		t.Fatalf("stop with no sshd and a failing systemctl: %v", err)
+	}
+}
+
+// The stop path must not pay for a service manager round trip when nothing is
+// serving. `systemctl stop` measured ~120 ms in-guest — about what the eager
+// keygen it replaced cost — so calling it unconditionally made the whole
+// deferral nearly worthless (identity stayed at 108-135 ms per clone). The
+// golden is built by a cold boot, which has no host key and so never starts
+// sshd, making "nothing to stop" the common case.
+func TestStopSSHServiceSkipsServiceManagerWhenNothingRuns(t *testing.T) {
+	dir := t.TempDir()
+	oldPath, oldRun := sshdPIDPath, runIdentityCommand
+	t.Cleanup(func() { sshdPIDPath, runIdentityCommand = oldPath, oldRun })
+	sshdPIDPath = filepath.Join(dir, "sshd.pid") // absent: no sshd
+
+	calls := 0
+	runIdentityCommand = func(string, ...string) error {
+		calls++
+		return nil
+	}
+	if err := stopSSHService(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("ran %d commands with no sshd present; the check must come first", calls)
 	}
 }

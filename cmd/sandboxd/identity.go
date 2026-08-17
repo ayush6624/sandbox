@@ -34,6 +34,9 @@ var (
 	// sshdPIDPath is where sshd records its master pid; a variable so tests can
 	// exercise the stop path without a real sshd.
 	sshdPIDPath = "/run/sshd.pid"
+	// inheritedSSHDPIDFn is the live-sshd probe, injectable so tests can pin the
+	// stop path without a real sshd (its comm check cannot be faked).
+	inheritedSSHDPIDFn = inheritedSSHDPID
 )
 
 func handleGuestIdentity(w http.ResponseWriter, r *http.Request) {
@@ -168,15 +171,24 @@ func stopSSHService() error {
 		stopOwnSSHD()
 		return nil
 	}
-	// Prefer the service manager, because it is deterministic about respawn: a
-	// bare SIGTERM can leave systemd restarting a unit whose Restart= policy
-	// counts the signal as a failure, and it would then fail repeatedly with no
-	// host key and burn the unit's start limit.
-	_ = runIdentityCommand("systemctl", "stop", "ssh.service")
-
-	pid, ok := inheritedSSHDPID()
+	// Cheap check FIRST. `systemctl stop` is a D-Bus round trip that measured
+	// ~120 ms in-guest — about what the eager keygen it replaced cost — so
+	// running it unconditionally made this whole deferral nearly worthless
+	// (measured: identity stayed at 108-135 ms per clone). Since the golden is
+	// itself built by a cold boot, which has no host key and therefore never
+	// starts sshd, its clones inherit no listener at all and the common case is
+	// that there is nothing to stop.
+	pid, ok := inheritedSSHDPIDFn()
 	if !ok {
-		return nil // nothing running — the ordinary cold-boot case
+		return nil // nothing running — the ordinary case
+	}
+	// Something IS serving an inherited key. Prefer the service manager, because
+	// it is deterministic about respawn: a bare SIGTERM can leave systemd
+	// restarting a unit whose Restart= policy counts the signal as a failure, and
+	// it would then fail repeatedly with no host key and burn the start limit.
+	_ = runIdentityCommand("systemctl", "stop", "ssh.service")
+	if _, still := inheritedSSHDPIDFn(); !still {
+		return nil
 	}
 	// systemd absent or the unit unknown: signal the master pid directly.
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -184,14 +196,14 @@ func stopSSHService() error {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, still := inheritedSSHDPID(); !still {
+		if _, still := inheritedSSHDPIDFn(); !still {
 			return nil
 		}
 		if time.Now().After(deadline) {
 			// Escalate once before giving up; a create must not proceed while an
 			// inherited key is still being served.
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			if _, still := inheritedSSHDPID(); still {
+			if _, still := inheritedSSHDPIDFn(); still {
 				return fmt.Errorf("inherited sshd pid %d still serving after stop", pid)
 			}
 			return nil
