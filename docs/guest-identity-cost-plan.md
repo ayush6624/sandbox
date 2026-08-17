@@ -20,9 +20,12 @@ iowait ~0-1%. 32 guests cannot do that in the time 8 take on 16 cores, which is
 why fanout is still ~linear past N≈8 and why raising `fanoutParallelism` makes
 reidentify *worse* (it already breaches the first 1.5 s margin at 16-way).
 
-Both items below are guest-side, so both ship through the image-pinned path —
-`bake-image.sh bake && golden` plus a MIG roll — NOT `rollout.sh`, which carries
-only the `sandbox` server binary.
+Part 2 is guest-side and shipped through the image-pinned path
+(`bake-image.sh bake && golden` plus a MIG roll). **Part 1 turned out NOT to be**
+— see finding 5 below: the existing baked agent already leaves its address alone
+when the MMDS document carries no `gen`, so Part 1 ships through ordinary
+`rollout.sh`. That was an assumption in the first draft of this document, and it
+was wrong.
 
 ## Part 1: stop re-identifying the guest (netns per VM)
 
