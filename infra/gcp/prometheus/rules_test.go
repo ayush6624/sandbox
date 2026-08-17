@@ -30,29 +30,15 @@ func ruleExpr(t *testing.T, record string) string {
 	return ""
 }
 
-func TestWorkersDesiredUsesInstantCommittedOccupancy(t *testing.T) {
+func TestWorkersDesiredUsesGatewayOwnedMIGTarget(t *testing.T) {
 	expr := ruleExpr(t, "sandbox:workers_desired")
-	for _, want := range []string{
-		`sum(sandbox_slots_committed{job="sandbox-gateway"})`,
-		`sum(sandbox_hibernated{job="sandbox-gateway"})`,
-		`sum(sandbox_create_queue_depth)`,
-	} {
-		if !strings.Contains(expr, want) {
-			t.Errorf("workers_desired expression missing %q:\n%s", want, expr)
+	if !strings.Contains(expr, `sandbox_mig_target_size{job="sandbox-gateway"}`) {
+		t.Errorf("workers_desired must use the gateway-observed MIG target:\n%s", expr)
+	}
+	for _, stale := range []string{"sandbox_slots_committed", "sandbox_create_queue_depth", "sandbox_hibernated"} {
+		if strings.Contains(expr, stale) {
+			t.Errorf("workers_desired must not reconstruct provider intent from %s:\n%s", stale, expr)
 		}
-	}
-	if strings.Contains(expr, "sandbox_slots_used") {
-		t.Errorf("workers_desired must not regress to heartbeat-only occupancy:\n%s", expr)
-	}
-	if strings.Contains(expr, "max_over_time") {
-		t.Errorf("occupancy must be instantaneous:\n%s", expr)
-	}
-
-	// Canonical held burst: two 48-slot hosts have 96 committed assignments
-	// and 64 more creates queued, so the signal must read four workers.
-	const committed, queued, slotsPerHost = 96, 64, 48
-	if desired := (committed + queued + slotsPerHost - 1) / slotsPerHost; desired != 4 {
-		t.Fatalf("canonical desired workers = %d, want 4", desired)
 	}
 }
 

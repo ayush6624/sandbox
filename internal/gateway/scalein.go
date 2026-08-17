@@ -131,9 +131,13 @@ func (g *Gateway) evaluateScaleIn(ctx context.Context) {
 	}
 	fmt.Fprintf(os.Stderr, "gateway: cordoned host %s for scale-in (demand=%d live=%d)\n", victim, fs.demand, fs.live)
 	g.scaleInCordons.Add(1)
-	// Reset the window so the NEXT cordon has to earn its own quiet period
-	// rather than following immediately behind this one.
-	g.scaleInLowSince = time.Time{}
+	// Keep the original low-demand timestamp. Only one host can drain at a
+	// time, and every pass checks returning demand before deleting or cordoning,
+	// so forcing the fleet to re-earn the entire quiet window after each empty
+	// removal adds no safety. It made a 16 -> 2 correction take roughly one
+	// window per host and miss the live sawtooth deadline even with a 60-second
+	// test window. Continuous low demand earns one window; any returning demand
+	// clears it at the top of the next pass and uncordons the current victim.
 }
 
 // cordonLeastLoaded marks the emptiest eligible host as draining and returns its

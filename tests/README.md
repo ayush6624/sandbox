@@ -178,7 +178,10 @@ scale-out is in progress, long-lived sandboxes during worker reconciliation,
 create/exec/kill churn, repeated scale-out/scale-in sawteeth, and a
 `standby-refill-boundary` regression that holds live sandboxes across the
 standby pool's initial-delay boundary while proving newly created refill
-workers remain placement-quarantined until safely suspended. Successful
+workers remain placement-quarantined until safely suspended. The
+`snapshot-fanout-resume` scenario fills the floor, mixes ordinary creates with
+an atomic snapshot fanout that must queue and scale beyond its full owner, then
+probes clone hibernation/resumption and a memory-state restore. Successful
 creates are repeatedly reconnected and executed against; host release,
 capacity, placement, routing, and final cleanup invariants are monitored
 independently.
@@ -189,7 +192,7 @@ GCE, SSH, Nomad, gateway, and queue timeline is captured on the same clock:
 ```bash
 export EXPECTED_WORKER_RELEASE=<deployed-release>
 export LIVE_AUTOSCALE_BENCHMARK=I_UNDERSTAND_THIS_CREATES_REAL_VMS
-export TRAFFIC_SCENARIOS="sawtooth-scale-cycle standby-refill-boundary held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
+export TRAFFIC_SCENARIOS="sawtooth-scale-cycle scale-in-drain standby-refill-boundary snapshot-fanout-resume held-burst gradual-ramp second-wave long-lived-reconcile create-exec-kill-churn"
 
 ./tests/autoscale-benchmark.sh
 ```

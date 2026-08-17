@@ -7,60 +7,45 @@
 # computes its own demand — but it feeds the fleet dashboard, and a dashboard
 # that quietly reads a constant is its own kind of outage.
 #
-# Rendered against LEAD_SECONDS=90, HEADROOM_SLOTS=48, SLOTS_PER_HOST=48, so an
-# idle fleet's demand is ceil(48/48) = 1.
+# The gateway is the sole scaling controller; this recording rule mirrors the
+# actual provider target it exports instead of reimplementing demand arithmetic.
 rule_files:
   - rules.yml
 
 evaluation_interval: 1m
 
 tests:
-  # Quiet fleet: desired is the headroom floor, ceil(48/48) = 1.
+  # Quiet fleet: desired is the provider's two-worker floor.
   - interval: 1m
     input_series:
-      - series: 'sandbox_slots_committed{job="sandbox-gateway"}'
-        values: "0+0x10"
-      - series: 'sandbox_hibernated{job="sandbox-gateway"}'
-        values: "0+0x10"
-      - series: "sandbox_create_queue_depth"
-        values: "0+0x10"
-      - series: "sandbox_create_rejected_total"
-        values: "0+0x10"
-      - series: 'sandbox_creates_total{job="sandbox-gateway"}'
-        values: "0+0x10"
+      - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
+        values: "2+0x10"
     promql_expr_test:
       - expr: sandbox:workers_desired
         eval_time: 8m
         exp_samples:
           - labels: '{__name__="sandbox:workers_desired"}'
-            value: 1
+            value: 2
 
-  # Held burst: 96 committed + 64 queued + 48 headroom over 48 slots/host = 5.
+  # Memory-heavy burst: expose the actual target without reconstructing it from
+  # request counts (the stale arithmetic showed 5 here while the target was 16).
   - interval: 1m
     input_series:
-      - series: 'sandbox_slots_committed{job="sandbox-gateway"}'
-        values: "96+0x10"
-      - series: 'sandbox_hibernated{job="sandbox-gateway"}'
-        values: "0+0x10"
-      - series: "sandbox_create_queue_depth"
-        values: "64+0x10"
-      - series: "sandbox_create_rejected_total"
-        values: "0+0x10"
-      - series: 'sandbox_creates_total{job="sandbox-gateway"}'
-        values: "0+0x10"
+      - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
+        values: "16+0x10"
     promql_expr_test:
       - expr: sandbox:workers_desired
         eval_time: 8m
         exp_samples:
           - labels: '{__name__="sandbox:workers_desired"}'
-            value: 5
+            value: 16
 
   # Gateway/Prometheus outage: the demand series are gone. The signal must be
   # ABSENT, so the dashboard shows a gap rather than a confident zero.
   - interval: 1m
     input_series:
-      - series: 'sandbox_mig_target_size{job="sandbox-gateway"}'
-        values: "3+0x10"
+      - series: 'up{job="sandbox-gateway"}'
+        values: "0+0x10"
     promql_expr_test:
       - expr: sandbox:workers_desired
         eval_time: 8m

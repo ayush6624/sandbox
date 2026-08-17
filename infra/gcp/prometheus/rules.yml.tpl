@@ -1,74 +1,10 @@
-# Rendered by control-install.sh (envsubst): ${HEADROOM_SLOTS}, ${SLOTS_PER_HOST},
-# ${LEAD_SECONDS}.
-# sandbox:workers_desired is the scaling signal: how many worker hosts we want
-# so that OCCUPIED capacity PLUS queued creates PLUS a headroom buffer fit.
-#
-# Occupancy is (slots_committed + hibernated), NOT (slots_total - slots_free).
-# slots_committed is each host's running slots plus gateway create reservations,
-# clamped to that host's physical capacity. This closes the first-scrape gap
-# where a held burst has been assigned but the worker heartbeat has not reported
-# the new sandboxes yet; without it, 96 assigned + 64 queued could appear as
-# only 48 used + 64 queued and under-scale a four-worker burst to three.
-#
-# A host
-# still WARMING advertises slots_free=0 as a PLACEMENT gate (so it doesn't attract
-# a cold-boot storm), yet it runs ZERO sandboxes — so (total - free) misreads it
-# as fully occupied, a phantom ~SLOTS_PER_HOST spike per warming host that
-# max_over_time then LATCHES into a ~1-host over-scale for the whole scale-down
-# window (observed live: a scale-up to 3 bounced to 4). slots_committed is zero
-# for a warming host with neither running sandboxes nor reservations; adding
-# hibernated keeps the original intent — scale for hibernation-heavy fleets, whose
-# frozen sandboxes hold ports and will wake — without the warming artifact.
-# (slots_committed + hibernated slightly over-counts hibernation vs total-free, but
-# that's conservative and hibernated is ~0 in the steady state.)
-#
-# Both terms MUST be scoped to {job="sandbox-gateway"} (the gateway's
-# fleet-aggregate /metrics): sandbox_hibernated (and the old slots_free) are ALSO
-# exported per-host by the federation (job="sandbox-hosts", /metrics/hosts), so an
-# unscoped sum() DOUBLE-COUNTS. slots_committed is gateway-only, queue_depth/rejected
-# are gateway-only, creates_ok is host-only — but scope the two occupancy terms
-# defensively so a future federation of either can't silently corrupt the signal.
-#
-# Queued creates (the gateway's bounded create queue) are demand that found no
-# slot — counting them makes a burst larger than the headroom pull scale-up
-# immediately, while the queue holds those creates until the new host boots.
-#
-# The queue-depth gauge saturates at queue-max, so demand beyond it appears
-# ONLY as rejected creates (503 + Retry-After ~5s). Rejected clients that
-# retry re-increment the counter every ~5s, so rate()*5 approximates the
-# outstanding overflow; `or vector(0)` keeps the rule alive against an old
-# gateway that doesn't export the counter yet. sum() strips instance labels
-# so the label-less vector(0) can participate in the arithmetic.
-# The headroom term LEADS demand instead of being a flat buffer: it reserves
-# enough spare slots to absorb the creates expected to arrive during one host's
-# reaction window (detection + warm-up), i.e. rate(creates)·LEAD_SECONDS, but
-# never drops below the static floor HEADROOM_SLOTS. So an idle fleet keeps the
-# fixed floor (rate≈0 → clamp_min(0, HEADROOM) = HEADROOM, unchanged), while a
-# sustained ramp pre-provisions ahead of the curve so the create queue rarely
-# forms. sandbox_creates_total is the GATEWAY's own aggregate create counter on
-# its /metrics (scraped every 10s), so rate() estimates the fleet create rate at
-# 10s resolution — far fresher than the 30s-federated per-host
-# sandbox_creates_ok_total it replaces (12 vs ~4 samples across the 2m window,
-# and ≤10s vs ≤30s stale). rate() handles gateway restarts (counter reset).
-# `or vector(0)` keeps the term at the floor if the series is absent (old gateway
-# that predates this counter, or no creates yet). Set LEAD_SECONDS=0 to disable
-# the lead and fall back to the pure static floor.
-#
-# Clamped to >=1 (never scale to zero). Absent when the gateway series are
-# missing, so a gateway/Prometheus outage shows as a gap rather than a
-# confident zero.
-#
-# The autoscaler that used to consume this is gone; the gateway now owns both
-# scaling directions and computes demand in-process (internal/gateway,
-# fleetDemand). This rule survives as the OBSERVABILITY view of that same
-# arithmetic — it is what the Grafana fleet dashboard graphs — so keep the two
-# in step when either changes.
-#
-# Deliberately not a control input any more. When it was one, this rule and the
-# gateway were two implementations of "how many hosts do we need" that disagreed
-# by a host (the gateway sizes to live+1 on a non-empty create queue; this has
-# no such term), and the autoscaler applied the lower answer by purging the host
-# the gateway had just added. A signal read by one writer cannot reproduce that.
+# sandbox:workers_desired is the provider's actual MIG target, polled and
+# exported by the gateway that exclusively owns scale-out and scale-in. Do not
+# reconstruct it from Prometheus demand arithmetic: that created a second,
+# observability-only implementation which drifted from memory-aware gateway
+# demand and showed 5 desired workers while the gateway had correctly requested
+# 16 for a 4 GiB workload. Missing gateway/provider data deliberately produces
+# an absent series instead of a confident zero.
 groups:
   - name: sandbox
     # Recompute on the 5s gateway scrape cadence. A 10s scrape + 10s rule
@@ -77,7 +13,7 @@ groups:
     interval: 5s
     rules:
       - record: sandbox:workers_desired
-        expr: clamp_min(ceil((sum(sandbox_slots_committed{job="sandbox-gateway"}) + sum(sandbox_hibernated{job="sandbox-gateway"}) + sum(sandbox_create_queue_depth) + (sum(rate(sandbox_create_rejected_total[1m])) * 5 or vector(0)) + clamp_min((sum(rate(sandbox_creates_total{job="sandbox-gateway"}[2m])) * ${LEAD_SECONDS}) or vector(0), ${HEADROOM_SLOTS})) / ${SLOTS_PER_HOST}), 1)
+        expr: max(sandbox_mig_target_size{job="sandbox-gateway"})
 
   - name: public-ingress
     interval: 15s

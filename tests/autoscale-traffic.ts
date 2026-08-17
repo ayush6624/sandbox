@@ -227,6 +227,26 @@ class ScenarioContext {
     return made
   }
 
+  trackSnapshotCreate(sandbox: Sandbox, marker: string, latencyMs: number): Held {
+    if (this.held.size >= MAX_LIVE_SANDBOXES) {
+      throw new Error(
+        `${this.scenario}: refusing more than ${MAX_LIVE_SANDBOXES} simultaneously live creates`
+      )
+    }
+    this.createLatencyMs.push(latencyMs)
+    this.creates++
+    const held: Held = {
+      sandbox,
+      marker,
+      scenario: this.scenario,
+      createdAt: Date.now(),
+      host: sandbox.info.hostAddr ?? '',
+      probes: 0,
+    }
+    this.held.set(sandbox.sandboxId, held)
+    return held
+  }
+
   async probe(held: Held): Promise<void> {
     this.probes++
     held.probes++
@@ -468,6 +488,100 @@ const longLived: Scenario = {
   },
 }
 
+// Snapshot operations used to bypass the fleet queue and stay pinned to a
+// full snapshot owner. A fanout then 503'd even when another worker had room,
+// and its N clones were not reserved atomically. Exercise that path under the
+// same scale-out pressure as ordinary creates, then explicitly pause/resume the
+// clones while unrelated sandboxes remain busy.
+const snapshotFanoutResume: Scenario = {
+  name: 'snapshot-fanout-resume',
+  async run(ctx) {
+    const opts = {
+      apiUrl: API_URL,
+      apiKey: API_KEY,
+      timeoutMs: TTL_MS,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      hibernateAfterMs: -1,
+    }
+    let snapshotId = ''
+    try {
+      const source = await ctx.create('snapshot-source')
+      await source.sandbox.files.write('/home/sandbox/snapshot-seed', 'fleet-snapshot-state')
+      const snapshot = await source.sandbox.snapshot({
+        name: `autoscale-${RUN_ID}-fleet-snapshot`.slice(0, 63),
+      })
+      snapshotId = snapshot.snapshotId
+
+      // Explicit identity-preserving hibernate/resume before baking traffic
+      // from the snapshot. The source remains tracked and independently probed.
+      await source.sandbox.pause()
+      await source.sandbox.resume()
+      await ctx.probe(source)
+      ctx.assertHealthy()
+      await ctx.kill(source)
+      ctx.assertHealthy()
+
+      // Fill the floor so the snapshot owner cannot satisfy the fanout. Start
+      // ordinary pressure just behind the fanout request: the fanout must hold
+      // one atomic N-slot reservation, queue, and cause scale-out rather than
+      // being fragmented or rejected while another worker comes online.
+      const anchors = await ctx.createMany(
+        integerEnv('AUTOSCALE_SNAPSHOT_ANCHORS', FLOOR_HOSTS * SLOTS_PER_HOST, 1),
+        'snapshot-anchor'
+      )
+      const fanoutCount = integerEnv('AUTOSCALE_SNAPSHOT_FANOUT', 8, 1)
+      const fanoutStarted = Date.now()
+      const fanoutPromise = Sandbox.fanout(snapshotId, fanoutCount, opts)
+      await sleep(integerEnv('AUTOSCALE_SNAPSHOT_MIXED_DELAY_MS', 250, 1))
+      const mixedPromise = ctx.createMany(
+        integerEnv('AUTOSCALE_SNAPSHOT_MIXED_CREATES', Math.max(8, Math.floor(SLOTS_PER_HOST / 2)), 1),
+        'snapshot-mixed'
+      )
+      const [clones, mixed] = await Promise.all([fanoutPromise, mixedPromise])
+      const fanoutLatency = Date.now() - fanoutStarted
+      for (const clone of clones) {
+        ctx.trackSnapshotCreate(clone, source.marker, fanoutLatency)
+      }
+      if (clones.length !== fanoutCount) {
+        throw new Error(`snapshot fanout returned ${clones.length}/${fanoutCount} clones`)
+      }
+
+      await mapItems(clones, fanoutCount, async (clone) => {
+        const state = await clone.files.read('/home/sandbox/snapshot-seed')
+        if (state !== 'fleet-snapshot-state') {
+          throw new Error(`fanout clone ${clone.sandboxId} lost prepared disk state`)
+        }
+      })
+
+      await mapItems(clones, fanoutCount, (clone) => clone.pause())
+      await Promise.all([
+        mapItems(clones, fanoutCount, (clone) => clone.resume()),
+        mapItems([...anchors, ...mixed].slice(0, 24), 24, (held) => ctx.probe(held)),
+      ])
+      await ctx.probeAll()
+
+      const restoreStarted = Date.now()
+      const restored = await Sandbox.restore(snapshotId, opts)
+      const restoredHeld = ctx.trackSnapshotCreate(
+        restored,
+        source.marker,
+        Date.now() - restoreStarted
+      )
+      await ctx.probe(restoredHeld)
+      ctx.assertHealthy()
+    } finally {
+      await ctx.killAll()
+      if (snapshotId) {
+        try {
+          await Sandbox.deleteSnapshot(snapshotId, { apiUrl: API_URL, apiKey: API_KEY })
+        } catch (error) {
+          ctx.record('snapshot-delete', error)
+        }
+      }
+    }
+  },
+}
+
 const churn: Scenario = {
   name: 'create-exec-kill-churn',
   async run(ctx) {
@@ -633,6 +747,7 @@ const ALL: Scenario[] = [
   sawtooth,
   scaleInDrain,
   standbyRefillBoundary,
+  snapshotFanoutResume,
   heldBurst,
   gradualRamp,
   secondWave,

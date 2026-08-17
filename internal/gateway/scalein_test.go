@@ -130,6 +130,34 @@ func TestScaleInRequiresSustainedLowDemand(t *testing.T) {
 	}
 }
 
+// Once an uninterrupted low-demand period has earned the quiet window, each
+// drained removal may advance directly to the next single-host cordon. Making
+// every host re-earn the whole window turns an N-host correction into N times
+// scaleInAfter even though demand is checked before every delete and cordon.
+func TestScaleInRetiresAndCordonsNextDuringSameLowDemandPeriod(t *testing.T) {
+	g, f := scaleInGateway(t, 1,
+		&host{id: "a", instanceName: "vm-a", slotsTotal: 10, slotsFree: 10},
+		&host{id: "b", instanceName: "vm-b", slotsTotal: 10, slotsFree: 10},
+		&host{id: "c", instanceName: "vm-c", slotsTotal: 10, slotsFree: 10},
+	)
+	g.scaleInLowSince = time.Now().Add(-2 * time.Minute)
+	g.evaluateScaleIn(context.Background())
+	if got := g.drainingHostCount(); got != 1 {
+		t.Fatalf("first pass draining hosts = %d, want 1", got)
+	}
+
+	g.evaluateScaleIn(context.Background())
+	if names := f.deletedNames(); len(names) != 1 {
+		t.Fatalf("second pass deleted %v, want one drained host", names)
+	}
+	if got := g.drainingHostCount(); got != 1 {
+		t.Fatalf("second pass draining hosts = %d, want next single host", got)
+	}
+	if g.scaleInLowSince.IsZero() {
+		t.Fatal("continuous low demand unexpectedly reset the quiet-period timestamp")
+	}
+}
+
 // The victim is the emptiest host, and one that the provider can actually be
 // told to delete.
 func TestScaleInCordonsEmptiestNameableHost(t *testing.T) {
