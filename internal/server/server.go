@@ -282,6 +282,9 @@ type serverMetrics struct {
 	warmClaims   atomic.Int64 // creates served by a fully initialized ready VM
 	warmMisses   atomic.Int64 // eligible creates that found the ready pool empty
 	warmFailures atomic.Int64 // background ready-VM builds that failed
+	// guestStatFailures counts utilization ticks where a running guest's agent
+	// did not answer GET /stats (old baked agent, timeout, unreachable).
+	guestStatFailures atomic.Int64
 	// Billable totals, credited when an interval closes. Integer units, not
 	// float: interval timestamps have one-second resolution and vcpus/mem_mib
 	// are integers, so every billed quantity is exactly an integer and stays

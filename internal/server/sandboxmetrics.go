@@ -172,24 +172,29 @@ func (st *sandboxStats) latest() []metricsapi.Sample {
 	return out
 }
 
-// sampleLoop ticks the collector. Guest stats run on every guestStatsEvery'th
-// tick: polling the agent costs the tenant's own CPU and therefore shows up in
-// the very number being measured, so the observer effect is halved by default.
+// sampleLoop ticks the collector.
+//
+// Guest stats are polled on EVERY tick, not every other one. Halving the poll
+// rate to halve its observer effect was a false economy: it makes the guest
+// fields present on alternating samples, so a chart of memory gets holes in it
+// and `limit=1` — the "current reading" call a dashboard makes — is a coin flip
+// on whether it returns them. Measured on the fleet, the poll is three /proc
+// reads and a statfs against an idle guest sitting at ~0.8% CPU; completeness
+// is worth far more than the cost being avoided.
 func (s *Server) sampleLoop(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
-	for n := int64(0); ; n++ {
+	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.sampleAll(ctx, s.cfg.MetricsGuestStats && n%guestStatsEvery == 0)
+			s.sampleAll(ctx, s.cfg.MetricsGuestStats)
 		}
 	}
 }
 
 const (
-	guestStatsEvery       = 2
 	guestStatsConcurrency = 8
 	guestStatsTimeout     = time.Second
 )
@@ -231,7 +236,12 @@ func (s *Server) sampleAll(ctx context.Context, withGuest bool) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				guest[i] = fetchGuestStats(ctx, t.sb.ID, t.sb.GuestIP)
+				if guest[i] = fetchGuestStats(ctx, t.sb.ID, t.sb.GuestIP); guest[i] == nil {
+					// Silence here would hide a half-rolled fleet: an agent
+					// predating GET /stats degrades to host-only fields and
+					// looks identical to the feature being switched off.
+					s.met.guestStatFailures.Add(1)
+				}
 			}()
 		}
 		wg.Wait()

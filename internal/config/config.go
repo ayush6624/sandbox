@@ -117,9 +117,10 @@ type Config struct {
 	// MetricsGuestStats additionally polls each running guest's sandboxd for
 	// the two things the host cannot see from outside the VM: memory actually
 	// in use (the hypervisor's charge only ever grows) and free disk. The poll
-	// runs on every second sampling tick and is deliberately routed around the
+	// runs on every sampling tick and is deliberately routed around the
 	// activity tracker, so it neither delays idle hibernation nor wakes a
-	// frozen sandbox. Needs an agent with GET /stats — the agent is
+	// frozen sandbox. Watch sandbox_guest_stat_failures_total: a guest whose
+	// agent predates GET /stats degrades to host-only fields silently. Needs an agent with GET /stats — the agent is
 	// image-pinned, so a fleet must rebake before enabling this.
 	MetricsGuestStats bool `json:"metrics_guest_stats"`
 	// Data-plane fan-in caps. They bound forwarded-port accepts and CONNECT

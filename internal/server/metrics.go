@@ -73,6 +73,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_warm_claims_total", "Creates served from fully initialized ready VMs.", s.met.warmClaims.Load())
 	counter("sandbox_warm_misses_total", "Eligible creates that found no ready VM and used the normal clone path.", s.met.warmMisses.Load())
 	counter("sandbox_warm_build_failures_total", "Background ready-VM build failures.", s.met.warmFailures.Load())
+	counter("sandbox_guest_stat_failures_total", "Utilization ticks where a running guest's agent did not answer /stats (old baked agent, timeout, unreachable).", s.met.guestStatFailures.Load())
 	// Billable volume, credited as each interval closes (see creditBillable).
 	// Host-level only, for the same cardinality reason as the gauges below:
 	// per-sandbox detail belongs to /v1/usage, and money belongs in the ledger
