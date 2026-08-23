@@ -14,6 +14,7 @@ Self-hosted Firecracker microVM sandboxes with an e2b-style API. Start here:
 | [Usage metering plan](usage-metering-plan.md) | Design for per-sandbox CPU-hours and RAM-hours, durable enough to bill from |
 | [Worker memory model](cgroup-memory-model.md) | How cgroups, the 156 MiB overhead, page cache, and physical RAM fit together — read this first |
 | [P0.2 jailer design](p0-jailer-design.md) | Shared launcher, per-VM identity, chroot path translation, and cgroup v2 rollout |
+| [Tensorlake architecture notes](tensorlake-architecture-notes.md) | Tensorlake blog survey, overlap with this runtime, and a prioritized adoption roadmap |
 
 Also:
 

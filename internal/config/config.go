@@ -105,6 +105,9 @@ type Config struct {
 	// WarmPoolSize keeps this many fully isolated golden clones ready to claim.
 	// They consume normal VM capacity; 0 disables prewarming.
 	WarmPoolSize int `json:"warm_pool_size"`
+	// WarmPoolBudget caps aggregate ready and preparing VMs across all
+	// templates. 0 inherits warm_pool_size for backward compatibility.
+	WarmPoolBudget int `json:"warm_pool_budget"`
 	// MetricsIntervalSec samples each running sandbox's CPU/memory/network/disk
 	// from the host (cgroup leaf, tap counters, rootfs blocks) for
 	// GET /sandboxes/{id}/metrics and the /metrics aggregates. It never

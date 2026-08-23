@@ -54,11 +54,14 @@ type Sandbox struct {
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	SourceType string            `json:"source_type,omitempty"`
 	SourceID   string            `json:"source_id,omitempty"`
-	PID        int               `json:"pid"`
-	VMID       string            `json:"vm_id"`
-	SocketPath string            `json:"socket_path"`
-	TapDevice  string            `json:"tap_device"`
-	GuestIP    string            `json:"guest_ip"`
+	// WarmTemplateID is internal pool provenance. It remains attached after a
+	// claim only long enough for diagnostics; public clients never need it.
+	WarmTemplateID string `json:"-"`
+	PID            int    `json:"pid"`
+	VMID           string `json:"vm_id"`
+	SocketPath     string `json:"socket_path"`
+	TapDevice      string `json:"tap_device"`
+	GuestIP        string `json:"guest_ip"`
 	// LastTap/LastIP are the tap and guest IP a hibernated sandbox's frozen
 	// memory image has baked in. A hibernated row's LIVE identity columns are
 	// empty (the frozen VM holds neither), so these are what the pool pickers
@@ -150,6 +153,11 @@ type Snapshot struct {
 	// Golden marks the server-managed pristine snapshot that POST /sandboxes
 	// clones from. At most one snapshot is golden (partial unique index).
 	Golden bool `json:"golden,omitempty"`
+	// Role separates server internals, reusable templates, and ordinary user
+	// checkpoints. WarmTarget is the desired per-worker ready inventory for a
+	// reusable template (zero means on-demand only).
+	Role       string `json:"role,omitempty"`
+	WarmTarget int    `json:"warm_target,omitempty"`
 	// BaseMtime/BaseSize record the base rootfs stat at snapshot time, so a
 	// rebuilt base image (e.g. after install-agent) invalidates a golden
 	// snapshot on the next server startup.
@@ -170,6 +178,12 @@ type Snapshot struct {
 	Vcpus  int64 `json:"vcpus,omitempty"`
 	MemMIB int64 `json:"mem_mib,omitempty"`
 }
+
+const (
+	SnapshotRoleBuiltin  = "builtin"
+	SnapshotRoleTemplate = "template"
+	SnapshotRoleUser     = "user"
+)
 
 // Snapshot formats.
 const (
@@ -489,6 +503,7 @@ func (r *Registry) migrate() error {
 		, source_id TEXT NOT NULL DEFAULT ''
 		, last_tap  TEXT NOT NULL DEFAULT ''
 		, last_ip   TEXT NOT NULL DEFAULT ''
+		, warm_template_id TEXT NOT NULL DEFAULT ''
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_tap_running  ON sandboxes(tap_device) WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming') AND tap_device <> '';
 	CREATE UNIQUE INDEX IF NOT EXISTS uniq_ip_running   ON sandboxes(guest_ip)   WHERE status IN ('running', 'starting', 'stopping', 'preparing', 'warming') AND guest_ip <> '';
@@ -521,6 +536,8 @@ func (r *Registry) migrate() error {
 		name               TEXT NOT NULL DEFAULT ''
 		, expires_at        INTEGER
 		, durability       TEXT NOT NULL DEFAULT 'local'
+		, role             TEXT NOT NULL DEFAULT 'user'
+		, warm_target      INTEGER NOT NULL DEFAULT 0
 	);
 	`
 	if _, err := r.db.Exec(schema); err != nil {
@@ -637,10 +654,18 @@ func (r *Registry) migrate() error {
 		`ALTER TABLE sandboxes ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'`,
 		`ALTER TABLE sandboxes ADD COLUMN source_type TEXT NOT NULL DEFAULT 'default'`,
 		`ALTER TABLE sandboxes ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sandboxes ADD COLUMN warm_template_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE snapshots ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`,
+		`ALTER TABLE snapshots ADD COLUMN warm_target INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := r.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return err
 		}
+	}
+	// Golden is a legacy boolean role. Keep it authoritative for upgraded
+	// databases while all newly created snapshots write both representations.
+	if _, err := r.db.Exec(`UPDATE snapshots SET role='builtin' WHERE golden=1`); err != nil {
+		return err
 	}
 	// last_tap/last_ip split a hibernated sandbox's REMEMBERED identity from the
 	// live tap_device/guest_ip the partial unique indexes bind. Hibernated rows
@@ -775,21 +800,25 @@ func (r *Registry) dropLegacyHostPortColumn() error {
 // vcpus/memMIB are per-sandbox resource overrides (0 = template default).
 // name is the free-form display label ("" = unnamed).
 func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
-	return r.create(ctx, StatusRunning, id, name, rootfsPath, expiresAt, baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
+	return r.create(ctx, StatusRunning, id, name, rootfsPath, expiresAt, baseSnapshotID, "", hibernateAfterSec, vcpus, memMIB)
 }
 
 // CreateStarting reserves capacity without publishing a user sandbox. The
 // server calls MarkRunning only after all readiness gates complete.
 func (r *Registry) CreateStarting(ctx context.Context, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
-	return r.create(ctx, StatusStarting, id, name, rootfsPath, expiresAt, baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
+	return r.create(ctx, StatusStarting, id, name, rootfsPath, expiresAt, baseSnapshotID, "", hibernateAfterSec, vcpus, memMIB)
 }
 
 // CreateWarm allocates a hidden, capacity-holding row for a pre-started VM.
 func (r *Registry) CreateWarm(ctx context.Context, id, rootfsPath, baseSnapshotID string, vcpus, memMIB int64) (Sandbox, error) {
-	return r.create(ctx, StatusPreparing, id, "", rootfsPath, nil, baseSnapshotID, -1, vcpus, memMIB)
+	return r.CreateWarmForTemplate(ctx, id, rootfsPath, baseSnapshotID, baseSnapshotID, vcpus, memMIB)
 }
 
-func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
+func (r *Registry) CreateWarmForTemplate(ctx context.Context, id, rootfsPath, baseSnapshotID, warmTemplateID string, vcpus, memMIB int64) (Sandbox, error) {
+	return r.create(ctx, StatusPreparing, id, "", rootfsPath, nil, baseSnapshotID, warmTemplateID, -1, vcpus, memMIB)
+}
+
+func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID, warmTemplateID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -814,9 +843,9 @@ func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath stri
 
 	now := time.Now()
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, name, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib)
-		 VALUES (?, ?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, name, tap, ip, rootfsPath, status, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, hibernateAfterSec, vcpus, memMIB)
+		`INSERT INTO sandboxes (id, name, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, expires_at, base_snapshot_id, warm_template_id, hibernate_after_sec, vcpus, mem_mib)
+		 VALUES (?, ?, 0, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, name, tap, ip, rootfsPath, status, now.Unix(), unixOrNil(expiresAt), baseSnapshotID, warmTemplateID, hibernateAfterSec, vcpus, memMIB)
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
 	}
@@ -833,6 +862,7 @@ func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath stri
 		CreatedAt:         now,
 		ExpiresAt:         expiresAt,
 		BaseSnapshotID:    baseSnapshotID,
+		WarmTemplateID:    warmTemplateID,
 		HibernateAfterSec: hibernateAfterSec,
 		Vcpus:             vcpus,
 		MemMIB:            memMIB,
@@ -1417,7 +1447,7 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability`
+const snapshotCols = `id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability, role, warm_target`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
@@ -1430,14 +1460,38 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 	if format == "" {
 		format = FormatFull
 	}
+	if s.Role == "" {
+		if s.Golden {
+			s.Role = SnapshotRoleBuiltin
+		} else {
+			s.Role = SnapshotRoleUser
+		}
+	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.GuestMAC, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name, unixOrNil(s.ExpiresAt), snapshotDurability(s.Durability))
+		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability, role, warm_target)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.GuestMAC, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name, unixOrNil(s.ExpiresAt), snapshotDurability(s.Durability), s.Role, s.WarmTarget)
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
 	return nil
+}
+
+// SetSnapshotWarmTarget changes only ready-pool policy; snapshot artifacts
+// and their revision remain immutable.
+func (r *Registry) SetSnapshotWarmTarget(ctx context.Context, id string, target int) (Snapshot, error) {
+	if target < 0 {
+		return Snapshot{}, fmt.Errorf("warm target must be non-negative")
+	}
+	res, err := r.db.ExecContext(ctx, `UPDATE snapshots SET warm_target=? WHERE id=? AND role IN (?, ?)`,
+		target, id, SnapshotRoleBuiltin, SnapshotRoleTemplate)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Snapshot{}, sql.ErrNoRows
+	}
+	return r.GetSnapshot(ctx, id)
 }
 
 // GoldenSnapshot returns the snapshot marked golden (sql.ErrNoRows if none).
@@ -1546,7 +1600,8 @@ func (r *Registry) SnapshotDependencyCount(ctx context.Context, id string) (int,
 	if err := r.rdb.QueryRowContext(ctx, `
 		SELECT
 		  (SELECT COUNT(*) FROM snapshots WHERE base_id=?1) +
-		  (SELECT COUNT(*) FROM sandboxes WHERE source_type='snapshot' AND source_id=?1)`,
+		  (SELECT COUNT(*) FROM sandboxes WHERE source_type='snapshot' AND source_id=?1) +
+		  (SELECT COUNT(*) FROM sandboxes WHERE warm_template_id=?1 AND status IN ('preparing', 'warming'))`,
 		id).Scan(&dependencies); err != nil {
 		return 0, err
 	}
@@ -1558,7 +1613,7 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var createdAt int64
 	var expiresAt sql.NullInt64
 	var golden int
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.GuestMAC, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability)
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.GuestMAC, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability, &s.Role, &s.WarmTarget)
 	if err != nil {
 		return s, err
 	}
@@ -1568,6 +1623,13 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 		s.ExpiresAt = &value
 	}
 	s.Golden = golden == 1
+	if s.Role == "" {
+		if s.Golden {
+			s.Role = SnapshotRoleBuiltin
+		} else {
+			s.Role = SnapshotRoleUser
+		}
+	}
 	if s.Format == "" {
 		s.Format = FormatFull
 	}
@@ -1582,7 +1644,7 @@ func snapshotDurability(value string) string {
 }
 
 // sandboxCols is the column list every sandbox SELECT uses, in scanSandbox order.
-const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name, metadata, source_type, source_id, last_tap, last_ip`
+const sandboxCols = `id, pid, vm_id, socket_path, tap_device, guest_ip, rootfs_path, status, created_at, stopped_at, expires_at, base_snapshot_id, hibernate_after_sec, vcpus, mem_mib, name, metadata, source_type, source_id, last_tap, last_ip, warm_template_id`
 
 // Get returns the sandbox row for the given ID.
 func (r *Registry) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -1623,7 +1685,7 @@ func scanSandbox(r rowScanner) (Sandbox, error) {
 	var createdAt int64
 	var stoppedAt, expiresAt sql.NullInt64
 	var metadata string
-	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name, &metadata, &sb.SourceType, &sb.SourceID, &sb.LastTap, &sb.LastIP)
+	err := r.Scan(&sb.ID, &sb.PID, &sb.VMID, &sb.SocketPath, &sb.TapDevice, &sb.GuestIP, &sb.RootfsPath, &sb.Status, &createdAt, &stoppedAt, &expiresAt, &sb.BaseSnapshotID, &sb.HibernateAfterSec, &sb.Vcpus, &sb.MemMIB, &sb.Name, &metadata, &sb.SourceType, &sb.SourceID, &sb.LastTap, &sb.LastIP, &sb.WarmTemplateID)
 	if err != nil {
 		return sb, err
 	}
@@ -1698,15 +1760,24 @@ func (r *Registry) MarkWarmReady(ctx context.Context, id string) error {
 // ClaimWarm atomically promotes the oldest hidden ready VM into a routed
 // sandbox and applies the request's mutable fields.
 func (r *Registry) ClaimWarm(ctx context.Context, name string, expiresAt *time.Time, idleTimeout int) (Sandbox, error) {
+	return r.ClaimWarmForTemplate(ctx, "", name, expiresAt, idleTimeout)
+}
+
+func (r *Registry) ClaimWarmForTemplate(ctx context.Context, templateID, name string, expiresAt *time.Time, idleTimeout int) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
 	}
 	defer tx.Rollback()
 
-	sb, err := scanSandbox(tx.QueryRowContext(ctx,
-		`SELECT `+sandboxCols+` FROM sandboxes WHERE status=? ORDER BY created_at LIMIT 1`,
-		StatusWarming))
+	query := `SELECT ` + sandboxCols + ` FROM sandboxes WHERE status=?`
+	args := []any{StatusWarming}
+	if templateID != "" {
+		query += ` AND warm_template_id=?`
+		args = append(args, templateID)
+	}
+	query += ` ORDER BY created_at LIMIT 1`
+	sb, err := scanSandbox(tx.QueryRowContext(ctx, query, args...))
 	if err != nil {
 		return Sandbox{}, err
 	}
@@ -1738,6 +1809,27 @@ func (r *Registry) WarmCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// WarmCountByTemplate is the heartbeat-ready inventory keyed by immutable
+// snapshot id. Rows from a legacy binary without provenance are reported under
+// the empty key and are never offered for a custom template.
+func (r *Registry) WarmCountByTemplate(ctx context.Context) (map[string]int, error) {
+	rows, err := r.rdb.QueryContext(ctx, `SELECT warm_template_id, COUNT(*) FROM sandboxes WHERE status=? GROUP BY warm_template_id`, StatusWarming)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var templateID string
+		var n int
+		if err := rows.Scan(&templateID, &n); err != nil {
+			return nil, err
+		}
+		out[templateID] = n
+	}
+	return out, rows.Err()
+}
+
 // WarmInventory reports ready and still-preparing pool entries.
 func (r *Registry) WarmInventory(ctx context.Context) (ready, preparing int, err error) {
 	err = r.rdb.QueryRowContext(ctx, `
@@ -1746,6 +1838,33 @@ func (r *Registry) WarmInventory(ctx context.Context) (ready, preparing int, err
 			(SELECT COUNT(*) FROM sandboxes WHERE status=?2)`,
 		StatusWarming, StatusPreparing).Scan(&ready, &preparing)
 	return
+}
+
+type WarmInventory struct {
+	Ready     int
+	Preparing int
+}
+
+func (r *Registry) WarmInventoryByTemplate(ctx context.Context) (map[string]WarmInventory, error) {
+	rows, err := r.rdb.QueryContext(ctx, `
+		SELECT warm_template_id,
+		       SUM(CASE WHEN status=?1 THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN status=?2 THEN 1 ELSE 0 END)
+		FROM sandboxes WHERE status IN (?1, ?2) GROUP BY warm_template_id`, StatusWarming, StatusPreparing)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]WarmInventory{}
+	for rows.Next() {
+		var templateID string
+		var inv WarmInventory
+		if err := rows.Scan(&templateID, &inv.Ready, &inv.Preparing); err != nil {
+			return nil, err
+		}
+		out[templateID] = inv
+	}
+	return out, rows.Err()
 }
 
 func collectSandboxes(rows *sql.Rows) ([]Sandbox, error) {

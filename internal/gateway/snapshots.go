@@ -38,7 +38,7 @@ func (g *Gateway) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	g.mu.RUnlock()
 
 	out := []registry.Snapshot{}
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, h := range live {
 		req, err := http.NewRequestWithContext(r.Context(), "GET", client.EndpointURL(h.addr)+"/snapshots", nil)
 		if err != nil {
@@ -59,10 +59,17 @@ func (g *Gateway) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 		}
 		// A pulled snapshot exists on several hosts — dedupe by id.
 		for _, sn := range snaps {
-			if !seen[sn.ID] {
-				seen[sn.ID] = true
-				out = append(out, sn)
+			if index, ok := seen[sn.ID]; ok {
+				// Warm policy is host-local. The fleet list exposes the largest
+				// configured target so a warmed copy is not hidden by an unwarmed
+				// duplicate returned first in map iteration order.
+				if sn.WarmTarget > out[index].WarmTarget {
+					out[index].WarmTarget = sn.WarmTarget
+				}
+				continue
 			}
+			seen[sn.ID] = len(out)
+			out = append(out, sn)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -156,10 +163,10 @@ func (g *Gateway) serveSnapshotCreate(w http.ResponseWriter, r *http.Request, id
 	var lastErr error
 
 	for attempt := 0; attempt < maxCreateAttempts; attempt++ {
-		h := g.reserveHostFor(tried, needed, owner)
+		h := g.reserveHostForTemplate(tried, needed, owner, id)
 		if h == nil {
 			h = g.awaitHostWith(r.Context(), deadline, needed, func() *host {
-				return g.reserveHostFor(tried, needed, owner)
+				return g.reserveHostForTemplate(tried, needed, owner, id)
 			})
 		}
 		if h == nil {

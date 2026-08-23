@@ -2,8 +2,6 @@
 
 Firecracker-based microVM sandboxes for development. Spin up isolated Ubuntu VMs — each with Node 22, Python 3, and common build tooling — in a few hundred milliseconds, then run commands and edit files inside them over an HTTP API or the TypeScript SDK.
 
-Think [Lovable](https://lovable.dev) / [e2b](https://e2b.dev) — but self-hosted, on bare metal.
-
 **Docs:** [Quickstart](docs/quickstart.md) · [Concepts](docs/concepts.md) · [HTTP API](docs/http-api.md) · [Self-hosting](docs/self-hosting.md) · [Autoscaling latency](docs/autoscaling-latency.md) · [TypeScript SDK](sdk/typescript/README.md)
 
 - **Fast creates** — every `POST /sandboxes` clones a pre-booted golden snapshot (~0.5 s end-to-end; automatic cold-boot fallback).

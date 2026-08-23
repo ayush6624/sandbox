@@ -53,6 +53,9 @@ func (s *Server) ensureGolden(ctx context.Context) {
 
 	if s.goldenUsable(snap) {
 		if err := s.stageSnapshotRootfs(snap); err == nil {
+			if updated, updateErr := s.reg.SetSnapshotWarmTarget(ctx, snap.ID, s.cfg.WarmPoolSize); updateErr == nil {
+				snap = updated
+			}
 			s.golden.Store(&snap)
 			go s.uploadGoldenBase(snap)
 			fmt.Fprintf(os.Stderr, "golden snapshot %s adopted; creates are hot\n", snap.ID)
@@ -107,6 +110,9 @@ func (s *Server) buildGolden(ctx context.Context) {
 	if err := s.stageSnapshotRootfs(snap); err != nil {
 		fmt.Fprintf(os.Stderr, "golden snapshot: stage rootfs failed, creates stay cold: %v\n", err)
 		return
+	}
+	if updated, err := s.reg.SetSnapshotWarmTarget(ctx, snap.ID, s.cfg.WarmPoolSize); err == nil {
+		snap = updated
 	}
 	s.golden.Store(&snap)
 	s.writeGoldenManifest(snap)

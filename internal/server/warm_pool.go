@@ -13,11 +13,7 @@ import (
 )
 
 func (s *Server) startWarmPool(ctx context.Context) {
-	if s.cfg.WarmPoolSize <= 0 {
-		return
-	}
-	if s.golden.Load() == nil {
-		s.settleReadyPool()
+	if s.warmPoolBudget() <= 0 {
 		return
 	}
 	s.warmOnce.Do(func() {
@@ -33,6 +29,13 @@ func (s *Server) startWarmPool(ctx context.Context) {
 			s.maintainWarmPool(ctx)
 		}()
 	})
+}
+
+func (s *Server) warmPoolBudget() int {
+	if s.cfg.WarmPoolBudget > 0 {
+		return s.cfg.WarmPoolBudget
+	}
+	return s.cfg.WarmPoolSize
 }
 
 func (s *Server) settleReadyPool() {
@@ -72,17 +75,24 @@ func (s *Server) kickWarmPool() {
 // No security setup is skipped: the replenisher already performed the jailed
 // launch, network re-identification, clock sync, and SSH host-key rotation.
 func (s *Server) claimWarm(ctx context.Context, name string, expiresAt *time.Time, idleTimeout int) (registry.Sandbox, bool) {
-	sb, err := s.reg.ClaimWarm(ctx, name, expiresAt, idleTimeout)
+	return s.claimWarmForTemplate(ctx, "", name, expiresAt, idleTimeout)
+}
+
+func (s *Server) claimWarmForTemplate(ctx context.Context, templateID, name string, expiresAt *time.Time, idleTimeout int) (registry.Sandbox, bool) {
+	sb, err := s.reg.ClaimWarmForTemplate(ctx, templateID, name, expiresAt, idleTimeout)
 	if errors.Is(err, sql.ErrNoRows) {
 		s.met.warmMisses.Add(1)
+		s.met.forTemplate(templateID).misses.Add(1)
 		return registry.Sandbox{}, false
 	}
 	if err != nil {
 		s.met.warmMisses.Add(1)
+		s.met.forTemplate(templateID).misses.Add(1)
 		fmt.Fprintf(os.Stderr, "claim warm sandbox: %v\n", err)
 		return registry.Sandbox{}, false
 	}
 	s.met.warmClaims.Add(1)
+	s.met.forTemplate(templateID).claims.Add(1)
 	s.act.touch(sb.ID)
 	// A ready VM has been running at our expense since the pool built it.
 	// Billing starts at the claim — ClaimWarm also resets created_at to this
@@ -97,7 +107,7 @@ func (s *Server) maintainWarmPool(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		ready, preparing, err := s.reg.WarmInventory(ctx)
+		inventory, err := s.reg.WarmInventoryByTemplate(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warm pool count: %v\n", err)
 			if !waitWarmRetry(ctx, s.warmKick) {
@@ -105,8 +115,32 @@ func (s *Server) maintainWarmPool(ctx context.Context) {
 			}
 			continue
 		}
-		if ready+preparing >= s.cfg.WarmPoolSize {
-			if ready >= s.cfg.WarmPoolSize {
+		targets, err := s.warmPoolTargets(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warm pool targets: %v\n", err)
+			if !waitWarmRetry(ctx, s.warmKick) {
+				return
+			}
+			continue
+		}
+		if pruned, err := s.pruneWarmPool(ctx, targets, inventory); err != nil {
+			fmt.Fprintf(os.Stderr, "warm pool prune: %v\n", err)
+		} else if pruned {
+			continue // recount after teardown released capacity
+		}
+		missing := make([]registry.Snapshot, 0)
+		allReady := true
+		for _, snap := range targets {
+			inv := inventory[snap.ID]
+			if inv.Ready < snap.WarmTarget {
+				allReady = false
+			}
+			for range snap.WarmTarget - inv.Ready - inv.Preparing {
+				missing = append(missing, snap)
+			}
+		}
+		if len(missing) == 0 {
+			if allReady {
 				s.settleReadyPool()
 			}
 			timer := time.NewTimer(time.Second)
@@ -122,17 +156,18 @@ func (s *Server) maintainWarmPool(ctx context.Context) {
 			}
 		}
 
-		// Fill the deficit concurrently. Each build first creates a
+		// Fill each template's deficit concurrently. Each build first creates a
 		// StatusPreparing row, so requests cannot claim it until every
 		// readiness/security gate completes and MarkWarmReady promotes it.
-		missing := s.cfg.WarmPoolSize - ready - preparing
 		var wg sync.WaitGroup
-		errs := make(chan error, missing)
-		for range missing {
+		errs := make(chan error, len(missing))
+		for _, snap := range missing {
+			snap := snap
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := s.buildWarmOne(ctx); err != nil {
+				if err := s.buildWarmOne(ctx, snap); err != nil {
+					s.met.forTemplate(snap.ID).failures.Add(1)
 					errs <- err
 				}
 			}()
@@ -151,16 +186,80 @@ func (s *Server) maintainWarmPool(ctx context.Context) {
 	}
 }
 
-func (s *Server) buildWarmOne(ctx context.Context) error {
+func (s *Server) pruneWarmPool(ctx context.Context, targets []registry.Snapshot, inventory map[string]registry.WarmInventory) (bool, error) {
+	targetByID := map[string]int{}
+	for _, snap := range targets {
+		targetByID[snap.ID] = snap.WarmTarget
+	}
+	excess := map[string]int{}
+	for templateID, inv := range inventory {
+		if n := inv.Ready + inv.Preparing - targetByID[templateID]; n > 0 {
+			excess[templateID] = n
+		}
+	}
+	if len(excess) == 0 {
+		return false, nil
+	}
+	rows, err := s.reg.All(ctx)
+	if err != nil {
+		return false, err
+	}
+	pruned := false
+	for _, sb := range rows {
+		if excess[sb.WarmTemplateID] <= 0 || (sb.Status != registry.StatusWarming && sb.Status != registry.StatusPreparing) {
+			continue
+		}
+		if err := s.destroy(ctx, sb.ID); err != nil {
+			return pruned, fmt.Errorf("destroy excess warm %s: %w", sb.ID, err)
+		}
+		excess[sb.WarmTemplateID]--
+		pruned = true
+	}
+	return pruned, nil
+}
+
+func (s *Server) warmPoolTargets(ctx context.Context) ([]registry.Snapshot, error) {
+	snaps, err := s.reg.ListSnapshots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return allocateWarmPoolTargets(snaps, s.warmPoolBudget(), s.cfg.WarmPoolSize), nil
+}
+
+func allocateWarmPoolTargets(snaps []registry.Snapshot, budget, builtinTarget int) []registry.Snapshot {
+	out := make([]registry.Snapshot, 0, len(snaps))
+	used := 0
+	// Built-in first preserves the existing default-create latency guarantee;
+	// custom templates consume only the explicitly configured remaining budget.
+	for pass := 0; pass < 2; pass++ {
+		for _, snap := range snaps {
+			if pass == 0 && snap.Role != registry.SnapshotRoleBuiltin || pass == 1 && snap.Role != registry.SnapshotRoleTemplate {
+				continue
+			}
+			target := snap.WarmTarget
+			if snap.Role == registry.SnapshotRoleBuiltin {
+				target = builtinTarget
+			}
+			if target <= 0 || used >= budget {
+				continue
+			}
+			if target > budget-used {
+				target = budget - used
+			}
+			snap.WarmTarget = target
+			used += target
+			out = append(out, snap)
+		}
+	}
+	return out
+}
+
+func (s *Server) buildWarmOne(ctx context.Context, snap registry.Snapshot) error {
 	if err := s.acquireCreate(ctx); err != nil {
 		return err
 	}
 	defer s.releaseCreate()
-	snap := s.golden.Load()
-	if snap == nil {
-		return errors.New("golden snapshot unavailable")
-	}
-	_, err := s.createWarmFromSnapshot(ctx, *snap)
+	_, err := s.createWarmFromSnapshot(ctx, snap)
 	return err
 }
 
@@ -194,7 +293,7 @@ func (s *Server) createWarmFromSnapshot(ctx context.Context, snap registry.Snaps
 		return registry.Sandbox{}, fmt.Errorf("mark warm ready: %w", err)
 	}
 	c.sb.Status = registry.StatusWarming
-	fmt.Fprintf(os.Stderr, "[%s] warm sandbox ready from golden snapshot %s in %s\n",
+	fmt.Fprintf(os.Stderr, "[%s] warm sandbox ready from template %s in %s\n",
 		c.sb.ID, snap.ID, time.Since(started).Round(time.Millisecond))
 	return c.sb, nil
 }

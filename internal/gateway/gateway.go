@@ -64,15 +64,24 @@ type host struct {
 	demandSlots int
 	demandKnown bool
 	warmReady   int // worker-reported fully initialized VMs ready for atomic claim
-	hibernated  int // idle sandboxes frozen to disk on the host (hold no slot)
+	// warmReadyByTemplate is the template-aware ready inventory reported by new
+	// workers. The legacy aggregate above remains during rolling upgrades; when
+	// this map is empty, only the built-in "default" template may use it.
+	warmReadyByTemplate map[string]int
+	hibernated          int // idle sandboxes frozen to disk on the host (hold no slot)
 	// reservedCount is set only on the COPY returned by a reservation: how many
 	// slots it covers. A fanout of N reserves N at once, so releasing it has to
 	// undo the same N.
 	reservedCount int
+	// reservationCapacityCount is the subset that needs new host capacity. A
+	// matching warm VM already holds its tap/IP/memory, so claiming it consumes
+	// no additional advertised free slot.
+	reservationCapacityCount int
 	// reservationUnits is the autoscaling demand carried by this reservation,
 	// in default-sandbox slot equivalents. It is usually 1, but a large memory
 	// override can consume several default slots' worth of host memory.
-	reservationUnits int
+	reservationUnits    int
+	reservationUnitsSet bool
 	// reserved counts creates dispatched to this host but not yet completed.
 	// Without it, a burst of concurrent creates all read the same stale
 	// slotsFree (heartbeats lag by seconds) and pile onto one bin-pack target
@@ -86,10 +95,13 @@ type host struct {
 	// warmReserved is the subset of reservations selected against warmReady.
 	// Keeping it separate lets concurrent placement spread across ready pools
 	// before falling back to ordinary clone capacity.
-	warmReserved int
+	warmReserved           int
+	warmReservedByTemplate map[string]int
 	// reservationWarm exists only on the snapshot returned by reserveHost and
 	// tells completion which counter to release.
-	reservationWarm bool
+	reservationWarm      bool
+	reservationWarmCount int
+	reservationTemplate  string
 	// penaltyUntil makes the host unplaceable until this instant. Set when a
 	// create on it fails with a capacity-class error (its advertised free was
 	// stale — trust nothing until heartbeats correct it) or a connection
@@ -138,7 +150,34 @@ func (h *host) free() int {
 }
 
 func (h *host) warmFree() int {
+	if len(h.warmReadyByTemplate) > 0 {
+		n := 0
+		for templateID, ready := range h.warmReadyByTemplate {
+			n += ready - h.warmReservedByTemplate[templateID]
+		}
+		if n < 0 {
+			return 0
+		}
+		return n
+	}
 	f := h.warmReady - h.warmReserved
+	if f < 0 {
+		return 0
+	}
+	return f
+}
+
+func (h *host) warmFreeFor(templateID string) int {
+	if templateID == "" {
+		return 0
+	}
+	if len(h.warmReadyByTemplate) == 0 {
+		if templateID == "default" {
+			return h.warmFree()
+		}
+		return 0
+	}
+	f := h.warmReadyByTemplate[templateID] - h.warmReservedByTemplate[templateID]
 	if f < 0 {
 		return 0
 	}
@@ -236,7 +275,19 @@ type Gateway struct {
 	// createsOK counts sandboxes the gateway successfully brought up (each
 	// release(landed=true)). Exported as sandbox_creates_total — a gateway-side
 	// aggregate on the gateway's own /metrics for burst-rate observability.
-	createsOK atomic.Int64
+	createsOK               atomic.Int64
+	placementRequests       atomic.Uint64
+	placementCandidates     atomic.Uint64
+	placementRejectExcluded atomic.Uint64
+	placementRejectStale    atomic.Uint64
+	placementRejectPenalty  atomic.Uint64
+	placementRejectDraining atomic.Uint64
+	placementRejectCapacity atomic.Uint64
+	placementSelectedWarm   atomic.Uint64
+	placementSelectedLocal  atomic.Uint64
+	placementSelectedPacked atomic.Uint64
+	placementLatencyCount   [8]atomic.Uint64
+	placementLatencySumUS   atomic.Uint64
 	// slotFreed is replaced and the old channel closed whenever capacity may
 	// have appeared. Closing broadcasts to every queued create: a fresh worker
 	// can expose dozens of slots in one heartbeat, so waking only one waiter
@@ -593,6 +644,7 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("POST /snapshots/{id}/fanout", g.handleSnapshotOp)
 	mux.HandleFunc("POST /snapshots/{id}/rename", g.handleSnapshotOp)
 	mux.HandleFunc("PATCH /snapshots/{id}/public-fields", g.handleSnapshotOp)
+	mux.HandleFunc("PATCH /snapshots/{id}/warm-target", g.handleSnapshotOp)
 	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
 	apiv1.New(mux).Register(mux)
 
@@ -707,6 +759,25 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.slotsTotal = hb.SlotsTotal
 	h.slotsUsed = hb.SlotsUsed
 	h.warmReady = hb.WarmReady
+	h.warmReadyByTemplate = nil
+	if len(hb.WarmReadyByTemplate) > 0 {
+		h.warmReadyByTemplate = make(map[string]int, len(hb.WarmReadyByTemplate))
+		total := 0
+		for templateID, ready := range hb.WarmReadyByTemplate {
+			if ready < 0 {
+				ready = 0
+			}
+			if ready > hb.SlotsTotal {
+				ready = hb.SlotsTotal
+			}
+			h.warmReadyByTemplate[templateID] = ready
+			total += ready
+		}
+		if total > hb.SlotsTotal {
+			total = hb.SlotsTotal
+		}
+		h.warmReady = total
+	}
 	h.slotsFree = hb.SlotsTotal - hb.SlotsUsed // old host binary: best guess
 	if hb.SlotsFree != nil {
 		h.slotsFree = *hb.SlotsFree
@@ -830,6 +901,7 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	demandUnits := g.createDemandUnits(createOpts.MemMIB)
+	warmEligible := createOpts.Vcpus == 0 && createOpts.MemMIB == 0
 
 	// One shared queue deadline across all attempts: a create that fails over
 	// twice must not wait 3× queueWait.
@@ -837,13 +909,14 @@ func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for attempt := 0; attempt < maxCreateAttempts; attempt++ {
-		h := g.reserveHostDemand(tried, demandUnits)
+		reserve := func() *host { return g.reserveHostCreate(tried, demandUnits, warmEligible) }
+		h := reserve()
 		if h == nil {
 			// No free slot right now — wait for one instead of failing. During a
 			// burst the queue depth itself feeds the gateway's scaling signal
 			// (sandbox_create_queue_depth), so waiting here is what gives the new
 			// host time to boot and absorb the queue.
-			h = g.awaitHostDemand(r.Context(), deadline, tried, demandUnits)
+			h = g.awaitHostWith(r.Context(), deadline, demandUnits, reserve)
 		}
 		if h == nil {
 			break
@@ -946,14 +1019,24 @@ func (g *Gateway) reserveHost(exclude map[string]bool) *host {
 }
 
 func (g *Gateway) reserveHostDemand(exclude map[string]bool, demandUnits int) *host {
-	return g.reserveHostMode(exclude, true, demandUnits)
+	return g.reserveHostCreate(exclude, demandUnits, true)
+}
+
+func (g *Gateway) reserveHostCreate(exclude map[string]bool, demandUnits int, warmEligible bool) *host {
+	warmTemplate := ""
+	if warmEligible {
+		warmTemplate = "default"
+	}
+	return g.place(placementRequest{
+		exclude: exclude, needed: 1, demandUnits: demandUnits,
+		warmTemplate: warmTemplate, reserve: true, requireCapacity: true,
+	})
 }
 
 // reserveHostFor reserves `needed` slots for a snapshot-sourced create
 // (restore/fanout). It differs from reserveHost in three ways, each deliberate:
 //
-//   - it never consumes a warm-ready VM, because those are pre-booted from the
-//     GOLDEN image and a snapshot create cannot use one;
+//   - it consumes only warm-ready VMs built from this exact snapshot/template;
 //   - it reserves N slots at once, so a fanout of N cannot be placed on a host
 //     that can only hold one of them;
 //   - it prefers the host that already holds the snapshot, because any other
@@ -962,39 +1045,14 @@ func (g *Gateway) reserveHostDemand(exclude map[string]bool, demandUnits int) *h
 //     given snapshot pile onto one host and 503 at its ceiling while the rest
 //     of the fleet sat idle.
 func (g *Gateway) reserveHostFor(exclude map[string]bool, needed int, prefer string) *host {
-	if needed <= 0 {
-		needed = 1
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	now := time.Now()
+	return g.reserveHostForTemplate(exclude, needed, prefer, "")
+}
 
-	fits := func(h *host) bool {
-		return h != nil && !exclude[h.id] && h.placeable(now, g.ttl) && h.free() >= needed
-	}
-	best := g.hosts[prefer]
-	if !fits(best) {
-		best = nil
-		for _, h := range g.hosts {
-			if !fits(h) {
-				continue
-			}
-			// Bin-pack, matching reserveHostMode: the tightest host that still
-			// fits, with a stable tie-break.
-			if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
-				best = h
-			}
-		}
-	}
-	if best == nil {
-		return nil
-	}
-	best.reserved += needed
-	best.reservedUnits += needed
-	snap := *best
-	snap.reservedCount = needed
-	snap.reservationUnits = needed
-	return &snap
+func (g *Gateway) reserveHostForTemplate(exclude map[string]bool, needed int, prefer, templateID string) *host {
+	return g.place(placementRequest{
+		exclude: exclude, needed: needed, demandUnits: needed, preferHost: prefer,
+		warmTemplate: templateID, reserve: true, requireCapacity: true,
+	})
 }
 
 // releaseReservationN ends a reservation covering more than one slot. landed
@@ -1012,13 +1070,17 @@ func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
 		g.mu.Unlock()
 		return
 	}
-	if h.reserved >= n {
-		h.reserved -= n
+	capacityCount := reserved.reservationCapacityCount
+	if !reserved.reservationUnitsSet {
+		capacityCount = n
+	}
+	if h.reserved >= capacityCount {
+		h.reserved -= capacityCount
 	} else {
 		h.reserved = 0
 	}
 	units := reserved.reservationUnits
-	if units <= 0 {
+	if !reserved.reservationUnitsSet {
 		units = n
 	}
 	if h.reservedUnits >= units {
@@ -1026,12 +1088,13 @@ func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
 	} else {
 		h.reservedUnits = 0
 	}
+	releaseWarmReservation(h, reserved)
 	if landed {
 		for i := 0; i < n; i++ {
 			if h.slotsUsed < h.slotsTotal {
 				h.slotsUsed++
 			}
-			if h.slotsFree > 0 {
+			if i < capacityCount && h.slotsFree > 0 {
 				h.slotsFree--
 			}
 		}
@@ -1047,55 +1110,165 @@ func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
 // reserveHostOrdinary is used by snapshot adoption, which cannot consume a
 // default-create ready VM.
 func (g *Gateway) reserveHostOrdinary(exclude map[string]bool) *host {
-	return g.reserveHostMode(exclude, false, 1)
+	return g.place(placementRequest{
+		exclude: exclude, needed: 1, demandUnits: 1, reserve: true, requireCapacity: true,
+	})
 }
 
 func (g *Gateway) reserveHostMode(exclude map[string]bool, useWarm bool, demandUnits int) *host {
-	if demandUnits <= 0 {
-		demandUnits = 1
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	now := time.Now()
-	var best *host
-	preferWarm := false
+	templateID := ""
 	if useWarm {
-		for _, h := range g.hosts {
-			if exclude[h.id] || !h.placeable(now, g.ttl) || h.free() < demandUnits {
-				continue
-			}
-			if h.warmFree() > 0 {
-				preferWarm = true
-				break
-			}
-		}
+		templateID = "default"
 	}
+	return g.place(placementRequest{
+		exclude: exclude, needed: 1, demandUnits: demandUnits,
+		warmTemplate: templateID, reserve: true, requireCapacity: true,
+	})
+}
+
+// placementRequest is the single scheduler input used by every gateway path.
+// Filtering (health, rollout, capacity, retry exclusions) and ranking (warm
+// affinity, snapshot locality, bin-pack, stable id) live in place so a new
+// constraint cannot accidentally be implemented for only one API route.
+type placementRequest struct {
+	exclude         map[string]bool
+	needed          int
+	demandUnits     int
+	preferHost      string
+	warmTemplate    string
+	reserve         bool
+	requireCapacity bool
+	allowDraining   bool
+}
+
+func (g *Gateway) place(req placementRequest) *host {
+	started := time.Now()
+	g.placementRequests.Add(1)
+	defer func() { g.observePlacementLatency(time.Since(started)) }()
+	if req.needed <= 0 {
+		req.needed = 1
+	}
+	if req.demandUnits <= 0 {
+		req.demandUnits = req.needed
+	}
+
+	if req.reserve {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+	} else {
+		g.mu.RLock()
+		defer g.mu.RUnlock()
+	}
+	now := time.Now()
+	// A matching ready VM is the strongest affinity: it avoids clone setup and
+	// snapshot transfer. Among warm candidates, prefer one that can satisfy the
+	// largest portion of a fan-out, then preserve snapshot locality, then pack.
+	var best *host
+	bestWarm := 0
 	for _, h := range g.hosts {
-		if exclude[h.id] || !h.placeable(now, g.ttl) {
+		g.placementCandidates.Add(1)
+		if h == nil {
+			g.placementRejectExcluded.Add(1)
 			continue
 		}
-		if h.free() < demandUnits {
+		warm := h.warmFreeFor(req.warmTemplate)
+		if warm > req.needed {
+			warm = req.needed
+		}
+		ordinaryUnits := req.demandUnits - warm
+		if ordinaryUnits < 0 {
+			ordinaryUnits = 0
+		}
+		switch {
+		case req.exclude[h.id]:
+			g.placementRejectExcluded.Add(1)
+			continue
+		case now.Sub(h.lastSeen) > g.ttl:
+			g.placementRejectStale.Add(1)
+			continue
+		case now.Before(h.penaltyUntil):
+			g.placementRejectPenalty.Add(1)
+			continue
+		case h.draining && !req.allowDraining:
+			g.placementRejectDraining.Add(1)
+			continue
+		case req.requireCapacity && h.free() < ordinaryUnits:
+			g.placementRejectCapacity.Add(1)
 			continue
 		}
-		if preferWarm && h.warmFree() <= 0 {
-			continue
-		}
-		if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
-			best = h
+		if best == nil || placementBetter(h, warm, best, bestWarm, req.preferHost) {
+			best, bestWarm = h, warm
 		}
 	}
 	if best == nil {
 		return nil
 	}
-	best.reserved++
-	best.reservedUnits += demandUnits
-	snap := *best
-	snap.reservationUnits = demandUnits
-	if preferWarm {
-		best.warmReserved++
-		snap.reservationWarm = true
+	if bestWarm > 0 {
+		g.placementSelectedWarm.Add(1)
+	} else if best.id == req.preferHost && req.preferHost != "" {
+		g.placementSelectedLocal.Add(1)
+	} else {
+		g.placementSelectedPacked.Add(1)
 	}
+
+	if req.reserve {
+		capacityCount := req.needed - bestWarm
+		capacityUnits := req.demandUnits - bestWarm
+		if capacityCount < 0 {
+			capacityCount = 0
+		}
+		if capacityUnits < 0 {
+			capacityUnits = 0
+		}
+		best.reserved += capacityCount
+		best.reservedUnits += capacityUnits
+		if bestWarm > 0 {
+			best.warmReserved += bestWarm
+			if best.warmReservedByTemplate == nil {
+				best.warmReservedByTemplate = map[string]int{}
+			}
+			best.warmReservedByTemplate[req.warmTemplate] += bestWarm
+		}
+	}
+	snap := *best
+	snap.reservedCount = req.needed
+	snap.reservationCapacityCount = req.needed - bestWarm
+	snap.reservationUnits = req.demandUnits - bestWarm
+	if snap.reservationCapacityCount < 0 {
+		snap.reservationCapacityCount = 0
+	}
+	if snap.reservationUnits < 0 {
+		snap.reservationUnits = 0
+	}
+	snap.reservationUnitsSet = true
+	snap.reservationWarm = bestWarm > 0
+	snap.reservationWarmCount = bestWarm
+	snap.reservationTemplate = req.warmTemplate
 	return &snap
+}
+
+func (g *Gateway) observePlacementLatency(elapsed time.Duration) {
+	us := uint64(elapsed.Microseconds())
+	g.placementLatencySumUS.Add(us)
+	for i, bound := range [...]uint64{1, 5, 10, 50, 100, 500, 1000} {
+		if us <= bound {
+			g.placementLatencyCount[i].Add(1)
+		}
+	}
+	g.placementLatencyCount[7].Add(1) // +Inf / total count
+}
+
+func placementBetter(candidate *host, candidateWarm int, current *host, currentWarm int, preferHost string) bool {
+	if candidateWarm != currentWarm {
+		return candidateWarm > currentWarm
+	}
+	if (candidate.id == preferHost) != (current.id == preferHost) {
+		return candidate.id == preferHost
+	}
+	if candidate.free() != current.free() {
+		return candidate.free() < current.free()
+	}
+	return candidate.id < current.id
 }
 
 // release ends a create's reservation. landed=true means the sandbox came up,
@@ -1114,11 +1287,15 @@ func (g *Gateway) releaseReservation(reserved *host, landed bool) {
 		g.mu.Unlock()
 		return
 	}
-	if h.reserved > 0 {
+	capacityCount := 1
+	if reserved.reservationUnitsSet {
+		capacityCount = reserved.reservationCapacityCount
+	}
+	if capacityCount > 0 && h.reserved > 0 {
 		h.reserved--
 	}
 	units := reserved.reservationUnits
-	if units <= 0 {
+	if !reserved.reservationUnitsSet {
 		units = 1
 	}
 	if h.reservedUnits >= units {
@@ -1126,16 +1303,7 @@ func (g *Gateway) releaseReservation(reserved *host, landed bool) {
 	} else {
 		h.reservedUnits = 0
 	}
-	if reserved.reservationWarm && h.warmReserved > 0 {
-		h.warmReserved--
-	}
-	// Once a request was dispatched against a ready VM, stop advertising that
-	// VM even if the request failed: the worker may have claimed it before
-	// returning the error. A later heartbeat restores the count when the
-	// request never reached the worker or replenishment completed.
-	if reserved.reservationWarm && h.warmReady > 0 {
-		h.warmReady--
-	}
+	releaseWarmReservation(h, reserved)
 	if landed {
 		if h.slotsUsed < h.slotsTotal {
 			h.slotsUsed++
@@ -1177,11 +1345,15 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 	routeID := reserved.id
 	if h != nil {
 		routeID = h.id
-		if h.reserved > 0 {
+		capacityCount := 1
+		if reserved.reservationUnitsSet {
+			capacityCount = reserved.reservationCapacityCount
+		}
+		if capacityCount > 0 && h.reserved > 0 {
 			h.reserved--
 		}
 		units := reserved.reservationUnits
-		if units <= 0 {
+		if !reserved.reservationUnitsSet {
 			units = 1
 		}
 		if h.reservedUnits >= units {
@@ -1189,18 +1361,13 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 		} else {
 			h.reservedUnits = 0
 		}
-		if reserved.reservationWarm && h.warmReserved > 0 {
-			h.warmReserved--
-		}
+		releaseWarmReservation(h, reserved)
 		if h.slotsUsed < h.slotsTotal {
 			h.slotsUsed++
 		}
 		h.slotsFree -= units
 		if h.slotsFree < 0 {
 			h.slotsFree = 0
-		}
-		if reserved.reservationWarm && h.warmReady > 0 {
-			h.warmReady--
 		}
 	}
 	g.route[sandboxID] = routeID
@@ -1212,6 +1379,45 @@ func (g *Gateway) landReservation(reserved *host, sandboxID string) string {
 	g.notFound.drop(sandboxID)
 	g.createsOK.Add(1)
 	return routeID
+}
+
+// releaseWarmReservation stops advertising ready VMs once a request was
+// dispatched against them, even when the worker ultimately returned an error:
+// it may have claimed some or all of them before failing. The next heartbeat
+// restores any inventory that was not actually consumed.
+func releaseWarmReservation(h, reserved *host) {
+	n := reserved.reservationWarmCount
+	if n <= 0 && reserved.reservationWarm {
+		n = 1
+	}
+	if n <= 0 {
+		return
+	}
+	if h.warmReserved >= n {
+		h.warmReserved -= n
+	} else {
+		h.warmReserved = 0
+	}
+	templateID := reserved.reservationTemplate
+	if templateID != "" {
+		if held := h.warmReservedByTemplate[templateID]; held >= n {
+			h.warmReservedByTemplate[templateID] = held - n
+		} else {
+			h.warmReservedByTemplate[templateID] = 0
+		}
+		if ready := h.warmReadyByTemplate[templateID]; ready > 0 {
+			if ready > n {
+				h.warmReadyByTemplate[templateID] = ready - n
+			} else {
+				h.warmReadyByTemplate[templateID] = 0
+			}
+		}
+	}
+	if h.warmReady > n {
+		h.warmReady -= n
+	} else {
+		h.warmReady = 0
+	}
 }
 
 // routePinGrace is how long a gateway-recorded route survives heartbeats that
@@ -1571,26 +1777,7 @@ func hostOnly(addr string) string {
 // spread/least-loaded policy, which would keep every host partially full and
 // never releasable.)
 func (g *Gateway) pickHost() *host {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	now := time.Now()
-	var best *host
-	for _, h := range g.hosts {
-		if now.Before(h.penaltyUntil) {
-			continue
-		}
-		if now.Sub(h.lastSeen) > g.ttl || h.free() <= 0 {
-			continue
-		}
-		if best == nil || h.free() < best.free() || (h.free() == best.free() && h.id < best.id) {
-			best = h
-		}
-	}
-	if best == nil {
-		return nil
-	}
-	snap := *best
-	return &snap
+	return g.place(placementRequest{needed: 1, demandUnits: 1, requireCapacity: true})
 }
 
 // --- list (scatter-gather) ---

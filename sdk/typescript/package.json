@@ -46,6 +46,7 @@
     "bench": "tsx benchmarks/run-bench.ts",
     "bench:snapshot-source": "tsx benchmarks/snapshot-source-bench.ts",
     "bench:snapshot-batch": "tsx benchmarks/snapshot-batch-bench.ts",
+    "bench:template-warm": "tsx benchmarks/template-warm-bench.ts",
     "bench:burst": "tsx benchmarks/burst-bench.ts",
     "bench:fleet": "tsx benchmarks/fleet-bench.ts",
     "bench:lifecycle": "tsx benchmarks/lifecycle-bench.ts",

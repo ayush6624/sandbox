@@ -146,6 +146,18 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		fmt.Fprintf(os.Stderr, "heartbeat: count ready pool: %v\n", err)
 		warmReady = 0
 	}
+	warmByTemplate, err := s.reg.WarmCountByTemplate(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "heartbeat: count ready pool by template: %v\n", err)
+		warmByTemplate = nil
+	}
+	// The built-in snapshot id is host-local; the gateway needs one stable key
+	// to compare default-create affinity across workers.
+	if golden := s.golden.Load(); golden != nil && warmByTemplate[golden.ID] > 0 {
+		warmByTemplate["default"] += warmByTemplate[golden.ID]
+		delete(warmByTemplate, golden.ID)
+	}
+	delete(warmByTemplate, "") // legacy provenance is unsafe for exact affinity
 	ids := make([]string, len(routed))
 	runningCount, hibernated := 0, 0
 	for i, sb := range routed {
@@ -191,17 +203,18 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		fmt.Fprintf(os.Stderr, "heartbeat: list snapshots: %v\n", err)
 	}
 	hb := cluster.Heartbeat{
-		HostID:       hostID,
-		Addr:         advertise,
-		InstanceName: gceInstanceName(ctx),
-		Release:      s.cfg.WorkerRelease,
-		SlotsTotal:   s.reg.Pools().Slots(),
-		SlotsUsed:    runningCount,
-		WarmReady:    warmReady,
-		Hibernated:   hibernated,
-		SandboxIDs:   ids,
-		SnapshotIDs:  snapIDs,
-		RawRoutes:    rawRoutes,
+		HostID:              hostID,
+		Addr:                advertise,
+		InstanceName:        gceInstanceName(ctx),
+		Release:             s.cfg.WorkerRelease,
+		SlotsTotal:          s.reg.Pools().Slots(),
+		SlotsUsed:           runningCount,
+		WarmReady:           warmReady,
+		WarmReadyByTemplate: warmByTemplate,
+		Hibernated:          hibernated,
+		SandboxIDs:          ids,
+		SnapshotIDs:         snapIDs,
+		RawRoutes:           rawRoutes,
 	}
 	if s.workerCredentials != nil {
 		hb.ControlToken = s.workerCredentials.Outbound()

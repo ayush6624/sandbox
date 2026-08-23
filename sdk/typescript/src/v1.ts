@@ -103,6 +103,7 @@ export interface TemplateResource {
   id: string
   revision: string
   resources: SandboxResources
+  warmTarget: number
 }
 
 export interface PortForwardResource {
@@ -595,6 +596,13 @@ export class TemplatesCollection {
       return { items: page.templates.map(templateFromApi), nextPageToken: page.next_page_token }
     })
   }
+  async updateWarmTarget(id: string, warmTarget: number, control: RequestControl = {}): Promise<TemplateResource> {
+    if (!Number.isInteger(warmTarget) || warmTarget < 0) throw new Error('warmTarget must be a non-negative integer')
+    const raw = await this.transport.mutate<ApiTemplate>(
+      'PATCH', `/v1/templates/${encodeURIComponent(id)}`, { warm_target: warmTarget }, control,
+    )
+    return templateFromApi(raw)
+  }
 }
 
 export class OperationsCollection {
@@ -733,7 +741,7 @@ function usageIntervalFromApi(raw: ApiUsageInterval): UsageIntervalResource {
 }
 
 function templateFromApi(raw: ApiTemplate): TemplateResource {
-  return { id: raw.id, revision: raw.revision, resources: { vcpus: raw.resources.vcpu, memoryMib: raw.resources.memory_mib } }
+  return { id: raw.id, revision: raw.revision, warmTarget: raw.warm_target, resources: { vcpus: raw.resources.vcpu, memoryMib: raw.resources.memory_mib } }
 }
 
 function portForwardFromApi(raw: ApiPortForward): PortForwardResource {

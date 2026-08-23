@@ -20,7 +20,10 @@ func TestValidateWarmPoolConfig(t *testing.T) {
 	}{
 		{name: "disabled"},
 		{name: "valid", edit: func(c *config.Config) { c.WarmPoolSize = 3 }},
+		{name: "valid custom budget", edit: func(c *config.Config) { c.WarmPoolSize, c.WarmPoolBudget = 1, 3 }},
 		{name: "negative", edit: func(c *config.Config) { c.WarmPoolSize = -1 }, want: "must be >= 0"},
+		{name: "negative budget", edit: func(c *config.Config) { c.WarmPoolBudget = -1 }, want: "must be >= 0"},
+		{name: "size above budget", edit: func(c *config.Config) { c.WarmPoolSize, c.WarmPoolBudget = 3, 2 }, want: "must not exceed"},
 		{name: "without hot create", edit: func(c *config.Config) {
 			c.WarmPoolSize, c.DisableHotCreate = 1, true
 		}, want: "requires hot create"},

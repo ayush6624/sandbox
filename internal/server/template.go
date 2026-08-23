@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/agentapi"
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // A template is a snapshot, and this is the one thing that could not already be
@@ -70,7 +71,7 @@ func (s *Server) handleTemplateBuild(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Errorf("boot template rootfs: %w", err))
 		return
 	}
-	snap, _, snapErr := s.snapshotSandbox(r.Context(), sb.ID, false, body.Name, nil)
+	snap, _, snapErr := s.snapshotSandboxWithRole(r.Context(), sb.ID, false, registry.SnapshotRoleTemplate, body.Name, nil)
 	// The build VM exists only to be snapshotted — destroy it either way.
 	if err := s.destroy(context.Background(), sb.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "template build: destroy source %s: %v\n", sb.ID, err)

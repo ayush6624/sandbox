@@ -229,6 +229,23 @@ paths:
       responses:
         '200': {description: Template, content: {application/json: {schema: {$ref: '#/components/schemas/Template'}}}}
         default: {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [Templates]
+      operationId: updateTemplateWarmTarget
+      parameters:
+        - {name: template_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warm_target]
+              properties:
+                warm_target: {type: integer, minimum: 0}
+      responses:
+        '200': {description: Updated template, content: {application/json: {schema: {$ref: '#/components/schemas/Template'}}}}
+        default: {$ref: '#/components/responses/Problem'}
   /v1/usage:
     get:
       tags: [Usage]
@@ -401,11 +418,12 @@ components:
         expires_at: {type: string, format: date-time}
     Template:
       type: object
-      required: [id, revision, resources]
+      required: [id, revision, resources, warm_target]
       properties:
         id: {type: string}
         revision: {type: string}
         resources: {$ref: '#/components/schemas/Resources'}
+        warm_target: {type: integer, minimum: 0}
     PortForward:
       type: object
       description: |

@@ -155,6 +155,16 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		snap.ExpiresAt = body.ExpiresAt
 		f.snaps[id] = snap
 		_ = json.NewEncoder(w).Encode(snap)
+	case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/snapshots/") && strings.HasSuffix(r.URL.Path, "/warm-target"):
+		id := strings.Split(r.URL.Path, "/")[2]
+		snap := f.snaps[id]
+		var body struct {
+			WarmTarget int `json:"warm_target"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		snap.WarmTarget = body.WarmTarget
+		f.snaps[id] = snap
+		_ = json.NewEncoder(w).Encode(snap)
 	case r.Method == "GET" && r.URL.Path == "/snapshots":
 		out := make([]registry.Snapshot, 0, len(f.snaps))
 		for _, snap := range f.snaps {
@@ -283,7 +293,11 @@ func TestUnknownFieldsUseProblemDetails(t *testing.T) {
 }
 
 func TestLifecycleSnapshotTemplateAndPortResources(t *testing.T) {
-	h := testHandler(t, newFakeLegacy())
+	legacy := newFakeLegacy()
+	legacy.snaps["template_py"] = registry.Snapshot{
+		ID: "template_py", Role: registry.SnapshotRoleTemplate, Vcpus: 4, MemMIB: 2048, CreatedAt: time.Now(),
+	}
+	h := testHandler(t, legacy)
 	call := func(method, path, body, key string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		if key != "" {
@@ -312,6 +326,21 @@ func TestLifecycleSnapshotTemplateAndPortResources(t *testing.T) {
 	if got := call("GET", "/v1/templates/default", "", ""); got.Code != 200 ||
 		!strings.Contains(got.Body.String(), `"memory_mib":1024`) {
 		t.Fatalf("template=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("GET", "/v1/templates/template_py", "", ""); got.Code != 200 ||
+		!strings.Contains(got.Body.String(), `"memory_mib":2048`) {
+		t.Fatalf("custom template=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("PATCH", "/v1/templates/template_py", `{"warm_target":2}`, "warm"); got.Code != 200 ||
+		!strings.Contains(got.Body.String(), `"warm_target":2`) {
+		t.Fatalf("warm template=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("PATCH", "/v1/templates/template_py", `{}`, "warm-missing"); got.Code != 400 ||
+		!strings.Contains(got.Body.String(), "warm_target is required") {
+		t.Fatalf("missing warm target=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("PATCH", "/v1/templates/template_py", `{"warm_target":2,"extra":true}`, "warm-extra"); got.Code != 400 {
+		t.Fatalf("unknown warm field=%d body=%s", got.Code, got.Body.String())
 	}
 	port := call("POST", "/v1/sandboxes/existing/port-forwards", `{"guest_port":8080}`, "port")
 	if port.Code != 201 || !strings.Contains(port.Body.String(), `"status":"active"`) {

@@ -22,6 +22,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	type hostMetric struct {
 		id                      string
 		total, used, free, warm int
+		warmByTemplate          map[string]int
 	}
 	var (
 		liveHosts             int
@@ -35,6 +36,7 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		releaseMismatches     int
 		expectedRelease       string
 		perHost               []hostMetric
+		warmByTemplate        = map[string]int{}
 	)
 
 	g.mu.RLock()
@@ -54,7 +56,22 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		if expectedRelease != "" && h.release != expectedRelease {
 			releaseMismatches++
 		}
-		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed, free: h.free(), warm: h.warmFree()})
+		byTemplate := map[string]int{}
+		if len(h.warmReadyByTemplate) == 0 {
+			if n := h.warmFreeFor("default"); n > 0 {
+				byTemplate["default"] = n
+			}
+		} else {
+			for templateID := range h.warmReadyByTemplate {
+				if n := h.warmFreeFor(templateID); n > 0 {
+					byTemplate[templateID] = n
+				}
+			}
+		}
+		for templateID, n := range byTemplate {
+			warmByTemplate[templateID] += n
+		}
+		perHost = append(perHost, hostMetric{id: h.id, total: h.slotsTotal, used: h.slotsUsed, free: h.free(), warm: h.warmFree(), warmByTemplate: byTemplate})
 	}
 	routes = len(g.route)
 	g.mu.RUnlock()
@@ -88,6 +105,25 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// observability now that the gateway, rather than a Prometheus policy, owns
 	// MIG sizing.
 	fmt.Fprintf(&b, "# HELP sandbox_creates_total Sandboxes the gateway successfully brought up.\n# TYPE sandbox_creates_total counter\nsandbox_creates_total %d\n", g.createsOK.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_placement_requests_total Scheduler decisions attempted.\n# TYPE sandbox_placement_requests_total counter\nsandbox_placement_requests_total %d\n", g.placementRequests.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_placement_candidates_total Host candidates inspected or rejected by reason.\n# TYPE sandbox_placement_candidates_total counter\n")
+	fmt.Fprintf(&b, "sandbox_placement_candidates_total{result=\"inspected\"} %d\n", g.placementCandidates.Load())
+	fmt.Fprintf(&b, "sandbox_placement_candidates_total{result=\"excluded\"} %d\n", g.placementRejectExcluded.Load())
+	fmt.Fprintf(&b, "sandbox_placement_candidates_total{result=\"stale\"} %d\n", g.placementRejectStale.Load())
+	fmt.Fprintf(&b, "sandbox_placement_candidates_total{result=\"penalized\"} %d\n", g.placementRejectPenalty.Load())
+	fmt.Fprintf(&b, "sandbox_placement_candidates_total{result=\"draining\"} %d\n", g.placementRejectDraining.Load())
+	fmt.Fprintf(&b, "sandbox_placement_candidates_total{result=\"capacity\"} %d\n", g.placementRejectCapacity.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_placement_selected_total Placements by winning affinity.\n# TYPE sandbox_placement_selected_total counter\n")
+	fmt.Fprintf(&b, "sandbox_placement_selected_total{affinity=\"warm\"} %d\n", g.placementSelectedWarm.Load())
+	fmt.Fprintf(&b, "sandbox_placement_selected_total{affinity=\"snapshot_local\"} %d\n", g.placementSelectedLocal.Load())
+	fmt.Fprintf(&b, "sandbox_placement_selected_total{affinity=\"binpack\"} %d\n", g.placementSelectedPacked.Load())
+	fmt.Fprintf(&b, "# HELP sandbox_placement_duration_microseconds Gateway placement decision latency.\n# TYPE sandbox_placement_duration_microseconds histogram\n")
+	for i, bound := range []int{1, 5, 10, 50, 100, 500, 1000} {
+		fmt.Fprintf(&b, "sandbox_placement_duration_microseconds_bucket{le=%q} %d\n", fmt.Sprint(bound), g.placementLatencyCount[i].Load())
+	}
+	fmt.Fprintf(&b, "sandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} %d\n", g.placementLatencyCount[7].Load())
+	fmt.Fprintf(&b, "sandbox_placement_duration_microseconds_sum %d\n", g.placementLatencySumUS.Load())
+	fmt.Fprintf(&b, "sandbox_placement_duration_microseconds_count %d\n", g.placementLatencyCount[7].Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_total Queue-triggered direct scale-out requests submitted to the scaler.\n# TYPE sandbox_direct_scale_out_total counter\nsandbox_direct_scale_out_total %d\n", g.directScaleStarted.Load())
 	fmt.Fprintf(&b, "# HELP sandbox_direct_scale_out_failed_total Queue-triggered direct scale-out requests that failed.\n# TYPE sandbox_direct_scale_out_failed_total counter\nsandbox_direct_scale_out_failed_total %d\n", g.directScaleFailed.Load())
 	// Gateway-owned scale-in. hosts_draining is the one to alarm on: a host that
@@ -166,6 +202,26 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# HELP sandbox_host_warm_ready Ready VMs available on a live host, minus warm reservations.\n# TYPE sandbox_host_warm_ready gauge\n")
 	for _, h := range perHost {
 		fmt.Fprintf(&b, "sandbox_host_warm_ready{host=%q} %d\n", h.id, h.warm)
+	}
+	fmt.Fprintf(&b, "# HELP sandbox_template_warm_ready Ready VMs by immutable template id across the fleet.\n# TYPE sandbox_template_warm_ready gauge\n")
+	templateIDs := make([]string, 0, len(warmByTemplate))
+	for templateID := range warmByTemplate {
+		templateIDs = append(templateIDs, templateID)
+	}
+	sort.Strings(templateIDs)
+	for _, templateID := range templateIDs {
+		fmt.Fprintf(&b, "sandbox_template_warm_ready{template=%q} %d\n", templateID, warmByTemplate[templateID])
+	}
+	fmt.Fprintf(&b, "# HELP sandbox_host_template_warm_ready Ready VMs by host and immutable template id.\n# TYPE sandbox_host_template_warm_ready gauge\n")
+	for _, h := range perHost {
+		ids := make([]string, 0, len(h.warmByTemplate))
+		for templateID := range h.warmByTemplate {
+			ids = append(ids, templateID)
+		}
+		sort.Strings(ids)
+		for _, templateID := range ids {
+			fmt.Fprintf(&b, "sandbox_host_template_warm_ready{host=%q,template=%q} %d\n", h.id, templateID, h.warmByTemplate[templateID])
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

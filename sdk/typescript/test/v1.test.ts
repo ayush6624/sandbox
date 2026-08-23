@@ -239,7 +239,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/templates') {
-    json(res, 200, { templates: [{ id: 'default', revision: 'rev-1', resources: { vcpu: 2, memory_mib: 1024 } }] })
+    json(res, 200, { templates: [{ id: 'default', revision: 'rev-1', warm_target: 8, resources: { vcpu: 2, memory_mib: 1024 } }] })
+    return
+  }
+  if (req.method === 'PATCH' && url.pathname === '/v1/templates/template-py') {
+    const input = await body(req)
+    json(res, 200, { id: 'template-py', revision: 'rev-py', warm_target: input.warm_target, resources: { vcpu: 4, memory_mib: 2048 } })
     return
   }
   problem(res, 404, 'not_found', 'resource missing')
@@ -325,8 +330,13 @@ test('pagination is an AsyncIterable and safe retries reuse idempotency keys', a
   for await (const item of client.sandboxes.list({ pageSize: 1 })) listed.push(item.id)
   assert.deepEqual(listed, ['sandbox-1', 'sandbox-2'])
   const templates = []
-  for await (const template of client.templates.list()) templates.push(template.id)
-  assert.deepEqual(templates, ['default'])
+  for await (const template of client.templates.list()) templates.push(template)
+  assert.deepEqual(templates.map((template) => template.id), ['default'])
+  assert.equal(templates[0]?.warmTarget, 8)
+  const warmed = await client.templates.updateWarmTarget('template-py', 3)
+  assert.equal(warmed.warmTarget, 3)
+  assert.equal(warmed.resources.memoryMib, 2048)
+  await assert.rejects(client.templates.updateWarmTarget('template-py', -1), /non-negative integer/)
 })
 
 test('batch operations poll and retain indexed per-item errors', async () => {

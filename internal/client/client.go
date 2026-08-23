@@ -159,6 +159,23 @@ func (c *Client) BuildTemplate(ctx context.Context, opts TemplateBuildOpts) (reg
 	return snap, nil
 }
 
+func (c *Client) ListSnapshots(ctx context.Context) ([]registry.Snapshot, error) {
+	var out []registry.Snapshot
+	if err := c.do(ctx, http.MethodGet, "/snapshots", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) SetTemplateWarmTarget(ctx context.Context, id string, target int) (registry.Snapshot, error) {
+	var snap registry.Snapshot
+	if err := c.do(ctx, http.MethodPatch, "/snapshots/"+url.PathEscape(id)+"/warm-target",
+		map[string]int{"warm_target": target}, &snap); err != nil {
+		return registry.Snapshot{}, err
+	}
+	return snap, nil
+}
+
 // List returns all running sandboxes.
 func (c *Client) List(ctx context.Context) ([]registry.Sandbox, error) {
 	var out []registry.Sandbox

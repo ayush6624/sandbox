@@ -55,6 +55,56 @@ func templateCmd() *cobra.Command {
 		Short: "Build sandbox templates from container images",
 	}
 	cmd.AddCommand(templateBuildCmd())
+	cmd.AddCommand(templateListCmd(), templateWarmCmd())
+	return cmd
+}
+
+func templateListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use: "list", Short: "List reusable templates and their warm targets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, c, err := dialClient()
+			if err != nil {
+				return err
+			}
+			snaps, err := c.ListSnapshots(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Println("ID\tNAME\tWARM")
+			for _, snap := range snaps {
+				if snap.Role == "template" {
+					fmt.Printf("%s\t%s\t%d\n", snap.ID, snap.Name, snap.WarmTarget)
+				}
+			}
+			return nil
+		},
+	}
+	addClientFlags(cmd)
+	return cmd
+}
+
+func templateWarmCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use: "warm TEMPLATE_ID COUNT", Short: "Set a template's per-worker ready target", Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := strconv.Atoi(args[1])
+			if err != nil || target < 0 {
+				return fmt.Errorf("COUNT must be a non-negative integer")
+			}
+			_, c, err := dialClient()
+			if err != nil {
+				return err
+			}
+			snap, err := c.SetTemplateWarmTarget(cmd.Context(), args[0], target)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s warm target: %d\n", snap.ID, snap.WarmTarget)
+			return nil
+		},
+	}
+	addClientFlags(cmd)
 	return cmd
 }
 

@@ -61,6 +61,9 @@ type Config struct {
 	// WarmPoolSize keeps fully started, independently identified golden clones
 	// off the routed inventory until a create atomically claims one.
 	WarmPoolSize int
+	// WarmPoolBudget caps aggregate ready inventory across the built-in image
+	// and custom templates. 0 inherits WarmPoolSize.
+	WarmPoolBudget int
 	// Accept-side data-plane fan-in caps shared by forwarded host ports and
 	// CONNECT tunnels. 0 = default, negative = disabled. See connLimits in
 	// portproxy.go and config.MaxPortConnsPerSandbox.
@@ -200,6 +203,9 @@ type Server struct {
 	createSem chan struct{}
 	warmOnce  sync.Once
 	warmKick  chan struct{}
+	// warmPolicyMu serializes the read-sum-write sequence used to enforce the
+	// host-local warm-pool budget across concurrent operator updates.
+	warmPolicyMu sync.Mutex
 	// readyPoolSettled closes when the initial configured ready pool is full,
 	// or after a bounded failure window. Heartbeats keep placement closed until
 	// then so the first request does not race pool construction.
@@ -274,14 +280,15 @@ type backgroundUpload struct {
 // single choke point for each transition. All access is via the atomics, so no
 // lock is needed on the scrape path.
 type serverMetrics struct {
-	createsOK    atomic.Int64 // POST /sandboxes that returned 201 (hot clone or cold boot)
-	createsErr   atomic.Int64 // POST /sandboxes that failed to bring a sandbox up (post-validation)
-	hibernations atomic.Int64 // sandboxes frozen to disk (idle reaper, manual, or shutdown)
-	wakes        atomic.Int64 // successful thaws from hibernation
-	wakeFailures atomic.Int64 // wake attempts that rolled back to hibernated
-	warmClaims   atomic.Int64 // creates served by a fully initialized ready VM
-	warmMisses   atomic.Int64 // eligible creates that found the ready pool empty
-	warmFailures atomic.Int64 // background ready-VM builds that failed
+	createsOK      atomic.Int64 // POST /sandboxes that returned 201 (hot clone or cold boot)
+	createsErr     atomic.Int64 // POST /sandboxes that failed to bring a sandbox up (post-validation)
+	hibernations   atomic.Int64 // sandboxes frozen to disk (idle reaper, manual, or shutdown)
+	wakes          atomic.Int64 // successful thaws from hibernation
+	wakeFailures   atomic.Int64 // wake attempts that rolled back to hibernated
+	warmClaims     atomic.Int64 // creates served by a fully initialized ready VM
+	warmMisses     atomic.Int64 // eligible creates that found the ready pool empty
+	warmFailures   atomic.Int64 // background ready-VM builds that failed
+	warmByTemplate sync.Map     // snapshot id -> *templateWarmMetrics
 	// guestStatFailures counts utilization ticks where a running guest's agent
 	// did not answer GET /stats (old baked agent, timeout, unreachable).
 	guestStatFailures atomic.Int64
@@ -293,6 +300,21 @@ type serverMetrics struct {
 	billableVcpuSeconds   atomic.Int64 // allocated vCPU-seconds billed
 	billableMemMIBSeconds atomic.Int64 // allocated MiB-seconds billed
 	consumedCPUUsec       atomic.Int64 // host CPU consumed by guests (recorded, not billed)
+}
+
+type templateWarmMetrics struct {
+	claims   atomic.Int64
+	misses   atomic.Int64
+	failures atomic.Int64
+}
+
+func (m *serverMetrics) forTemplate(templateID string) *templateWarmMetrics {
+	if existing, ok := m.warmByTemplate.Load(templateID); ok {
+		return existing.(*templateWarmMetrics)
+	}
+	created := &templateWarmMetrics{}
+	actual, _ := m.warmByTemplate.LoadOrStore(templateID, created)
+	return actual.(*templateWarmMetrics)
 }
 
 // fcOverheadMIB is the FLOOR on per-VM memory charged on top of the guest's
@@ -319,7 +341,7 @@ func New(cfg Config, reg *registry.Registry) *Server {
 	s.createSem = make(chan struct{}, sem)
 	s.warmKick = make(chan struct{}, 1)
 	s.readyPoolSettled = make(chan struct{})
-	if cfg.WarmPoolSize <= 0 {
+	if s.warmPoolBudget() <= 0 {
 		close(s.readyPoolSettled)
 	}
 	s.warmed = make(chan struct{})
@@ -516,6 +538,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /snapshots/{id}/restore", s.handleRestore)
 	mux.HandleFunc("POST /snapshots/{id}/fanout", s.handleFanout)
 	mux.HandleFunc("PATCH /snapshots/{id}/public-fields", s.handleSnapshotPublicFields)
+	mux.HandleFunc("PATCH /snapshots/{id}/warm-target", s.handleSnapshotWarmTarget)
 	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
 	apiv1.New(mux).Register(mux)
 
@@ -831,8 +854,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var sb registry.Sandbox
 	hot := false
 	if body.Vcpus == 0 && body.MemMIB == 0 {
-		if ready, ok := s.claimWarm(ctx, body.Name, expiresAt, body.HibernateAfterSec); ok {
-			sb, hot = ready, true
+		if snap := s.golden.Load(); snap != nil {
+			if ready, ok := s.claimWarmForTemplate(ctx, snap.ID, body.Name, expiresAt, body.HibernateAfterSec); ok {
+				sb, hot = ready, true
+			}
 		}
 	}
 	if snap := s.golden.Load(); snap != nil && body.Vcpus == 0 && body.MemMIB == 0 {
@@ -1136,7 +1161,8 @@ type Info struct {
 	// HotCreate reports whether POST /sandboxes is served from a golden snapshot.
 	HotCreate bool `json:"hot_create"`
 	// WarmPoolSize is the configured number of hidden, fully initialized VMs.
-	WarmPoolSize int `json:"warm_pool_size"`
+	WarmPoolSize   int `json:"warm_pool_size"`
+	WarmPoolBudget int `json:"warm_pool_budget"`
 	// HibernateAfterSec is the host's default idle-hibernation window (0 = off).
 	HibernateAfterSec int `json:"hibernate_after_sec"`
 	// HostID identifies this host in fleet mode; empty standalone.
@@ -1151,6 +1177,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		MaxMemMIB:         s.maxMemMIB(),
 		HotCreate:         s.cfg.HotCreate,
 		WarmPoolSize:      s.cfg.WarmPoolSize,
+		WarmPoolBudget:    s.warmPoolBudget(),
 		HibernateAfterSec: int(s.cfg.HibernateAfter / time.Second),
 		HostID:            s.cfg.HostID,
 	})

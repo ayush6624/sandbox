@@ -200,7 +200,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        patch: operations["updateTemplateWarmTarget"];
         trace?: never;
     };
     "/v1/usage": {
@@ -395,6 +395,7 @@ export interface components {
             id: string;
             revision: string;
             resources: components["schemas"]["Resources"];
+            warm_target: number;
         };
         /**
          * @description One explicitly exposed guest port. How it is reachable depends on
@@ -1085,6 +1086,35 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Template"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    updateTemplateWarmTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                template_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    warm_target: number;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated template */
             200: {
                 headers: {
                     [name: string]: unknown;

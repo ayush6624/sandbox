@@ -188,6 +188,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		HotCreate:              !cfg.DisableHotCreate,
 		CreateConcurrency:      cfg.CreateConcurrency,
 		WarmPoolSize:           cfg.WarmPoolSize,
+		WarmPoolBudget:         cfg.WarmPoolBudget,
 		MaxPortConnsPerSandbox: cfg.MaxPortConnsPerSandbox,
 		MaxPortConnsTotal:      cfg.MaxPortConnsTotal,
 		PortConnRatePerSec:     cfg.PortConnRatePerSec,
@@ -230,14 +231,24 @@ func validateWarmPoolConfig(cfg config.Config) error {
 	if cfg.WarmPoolSize < 0 {
 		return fmt.Errorf("warm_pool_size must be >= 0")
 	}
-	if cfg.WarmPoolSize == 0 {
+	if cfg.WarmPoolBudget < 0 {
+		return fmt.Errorf("warm_pool_budget must be >= 0")
+	}
+	budget := cfg.WarmPoolBudget
+	if budget == 0 {
+		budget = cfg.WarmPoolSize
+	}
+	if budget == 0 {
 		return nil
 	}
 	if cfg.DisableHotCreate {
-		return fmt.Errorf("warm_pool_size requires hot create")
+		return fmt.Errorf("warm pool requires hot create")
 	}
-	if slots := cfg.Pools.Slots(); cfg.WarmPoolSize >= slots {
-		return fmt.Errorf("warm_pool_size %d must be smaller than the %d-slot tap/IP pool", cfg.WarmPoolSize, slots)
+	if cfg.WarmPoolSize > budget {
+		return fmt.Errorf("warm_pool_size %d must not exceed warm_pool_budget %d", cfg.WarmPoolSize, budget)
+	}
+	if slots := cfg.Pools.Slots(); budget >= slots {
+		return fmt.Errorf("warm_pool_budget %d must be smaller than the %d-slot tap/IP pool", budget, slots)
 	}
 	return nil
 }

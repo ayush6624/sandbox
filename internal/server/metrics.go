@@ -3,8 +3,11 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/registry"
 )
 
 // handleMetrics serves this host's occupancy + lifecycle counters in Prometheus
@@ -73,6 +76,70 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_warm_claims_total", "Creates served from fully initialized ready VMs.", s.met.warmClaims.Load())
 	counter("sandbox_warm_misses_total", "Eligible creates that found no ready VM and used the normal clone path.", s.met.warmMisses.Load())
 	counter("sandbox_warm_build_failures_total", "Background ready-VM build failures.", s.met.warmFailures.Load())
+	type warmMetricRow struct {
+		id string
+		m  *templateWarmMetrics
+	}
+	var warmRows []warmMetricRow
+	s.met.warmByTemplate.Range(func(key, value any) bool {
+		id := key.(string)
+		if golden := s.golden.Load(); golden != nil && id == golden.ID {
+			id = "default"
+		}
+		warmRows = append(warmRows, warmMetricRow{id: id, m: value.(*templateWarmMetrics)})
+		return true
+	})
+	sort.Slice(warmRows, func(i, j int) bool { return warmRows[i].id < warmRows[j].id })
+	fmt.Fprintf(&b, "# HELP sandbox_template_warm_events_total Ready-pool outcomes by template and result.\n# TYPE sandbox_template_warm_events_total counter\n")
+	for _, row := range warmRows {
+		fmt.Fprintf(&b, "sandbox_template_warm_events_total{template=%q,result=\"claim\"} %d\n", row.id, row.m.claims.Load())
+		fmt.Fprintf(&b, "sandbox_template_warm_events_total{template=%q,result=\"miss\"} %d\n", row.id, row.m.misses.Load())
+		fmt.Fprintf(&b, "sandbox_template_warm_events_total{template=%q,result=\"build_failure\"} %d\n", row.id, row.m.failures.Load())
+	}
+	if inventory, err := s.reg.WarmInventoryByTemplate(r.Context()); err == nil {
+		labels := map[string]string{}
+		targets := map[string]int{}
+		if snaps, listErr := s.reg.ListSnapshots(r.Context()); listErr == nil {
+			for _, snap := range snaps {
+				if snap.Role != registry.SnapshotRoleBuiltin && snap.Role != registry.SnapshotRoleTemplate {
+					continue
+				}
+				label := snap.ID
+				if snap.Role == registry.SnapshotRoleBuiltin {
+					label = "default"
+				}
+				labels[snap.ID] = label
+				targets[label] = 0
+			}
+			for _, snap := range allocateWarmPoolTargets(snaps, s.warmPoolBudget(), s.cfg.WarmPoolSize) {
+				targets[labels[snap.ID]] = snap.WarmTarget
+			}
+		}
+		fmt.Fprintf(&b, "# HELP sandbox_template_warm_inventory Ready-pool VMs by template and state.\n# TYPE sandbox_template_warm_inventory gauge\n")
+		ids := make([]string, 0, len(inventory))
+		for id := range inventory {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			label := labels[id]
+			if label == "" {
+				label = id
+			}
+			inv := inventory[id]
+			fmt.Fprintf(&b, "sandbox_template_warm_inventory{template=%q,state=\"ready\"} %d\n", label, inv.Ready)
+			fmt.Fprintf(&b, "sandbox_template_warm_inventory{template=%q,state=\"preparing\"} %d\n", label, inv.Preparing)
+		}
+		fmt.Fprintf(&b, "# HELP sandbox_template_warm_target Configured ready target by template.\n# TYPE sandbox_template_warm_target gauge\n")
+		targetIDs := make([]string, 0, len(targets))
+		for id := range targets {
+			targetIDs = append(targetIDs, id)
+		}
+		sort.Strings(targetIDs)
+		for _, id := range targetIDs {
+			fmt.Fprintf(&b, "sandbox_template_warm_target{template=%q} %d\n", id, targets[id])
+		}
+	}
 	counter("sandbox_guest_stat_failures_total", "Utilization ticks where a running guest's agent did not answer /stats (old baked agent, timeout, unreachable).", s.met.guestStatFailures.Load())
 	// Billable volume, credited as each interval closes (see creditBillable).
 	// Host-level only, for the same cardinality reason as the gauges below:

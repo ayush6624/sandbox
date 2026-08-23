@@ -1,8 +1,8 @@
 # Warm templates: one entity, an admin knob, and a feedback loop
 
-Status: proposed (2026-08-17). Prerequisite landed: snapshot consumers hold
-`snapshotLock` shared and the v1 batch issues chunked fanouts, so creates from
-one snapshot are no longer serialized.
+Status: implemented (2026-08-23). Snapshot consumers hold `snapshotLock`
+shared, claims are template-exact, and the v1 batch issues chunked fanouts, so
+creates from one snapshot are no longer serialized.
 
 ## Problem
 
@@ -106,8 +106,7 @@ the request names `default` or no source).
 
 ### 2. Pool maintainer iterates targets
 
-`maintainWarmPool` currently compares one inventory count against
-`cfg.WarmPoolSize`. It becomes: read `(template_id, target)` pairs from the
+`maintainWarmPool` reads `(template_id, target)` pairs from the
 registry, read per-template `(ready, preparing)` inventory, and fill deficits.
 `buildWarmOne(ctx, templateID)` replaces the `s.golden.Load()` read and calls
 `createWarmFromSnapshot` with that snapshot — which needs no change, because
@@ -126,18 +125,16 @@ memory against `mem_budget_mib`, and `registry.FreeSlots` already counts it. So
 oversubscribed targets do not degrade gracefully — they consume the host's
 advertised capacity and it stops taking creates.
 
-Add `warm_pool_budget` (config; default = `warm_pool_size`, i.e. today's total).
-The maintainer allocates the budget across templates by target share, largest
-remainder, and **never exceeds it** regardless of what the sum of targets says.
-Log the clamp: a silently truncated pool looks identical to a misconfigured one.
+`warm_pool_budget` defaults to `warm_pool_size`, preserving today's total.
+The API rejects a sum of targets above the budget; the maintainer also enforces
+the bound defensively, preserving the built-in pool first and then allocating
+the remaining budget to explicit template targets.
 
 ### 4. Heartbeat and placement
 
-`cluster.Heartbeat.WarmReady int` → `WarmReady map[string]int` keyed by template
-id. The gateway already consumes fleet-wide `warm_ready` to bin-pack ready
-capacity before falling back to ordinary free slots; that logic keys on the
-requested template instead of a single number. Keep the aggregate as a derived
-sum so `/metrics/hosts` and the fleet inventory endpoint don't change shape.
+Heartbeats retain the legacy aggregate `WarmReady int` and add
+`WarmReadyByTemplate map[string]int`. New gateways use exact template affinity;
+old gateways keep working during a rolling upgrade.
 
 Placement ranking for a template-sourced create becomes:
 1. host has a **warm row** for this template
@@ -149,11 +146,10 @@ extension of existing ranking, not new machinery.
 
 ### 5. Metrics — the feedback loop
 
-`sandbox_warming`, `sandbox_warm_preparing`, `sandbox_warm_claims_total`,
-`sandbox_warm_misses_total`, `sandbox_warm_build_failures_total` all gain a
-`template` label. **Per-template miss rate is the signal an operator tunes
-against** — an unlabeled aggregate cannot tell you which pool is too small.
-`injectHostLabel` already merges into existing labels, so federation is free.
+Existing aggregate counters remain stable. `sandbox_template_warm_events_total`
+adds `template` and `result` (`claim`, `miss`, `build_failure`) labels, while
+inventory and targets are exported through `sandbox_template_warm_inventory`
+and `sandbox_template_warm_target`.
 
 ### 6. Operator surface
 

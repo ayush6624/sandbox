@@ -68,6 +68,11 @@ type Heartbeat struct {
 	// claimed without entering the normal clone path. Gateways prefer this
 	// capacity across hosts before falling back to ordinary free slots.
 	WarmReady int `json:"warm_ready,omitempty"`
+	// WarmReadyByTemplate identifies which immutable snapshot each ready VM was
+	// built from. New gateways use it for exact template affinity; WarmReady is
+	// retained as an aggregate so old gateways and mixed-version fleets remain
+	// safe during rollout.
+	WarmReadyByTemplate map[string]int `json:"warm_ready_by_template,omitempty"`
 	// Hibernated is the number of idle sandboxes frozen to disk on this host.
 	// They appear in SandboxIDs (requests must route here to wake them) but
 	// consume no slots.

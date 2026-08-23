@@ -69,6 +69,14 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 // (cold boots, restores, user fan-out clones, the golden build itself) is a
 // self-contained FULL snapshot.
 func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, name string, expiresAt *time.Time) (registry.Snapshot, int, error) {
+	role := registry.SnapshotRoleUser
+	if golden {
+		role = registry.SnapshotRoleBuiltin
+	}
+	return s.snapshotSandboxWithRole(ctx, id, golden, role, name, expiresAt)
+}
+
+func (s *Server) snapshotSandboxWithRole(ctx context.Context, id string, golden bool, role, name string, expiresAt *time.Time) (registry.Snapshot, int, error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return registry.Snapshot{}, 404, err
@@ -284,6 +292,7 @@ func (s *Server) snapshotSandbox(ctx context.Context, id string, golden bool, na
 		CreatedAt:        time.Now(),
 		ExpiresAt:        expiresAt,
 		Golden:           golden,
+		Role:             role,
 		BaseMtime:        baseMtime,
 		BaseSize:         baseSize,
 		Format:           format,
@@ -669,9 +678,18 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	// reporting a capacity failure it could see up front. Advisory only
 	// (capacity moves under us, and warm/hibernated rows shift it); the
 	// per-clone registry admission stays the authority.
-	if free, err := s.reg.FreeSlots(ctx); err == nil && body.Count > free {
+	warmAvailable := 0
+	if counts, err := s.reg.WarmCountByTemplate(ctx); err == nil {
+		warmAvailable = counts[snapID]
+		if warmAvailable > body.Count {
+			warmAvailable = body.Count
+		}
+	}
+	ordinaryNeeded := body.Count - warmAvailable
+	if free, err := s.reg.FreeSlots(ctx); err == nil && ordinaryNeeded > free {
 		capacityOrHTTPError(w, http.StatusServiceUnavailable, fmt.Errorf(
-			"fanout of %d clones exceeds this host's %d free slots: %w", body.Count, free, registry.ErrPoolExhausted))
+			"fanout needs %d ordinary clones after %d warm matches, exceeding this host's %d free slots: %w",
+			ordinaryNeeded, warmAvailable, free, registry.ErrPoolExhausted))
 		return
 	}
 
@@ -739,8 +757,17 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	// which existed only so the staged baked rootfs could be unlinked at a known
 	// point; the file is permanent now, so the barrier bought nothing but
 	// wall-clock — every clone had to resume before any clone could bridge.
-	clones := make([]*clone, body.Count)
-	live := s.fanoutClones(ctx, snapID, snap, clones, limit, expiresAt, body.HibernateAfterSec)
+	live := make([]registry.Sandbox, 0, body.Count)
+	for len(live) < body.Count {
+		ready, ok := s.claimWarmForTemplate(ctx, snapID, "", expiresAt, body.HibernateAfterSec)
+		if !ok {
+			break
+		}
+		live = append(live, ready)
+	}
+	remaining := body.Count - len(live)
+	clones := make([]*clone, remaining)
+	live = append(live, s.fanoutClones(ctx, snapID, snap, clones, limit, expiresAt, body.HibernateAfterSec)...)
 
 	fmt.Fprintf(os.Stderr, "[fanout %s] %d/%d clones live in %s\n",
 		snapID, len(live), body.Count, time.Since(t0).Round(time.Millisecond))
@@ -786,7 +813,7 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 	var sb registry.Sandbox
 	var err error
 	if warming {
-		sb, err = s.reg.CreateWarm(ctx, id, rootfsPath, baseID, snap.Vcpus, snap.MemMIB)
+		sb, err = s.reg.CreateWarmForTemplate(ctx, id, rootfsPath, baseID, snap.ID, snap.Vcpus, snap.MemMIB)
 	} else {
 		sb, err = s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
 	}
@@ -1093,4 +1120,58 @@ func (s *Server) handleSnapshotPublicFields(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) handleSnapshotWarmTarget(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WarmTarget *int `json:"warm_target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, fmt.Errorf("decode body: %w", err))
+		return
+	}
+	if body.WarmTarget == nil {
+		httpError(w, 400, errors.New("warm_target is required"))
+		return
+	}
+	target := *body.WarmTarget
+	budget := s.warmPoolBudget()
+	if target < 0 || target > budget {
+		httpError(w, 400, fmt.Errorf("warm_target must be between 0 and warm_pool_budget (%d)", budget))
+		return
+	}
+	s.warmPolicyMu.Lock()
+	defer s.warmPolicyMu.Unlock()
+	id := r.PathValue("id")
+	snaps, err := s.reg.ListSnapshots(r.Context())
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	total := s.cfg.WarmPoolSize
+	found := false
+	for _, snap := range snaps {
+		if snap.ID == id {
+			found = snap.Role == registry.SnapshotRoleTemplate
+			continue
+		}
+		if snap.Role == registry.SnapshotRoleTemplate {
+			total += snap.WarmTarget
+		}
+	}
+	if !found {
+		httpError(w, 404, fmt.Errorf("template snapshot %s not found", id))
+		return
+	}
+	if total+target > budget {
+		httpError(w, 409, fmt.Errorf("warm targets total %d exceeds warm_pool_budget %d", total+target, budget))
+		return
+	}
+	updated, err := s.reg.SetSnapshotWarmTarget(r.Context(), id, target)
+	if err != nil {
+		httpError(w, 404, err)
+		return
+	}
+	s.kickWarmPool()
+	writeJSON(w, http.StatusOK, updated)
 }

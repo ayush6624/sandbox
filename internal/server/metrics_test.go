@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
@@ -96,6 +97,16 @@ func TestHandleMetrics(t *testing.T) {
 	s.met.hibernations.Add(2)
 	s.met.wakes.Add(3)
 	s.met.wakeFailures.Add(1)
+	s.cfg.WarmPoolBudget = 2
+	if err := s.reg.CreateSnapshot(ctx, registry.Snapshot{
+		ID: "template-py", Role: registry.SnapshotRoleTemplate, WarmTarget: 2, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create template snapshot: %v", err)
+	}
+	templateMetrics := s.met.forTemplate("template-py")
+	templateMetrics.claims.Add(4)
+	templateMetrics.misses.Add(2)
+	templateMetrics.failures.Add(1)
 
 	w := httptest.NewRecorder()
 	s.handleMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
@@ -125,6 +136,10 @@ func TestHandleMetrics(t *testing.T) {
 		"sandbox_hibernations_total":        2,
 		"sandbox_wakes_total":               3,
 		"sandbox_wake_failures_total":       1,
+		"sandbox_template_warm_events_total{template=\"template-py\",result=\"claim\"}":         4,
+		"sandbox_template_warm_events_total{template=\"template-py\",result=\"miss\"}":          2,
+		"sandbox_template_warm_events_total{template=\"template-py\",result=\"build_failure\"}": 1,
+		"sandbox_template_warm_target{template=\"template-py\"}":                                2,
 	}
 	for k, v := range want {
 		if got, ok := m[k]; !ok {

@@ -52,6 +52,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("DELETE /v1/snapshots/{id}", h.idem.Wrap(http.HandlerFunc(h.deleteSnapshot)))
 	mux.HandleFunc("GET /v1/templates", h.listTemplates)
 	mux.HandleFunc("GET /v1/templates/{id}", h.getTemplate)
+	mux.HandleFunc("PATCH /v1/templates/{id}", h.updateTemplate)
 	mux.Handle("POST /v1/sandbox-batches", h.idem.Wrap(http.HandlerFunc(h.createBatch)))
 	mux.HandleFunc("GET /v1/operations", h.listOperations)
 	mux.HandleFunc("GET /v1/operations/{id}", h.getOperation)
@@ -485,12 +486,35 @@ func (h *Handler) listTemplates(w http.ResponseWriter, r *http.Request) {
 	var info struct {
 		DefaultVcpus  int64 `json:"default_vcpus"`
 		DefaultMemMIB int64 `json:"default_mem_mib"`
+		WarmPoolSize  int   `json:"warm_pool_size"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
 		return
 	}
-	templates := []map[string]any{template(info.DefaultVcpus, info.DefaultMemMIB)}
+	templates := []map[string]any{template(defaultTemplateID, "host-default", info.DefaultVcpus, info.DefaultMemMIB, info.WarmPoolSize)}
+	snapshotRec := h.call(r, http.MethodGet, "/snapshots", nil)
+	if !translateError(w, r, snapshotRec) {
+		return
+	}
+	var snaps []registry.Snapshot
+	if err := json.Unmarshal(snapshotRec.Body.Bytes(), &snaps); err != nil {
+		httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
+		return
+	}
+	for _, snap := range snaps {
+		if snap.Role != registry.SnapshotRoleTemplate {
+			continue
+		}
+		vcpu, memory := snap.Vcpus, snap.MemMIB
+		if vcpu == 0 {
+			vcpu = info.DefaultVcpus
+		}
+		if memory == 0 {
+			memory = info.DefaultMemMIB
+		}
+		templates = append(templates, template(snap.ID, snap.ID, vcpu, memory, snap.WarmTarget))
+	}
 	page, next, ok := paginate(w, r, templates)
 	if !ok {
 		return
@@ -499,10 +523,7 @@ func (h *Handler) listTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getTemplate(w http.ResponseWriter, r *http.Request) {
-	if r.PathValue("id") != "default" {
-		httpapi.WriteProblem(w, r, 404, "template_not_found", "template not found")
-		return
-	}
+	id := r.PathValue("id")
 	rec := h.call(r, http.MethodGet, "/info", nil)
 	if !translateError(w, r, rec) {
 		return
@@ -510,12 +531,87 @@ func (h *Handler) getTemplate(w http.ResponseWriter, r *http.Request) {
 	var info struct {
 		DefaultVcpus  int64 `json:"default_vcpus"`
 		DefaultMemMIB int64 `json:"default_mem_mib"`
+		WarmPoolSize  int   `json:"warm_pool_size"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
 		return
 	}
-	writeJSON(w, 200, template(info.DefaultVcpus, info.DefaultMemMIB))
+	if id == defaultTemplateID {
+		writeJSON(w, 200, template(id, "host-default", info.DefaultVcpus, info.DefaultMemMIB, info.WarmPoolSize))
+		return
+	}
+	snapshotRec := h.call(r, http.MethodGet, "/snapshots", nil)
+	if !translateError(w, r, snapshotRec) {
+		return
+	}
+	var snaps []registry.Snapshot
+	if err := json.Unmarshal(snapshotRec.Body.Bytes(), &snaps); err != nil {
+		httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
+		return
+	}
+	for _, snap := range snaps {
+		if snap.ID != id || snap.Role != registry.SnapshotRoleTemplate {
+			continue
+		}
+		vcpu, memory := snap.Vcpus, snap.MemMIB
+		if vcpu == 0 {
+			vcpu = info.DefaultVcpus
+		}
+		if memory == 0 {
+			memory = info.DefaultMemMIB
+		}
+		writeJSON(w, 200, template(id, id, vcpu, memory, snap.WarmTarget))
+		return
+	}
+	httpapi.WriteProblem(w, r, 404, "template_not_found", "template not found")
+}
+
+func (h *Handler) updateTemplate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == defaultTemplateID {
+		httpapi.WriteProblem(w, r, 400, "default_template_policy_is_configured", "default template warm target is configured with warm_pool_size")
+		return
+	}
+	var body struct {
+		WarmTarget *int `json:"warm_target"`
+	}
+	if !decodeBody(w, r, &body, true) {
+		return
+	}
+	if body.WarmTarget == nil {
+		httpapi.WriteProblem(w, r, 400, "invalid_request", "warm_target is required")
+		return
+	}
+	rec := h.call(r, http.MethodPatch, "/snapshots/"+url.PathEscape(id)+"/warm-target", map[string]int{"warm_target": *body.WarmTarget})
+	if !translateError(w, r, rec) {
+		return
+	}
+	var snap registry.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
+		return
+	}
+	infoRec := h.call(r, http.MethodGet, "/info", nil)
+	if !translateError(w, r, infoRec) {
+		return
+	}
+	var info struct {
+		DefaultVcpus  int64 `json:"default_vcpus"`
+		DefaultMemMIB int64 `json:"default_mem_mib"`
+	}
+	if err := json.Unmarshal(infoRec.Body.Bytes(), &info); err != nil {
+		httpapi.WriteProblem(w, r, 502, "invalid_upstream_response", err.Error())
+		return
+	}
+	vcpu, memory := snap.Vcpus, snap.MemMIB
+	if vcpu == 0 {
+		vcpu = info.DefaultVcpus
+	}
+	if memory == 0 {
+		memory = info.DefaultMemMIB
+	}
+	writeJSON(w, http.StatusOK, template(snap.ID, snap.ID, vcpu, memory, snap.WarmTarget))
 }
 
 func (h *Handler) createBatch(w http.ResponseWriter, r *http.Request) {
@@ -914,9 +1010,9 @@ func publicPort(sandboxID string, p registry.PortMapping) map[string]any {
 // `sandbox template build` produced.
 const defaultTemplateID = "default"
 
-func template(vcpu, memoryMIB int64) map[string]any {
+func template(id, revision string, vcpu, memoryMIB int64, warmTarget int) map[string]any {
 	return map[string]any{
-		"id": defaultTemplateID, "revision": "host-default",
+		"id": id, "revision": revision, "warm_target": warmTarget,
 		"resources": Resources{VCPU: vcpu, MemoryMIB: memoryMIB},
 	}
 }

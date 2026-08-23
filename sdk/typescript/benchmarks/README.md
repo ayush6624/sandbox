@@ -60,6 +60,7 @@ npm run bench -- --mode default --iterations 5
 npm run bench -- --output results/mine.json
 npm run bench:snapshot-source -- --iterations 25
 npm run bench:snapshot-batch -- --counts 1,2,4,8,16,32 --baseline
+npm run bench:template-warm -- --template-id <id> --count 4 --rounds 3
 npm run bench:fleet -- --count 64 --mode default
 npm run bench:burst -- --count 500 --concurrency 96 --retry-ms 250
 npm run bench:lifecycle -- --iterations 25
