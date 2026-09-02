@@ -289,6 +289,13 @@ type serverMetrics struct {
 	warmMisses     atomic.Int64 // eligible creates that found the ready pool empty
 	warmFailures   atomic.Int64 // background ready-VM builds that failed
 	warmByTemplate sync.Map     // snapshot id -> *templateWarmMetrics
+	// Peer snapshot transfer counters separate the low-latency VPC cache path
+	// from durable GCS fallback without adding snapshot-id cardinality.
+	snapshotPeerPulls    atomic.Int64
+	snapshotPeerFailures atomic.Int64
+	snapshotPeerServes   atomic.Int64
+	snapshotPeerBytes    atomic.Int64
+	snapshotGCSFallbacks atomic.Int64
 	// guestStatFailures counts utilization ticks where a running guest's agent
 	// did not answer GET /stats (old baked agent, timeout, unreachable).
 	guestStatFailures atomic.Int64
@@ -532,6 +539,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /sandboxes/{id}/adopt", s.handleAdopt)
 	mux.HandleFunc("POST /sandboxes/{id}/release", s.handleRelease)
 	mux.HandleFunc("POST /internal/v1/sandboxes/{action}", s.handleInternalSandboxAction)
+	mux.HandleFunc("GET /internal/v1/snapshots/{id}", s.handlePeerSnapshotMeta)
+	mux.HandleFunc("GET /internal/v1/snapshots/{id}/{artifact}", s.handlePeerSnapshotArtifact)
 	mux.HandleFunc("POST /templates/build", s.handleTemplateBuild)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/rename", s.handleRenameSnapshot)
@@ -794,7 +803,6 @@ func (s *Server) shutdownAll() {
 }
 
 // --- HTTP handlers ---
-
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 

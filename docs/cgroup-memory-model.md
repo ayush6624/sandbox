@@ -108,6 +108,7 @@ Knobs, and how they relate:
 | `jailer_memory_overhead_mib` | the emulator's share — 156 — sets each VM's `memory.max` at `mem_mib + this` |
 | `MEM_PER_SLOT_MIB` | what capacity planning charges per slot — must be ≥ the two above summed |
 | `mem_budget_mib` | the software admission ceiling — `SLOTS × MEM_PER_SLOT_MIB` |
+| `SNAPSHOT_MEMORY_RESERVE_MIB` | parent-cgroup room not offered as slots; defaults to one slot charge so a dirty 1 GiB guest can snapshot at full occupancy |
 
 ### Two guards saying the same thing
 
@@ -195,12 +196,12 @@ Put "http://localhost/snapshot/create": EOF
 Note what was *not* the problem: the disk had plenty of free space, and the
 finished file is only 1 GiB. **The constraint was RAM in transit, not storage.**
 
-### Why only some sandboxes were affected
+### Why the original reproduction affected only some sandboxes
 
 | Sandbox kind | Snapshot type | Page cache burst | Outcome |
 | --- | --- | --- | --- |
-| Default (cloned from the golden snapshot) | **diff** — only pages changed since the golden | a few MiB | fine |
-| Cold-booted (created with a `vcpus`/`mem_mib` override) | **full** — the entire guest | up to `mem_mib` | died |
+| Default (cloned from the golden snapshot) | **diff** — pages changed since the golden | usually a few MiB, but up to `mem_mib` | workload-dependent |
+| Cold-booted (created with a `vcpus`/`mem_mib` override) | **full** — the entire guest | up to `mem_mib` | died in the original sweep |
 
 A resource override cannot be served from the golden snapshot, because
 Firecracker bakes vcpus/mem into a snapshot. So overrides always cold-boot, and a
@@ -283,7 +284,7 @@ slack — but a 256 MiB guest kept dying, because it does fill its RAM. The resu
 was non-monotonic, which is the tell that room, not pressure, was the missing
 ingredient.
 
-So for a **full** snapshot the window also **raises `memory.max`** to
+So for **every** snapshot the window also **raises `memory.max`** to
 `current + write_size + margin`, and hands it back when the snapshot finishes:
 
 ```
@@ -309,8 +310,10 @@ does not, the snapshot is refused with everything left untouched. Overcommitting
 the parent is the one outcome worth refusing service over: it OOMs serve and every
 VM on the host at once.
 
-Full-snapshot windows are also serialized, since two of them would each see the
-same headroom as free. Diff snapshots skip the reservation and the lock entirely.
+The headroom calculation and each leaf-limit mutation are serialized, since two
+callers must not both see the same bytes as free. The lock is released as soon
+as each reservation is installed, so the snapshot writes themselves still run
+in parallel.
 
 ### And a guard, because reserving is not always possible
 
@@ -331,8 +334,8 @@ silent, unrecoverable data loss on a documented feature.
 | --- | --- |
 | Guest, while running | **None.** `memory.high` exists only during a snapshot. |
 | Guest, during the snapshot | **None.** It is paused; it cannot be slowed. |
-| Default sandboxes (diff snapshots) | **None.** A few MiB never reaches the line. Freeze stays ~178 ms. |
-| Full snapshots (the ones that used to die) | Slower: disk-bound rather than RAM-bound — roughly the time to genuinely write the file (order 1–3 s per GiB on the local XFS SSD) instead of "instant, flush later". They are also serialized per host, so a host full of override sandboxes freezes them one at a time. |
+| Lightly dirtied diff snapshots | The reservation is mostly unused insurance; writes remain parallel. |
+| Heavily dirtied diff and full snapshots | Slower: disk-bound rather than RAM-bound — roughly the time to genuinely write the dirty layer (up to the whole guest) instead of "instant, flush later". |
 
 The comparison for that last row is not "fast snapshot vs slow snapshot". It is
 "slow snapshot vs destroyed sandbox".
@@ -360,10 +363,20 @@ memory.max  =  fence (kills)      memory.high = warning line (throttles)
 guest RAM   =  unreclaimable (no swap)   page cache = reclaimable once flushed
 ```
 
-This came out of the cold-boot snapshot OOM: a FULL snapshot of a cold-booted
-sandbox charged the guest's whole memory image to the same cgroup leaf that
-already held the guest, and the kernel OOM-killed the VMM. Fixed and verified on
-the fleet in release `ec5b70c` (2026-08-03); `internal/vm/jailer.go` carries the
-`memory.high` fence and the pre-snapshot headroom check that close it.
+This first came out of the cold-boot snapshot OOM: a FULL snapshot of a
+cold-booted sandbox charged the guest's whole memory image to the same cgroup
+leaf that already held the guest, and the kernel OOM-killed the VMM. Release
+`ec5b70c` (2026-08-03) added the original full-snapshot guard. A dirty-working-set
+benchmark on release `8284f21` (2026-08-26) then disproved its assumption that a
+diff is always small: a 256 MiB continuously dirtied workload produced 270 MiB
+of dirty snapshot page cache, reached the unchanged 1180 MiB leaf limit, and
+OOM-killed Firecracker. `internal/vm/jailer.go` now applies the headroom
+reservation to both Full and Diff snapshots while serializing only reservation
+accounting, not their writes. On an isolated production-shaped `n2-standard-16`,
+the candidate completed the same snapshot in 3.776 s, recorded 899
+`memory.high` throttle/reclaim events and zero OOM kills, then passed 170/170
+fan-out clone verifications. The Nomad task also retains one slot charge of
+dedicated snapshot headroom so this remains available at ordinary slot
+saturation rather than merely failing closed.
 [usage-metering-plan.md](usage-metering-plan.md) covers the billing ledger,
 which is how the bug was found.

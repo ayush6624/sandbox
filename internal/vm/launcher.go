@@ -80,10 +80,9 @@ type PreparedLaunch struct {
 	// the returned restore callback before resuming it. Direct launches leave
 	// this nil.
 	//
-	// full reports whether this is a FULL snapshot, which writes the entire
-	// guest and therefore needs room reserved for it. A diff snapshot writes
-	// only dirty pages and takes the cheap path — no reservation, no
-	// serialization.
+	// full reports the Firecracker snapshot type for callers that need it. The
+	// jailer reserves for a whole-guest write for either type: a diff contains
+	// only dirty pages, but a workload can dirty nearly the entire guest.
 	BeginSnapshotWrite func(full bool) (restore func() error, err error)
 	// CgroupLeaf is the absolute path of this VM's cgroup v2 leaf, the source
 	// of its consumed-CPU accounting (see SampleUsage). Empty for direct

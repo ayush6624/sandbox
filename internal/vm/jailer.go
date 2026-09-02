@@ -561,9 +561,11 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 //     sandbox was lost (docs/cgroup-memory-model.md). memory.high makes the
 //     kernel throttle and reclaim instead, which is what it exists for.
 //
-// Diff snapshots never hit this (a few MiB of dirty pages), which is why only
-// cold-booted sandboxes — the ones with no golden base to diff against — were
-// affected.
+// A diff is only small when the guest has dirtied little memory. That is a
+// workload property, not a Firecracker guarantee: a guest can dirty nearly all
+// of RAM between snapshots. Reserve for the worst case for both Full and Diff
+// snapshots. The reservation raises only memory.max; memory.high keeps actual
+// usage close to the pre-snapshot footprint.
 //
 // It FAILS CLOSED: if the memory guard cannot be installed, the window returns
 // an error and vm.Snapshot aborts before issuing /snapshot/create. The VMM is
@@ -580,40 +582,33 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(
 	// size; Snapshot only has to say which kind of snapshot it is taking.
 	burst := guestMemMIB << 20
 
-	return func(full bool) (func() error, error) {
+	return func(_ bool) (func() error, error) {
 		var (
-			unlock     func()
 			restoreMax = func() error { return nil }
 		)
-		if full {
-			// Serialize full-snapshot windows: each reserves parent-cgroup
-			// headroom, and two concurrent windows would each see the same
-			// headroom as free. Diff snapshots skip this entirely, so the
-			// 8-way-parallel shutdown freeze of golden clones is unaffected.
-			snapshotFullWindowMu.Lock()
-			unlock = snapshotFullWindowMu.Unlock
-			var err error
-			restoreMax, err = reserveSnapshotMemory(cfg, leaf, burst)
-			if err != nil {
-				unlock()
-				return nil, err
-			}
+		// The parent headroom calculation and leaf-limit raise must be atomic.
+		// Hold the mutex only for that accounting mutation, not for the snapshot
+		// itself, so independent diff snapshots can still write in parallel.
+		snapshotReservationMu.Lock()
+		var err error
+		restoreMax, err = reserveSnapshotMemory(cfg, leaf, burst)
+		snapshotReservationMu.Unlock()
+		if err != nil {
+			return nil, err
 		}
 		restoreHigh, err := armSnapshotMemoryHigh(leaf)
 		if err != nil {
+			snapshotReservationMu.Lock()
 			_ = restoreMax()
-			if unlock != nil {
-				unlock()
-			}
+			snapshotReservationMu.Unlock()
 			return nil, err
 		}
 		if relaxIO {
 			if err := os.WriteFile(ioPath, []byte(unlimitedWrite), 0600); err != nil {
 				_ = restoreHigh()
+				snapshotReservationMu.Lock()
 				_ = restoreMax()
-				if unlock != nil {
-					unlock()
-				}
+				snapshotReservationMu.Unlock()
 				return nil, fmt.Errorf("remove snapshot write throttle: %w", err)
 			}
 		}
@@ -631,14 +626,14 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(
 				// ceiling has kept actual usage low throughout, so lowering the
 				// hard limit here reclaims nothing and cannot OOM. Lifting the
 				// ceiling first would remove that guarantee.
-				if err := restoreMax(); err != nil {
+				snapshotReservationMu.Lock()
+				err := restoreMax()
+				snapshotReservationMu.Unlock()
+				if err != nil {
 					errs = append(errs, err)
 				}
 				if err := restoreHigh(); err != nil {
 					errs = append(errs, err)
-				}
-				if unlock != nil {
-					unlock()
 				}
 				restoreErr = errors.Join(errs...)
 			})
@@ -647,8 +642,9 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(
 	}
 }
 
-// snapshotFullWindowMu serializes full-snapshot memory reservations per process.
-var snapshotFullWindowMu sync.Mutex
+// snapshotReservationMu serializes only parent-headroom accounting and leaf
+// memory.max mutations. It deliberately does not serialize the snapshot writes.
+var snapshotReservationMu sync.Mutex
 
 // serveMemoryReserve is what a host keeps for serve itself, mirroring the +2 GiB
 // deploy-job.sh adds to TASK_MEMORY on top of SLOTS × MEM_PER_SLOT_MIB. serve

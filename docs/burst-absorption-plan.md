@@ -13,7 +13,8 @@ Per worker (`WORKER_MACHINE_TYPE="n2-standard-16"` — 16 vCPU / 64 GiB):
 | Slots (tap/IP pool) | 48 | `SLOTS_PER_HOST`, config.env |
 | Committed memory per slot | 1180 MiB | `MEM_PER_SLOT_MIB` default (commented out in config.env) |
 | `mem_budget_mib` | 56,640 MiB (55.3 GiB) | `SLOTS × MEM_PER_SLOT` |
-| Nomad task cgroup | 58,640 MiB (57.3 GiB) of 64 GiB | `TASK_MEMORY` |
+| Snapshot write reserve | 1,180 MiB | `SNAPSHOT_MEMORY_RESERVE_MIB`, unavailable to ordinary slots |
+| Nomad task cgroup | 59,868 MiB (58.5 GiB) of 64 GiB | budget + 2 GiB serve + snapshot reserve |
 | Default guest | 2 vCPU / 1024 MiB | `configs/devbox.json` |
 | Concurrent bring-ups | 24 | `CREATE_CONCURRENCY` default, deploy-job.sh:94 |
 | Ready pool | 8 | `warm_pool_size` |

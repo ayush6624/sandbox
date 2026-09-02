@@ -76,6 +76,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_warm_claims_total", "Creates served from fully initialized ready VMs.", s.met.warmClaims.Load())
 	counter("sandbox_warm_misses_total", "Eligible creates that found no ready VM and used the normal clone path.", s.met.warmMisses.Load())
 	counter("sandbox_warm_build_failures_total", "Background ready-VM build failures.", s.met.warmFailures.Load())
+	counter("sandbox_snapshot_peer_pulls_total", "Snapshots successfully populated from another worker over the private network.", s.met.snapshotPeerPulls.Load())
+	counter("sandbox_snapshot_peer_pull_failures_total", "Peer snapshot pulls that failed before falling back to durable storage.", s.met.snapshotPeerFailures.Load())
+	counter("sandbox_snapshot_peer_serves_total", "Sparse snapshot artifacts successfully streamed to peer workers.", s.met.snapshotPeerServes.Load())
+	counter("sandbox_snapshot_peer_payload_bytes_total", "Uncompressed allocated snapshot bytes streamed to peer workers.", s.met.snapshotPeerBytes.Load())
+	counter("sandbox_snapshot_gcs_fallbacks_total", "Snapshot pulls sent to GCS after a peer hint failed.", s.met.snapshotGCSFallbacks.Load())
 	type warmMetricRow struct {
 		id string
 		m  *templateWarmMetrics

@@ -12,7 +12,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 # Honour FLEET_SECRETS_FILE like control.sh/edge.sh/rollout.sh: a worktree has
 # its own infra/gcp/ but not the gitignored secrets file.
 FLEET_SECRETS="${FLEET_SECRETS_FILE:-$DIR/fleet-secrets.env}"
@@ -96,6 +96,16 @@ if [ "$CREATE_CONCURRENCY" -lt 1 ]; then
   echo "error: CREATE_CONCURRENCY=$CREATE_CONCURRENCY must be >= 1"
   exit 1
 fi
+# Keep one default-slot charge outside ordinary admission for the transient
+# snapshot page-cache burst. A maximally dirty 1 GiB guest can need up to its
+# whole memory image plus the reclaim margin even for a Diff snapshot. Without
+# this reserve, a fully occupied host has zero parent-cgroup headroom and must
+# refuse the snapshot (the safe alternative to OOM-killing Firecracker).
+SNAPSHOT_RESERVE="${SNAPSHOT_MEMORY_RESERVE_MIB:-$MEM_PER_SLOT}"
+if ! [[ "$SNAPSHOT_RESERVE" =~ ^[0-9]+$ ]]; then
+  echo "error: SNAPSHOT_MEMORY_RESERVE_MIB must be a non-negative integer"
+  exit 1
+fi
 STANDBY_DELAY="${STANDBY_INITIAL_DELAY:-0}"
 PLACEMENT_HEADROOM="${PLACEMENT_DELAY_HEADROOM_SEC:-0}"
 if ! [[ "$STANDBY_DELAY" =~ ^[0-9]+$ ]] || ! [[ "$PLACEMENT_HEADROOM" =~ ^[0-9]+$ ]]; then
@@ -115,6 +125,7 @@ GEN_CONFIG="$(mktemp)"
 jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" --argjson cc "$CREATE_CONCURRENCY" \
    --argjson placement "$PLACEMENT_DELAY" \
    --arg gipmax "$GIP_MAX" --argjson mps "$MEM_PER_SLOT" \
+   --arg snapshot_bucket "$SNAPSHOT_BUCKET" \
    --arg ingress "$INGRESS_DOMAIN" --argjson urlonly "$DEFAULT_URL_ONLY" '
   .guest_subnet_bits = $bits |
   .pools.TapMax      = $n |
@@ -122,19 +133,22 @@ jq --argjson n "$SLOTS" --argjson p "$PORTS" --argjson bits "$BITS" --argjson cc
   .pools.PortMax     = (.pools.PortMin + $p - 1) |
   .mem_budget_mib    = ($n * $mps) |
   .create_concurrency = $cc |
+  .snapshot_bucket   = $snapshot_bucket |
   .placement_delay_sec = $placement |
   .ingress_domain    = $ingress |
   .default_url_only  = $urlonly
 ' "$REPO/configs/devbox-gcp.json" > "$GEN_CONFIG"
 
 # Size the Nomad task cgroup to the host: MEM_PER_SLOT_MIB per slot + 2 GiB for
-# serve itself; CPU shares near the machine's core count (parsed from
-# WORKER_MACHINE_TYPE, e.g. n2-standard-16 -> 16).
-TASK_MEMORY="$(( SLOTS * MEM_PER_SLOT + 2000 ))"
+# serve itself + a dedicated snapshot-write reserve. CPU shares stay near the
+# machine's core count (parsed from WORKER_MACHINE_TYPE, e.g. n2-standard-16 ->
+# 16). Use 2048, not 2000, because parentReservableBytes subtracts the same
+# binary 2 GiB serve reserve.
+TASK_MEMORY="$(( SLOTS * MEM_PER_SLOT + 2048 + SNAPSHOT_RESERVE ))"
 CORES="$(echo "${WORKER_MACHINE_TYPE:-n2-standard-16}" | grep -oE '[0-9]+$' || echo 16)"
 TASK_CPU="$(( (CORES - 1) * 1000 ))"
 
-echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS creates=$CREATE_CONCURRENCY placement-delay=${PLACEMENT_DELAY}s /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
+echo ">> copy job + generated config to $CONTROL_NAME (slots=$SLOTS creates=$CREATE_CONCURRENCY placement-delay=${PLACEMENT_DELAY}s /$BITS IPs=$GIP_MIN..$GIP_MAX ports=$PORTS mem/slot=${MEM_PER_SLOT} snapshot-reserve=${SNAPSHOT_RESERVE} budget/cgroup=$(( SLOTS * MEM_PER_SLOT ))/${TASK_MEMORY}MiB cpu=${TASK_CPU})"
 scp "${SSH_OPTS[@]}" -q "$DIR/nomad/serve.nomad.hcl" "${SSH_USER}@${CONTROL_SSH_HOST}:/tmp/serve.nomad.hcl"
 scp "${SSH_OPTS[@]}" -q "$GEN_CONFIG" "${SSH_USER}@${CONTROL_SSH_HOST}:/tmp/devbox-gcp.json"
 rm -f "$GEN_CONFIG"

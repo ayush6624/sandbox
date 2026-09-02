@@ -18,6 +18,10 @@ zero npm dependencies, no Python, no native addons.
   snapshot-source creation using `SandboxClient`.
 - **`snapshot-batch-bench.ts`** — scales the typed v1 batch operation over a
   single immutable snapshot source.
+- **`snapshot-working-set-bench.ts`** — repeats snapshot fan-out with 256 MiB
+  of continuously dirtied anonymous memory and roughly 436 MiB of mixed
+  filesystem state, reporting command readiness separately from full working-
+  set hydration.
 - **`fleet-bench.ts`** and **`burst-bench.ts`** — exercise fleet-wide workload
   throughput and create/exec/terminate churn through the v1 client.
 - **`lifecycle-bench.ts`** — measures typed create, pause, resume-to-usable, and
@@ -60,11 +64,17 @@ npm run bench -- --mode default --iterations 5
 npm run bench -- --output results/mine.json
 npm run bench:snapshot-source -- --iterations 25
 npm run bench:snapshot-batch -- --counts 1,2,4,8,16,32 --baseline
+npm run bench:snapshot-working-set -- --counts 1,4,8,16,24,32 --rounds 2
 npm run bench:template-warm -- --template-id <id> --count 4 --rounds 3
 npm run bench:fleet -- --count 64 --mode default
 npm run bench:burst -- --count 500 --concurrency 96 --retry-ms 250
 npm run bench:lifecycle -- --iterations 25
 ```
+
+Use `--guest-memory-mib 2048` with `bench:snapshot-working-set` to make the
+source a cold-booted 2 GiB guest when deliberately separating working-set size
+from guest cgroup headroom. Leaving it unset exercises the production template
+and warm-clone snapshot path.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -129,6 +139,16 @@ cleanup complete. Partial create/workload results, transient cleanup errors,
 host observations, and the final cleanup verdict are persisted even when the
 command exits nonzero. Tune the per-request bound with
 `--cleanup-timeout-ms` (10 s default).
+
+The snapshot working-set suite is the guard against a deceptively clean
+snapshot benchmark. Its source process fills random anonymous memory and
+touches every 4 KiB page continuously; its disk state contains an incompressible
+large file, 5,000 small files, and SQLite WAL data. Every clone must preserve
+that live process, complete another full memory sweep, hash the entire large
+file, enumerate the small files, and pass `PRAGMA integrity_check`. Counts run
+ascending in odd rounds and descending in even rounds so cache warming does not
+always benefit the largest fan-out. Use `--memory-mib`, `--disk-mib`,
+`--small-files`, and `--sqlite-mib` to scale the working set.
 
 ## Implementation notes
 

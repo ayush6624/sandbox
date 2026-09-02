@@ -460,7 +460,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	snapshotOp.RLock()
 	defer snapshotOp.RUnlock()
 
-	snap, err := s.ensureSnapshotLocal(ctx, snapID)
+	snap, err := s.ensureSnapshotLocalFrom(ctx, snapID, snapshotPeerHint(r))
 	if err != nil {
 		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
 		return
@@ -727,7 +727,7 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	snapshotOp.RLock()
 	defer snapshotOp.RUnlock()
 
-	snap, err := s.ensureSnapshotLocal(ctx, snapID)
+	snap, err := s.ensureSnapshotLocalFrom(ctx, snapID, snapshotPeerHint(r))
 	if err != nil {
 		httpError(w, 404, fmt.Errorf("snapshot %s not found: %w", snapID, err))
 		return

@@ -12,7 +12,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.8.0/sandbox-2.8.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.9.0/sandbox-2.9.0.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -362,6 +362,10 @@ const operation = await Sandbox.createMany({ count: 16, source: { templateId } }
 
 // `default` stays reserved for the host's built-in Node + Python image.
 const plain = await Sandbox.createFromSource({ templateId: 'default' })
+
+// Resource clients expose and tune the per-template ready-VM target.
+const template = await client.templates.updateWarmTarget(templateId, 8)
+console.log(template.warmTarget)
 ```
 
 The sandbox runs as the image's `USER` (root unless the image says otherwise),

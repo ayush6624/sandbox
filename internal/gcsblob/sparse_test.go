@@ -136,3 +136,42 @@ func TestSparseOverlay(t *testing.T) {
 		}
 	}
 }
+
+func TestTransportSparseHelpersRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.bin")
+	dst := filepath.Join(dir, "destination.bin")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(2 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("peer-snapshot"), 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var wire bytes.Buffer
+	payload, err := WriteSparse(&wire, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload <= 0 {
+		t.Fatalf("payload = %d, want allocated data", payload)
+	}
+	if err := ReadSparse(&wire, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2<<20 || string(got[1<<20:(1<<20)+13]) != "peer-snapshot" {
+		t.Fatalf("round trip size/payload mismatch: size=%d payload=%q", len(got), got[1<<20:(1<<20)+13])
+	}
+}

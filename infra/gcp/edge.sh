@@ -2,7 +2,7 @@
 # Regional HA public edge: MIG + external passthrough Network Load Balancer.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 
 REGION="${ZONE%-*}"
 NAME="${EDGE_MIG_NAME:-sandbox-edge}"

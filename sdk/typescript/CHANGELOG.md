@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.9.0 - 2026-09-02
+
+### Added
+
+- **Template warm-target control.** `TemplateResource.warmTarget` reports the
+  desired per-template ready-VM pool, and
+  `client.templates.updateWarmTarget(templateId, count)` changes it through the
+  typed `/v1/templates/{template_id}` resource API. This lets operators absorb
+  bursts for selected templates without exposing worker placement or internal
+  pool mechanics to tenant code.
+
+No breaking changes; existing code type-checks unchanged.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.6.0`).
+
 ## 2.8.0 - 2026-08-17
 
 ### Added

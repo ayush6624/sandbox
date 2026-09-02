@@ -40,8 +40,27 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
+CONFIG_PATH="${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
+CONFIG_PATH="$(cd "$(dirname "$CONFIG_PATH")" && pwd)/$(basename "$CONFIG_PATH")"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "$CONFIG_PATH"
+
+# The working tree is mirrored to the control VM, so carry the selected config
+# with it. Without this, a local config.us.env invocation silently falls back to
+# config.env when rollout.sh starts remotely.
+case "$CONFIG_PATH" in
+  "$REPO"/*) REMOTE_CONFIG="${CONFIG_PATH#"$REPO/"}" ;;
+  *)
+    echo "error: SANDBOX_GCP_CONFIG must be inside $REPO" >&2
+    exit 1
+    ;;
+esac
+case "$REMOTE_CONFIG" in
+  *[!A-Za-z0-9_./-]*)
+    echo "error: unsupported characters in config path: $REMOTE_CONFIG" >&2
+    exit 1
+    ;;
+esac
 
 SSH_HOST="${CONTROL_SSH_HOST:-$CONTROL_NAME}"
 REMOTE_SRC="${REMOTE_SRC:-sandbox-src}"
@@ -69,15 +88,18 @@ if [ -n "$missing" ]; then
 fi
 
 # Push the working tree, not a git fetch: the repo is private and this keeps
-# GitHub credentials off the VM entirely. --delete so a source file deleted
-# locally cannot linger and break the remote build. fleet-secrets.env is
-# gitignored but IS synced — rollout.sh preflight-fails without GATEWAY_TOKEN.
+# GitHub credentials off the VM entirely. fleet-secrets.env is gitignored but
+# IS synced — rollout.sh preflight-fails without GATEWAY_TOKEN. General-purpose
+# .env files are explicitly excluded so unrelated provider credentials never
+# leave the operator machine. Do not delete remote files from this wrapper;
+# releases are content-addressed and a deletion here is needlessly destructive.
 # node_modules/bin/ are excluded (~430 MiB of the 473 MiB tree) and rebuilt or
 # unneeded remotely.
 echo ">> sync $REPO -> $TARGET:~/$REMOTE_SRC"
-rsync -az --delete \
+rsync -az \
   --exclude 'node_modules/' --exclude '/bin/' --exclude 'graphify-out/' \
   --exclude 'tests/results/' \
+  --exclude '/.env' --exclude '/.env.*' \
   --exclude '*.tgz' --exclude '/production_*' --exclude '.DS_Store' \
   -e "ssh ${SSH_OPTS[*]}" \
   "$REPO/" "${TARGET}:${REMOTE_SRC}/"
@@ -91,7 +113,7 @@ echo ">> rollout.sh $* (on $SSH_HOST)"
 # under `set -u`, expanding an EMPTY array ("${TTY_OPT[@]}") is an unbound-variable
 # error in bash 3.2, which is still /bin/bash on macOS. This script has to run on
 # whatever dev machine you happen to be on, so don't reintroduce that.
-REMOTE_CMD="cd ~/${REMOTE_SRC}/infra/gcp && PATH=\$PATH:/usr/local/go/bin ./rollout.sh $*"
+REMOTE_CMD="cd ~/${REMOTE_SRC}/infra/gcp && SANDBOX_GCP_CONFIG=\$HOME/${REMOTE_SRC}/${REMOTE_CONFIG} PATH=\$PATH:/usr/local/go/bin ./rollout.sh $*"
 if [ -t 0 ]; then
   ssh -t "${SSH_OPTS[@]}" "$TARGET" "$REMOTE_CMD"
 else

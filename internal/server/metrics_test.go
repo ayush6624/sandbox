@@ -97,6 +97,11 @@ func TestHandleMetrics(t *testing.T) {
 	s.met.hibernations.Add(2)
 	s.met.wakes.Add(3)
 	s.met.wakeFailures.Add(1)
+	s.met.snapshotPeerPulls.Add(2)
+	s.met.snapshotPeerFailures.Add(1)
+	s.met.snapshotPeerServes.Add(6)
+	s.met.snapshotPeerBytes.Add(12345)
+	s.met.snapshotGCSFallbacks.Add(1)
 	s.cfg.WarmPoolBudget = 2
 	if err := s.reg.CreateSnapshot(ctx, registry.Snapshot{
 		ID: "template-py", Role: registry.SnapshotRoleTemplate, WarmTarget: 2, CreatedAt: time.Now(),
@@ -120,22 +125,27 @@ func TestHandleMetrics(t *testing.T) {
 	m := parseMetrics(t, w.Body.String())
 	want := map[string]int64{
 		"sandbox_build_info{component=\"worker\",release=\"release_candidate_7\"}": 1,
-		"sandbox_running":                   1,
-		"sandbox_hibernated":                1,
-		"sandbox_pool_used{pool=\"tap\"}":   1, // hibernated released its tap
-		"sandbox_pool_used{pool=\"ip\"}":    1, // and its IP
-		"sandbox_pool_used{pool=\"port\"}":  1, // explicit mapping stays held
-		"sandbox_pool_total{pool=\"tap\"}":  3,
-		"sandbox_pool_total{pool=\"ip\"}":   3,
-		"sandbox_pool_total{pool=\"port\"}": 3,
-		"sandbox_slots_free":                2, // 3 taps - 1 running (mem admission off)
-		"sandbox_mem_budget_mib":            0, // disabled
-		"sandbox_golden_ready":              0,
-		"sandbox_creates_ok_total":          5,
-		"sandbox_creates_error_total":       1,
-		"sandbox_hibernations_total":        2,
-		"sandbox_wakes_total":               3,
-		"sandbox_wake_failures_total":       1,
+		"sandbox_running":                           1,
+		"sandbox_hibernated":                        1,
+		"sandbox_pool_used{pool=\"tap\"}":           1, // hibernated released its tap
+		"sandbox_pool_used{pool=\"ip\"}":            1, // and its IP
+		"sandbox_pool_used{pool=\"port\"}":          1, // explicit mapping stays held
+		"sandbox_pool_total{pool=\"tap\"}":          3,
+		"sandbox_pool_total{pool=\"ip\"}":           3,
+		"sandbox_pool_total{pool=\"port\"}":         3,
+		"sandbox_slots_free":                        2, // 3 taps - 1 running (mem admission off)
+		"sandbox_mem_budget_mib":                    0, // disabled
+		"sandbox_golden_ready":                      0,
+		"sandbox_creates_ok_total":                  5,
+		"sandbox_creates_error_total":               1,
+		"sandbox_snapshot_peer_pulls_total":         2,
+		"sandbox_snapshot_peer_pull_failures_total": 1,
+		"sandbox_snapshot_peer_serves_total":        6,
+		"sandbox_snapshot_peer_payload_bytes_total": 12345,
+		"sandbox_snapshot_gcs_fallbacks_total":      1,
+		"sandbox_hibernations_total":                2,
+		"sandbox_wakes_total":                       3,
+		"sandbox_wake_failures_total":               1,
 		"sandbox_template_warm_events_total{template=\"template-py\",result=\"claim\"}":         4,
 		"sandbox_template_warm_events_total{template=\"template-py\",result=\"miss\"}":          2,
 		"sandbox_template_warm_events_total{template=\"template-py\",result=\"build_failure\"}": 1,

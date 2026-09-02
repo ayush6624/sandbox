@@ -17,13 +17,15 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 
 MIG_NAME="${MIG_NAME:-sandbox-workers}"
 IMAGE_FAMILY="${WORKER_IMAGE_FAMILY:-sandbox-worker}"
 GOLDEN_FAMILY="${GOLDEN_DATA_IMAGE_FAMILY:-sandbox-golden-data}"
 MACHINE="${WORKER_MACHINE_TYPE:-n2-standard-8}"
 DATA_DISK="${WORKER_DATA_DISK_SIZE:-256GB}"
+BOOT_DISK_TYPE="${WORKER_BOOT_DISK_TYPE:-pd-ssd}"
+DATA_DISK_TYPE="${WORKER_DATA_DISK_TYPE:-pd-ssd}"
 CONTROL_IP="${CONTROL_INTERNAL_IP:?set CONTROL_INTERNAL_IP in config.env}"
 SA_EMAIL="sandbox-fleet-sa@${PROJECT}.iam.gserviceaccount.com"   # reuse the snapshot SA
 RELEASE_BUCKET="${RELEASE_BUCKET:?set RELEASE_BUCKET in config.env}"
@@ -84,7 +86,7 @@ template_name() { echo "${MIG_NAME}-tpl-$(date +%Y%m%d-%H%M%S)"; }
 # formats it and stages the rootfs, serve cold-builds the golden). Safe to roll
 # the MIG before ever baking a golden.
 data_disk_arg() {
-  local base="device-name=sandbox-xfs,size=${DATA_DISK},type=pd-ssd,auto-delete=yes"
+  local base="device-name=sandbox-xfs,size=${DATA_DISK},type=${DATA_DISK_TYPE},auto-delete=yes"
   if "${GC[@]}" compute images describe-from-family "$GOLDEN_FAMILY" >/dev/null 2>&1; then
     echo "${base},image-family=${GOLDEN_FAMILY},image-project=${PROJECT}"
   else
@@ -95,7 +97,7 @@ data_disk_arg() {
 create_template() {
   local tpl="$1"
   local disk_spec; disk_spec="$(data_disk_arg)"
-  echo ">> Create instance template $tpl (boot family $IMAGE_FAMILY, data disk: ${disk_spec#*type=pd-ssd,auto-delete=yes}, spot=$WORKER_SPOT)"
+  echo ">> Create instance template $tpl (boot family $IMAGE_FAMILY, boot disk: $BOOT_DISK_TYPE, data disk: ${disk_spec#*auto-delete=yes}, spot=$WORKER_SPOT)"
   case "$disk_spec" in
     *image-family=*) echo "   data disk seeded from golden image family $GOLDEN_FAMILY (serve adopts the golden)";;
     *)               echo "   data disk BLANK (no $GOLDEN_FAMILY image yet — worker stages rootfs + cold-builds golden)";;
@@ -104,7 +106,7 @@ create_template() {
   "${GC[@]}" compute instance-templates create "$tpl" \
     --machine-type="$MACHINE" \
     --image-family="$IMAGE_FAMILY" --image-project="$PROJECT" \
-    --boot-disk-size="${WORKER_BOOT_DISK_SIZE:-256GB}" --boot-disk-type=pd-ssd \
+    --boot-disk-size="${WORKER_BOOT_DISK_SIZE:-256GB}" --boot-disk-type="$BOOT_DISK_TYPE" \
     --create-disk="$disk_spec" \
     --enable-nested-virtualization \
     --service-account="$SA_EMAIL" --scopes=storage-rw \

@@ -5,6 +5,12 @@ bin/sandbox.sandbox-token
 graphify-out
 *.tgz
 .DS_Store
+__pycache__/
+*.pyc
+
+# Machine/region-specific GCP settings stay local. The checked-in example is
+# infra/gcp/config.env.example.
+infra/gcp/config.*.env
 
 # Claude Code: share settings.json, keep machine-local state out. An untracked
 # file here is enough to stamp vcs.modified=true into release binaries.

@@ -286,20 +286,21 @@ func TestSnapshotWriteWindowRefusesWhenParentHasNoHeadroom(t *testing.T) {
 	}
 }
 
-// A DIFF snapshot writes only dirty pages, so it must take the cheap path: no
-// reservation and no serialization. That keeps the 8-way-parallel shutdown freeze
-// of golden-clone sandboxes exactly as fast as before.
-func TestSnapshotWriteWindowDiffDoesNotReserve(t *testing.T) {
+// A DIFF can contain almost the whole guest when a workload continually dirties
+// memory. It needs the same worst-case reservation as a full snapshot; assuming
+// that every diff is a few MiB let Firecracker get cgroup-OOM-killed in production.
+func TestSnapshotWriteWindowDiffReservesWorstCaseBurst(t *testing.T) {
 	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
 	leafPath := jailerCgroupLeaf(cfg, "vm-1")
 	if err := os.MkdirAll(leafPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	limit := int64(1180 << 20)
-	// Deliberately no parent memory.max: a diff window must not even look.
+	current := int64(900 << 20)
+	writeParentLimit(t, cfg, 57<<30)
 	for name, value := range map[string]string{
 		"memory.max":     strconv.FormatInt(limit, 10),
-		"memory.current": strconv.FormatInt(900<<20, 10),
+		"memory.current": strconv.FormatInt(current, 10),
 		"memory.high":    "max",
 	} {
 		if err := os.WriteFile(filepath.Join(leafPath, name), []byte(value), 0600); err != nil {
@@ -309,13 +310,70 @@ func TestSnapshotWriteWindowDiffDoesNotReserve(t *testing.T) {
 
 	restore, err := snapshotWriteWindow(cfg, "vm-1", 1024)(false)
 	if err != nil {
-		t.Fatalf("a diff window must not need parent headroom: %v", err)
+		t.Fatalf("open diff window: %v", err)
 	}
-	if got := readLeaf(t, leafPath, "memory.max"); got != strconv.FormatInt(limit, 10) {
-		t.Fatalf("diff snapshot raised memory.max to %q; it should not reserve at all", got)
+	raised, err := strconv.ParseInt(readLeaf(t, leafPath, "memory.max"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raised < current+(1024<<20) {
+		t.Fatalf("diff memory.max = %d MiB, want room for footprint plus a worst-case 1024 MiB dirty layer", raised>>20)
 	}
 	if err := restore(); err != nil {
 		t.Fatalf("restore: %v", err)
+	}
+	if got := readLeaf(t, leafPath, "memory.max"); got != strconv.FormatInt(limit, 10) {
+		t.Fatalf("restored diff memory.max = %q, want %d", got, limit)
+	}
+}
+
+// A reservation already installed on one leaf must be visible to the next
+// caller. The mutex protects only the accounting mutation, while the raised
+// limit itself keeps the bytes committed for the lifetime of the write window.
+func TestSnapshotWriteWindowAccountsForConcurrentReservations(t *testing.T) {
+	cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task"}
+	const (
+		limit   = int64(1180 << 20)
+		current = int64(900 << 20)
+		burst   = int64(1024 << 20)
+	)
+	extra := current + burst + snapshotMemoryHighMarginMax - limit
+	writeParentLimit(t, cfg, 2*limit+serveMemoryReserve+extra)
+
+	windows := make([]func(bool) (func() error, error), 0, 2)
+	for _, vmID := range []string{"vm-1", "vm-2"} {
+		leaf := jailerCgroupLeaf(cfg, vmID)
+		if err := os.MkdirAll(leaf, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, value := range map[string]string{
+			"memory.max":     strconv.FormatInt(limit, 10),
+			"memory.current": strconv.FormatInt(current, 10),
+			"memory.high":    "max",
+		} {
+			if err := os.WriteFile(filepath.Join(leaf, name), []byte(value), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		windows = append(windows, snapshotWriteWindow(cfg, vmID, 1024))
+	}
+
+	restoreFirst, err := windows[0](false)
+	if err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	if _, err := windows[1](false); err == nil || !strings.Contains(err.Error(), "unreserved") {
+		t.Fatalf("second reservation should see the first one's commitment, got: %v", err)
+	}
+	if err := restoreFirst(); err != nil {
+		t.Fatalf("restore first: %v", err)
+	}
+	restoreSecond, err := windows[1](false)
+	if err != nil {
+		t.Fatalf("second reservation after release: %v", err)
+	}
+	if err := restoreSecond(); err != nil {
+		t.Fatalf("restore second: %v", err)
 	}
 }
 

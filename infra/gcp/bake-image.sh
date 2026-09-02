@@ -20,7 +20,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 
 BAKE_VM="${BAKE_VM:-sandbox-bake}"
 GOLDEN_BAKE_VM="${GOLDEN_BAKE_VM:-sandbox-golden-bake}"

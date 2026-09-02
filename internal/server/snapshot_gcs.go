@@ -198,8 +198,18 @@ func (s *Server) pullLock(key string) *keyedMutex {
 // makes any live host able to restore any snapshot, including ones whose
 // creating host is gone.
 func (s *Server) ensureSnapshotLocal(ctx context.Context, snapID string) (registry.Snapshot, error) {
+	return s.ensureSnapshotLocalFrom(ctx, snapID, "")
+}
+
+// ensureSnapshotLocalFrom prefers a live peer supplied by the gateway, then
+// falls back to durable GCS. Both paths share the same per-snapshot pull lock,
+// so a burst downloads once on each target host regardless of request count.
+func (s *Server) ensureSnapshotLocalFrom(ctx context.Context, snapID, peer string) (registry.Snapshot, error) {
 	snap, err := s.reg.GetSnapshot(ctx, snapID)
-	if err == nil || s.blob == nil {
+	if err == nil {
+		return snap, err
+	}
+	if s.blob == nil && peer == "" {
 		return snap, err
 	}
 
@@ -209,6 +219,25 @@ func (s *Server) ensureSnapshotLocal(ctx context.Context, snapID string) (regist
 	// Another request may have completed the pull while we waited.
 	if snap, err := s.reg.GetSnapshot(ctx, snapID); err == nil {
 		return snap, nil
+	}
+	if peer != "" {
+		t0 := time.Now()
+		pulled, bytes, peerErr := s.pullSnapshotFromPeer(ctx, snapID, peer)
+		if peerErr == nil {
+			s.met.snapshotPeerPulls.Add(1)
+			fmt.Fprintf(os.Stderr, "[snapshot %s] pulled from peer %s: wire=%dMiB in %s\n",
+				snapID, peer, bytes>>20, time.Since(t0).Round(time.Millisecond))
+			return pulled, nil
+		}
+		s.met.snapshotPeerFailures.Add(1)
+		fmt.Fprintf(os.Stderr, "[snapshot %s] peer %s unavailable (%v); falling back to GCS\n",
+			snapID, peer, peerErr)
+	}
+	if s.blob == nil {
+		return registry.Snapshot{}, fmt.Errorf("not in local registry and peer transfer failed; no snapshot bucket configured")
+	}
+	if peer != "" {
+		s.met.snapshotGCSFallbacks.Add(1)
 	}
 
 	metaBytes, err := s.blob.GetBytes(ctx, snapObj(snapID, "meta.json"))

@@ -9,6 +9,12 @@
 // once. Hosts remain the source of truth for which sandboxes actually exist.
 package cluster
 
+// SnapshotPeerHeader is an internal gateway-to-worker hint naming a live
+// worker that already holds the requested immutable snapshot. The receiving
+// worker validates the address as private and authenticates to the peer with
+// its worker credential; clients cannot use it to reach arbitrary services.
+const SnapshotPeerHeader = "X-Sandbox-Snapshot-Peer"
+
 // Heartbeat is the body of POST {gateway}/register, sent by a host on startup
 // and then periodically. Re-sends are idempotent — the gateway upserts by
 // HostID and refreshes the host's last-seen time.

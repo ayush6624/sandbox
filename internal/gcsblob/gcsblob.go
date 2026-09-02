@@ -352,6 +352,45 @@ func (c *Client) PutSparse(ctx context.Context, object, path string) (int64, err
 	return c.putRanges(ctx, object, f, ranges)
 }
 
+// WriteSparse writes path to w using the same sparse-stream representation as
+// PutSparse. It is transport-neutral so trusted workers can transfer immutable
+// snapshot artifacts directly without first round-tripping them through GCS.
+func WriteSparse(w io.Writer, path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	ranges, err := dataRanges(f)
+	if err != nil {
+		return 0, fmt.Errorf("enumerate data ranges of %s: %w", path, err)
+	}
+	return writeRanges(w, f, ranges)
+}
+
+// WriteRanges is WriteSparse with an explicit extent list. Diff snapshots use
+// it to send only rootfs extents that diverge from their immutable base.
+func WriteRanges(w io.Writer, path string, ranges []Range) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return writeRanges(w, f, ranges)
+}
+
+func writeRanges(w io.Writer, f *os.File, ranges []Range) (int64, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	var payload int64
+	for _, r := range ranges {
+		payload += r.Len
+	}
+	return payload, encodeSparse(w, f, fi.Size(), ranges)
+}
+
 // PutRanges uploads only the given ranges of path as a sparse stream — the
 // diff-upload variant, with ranges supplied by an extent comparison instead of
 // the file's own hole map. Returns payload bytes encoded.
@@ -430,6 +469,22 @@ func (c *Client) GetSparse(ctx context.Context, object, path string) error {
 	defer f.Close()
 	if err := decodeSparse(resp.Body, f); err != nil {
 		return fmt.Errorf("decode %s into %s: %w", object, path, err)
+	}
+	return f.Sync()
+}
+
+// ReadSparse applies a sparse stream from r to path. A pre-existing file is
+// deliberately not truncated before decoding: diff callers may reflink a base
+// into place and overlay only the changed frames. The stream header still sets
+// the authoritative final size.
+func ReadSparse(r io.Reader, path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := decodeSparse(r, f); err != nil {
+		return err
 	}
 	return f.Sync()
 }

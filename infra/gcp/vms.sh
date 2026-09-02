@@ -12,7 +12,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 
 need() { command -v "$1" >/dev/null || { echo "error: '$1' not found on PATH" >&2; exit 1; }; }
 need gcloud

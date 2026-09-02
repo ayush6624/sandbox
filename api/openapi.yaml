@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Sandbox API
-  version: 1.5.0
+  version: 1.6.0
   description: |
     Versioned public contract for creating and operating isolated development
     sandboxes. Routes outside `/v1` are deprecated compatibility endpoints.

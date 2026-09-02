@@ -28,7 +28,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 
 GATEWAY_HOST="${GATEWAY_HOST:-testvm-1}"
 CONFIG="configs/devbox-gcp.json"

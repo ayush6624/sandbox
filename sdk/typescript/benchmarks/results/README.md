@@ -12,9 +12,10 @@ credentials. Curated numbers live in
 | Pattern | Producer | Shape |
 | --- | --- | --- |
 | `production_*.json` | Any suite | Curated single-run production evidence |
-| `production_*/` | `scripts/bench-extensive.sh` | Curated multi-file production campaign |
+| `production_*.json` | Curated by hand from a raw local campaign | Small, reviewable production summary; raw campaign directories stay local |
 | `snapshot_source_<ts>.json` | `npm run bench:snapshot-source` | Default-source versus snapshot-source create latency |
 | `snapshot_batch_<ts>.json` | `npm run bench:snapshot-batch` | Snapshot-source batch operation/readiness scaling |
+| `snapshot_working_set_<ts>.json` | `npm run bench:snapshot-working-set` | Dirty-memory/filesystem fan-out readiness versus forced hydration |
 | `lifecycle_<ts>.json` | `npm run bench:lifecycle` | Create, pause, resume-to-usable, and terminate latency |
 | `fleet_<mode>_<n>_<ts>.json` | `benchmarks/fleet-bench.ts` | Gateway create/workload timing, host observations, diagnostics, and cleanup proof |
 | `burst_*.json` | `npm run bench:burst` | Create/exec/terminate churn or held-burst results |

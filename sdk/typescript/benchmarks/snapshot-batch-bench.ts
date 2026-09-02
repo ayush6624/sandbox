@@ -30,6 +30,8 @@ const RESULTS_DIR = join(HERE, 'results')
 interface Args {
   counts: number[]
   baseline: boolean
+  baselineParallelism: number
+  maxParallelism: number
   readinessTimeoutMs: number
   readinessPollMs: number
   output?: string
@@ -39,6 +41,8 @@ function parseArgs(argv: string[]): Args {
   const a: Args = {
     counts: [1, 4, 16, 32],
     baseline: false,
+    baselineParallelism: 32,
+    maxParallelism: 32,
     readinessTimeoutMs: 30_000,
     readinessPollMs: 250,
   }
@@ -46,13 +50,16 @@ function parseArgs(argv: string[]): Args {
     const k = argv[i]
     if (k === '--counts') a.counts = argv[++i]!.split(',').map((x) => Number(x.trim()))
     else if (k === '--baseline') a.baseline = true
+    else if (k === '--baseline-parallelism') a.baselineParallelism = Number(argv[++i])
+    else if (k === '--max-parallelism') a.maxParallelism = Number(argv[++i])
     else if (k === '--readiness-timeout-ms') a.readinessTimeoutMs = Number(argv[++i])
     else if (k === '--readiness-poll-ms') a.readinessPollMs = Number(argv[++i])
     else if (k === '--output') a.output = argv[++i]
     else if (k === '--help' || k === '-h') {
       console.log(
         'Usage: tsx benchmarks/snapshot-batch-bench.ts [--counts 1,4,16,32] ' +
-        '[--baseline] [--readiness-timeout-ms 30000] [--readiness-poll-ms 250] ' +
+        '[--baseline] [--baseline-parallelism 32] [--max-parallelism 32] ' +
+        '[--readiness-timeout-ms 30000] [--readiness-poll-ms 250] ' +
         '[--output file.json]',
       )
       process.exit(0)
@@ -60,6 +67,12 @@ function parseArgs(argv: string[]): Args {
     else throw new Error(`unknown arg: ${k}`)
   }
   if (a.counts.some((n) => !Number.isInteger(n) || n < 1)) throw new Error('--counts must be positive integers')
+  if (!Number.isInteger(a.baselineParallelism) || a.baselineParallelism < 1 || a.baselineParallelism > 32) {
+    throw new Error('--baseline-parallelism must be an integer from 1 to 32')
+  }
+  if (!Number.isInteger(a.maxParallelism) || a.maxParallelism < 1 || a.maxParallelism > 32) {
+    throw new Error('--max-parallelism must be an integer from 1 to 32')
+  }
   if (!Number.isInteger(a.readinessTimeoutMs) || a.readinessTimeoutMs < 1) {
     throw new Error('--readiness-timeout-ms must be a positive integer')
   }
@@ -289,7 +302,8 @@ async function main(): Promise<void> {
   const metadata = benchmarkMetadata('snapshot-source-batch-create', {
     counts: args.counts,
     baseline: args.baseline,
-    max_parallelism: 32,
+    baseline_parallelism: args.baselineParallelism,
+    max_parallelism: args.maxParallelism,
     readiness_timeout_ms: args.readinessTimeoutMs,
     readiness_poll_ms: args.readinessPollMs,
   })
@@ -303,8 +317,9 @@ async function main(): Promise<void> {
   const rows: BatchRow[] = []
   let baseline:
     | {
-        n: number
-        wallMs: number
+      n: number
+      maxParallelism: number
+      wallMs: number
         perSandboxMs: number
         created: number
         failed: number
@@ -338,7 +353,7 @@ async function main(): Promise<void> {
 
     for (const n of args.counts) {
       const batchStarted = Date.now()
-      const maxParallelism = Math.min(n, 32)
+      const maxParallelism = Math.min(n, args.maxParallelism)
       const operation = await client.sandboxes.createMany({
         count: n,
         maxParallelism,
@@ -445,7 +460,8 @@ async function main(): Promise<void> {
       console.log(`\n[baseline] ${n} concurrent default-source creates...`)
       const t = Date.now()
       const baselineErrors: string[] = []
-      const boots = await mapLimit(Array.from({ length: n }), 8, async () => {
+      const baselineParallelism = Math.min(n, args.baselineParallelism)
+      const boots = await mapLimit(Array.from({ length: n }), baselineParallelism, async () => {
         try {
           const sandbox = await client.sandboxes.create({
             requestTimeoutMs: 30 * 60_000,
@@ -466,6 +482,7 @@ async function main(): Promise<void> {
       }
       baseline = {
         n,
+        maxParallelism: baselineParallelism,
         wallMs,
         perSandboxMs: wallMs / n,
         created: created.length,

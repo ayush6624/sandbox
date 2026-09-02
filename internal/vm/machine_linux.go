@@ -573,8 +573,9 @@ func Snapshot(ctx context.Context, m *Machine, memPath, statePath, snapType stri
 		beginSnapshotWrite = m.raw.beginSnapshotWrite
 	}
 	if beginSnapshotWrite != nil {
-		// A full snapshot writes the whole guest, so the window must reserve
-		// room for that page-cache burst; a diff writes only dirty pages.
+		// A full snapshot writes the whole guest, while a diff can still approach
+		// that size when the workload dirties most pages. The window reserves for
+		// the safe worst case for either type.
 		restore, err := beginSnapshotWrite(snapType != SnapshotDiff)
 		if err != nil {
 			return err

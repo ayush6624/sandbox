@@ -17,7 +17,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 
 SNAPSHOT_BUCKET="${SNAPSHOT_BUCKET:-${PROJECT}-sandbox-snapshots}"
 SA_NAME="sandbox-fleet-sa"

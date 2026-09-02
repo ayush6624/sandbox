@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/client"
+	"github.com/ayush6624/sandbox/internal/cluster"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -173,7 +174,13 @@ func (g *Gateway) serveSnapshotCreate(w http.ResponseWriter, r *http.Request, id
 			break
 		}
 
-		status, respBody, err := g.forwardSnapshotOp(r, h, body)
+		peer := ""
+		if owner != "" && owner != h.id {
+			if source := g.hostByID(owner); source != nil {
+				peer = client.EndpointURL(source.addr)
+			}
+		}
+		status, respBody, err := g.forwardSnapshotOpFromPeer(r, h, body, peer)
 		if err != nil {
 			g.releaseReservationN(h, false)
 			if r.Context().Err() != nil {
@@ -248,12 +255,19 @@ func (g *Gateway) hostByID(id string) *host {
 }
 
 func (g *Gateway) forwardSnapshotOp(r *http.Request, target *host, body []byte) (int, []byte, error) {
+	return g.forwardSnapshotOpFromPeer(r, target, body, "")
+}
+
+func (g *Gateway) forwardSnapshotOpFromPeer(r *http.Request, target *host, body []byte, peer string) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, client.EndpointURL(target.addr)+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+target.token)
+	if peer != "" {
+		req.Header.Set(cluster.SnapshotPeerHeader, peer)
+	}
 	resp, err := snapClient.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("host %s unreachable: %w", target.id, err)

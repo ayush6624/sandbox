@@ -27,7 +27,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 # shellcheck source=config.env
-source "$DIR/config.env"
+source "${SANDBOX_GCP_CONFIG:-$DIR/config.env}"
 # Honour FLEET_SECRETS_FILE like control.sh and edge.sh do, so a git worktree
 # (which has its own infra/gcp/ but no gitignored secrets) can point at the
 # primary checkout's file instead of silently preflight-failing on an unset
@@ -381,7 +381,12 @@ done
 # ----------------------------------------------------------------- smoke test
 if [ "$SMOKE" != none ]; then
   step "Smoke test (${SMOKE})"
-  if { [ "$SMOKE" = full ] || [ "$SMOKE" = fast ]; } && command -v npx >/dev/null 2>&1; then
+  NODE_MAJOR=0
+  if command -v node >/dev/null 2>&1; then
+    NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+  fi
+  if { [ "$SMOKE" = full ] || [ "$SMOKE" = fast ]; } &&
+     command -v npx >/dev/null 2>&1 && [ "$NODE_MAJOR" -ge 22 ]; then
     # Exercises the WebSocket PTY path too — auth there rides in the
     # Sec-WebSocket-Protocol list and is proxied differently from REST, so a
     # REST-only smoke passes happily while the interactive shell is broken.
@@ -400,7 +405,13 @@ if [ "$SMOKE" != none ]; then
       fail "smoke test"
     fi
   else
-    [ "$SMOKE" = http ] || warn "npx not found — falling back to the REST-only smoke"
+    if [ "$SMOKE" != http ]; then
+      if ! command -v npx >/dev/null 2>&1; then
+        warn "npx not found — falling back to the REST-only smoke"
+      else
+        warn "Node ${NODE_MAJOR} lacks the global WebSocket used by the PTY smoke — falling back to REST-only"
+      fi
+    fi
     id="$(sshc "curl -s -m 60 -X POST -H 'Authorization: Bearer ${GATEWAY_TOKEN}' \
         -H 'Content-Type: application/json' -d '{}' ${GW_URL}/sandboxes" \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')" \

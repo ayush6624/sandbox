@@ -1,6 +1,6 @@
 {
   "name": "sandbox",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "TypeScript SDK for the sandbox Firecracker microVM sandbox API. Mirrors the e2b JavaScript SDK surface.",
   "license": "MIT",
   "type": "module",
@@ -46,12 +46,15 @@
     "bench": "tsx benchmarks/run-bench.ts",
     "bench:snapshot-source": "tsx benchmarks/snapshot-source-bench.ts",
     "bench:snapshot-batch": "tsx benchmarks/snapshot-batch-bench.ts",
+    "bench:snapshot-working-set": "tsx benchmarks/snapshot-working-set-bench.ts",
+    "bench:snapshot-peer-transfer": "tsx benchmarks/snapshot-peer-transfer-bench.ts",
+    "bench:snapshot-create-vs-batch": "tsx benchmarks/snapshot-create-vs-batch-bench.ts",
     "bench:template-warm": "tsx benchmarks/template-warm-bench.ts",
     "bench:burst": "tsx benchmarks/burst-bench.ts",
     "bench:fleet": "tsx benchmarks/fleet-bench.ts",
     "bench:lifecycle": "tsx benchmarks/lifecycle-bench.ts",
     "bench:snapshot-paths": "tsx benchmarks/snapshot-paths-bench.ts",
-    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts benchmarks/fleet-bench.test.ts benchmarks/snapshot-batch-bench.test.ts"
+    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts benchmarks/fleet-bench.test.ts benchmarks/snapshot-batch-bench.test.ts benchmarks/snapshot-working-set-bench.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

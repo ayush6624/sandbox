@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/cluster"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
 
@@ -1423,6 +1424,32 @@ func TestSnapshotCreatePrefersOwnerButFailsOverWhenItIsFull(t *testing.T) {
 	)
 	if h := g2.reserveHostFor(nil, 1, "owner"); h == nil || h.id != "owner" {
 		t.Fatalf("owner with capacity must be preferred (avoids a bucket pull), got %v", h)
+	}
+}
+
+func TestSnapshotCreateFailoverSuppliesPrivatePeerHint(t *testing.T) {
+	var gotPeer string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPeer = r.Header.Get(cluster.SnapshotPeerHeader)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"restored"}`))
+	}))
+	t.Cleanup(target.Close)
+
+	owner := &host{id: "owner", addr: "10.128.0.35:8080", token: "htok", slotsTotal: 4, slotsUsed: 4, slotsFree: 0}
+	other := &host{id: "other", addr: target.URL, token: "htok", slotsTotal: 4, slotsUsed: 0, slotsFree: 4}
+	g := liveGateway(owner, other)
+	g.snapRoute["snap-peer"] = owner.id
+
+	req := httptest.NewRequest(http.MethodPost, "/snapshots/snap-peer/restore", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	g.serveSnapshotCreate(rec, req, "snap-peer", []byte(`{}`), owner.id, 1)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if want := "http://10.128.0.35:8080"; gotPeer != want {
+		t.Fatalf("peer hint = %q, want %q", gotPeer, want)
 	}
 }
 

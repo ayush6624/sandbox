@@ -186,8 +186,9 @@ EOT
       # v2) sets memory.max from `memory`; too low a value OOM-kills the guests
       # (a 512 MiB cap kills every 1 GiB microVM). deploy-job.sh derives both
       # values from config.env — memory from SLOTS_PER_HOST (~1.18 GiB/slot +
-      # serve overhead), CPU shares near the machine's core count so guests
-      # aren't throttled under contention (shares-based, not a hard cap).
+      # serve overhead + a transient snapshot-write reserve), CPU shares near
+      # the machine's core count so guests aren't throttled under contention
+      # (shares-based, not a hard cap).
       resources {
         cpu    = var.task_cpu
         memory = var.task_memory
