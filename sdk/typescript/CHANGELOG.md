@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.9.1 - 2026-09-03
+
+### Fixed
+
+- Replaced the retired direct-worker API address in setup guidance and error
+  messages with the fleet gateway address. The GCP control-plane installer now
+  exposes that VPC-bound gateway through a tailnet-only TCP proxy, so the
+  documented laptop configuration reaches the US fleet instead of failing in
+  an upstream proxy before a request reaches the gateway.
+
+No API or type changes from 2.9.0.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.6.0`).
+
 ## 2.9.0 - 2026-09-02
 
 ### Added

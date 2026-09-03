@@ -350,7 +350,7 @@ export class Sandbox {
 
   /**
    * Returns the `host:port` to reach a service running inside the sandbox
-   * from the outside, e.g. `100.99.183.74:5200`.
+   * from the outside, e.g. `worker.internal:5200`.
    *
    * Synchronous: works for any port previously exposed through
    * {@link exposePort} or seen via {@link listPorts} on this instance.

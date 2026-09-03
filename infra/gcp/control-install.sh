@@ -102,6 +102,22 @@ RAW_ARGS=""
 if [ -n "${INGRESS_BUCKET:-}" ]; then
   RAW_ARGS="--ingress-bucket ${INGRESS_BUCKET} --raw-public-host ${RAW_PUBLIC_HOST:?} --raw-port-min ${RAW_PORT_MIN:-20000} --raw-port-max ${RAW_PORT_MAX:-29999}"
 fi
+
+# The gateway deliberately binds its stable VPC address because workers use
+# that address for heartbeats and callbacks. A control VM is not automatically
+# a Tailscale subnet router, though, so binding only CONTROL_IP makes the
+# documented laptop URL unreachable and upstream developer proxies report 502.
+# Tailscale Serve publishes the same TCP listener only inside the tailnet; it
+# does not expose the management API to the public internet. Serve state is
+# persistent, and repeating this command on every deploy is idempotent.
+configure_tailnet_gateway() {
+  if command -v tailscale >/dev/null 2>&1 && tailscale status >/dev/null 2>&1; then
+    tailscale serve --yes --bg --tcp "$GW_PORT" "tcp://${CONTROL_IP}:${GW_PORT}" >/dev/null
+    echo ">> gateway available on tailnet port ${GW_PORT}"
+  else
+    echo ">> WARNING: Tailscale is unavailable; gateway remains VPC-only at ${CONTROL_IP}:${GW_PORT}" >&2
+  fi
+}
 cat >/etc/systemd/system/sandbox-gateway.service <<UNIT
 [Unit]
 Description=sandbox multi-host gateway (control plane)
@@ -154,6 +170,7 @@ if [ "$SECTIONS" = gateway ]; then
   systemctl daemon-reload
   systemctl enable --now sandbox-gateway >/dev/null 2>&1 || true
   systemctl restart sandbox-gateway
+  configure_tailnet_gateway
   echo ">> gateway-only install done (release ${SANDBOX_RELEASE:-unknown})"
   exit 0
 fi
@@ -378,6 +395,7 @@ fi
 # restart (not enable --now): a redeploy must pick up new binaries/config on
 # already-running services. Gateway routes rebuild from heartbeats in <=5s.
 systemctl restart nomad-server sandbox-gateway prometheus grafana
+configure_tailnet_gateway
 
 # `systemctl restart` proves nothing about a Type=simple unit: it returns 0 as
 # soon as the process forks. A service that rejects its config and exits, or

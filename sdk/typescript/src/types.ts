@@ -4,7 +4,7 @@
  * `SANDBOX_API_URL` / `SANDBOX_API_KEY` environment variables.
  */
 export interface SandboxOpts {
-  /** Base URL of the sandbox API, e.g. `http://100.99.183.74:8080`. Defaults to `SANDBOX_API_URL`. */
+  /** Base URL of the sandbox API, e.g. `http://gateway.internal:9090`. Defaults to `SANDBOX_API_URL`. */
   apiUrl?: string;
   /** API key sent as `Authorization: Bearer <key>`. Defaults to `SANDBOX_API_KEY`. */
   apiKey?: string;

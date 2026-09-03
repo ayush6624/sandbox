@@ -58,7 +58,7 @@ export class ApiClient {
     const apiUrl = opts.apiUrl ?? process.env.SANDBOX_API_URL
     if (!apiUrl) {
       throw new SandboxError(
-        'Missing API URL: set the SANDBOX_API_URL environment variable (e.g. http://100.99.183.74:8080) or pass { apiUrl } explicitly.'
+        'Missing API URL: set the SANDBOX_API_URL environment variable (e.g. http://gateway.internal:9090) or pass { apiUrl } explicitly.'
       )
     }
     const apiKey = opts.apiKey ?? process.env.SANDBOX_API_KEY

@@ -2,7 +2,7 @@
  * Shared helpers for the example scripts. Every example talks to a running
  * sandbox API server via the SDK's default env vars:
  *
- *   export SANDBOX_API_URL=http://<host>:8080
+ *   export SANDBOX_API_URL=http://<gateway-tailnet-host>:9090
  *   export SANDBOX_API_KEY=<key>
  */
 
@@ -13,7 +13,7 @@ export function ensureCreds(): void {
       console.error(
         `Missing required environment variable ${name}.\n` +
           `Example:\n` +
-          `  export SANDBOX_API_URL=http://100.99.183.74:8080\n` +
+          `  export SANDBOX_API_URL=http://gateway.internal:9090\n` +
           `  export SANDBOX_API_KEY=<your-key>`
       )
       process.exit(1)

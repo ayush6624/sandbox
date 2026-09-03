@@ -12,7 +12,7 @@ Published as a tarball on [GitHub Releases](https://github.com/ayush6624/sandbox
 (tags `sdk-v*`):
 
 ```bash
-npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.9.0/sandbox-2.9.0.tgz
+npm install https://github.com/ayush6624/sandbox/releases/download/sdk-v2.9.1/sandbox-2.9.1.tgz
 ```
 
 Upgrading means pointing at a newer release URL — there are no semver ranges
@@ -34,7 +34,7 @@ The SDK reads two environment variables (both can also be passed
 programmatically via the `opts` argument on every entry point):
 
 ```bash
-export SANDBOX_API_URL=http://100.99.183.74:8080
+export SANDBOX_API_URL=http://<control-tailnet-ip>:9090
 export SANDBOX_API_KEY=<your-key>
 ```
 
@@ -163,14 +163,14 @@ const entries = await sbx.files.list('/home/sandbox')
 
 // Ports are private until explicitly exposed. Start a server (nothing runs by
 // default), expose its guest port, and use the returned address:
-const host = await sbx.exposePort(3000)         // e.g. "100.99.183.74:5200"
+const host = await sbx.exposePort(3000)         // e.g. "worker.internal:5200"
 await fetch(`http://${host}/`)
 
 // exposePort is idempotent and
 // returns the externally reachable "host:port"; afterwards the synchronous
 // getHost(port) works for that port too (it reads a per-instance cache —
 // for ports exposed elsewhere, call listPorts() first to refresh it).
-const api = await sbx.exposePort(8000)          // e.g. "100.99.183.74:5201"
+const api = await sbx.exposePort(8000)          // e.g. "worker.internal:5201"
 const ports = await sbx.listPorts()             // only explicitly exposed mappings
 sbx.getHost(8000)                               // works now; throws for unexposed ports
 
@@ -196,7 +196,7 @@ needs no route to the worker, and consumes no host-port slot.
 ```ts
 // Default: whatever the worker is configured for. On a worker with an ingress
 // domain that is host:port PLUS a URL, and exposePort returns the host address.
-const host = await sbx.exposePort(3000)   // "100.99.183.74:5200"
+const host = await sbx.exposePort(3000)   // "worker.internal:5200"
 sbx.getUrl(3000)                          // "https://3000-<id>.sandboxes.example.com"
 
 // URL-only: reserves no host port. exposePort returns the URL itself, and

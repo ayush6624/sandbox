@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The sandbox control plane VM: nomad server + `sandbox gateway` + Prometheus +
 # Grafana. One small non-spot e2-medium with a reserved static internal
-# IP (workers retry_join it) and Tailscale (laptop access + subnet router).
+# IP (workers retry_join it) and Tailscale Serve (tailnet-only laptop access).
 #
 #   ./control.sh up        # SA + static IP + create the VM
 #   ./control.sh deploy    # build + push binaries/configs, install + start units
@@ -162,8 +162,10 @@ cmd_deploy() {
 }
 
 cmd_status() {
-  local tsip
+  local tsip api_host
   tsip="$(sshx "$NAME" 'tailscale ip -4 | head -1' 2>/dev/null || echo '?')"
+  api_host="$IP"
+  [ "$tsip" = "?" ] || api_host="$tsip"
   [ -f "$SECRETS" ] && source "$SECRETS"
   echo
   echo ">> Control plane on $NAME (tailnet $tsip, internal $IP)"
@@ -171,7 +173,7 @@ cmd_status() {
       printf "   %-18s %s\n" "$u" "$(systemctl is-active $u 2>/dev/null)"; done' 2>/dev/null || true
   echo
   echo ">> Drive from laptop:"
-  echo "   SANDBOX_API_URL=http://${IP}:${GW_PORT} SANDBOX_API_KEY=<from fleet-secrets.env>"
+  echo "   SANDBOX_API_URL=http://${api_host}:${GW_PORT} SANDBOX_API_KEY=<from fleet-secrets.env>"
   echo "   Grafana: http://${tsip}:${GRAFANA_PORT} (dashboard: Sandbox / Sandbox Fleet)"
 }
 
