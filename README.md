@@ -121,7 +121,11 @@ See the [SDK README](sdk/typescript/README.md) for streaming exec, snapshots & f
 
 ```
 sandbox serve          Run the API server (owns all VMs)
-sandbox up [--ttl s]   Create a sandbox; blocks until the agent is ready
+sandbox up [--ttl s]   Show durable create progress on stderr, then ready JSON
+sandbox up --legacy    Use synchronous creation with older servers
+sandbox up --async     Return a durable single-create operation receipt
+sandbox operation get <id>   Inspect a single or batch create
+sandbox operation wait <id>  Wait with progress; return terminal operation JSON
 sandbox down <id>      Destroy a sandbox
 sandbox list           List running sandboxes
 sandbox exec [--stream] <id> -- <cmd>   Run a shell command inside a sandbox

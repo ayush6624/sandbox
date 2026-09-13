@@ -1,7 +1,9 @@
 # Snapshot peer transfer
 
-Status: implemented locally; production rollout requires a disposable-worker
-canary and cross-host benchmark.
+Status: implemented and verified on the dev fleet. See the
+[September 5 canary](development-canary-2026-09-05.md#public-restore-while-upload-is-pending).
+This document covers snapshot restore/fanout. Hibernation release/adopt uses
+the separate [retained-checkpoint peer path](peer-hibernation-transfer.md).
 
 ## Why
 

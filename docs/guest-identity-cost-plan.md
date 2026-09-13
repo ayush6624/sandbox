@@ -1,6 +1,11 @@
 # Removing guest-side identity work from the create path
 
-Status: proposed (2026-08-17). Prerequisite landed: identical jailed inputs share
+Status: backlogged by user decision (2026-09-07). Measure the current create and
+fork paths before resuming network namespace integration. The timings below are
+historical, not a current estimate of the benefit. This is not a proven fix for
+the intermittent guest readiness stall. See the [development backlog](development-backlog.md).
+
+Originally proposed 2026-08-17. Prerequisite landed: identical jailed inputs share
 one inode (`2e6ba08`), which moved the fanout bottleneck off disk I/O and onto
 guest CPU. This document is about the guest CPU.
 

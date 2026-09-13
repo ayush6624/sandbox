@@ -2,12 +2,17 @@
 
 **Updated 2026-08-01 · release `c0d0c0f`.**
 
-This report contains the current production release's lifecycle, burst, source,
-batch, fleet, and cleanup measurements. Historical and provider-comparison
-figures remain in Git history and older raw artifacts, but they are not mixed
-into the current tables.
+This report records release `c0d0c0f` on August 1. It does not measure the later
+template-placement or peer-transfer changes, and it does not establish the
+currently deployed release. A new campaign is required before publishing
+performance claims for those changes. The values below are historical evidence.
 
 Interactive version: [`benchmark-report.html`](./benchmark-report.html).
+
+The [September 5 development canary](development-canary-2026-09-05.md) records
+the current US fleet's lifecycle, snapshot, and peer-transfer measurements,
+including a public restore while upload is pending and the limitations of
+those small-sample runs.
 
 ## Result
 

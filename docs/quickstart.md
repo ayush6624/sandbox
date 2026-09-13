@@ -98,7 +98,7 @@ The same binary is the end-user client. From a laptop it uses the same API URL
 and key as the SDK; on the host it can still use the local Unix socket:
 
 ```bash
-sudo ./sandbox up                                  # create; prints JSON + URL
+sudo ./sandbox up                                  # progress on stderr; ready sandbox JSON on stdout
 sudo ./sandbox list
 sudo ./sandbox exec <id> -- "node --version"
 sudo ./sandbox shell <id>                          # full interactive terminal
