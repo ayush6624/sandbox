@@ -211,7 +211,7 @@ A change to `cmd/sandboxd` is NOT covered by this: the agent is image-pinned, so
 it needs `infra/gcp/bake-image.sh bake && golden` and a MIG roll (see the golden
 snapshot notes below). `rollout.sh` ships the `sandbox` server binary only.
 
-**`--fast` is the dev-iteration path, and rollout latency is NOT on the fleet.**
+`--fast` **is the dev-iteration path, and rollout latency is NOT on the fleet.**
 Measured: golden is *adopted* (ms), the ready pool refills at ~1.5 s per VM in
 parallel, and `shutdownAll` freezes at ~178 ms per VM 8-way parallel — so a
 worker is serving again seconds after its task restarts. **Don't try to speed
@@ -244,11 +244,12 @@ bridge, sets the sysctls, and adds the NAT/FORWARD rules. A host reboot just
 needs `serve` restarted.
 
 EnsureNetwork sets these critical host-wide knobs:
+
 - `net.ipv4.ip_forward=1` — **required**: guest egress to the internet is routed + MASQUERADEd
 - `iptables -t nat -A POSTROUTING -s <subnet> -o <host-iface> -j MASQUERADE` — **required**
-  for guest egress (the guests' 172.16.x addresses aren't routable outside the host)
+for guest egress (the guests' 172.16.x addresses aren't routable outside the host)
 - `net.ipv4.conf.all.route_localnet=1` and the `-o br-fc MASQUERADE` rule — kept for
-  back-compat with the retired DNAT port-forwarding scheme; harmless
+back-compat with the retired DNAT port-forwarding scheme; harmless
 
 Host:port → guest:port forwarding is NOT iptables DNAT anymore: it's a userspace TCP
 proxy inside the server (`internal/server/portproxy.go`). The server binds each mapped
@@ -300,834 +301,828 @@ configs/devbox.json   Default config (pools, bridge, paths, vCPUs/mem)
 scripts/              Host setup shell scripts
 ```
 
+
+
 ## Architecture notes
 
 - **Single long-running server.** `serve` owns every `*vm.Machine` in `machines sync.Map`.
-  If the server crashes, firecracker children become orphaned and we can no longer ACPI-shutdown
-  via the SDK. On the next `serve` startup, `reconcile()` kills any process whose
-  `/proc/<pid>/comm` is `firecracker` for each registry row (guards against PID reuse), then
-  releases tap, rootfs copy, legacy DNAT rules (pre-proxy hosts), and the row itself. Every
-  row is stale by definition at startup, since VMs only live inside a running server —
-  except hibernated rows, which reconcile skips and whose port listeners are then re-bound.
+If the server crashes, firecracker children become orphaned and we can no longer ACPI-shutdown
+via the SDK. On the next `serve` startup, `reconcile()` kills any process whose
+`/proc/<pid>/comm` is `firecracker` for each registry row (guards against PID reuse), then
+releases tap, rootfs copy, legacy DNAT rules (pre-proxy hosts), and the row itself. Every
+row is stale by definition at startup, since VMs only live inside a running server —
+except hibernated rows, which reconcile skips and whose port listeners are then re-bound.
 - **Multi-host is a gateway in front, not shared state.** `sandbox gateway` fronts the same
-  API and fans out across hosts. Each host keeps its own SQLite + pools + `reconcile()`
-  unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
-  opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
-  and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, slots_free,
-  demand_slots, warm_ready, sandbox_ids}` to the gateway every 5 s. **Placement trusts `slots_free`** (computed by
-  `registry.FreeSlots`: tap/IP availability bounded by memory admission) — NOT
-  `slots_total - slots_used`, which can overstate capacity when larger memory overrides are
-  running; a host still building its golden snapshot advertises `slots_free=0` so fresh
-  hosts aren't boot-stormed with cold creates.
-  The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
-  its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
-  each host reports. `POST /sandboxes` first consumes fleet-wide `warm_ready` capacity,
-  bin-packing and reserving those ready VMs across hosts before it falls back to the fullest
-  host with ordinary free slots. Snapshot adoption deliberately uses ordinary placement so
-  it cannot steal default-create ready capacity. Both modes reserve at pick time so concurrent
-  creates see each other. **Snapshot- and template-sourced creates (restore/fanout) go through
-  the SAME reserve → queue → fail-over loop** (`serveSnapshotCreate`, internal/gateway/snapshots.go).
-  They used to be pinned to whichever host owned the snapshot and 503 outright when it was
-  full: measured on the 89-task Terminal-Bench oracle sweep (2026-08-16), 28 of 89 trials died
-  that way while other hosts had free slots, and — because a rejected create never enqueues —
-  `sandbox_create_queue_depth` stayed 0, so the gateway's level-triggered scale-out never fired
-  and the fleet never grew. Snapshot locality is now a PREFERENCE (the owner is picked when it
-  can hold the request, since anyone else must pull from the bucket first), a fanout of N
-  reserves N slots on one host, and `recordSnapshotOp` must skip its own slot debit when a
-  reservation already did it or the same sandboxes are counted twice. A create that a host rejects with a
-  capacity-class error (503/429, e.g. pool exhaustion) or a connection failure **fails over**
-  to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
-  host errors return 502 without retry. When no slot is free the create
-  waits in a bounded queue (`--queue-wait`/`--queue-max`, defaults 240s/4096; depth exported as
-  `sandbox_create_queue_depth` and fed into the gateway's direct-scaling signal) before 503ing with
-  Retry-After. Id-scoped requests (incl. `/exec/stream` + `/shell`) are
-  reverse-proxied to the owning host (one cached proxy per host over a shared tuned
-  transport) with the host's token injected; `GET /sandboxes` scatter-gathers in parallel.
-  Scale-out and scale-in read the SAME `fleetDemand()`: worker-reported `demand_slots`
-  converts committed user memory into default-slot equivalents (excluding disposable warm
-  VMs and placement quarantine), and queued `mem_mib` overrides are weighted by
-  `ceil((mem_mib + VM overhead) / MEM_PER_SLOT_MIB)`. This is what makes eleven 4 GiB
-  sandboxes size like ~40 default slots rather than eleven. The Nomad autoscaler is retired;
-  the gateway is the sole MIG writer and scale-in is cordon → drain → delete-by-name.
-  Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The elastic fleet
-  (gateway + GCE MIG) lives in `infra/gcp/` — `SLOTS_PER_HOST` in `config.env` is
-  the source of truth for RUNNING capacity (taps/IPs/mem_budget_mib); `deploy-job.sh`
-  generates those pools from it. Three knobs decouple the pools that used to all scale off
-  `SLOTS_PER_HOST`: `PORTS_PER_HOST` (default 4× slots) sizes the port pool independently
-  since hibernated sandboxes hold only their port; `GUEST_SUBNET_BITS` (default 24) widens
-  the guest subnet past a single /24 so a host can run more than ~250 sandboxes at once;
-  `MEM_PER_SLOT_MIB` (default 1180) sets committed memory per slot so a small-sandbox fleet
-  can pack many more running sandboxes into the same host RAM — see the capacity-sizing
-  notes under Architecture notes.
+API and fans out across hosts. Each host keeps its own SQLite + pools + `reconcile()`
+unchanged (a *shared* DB would break reconcile's "every row is stale" + PID checks). Hosts
+opt in with `serve --gateway <url> --gateway-token <tok> --listen <addr> --token <addr-tok>`
+and heartbeat (`internal/server/heartbeat.go`) their `{addr, token, slots, slots_free, demand_slots, warm_ready, sandbox_ids}` to the gateway every 5 s. **Placement trusts** `slots_free` (computed by
+`registry.FreeSlots`: tap/IP availability bounded by memory admission) — NOT
+`slots_total - slots_used`, which can overstate capacity when larger memory overrides are
+running; a host still building its golden snapshot advertises `slots_free=0` so fresh
+hosts aren't boot-stormed with cold creates.
+The gateway (`internal/gateway`) holds **no durable state**: it rebuilds
+its `sandbox_id → host` routing table from heartbeats, so it self-heals after a restart once
+each host reports. `POST /sandboxes` first consumes fleet-wide `warm_ready` capacity, bin-packing and reserving those ready VMs across hosts before it falls back to the fullest host with ordinary free slots. Snapshot adoption deliberately uses ordinary placement so it cannot steal default-create ready capacity. Both mod  es reserve at pick time so concurrent creates see each other. **Snapshot- and template-sourced creates (restore/fanout) go through the SAME reserve → queue → fail-over loop** (`serveSnapshotCreate`, internal/gateway/snapshots.go).
+They used to be pinned to whichever host owned the snapshot and 503 outright when it was
+full: measured on the 89-task Terminal-Bench oracle sweep (2026-08-16), 28 of 89 trials died
+that way while other hosts had free slots, and — because a rejected create never enqueues —
+`sandbox_create_queue_depth` stayed 0, so the gateway's level-triggered scale-out never fired
+and the fleet never grew. Snapshot locality is now a PREFERENCE (the owner is picked when it
+can hold the request, since anyone else must pull from the bucket first), a fanout of N
+reserves N slots on one host, and `recordSnapshotOp` must skip its own slot debit when a
+reservation already did it or the same sandboxes are counted twice. A create that a host rejects with a
+capacity-class error (503/429, e.g. pool exhaustion) or a connection failure **fails over**
+to the next-best host (≤3 attempts, the failing host penalized ~2 heartbeats), while genuine
+host errors return 502 without retry. When no slot is free the create
+waits in a bounded queue (`--queue-wait`/`--queue-max`, defaults 240s/4096; depth exported as
+`sandbox_create_queue_depth` and fed into the gateway's direct-scaling signal) before 503ing with
+Retry-After. Id-scoped requests (incl. `/exec/stream` + `/shell`) are
+reverse-proxied to the owning host (one cached proxy per host over a shared tuned
+transport) with the host's token injected; `GET /sandboxes` scatter-gathers in parallel.
+Scale-out and scale-in read the SAME `fleetDemand()`: worker-reported `demand_slots`
+converts committed user memory into default-slot equivalents (excluding disposable warm
+VMs and placement quarantine), and queued `mem_mib` overrides are weighted by
+`ceil((mem_mib + VM overhead) / MEM_PER_SLOT_MIB)`. This is what makes eleven 4 GiB
+sandboxes size like ~40 default slots rather than eleven. The Nomad autoscaler is retired;
+the gateway is the sole MIG writer and scale-in is cordon → drain → delete-by-name.
+Point the CLI at it with `--gateway <addr> --gateway-token <tok>`. The elastic fleet
+(gateway + GCE MIG) lives in `infra/gcp/` — `SLOTS_PER_HOST` in `config.env` is
+the source of truth for RUNNING capacity (taps/IPs/mem_budget_mib); `deploy-job.sh`
+generates those pools from it. Three knobs decouple the pools that used to all scale off
+`SLOTS_PER_HOST`: `PORTS_PER_HOST` (default 4× slots) sizes the port pool independently
+since hibernated sandboxes hold only their port; `GUEST_SUBNET_BITS` (default 24) widens
+the guest subnet past a single /24 so a host can run more than ~250 sandboxes at once;
+`MEM_PER_SLOT_MIB` (default 1180) sets committed memory per slot so a small-sandbox fleet
+can pack many more running sandboxes into the same host RAM — see the capacity-sizing
+notes under Architecture notes.
 - **Creates are hot by default (golden snapshot).** On startup (`ensureGolden` in
-  `internal/server/golden.go`) the server adopts or builds a **golden snapshot**: it
-  cold-boots a throwaway pristine sandbox, snapshots it (marked `golden=1`, at most one via
-  partial unique index), destroys the source, and keeps the snapshot's baked rootfs staged
-  at `SourceRootfsPath` permanently (Firecracker opens that path during every LoadSnapshot).
-  `POST /sandboxes` then clones it — the identity-neutral fan-out mechanism with N=1 — and
-  **falls back to cold boot** on any failure (no golden yet, snapshot deleted, clone error),
-  so clients see the same API either way. The golden snapshot records the base rootfs
-  mtime+size; a rebuilt base (e.g. `install-agent`) invalidates it on the next server
-  restart — restart `serve` after changing the base image. Opt out with
-  `"disable_hot_create": true` in the config.
+`internal/server/golden.go`) the server adopts or builds a **golden snapshot**: it
+cold-boots a throwaway pristine sandbox, snapshots it (marked `golden=1`, at most one via
+partial unique index), destroys the source, and keeps the snapshot's baked rootfs staged
+at `SourceRootfsPath` permanently (Firecracker opens that path during every LoadSnapshot).
+`POST /sandboxes` then clones it — the identity-neutral fan-out mechanism with N=1 — and
+**falls back to cold boot** on any failure (no golden yet, snapshot deleted, clone error),
+so clients see the same API either way. The golden snapshot records the base rootfs
+mtime+size; a rebuilt base (e.g. `install-agent`) invalidates it on the next server
+restart — restart `serve` after changing the base image. Opt out with
+`"disable_hot_create": true` in the config.
 - **The golden can be BAKED onto a data-disk image so a fresh host adopts instead of
-  building it** (fleet fast-scale; `infra/gcp/bake-image.sh golden`). `buildGolden` writes a
-  self-describing manifest `golden.json` (the snapshot row + `base_mtime`/`base_size`, which
-  are `json:"-"` on the row so the manifest carries them explicitly) into `SnapshotDir`. On
-  startup, when the registry has no golden row (a fresh worker whose data disk was seeded from
-  the golden image but whose SQLite is empty), `ensureGolden` calls `importGoldenManifest`:
-  it reconstructs the row, re-validates via `goldenUsable` (artifacts on disk + base rootfs
-  mtime/size match), `CreateSnapshot`s it, and falls into the normal adopt path. **Every
-  failure mode — absent/corrupt manifest, stale artifacts, insert error — returns
-  "not ok" and cold-builds**, so a bad or missing manifest is never worse than today. This
-  removes the ~2 GB rootfs copy, the golden cold-build, AND the `slots_free=0` warming window
-  from the scale-up path. It relies on the base rootfs mtime being STABLE at boot (goldenUsable
-  keys on base rootfs mtime+size): the image bakes sandboxd into `/opt/fc` (`bake-image.sh
-  [3b/6]`), so **`run.sh` does NOT run `install-agent`** — doing so re-bakes whenever the GCS
-  release sandboxd differs from the baked one (two independent build paths differ by build-stamp
-  bytes ALONE), bumping the mtime and forcing every host to cold-build the golden. **sandboxd is
-  image-pinned: to ship a new agent, rebake (`./bake-image.sh bake && golden`) and roll.**
-  `mig.sh` seeds each worker's data disk from `$GOLDEN_DATA_IMAGE_FAMILY` when it exists (blank
-  disk + cold build otherwise). The `sandbox` SERVER binary is still pulled from the GCS release,
-  so a host can only ADOPT if that release has `importGoldenManifest` (deploy ≥ this change).
-  Rebake both images together (a drifted pair just cold-rebuilds).
+building it** (fleet fast-scale; `infra/gcp/bake-image.sh golden`). `buildGolden` writes a
+self-describing manifest `golden.json` (the snapshot row + `base_mtime`/`base_size`, which
+are `json:"-"` on the row so the manifest carries them explicitly) into `SnapshotDir`. On
+startup, when the registry has no golden row (a fresh worker whose data disk was seeded from
+the golden image but whose SQLite is empty), `ensureGolden` calls `importGoldenManifest`:
+it reconstructs the row, re-validates via `goldenUsable` (artifacts on disk + base rootfs
+mtime/size match), `CreateSnapshot`s it, and falls into the normal adopt path. **Every
+failure mode — absent/corrupt manifest, stale artifacts, insert error — returns
+"not ok" and cold-builds**, so a bad or missing manifest is never worse than today. This
+removes the ~2 GB rootfs copy, the golden cold-build, AND the `slots_free=0` warming window
+from the scale-up path. It relies on the base rootfs mtime being STABLE at boot (goldenUsable
+keys on base rootfs mtime+size): the image bakes sandboxd into `/opt/fc` (`bake-image.sh [3b/6]`), so `run.sh` **does NOT run** `install-agent` — doing so re-bakes whenever the GCS
+release sandboxd differs from the baked one (two independent build paths differ by build-stamp
+bytes ALONE), bumping the mtime and forcing every host to cold-build the golden. **sandboxd is
+image-pinned: to ship a new agent, rebake (**`./bake-image.sh bake && golden`**) and roll.**
+`mig.sh` seeds each worker's data disk from `$GOLDEN_DATA_IMAGE_FAMILY` when it exists (blank
+disk + cold build otherwise). The `sandbox` SERVER binary is still pulled from the GCS release,
+so a host can only ADOPT if that release has `importGoldenManifest` (deploy ≥ this change).
+Rebake both images together (a drifted pair just cold-rebuilds).
 - **A template IS a snapshot, and a container image can become one.**
-  `sandbox template build --from-image <ref>` (cmd/sandbox/template.go) exports the
-  image, overlays the guest-side sandbox contract onto the extracted tree, `mkfs.ext4
-  -d`s it, and asks the worker to boot it once and snapshot it (`POST /templates/build`,
-  internal/server/template.go — buildGolden's sequence minus the golden marking). The
-  snapshot id is the template id: `source:{type:"snapshot",id}` creates from it, the GCS
-  pull makes it usable on any worker, and hibernate/wake/TTL/ports/usage all work because
-  the result is an ordinary sandbox. So there is deliberately NO template registry, no
-  new id space, and no distribution code. The route is worker-local — the gateway proxies
-  an explicit path list and `/templates` is not on it — which is what keeps a tenant from
-  naming a host path to boot. **The image's ENTRYPOINT/CMD and init system are NOT run:
-  sandboxd runs as PID 1** (cmd/sandboxd/init_linux.go) — it mounts /proc, /sys, /dev,
-  /dev/pts, /dev/shm, /run, then re-execs itself as a supervised child, because a generic
-  `wait4(-1)` reaper in the same process as the agent would steal exit statuses from
-  os/exec and break every exec. The image needs only **bash** (exec/pty run `bash -l`),
-  checked at build time — NOT iproute2: a clone must reconfigure eth0 at thaw, and
-  shelling out to `ip` would exclude every published image (no Terminal-Bench task
-  image ships it), so sandboxd falls back to netlink when `ip` is absent
-  (cmd/sandboxd/netlink_linux.go; the library is already in the module graph via
-  the Firecracker SDK's CNI deps). **The image's USER/WORKDIR/ENV are honored** —
-  recorded at build time in `/etc/sandbox-guest.json` (agentapi.GuestProfile) and
-  adopted by the agent, so exec runs as root in e.g. `/app` rather than as the
-  `sandbox` account in `/home/sandbox/app`. Workloads written for the image depend
-  on this (a Terminal-Bench verifier apt-gets and checks `$PWD`), and root in the
-  guest is the model this repo already documents. A guest without that file — the
-  base image and everything derived from it — is completely unaffected.
-  The subtle one that cost a debugging session: **the kernel
-  hands init an environment with no PATH**, so `exec.Command("ip", …)` in the thaw agent
-  silently fails to resolve and the clone resumes still holding the template's address —
-  reachable at the OLD ip, invisible at the new one. `runInit` sets a default PATH; don't
-  remove it. systemd sets one in the base image, which is why only template guests hit it.
-  Resources are baked at build time (restores reject vcpu/mem overrides), and template
-  creates are fan-out speed (~300 ms–1 s), not ready-pool speed — the pool and golden are
-  per-host and singular. `source:{type:"template",id}` in v1 accepts a real template id
-  (apiv1 routes it to the same fanout as `snapshot`; `"default"` stays reserved for the
-  host's built-in image), so the SDK's long-standing `{templateId}` spelling works without
-  an SDK code change. `GET /v1/templates` still describes only the built-in one — listing
-  built templates needs a marker on the snapshot row and is not done. See docs/templates.md.
-- **Snapshot consumers hold `snapshotLock(snapID)` SHARED, and the staged baked rootfs is
-  permanent.** Golden create, snapshot create, template create, fanout and hibernation wake
-  are all ONE mechanism — `bringUpClone` + `finishClone`, a Firecracker restore onto an
-  unbridged tap, GARP reidentify, then bridge. Cold boot (`createCold`) is the *exception*
-  path, reached only by vcpu/mem overrides, a missing golden, or a template build. What used
-  to differ was concurrency: `snapshotLock` was exclusive and held across the whole
-  bring-up, so every create from one snapshot ran strictly one at a time, while the golden
-  path took that lock not at all. The asymmetry was NOT a design decision about snapshots —
-  the only shared mutable state was `snap.SourceRootfsPath`, which Firecracker opens during
-  LoadSnapshot before `PATCH /drives` can relocate it, and which restore/fanout used to
-  stage per call and then **unlink** (so one consumer's unlink could race another's load).
-  Golden never paid the lock precisely because `stageSnapshotRootfs` leaves its staged file
-  in place. `ensureStagedRootfs` now does that for every snapshot, which is what lets
-  consumers (restore, fanout, and the diff-base readers in `snapshotSandbox` /
-  `planHibernateDiff`) take `RLock` while delete and metadata writes take `Lock`. Two
-  consequences to preserve: the staged path lives OUTSIDE `SnapshotDir`, so
-  `CleanupSnapshot` misses it and `removeStagedRootfs` must run on delete (skipping golden
-  and any path a live source sandbox still owns); and nothing may RLock the same snapshot id
-  twice in one goroutine — Go's RWMutex blocks new readers once a writer waits, so nesting
-  would deadlock. There is no such nesting today (it would already have been a hard deadlock
-  under the old exclusive lock). Fanout also no longer barriers between "resume all" and
-  "bridge all" — that barrier existed only to pick a moment to unlink the staged file, and
-  it made every clone wait for the slowest resume in the batch; `fanoutClones` runs each
-  clone's bring-up and finish as one pipeline, `limit` at a time.
-- **A snapshot-sourced v1 batch is chunked fanout, not N fanouts of one.** `POST
-  /v1/sandbox-batches` used to call `h.create` `count` times, and each of those posts
-  `/snapshots/{id}/fanout` with `count:1` — so with the exclusive snapshot lock above,
-  `max_parallelism` was a lie and the batch was dead-linear: measured 1015/1519/3034/6048/
-  12094/24191 ms for N=1/2/4/8/16/32, i.e. ~756 ms per sandbox with effective concurrency of
-  exactly 1 (a 15-sandbox batch took ~11.3 s). `runSnapshotBatch` now issues fanouts of up
-  to `fanoutChunk` (8) clones. Chunk, don't send one giant fanout: a single call cannot
-  exceed the worker's `fanoutParallelism` anyway, and the gateway reserves a whole fanout's
-  slots on ONE host — so an unchunked `count=100` could never be placed. `max_parallelism`
-  bounds clones in flight, capping both chunk size and concurrent chunks. Single creates
-  still send `count:1` (`TestSingleSnapshotCreateStillSendsCountOne`).
+`sandbox template build --from-image <ref>` (cmd/sandbox/template.go) exports the
+image, overlays the guest-side sandbox contract onto the extracted tree, `mkfs.ext4 -d`s it, and asks the worker to boot it once and snapshot it (`POST /templates/build`,
+internal/server/template.go — buildGolden's sequence minus the golden marking). The
+snapshot id is the template id: `source:{type:"snapshot",id}` creates from it, the GCS
+pull makes it usable on any worker, and hibernate/wake/TTL/ports/usage all work because
+the result is an ordinary sandbox. So there is deliberately NO template registry, no
+new id space, and no distribution code. The route is worker-local — the gateway proxies
+an explicit path list and `/templates` is not on it — which is what keeps a tenant from
+naming a host path to boot. **The image's ENTRYPOINT/CMD and init system are NOT run:
+sandboxd runs as PID 1** (cmd/sandboxd/init_linux.go) — it mounts /proc, /sys, /dev,
+/dev/pts, /dev/shm, /run, then re-execs itself as a supervised child, because a generic
+`wait4(-1)` reaper in the same process as the agent would steal exit statuses from
+os/exec and break every exec. The image needs only **bash** (exec/pty run `bash -l`),
+checked at build time — NOT iproute2: a clone must reconfigure eth0 at thaw, and
+shelling out to `ip` would exclude every published image (no Terminal-Bench task
+image ships it), so sandboxd falls back to netlink when `ip` is absent
+(cmd/sandboxd/netlink_linux.go; the library is already in the module graph via
+the Firecracker SDK's CNI deps). **The image's USER/WORKDIR/ENV are honored** —
+recorded at build time in `/etc/sandbox-guest.json` (agentapi.GuestProfile) and
+adopted by the agent, so exec runs as root in e.g. `/app` rather than as the
+`sandbox` account in `/home/sandbox/app`. Workloads written for the image depend
+on this (a Terminal-Bench verifier apt-gets and checks `$PWD`), and root in the
+guest is the model this repo already documents. A guest without that file — the
+base image and everything derived from it — is completely unaffected.
+The subtle one that cost a debugging session: **the kernel
+hands init an environment with no PATH**, so `exec.Command("ip", …)` in the thaw agent
+silently fails to resolve and the clone resumes still holding the template's address —
+reachable at the OLD ip, invisible at the new one. `runInit` sets a default PATH; don't
+remove it. systemd sets one in the base image, which is why only template guests hit it.
+Resources are baked at build time (restores reject vcpu/mem overrides), and template
+creates are fan-out speed (~300 ms–1 s), not ready-pool speed — the pool and golden are
+per-host and singular. `source:{type:"template",id}` in v1 accepts a real template id
+(apiv1 routes it to the same fanout as `snapshot`; `"default"` stays reserved for the
+host's built-in image), so the SDK's long-standing `{templateId}` spelling works without
+an SDK code change. `GET /v1/templates` still describes only the built-in one — listing
+built templates needs a marker on the snapshot row and is not done. See docs/templates.md.
+- **Snapshot consumers hold** `snapshotLock(snapID)` **SHARED, and the staged baked rootfs is
+permanent.** Golden create, snapshot create, template create, fanout and hibernation wake
+are all ONE mechanism — `bringUpClone` + `finishClone`, a Firecracker restore onto an
+unbridged tap, GARP reidentify, then bridge. Cold boot (`createCold`) is the *exception*
+path, reached only by vcpu/mem overrides, a missing golden, or a template build. What used
+to differ was concurrency: `snapshotLock` was exclusive and held across the whole
+bring-up, so every create from one snapshot ran strictly one at a time, while the golden
+path took that lock not at all. The asymmetry was NOT a design decision about snapshots —
+the only shared mutable state was `snap.SourceRootfsPath`, which Firecracker opens during
+LoadSnapshot before `PATCH /drives` can relocate it, and which restore/fanout used to
+stage per call and then **unlink** (so one consumer's unlink could race another's load).
+Golden never paid the lock precisely because `stageSnapshotRootfs` leaves its staged file
+in place. `ensureStagedRootfs` now does that for every snapshot, which is what lets
+consumers (restore, fanout, and the diff-base readers in `snapshotSandbox` /
+`planHibernateDiff`) take `RLock` while delete and metadata writes take `Lock`. Two
+consequences to preserve: the staged path lives OUTSIDE `SnapshotDir`, so
+`CleanupSnapshot` misses it and `removeStagedRootfs` must run on delete (skipping golden
+and any path a live source sandbox still owns); and nothing may RLock the same snapshot id
+twice in one goroutine — Go's RWMutex blocks new readers once a writer waits, so nesting
+would deadlock. There is no such nesting today (it would already have been a hard deadlock
+under the old exclusive lock). Fanout also no longer barriers between "resume all" and
+"bridge all" — that barrier existed only to pick a moment to unlink the staged file, and
+it made every clone wait for the slowest resume in the batch; `fanoutClones` runs each
+clone's bring-up and finish as one pipeline, `limit` at a time.
+- **A snapshot-sourced v1 batch is chunked fanout, not N fanouts of one.** `POST /v1/sandbox-batches` used to call `h.create` `count` times, and each of those posts
+`/snapshots/{id}/fanout` with `count:1` — so with the exclusive snapshot lock above,
+`max_parallelism` was a lie and the batch was dead-linear: measured 1015/1519/3034/6048/
+12094/24191 ms for N=1/2/4/8/16/32, i.e. ~756 ms per sandbox with effective concurrency of
+exactly 1 (a 15-sandbox batch took ~11.3 s). `runSnapshotBatch` now issues fanouts of up
+to `fanoutChunk` (8) clones. Chunk, don't send one giant fanout: a single call cannot
+exceed the worker's `fanoutParallelism` anyway, and the gateway reserves a whole fanout's
+slots on ONE host — so an unchunked `count=100` could never be placed. `max_parallelism`
+bounds clones in flight, capping both chunk size and concurrent chunks. Single creates
+still send `count:1` (`TestSingleSnapshotCreateStillSendsCountOne`).
 - **Per-sandbox resource overrides cold-boot.** `POST /sandboxes` takes optional `vcpus` /
-  `mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
-  `internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override
-  can't be served from the golden snapshot — it always takes the slower cold path.
-  Restore/fanout bodies **reject** nonzero `vcpus`/`mem_mib` with 400 (a restored VM
-  runs whatever its snapshot baked; snapshot rows record the source's values so restored/
-  cloned rows report the truth). Hibernate/wake restores from snapshot, so overrides survive
-  automatically. **API responses always report effective resources**: the registry keeps
-  0 (= template default) but every sandbox-returning handler runs `effectiveResources`,
-  filling in the template's vcpus/mem — so clients never see an absent value. `GET /info`
-  exposes the template defaults + override limits (gateway forwards it to a live host).
+`mem_mib` (0/absent = template default; bounds-checked in `validateResources`,
+`internal/server/server.go`). Firecracker bakes vcpus/mem into snapshots, so an override
+can't be served from the golden snapshot — it always takes the slower cold path.
+Restore/fanout bodies **reject** nonzero `vcpus`/`mem_mib` with 400 (a restored VM
+runs whatever its snapshot baked; snapshot rows record the source's values so restored/
+cloned rows report the truth). Hibernate/wake restores from snapshot, so overrides survive
+automatically. **API responses always report effective resources**: the registry keeps
+0 (= template default) but every sandbox-returning handler runs `effectiveResources`,
+filling in the template's vcpus/mem — so clients never see an absent value. `GET /info`
+exposes the template defaults + override limits (gateway forwards it to a live host).
 - **The shell WebSocket is a supported client API, and it authenticates via the
-  SUBPROTOCOL — never the query string.** Browsers can't set headers on a WebSocket,
-  and `?access_token=` was removed in `6e4f1c0` (it leaks credentials into URLs, proxy
-  traces and access logs; both bearerAuth middlewares reject query credentials and both
-  proxies strip them). Clients instead offer two subprotocols:
-  `sandbox.bearer.<base64url(token)>` plus the negotiable `sandbox.shell.v1`
-  (`internal/wsutil`: `UpgradeAuthorization`, `StripBearerSubprotocol`,
-  `EchoSubprotocol`). Three constraints make this work and are easy to break:
-  **(1)** the token is base64url WITHOUT padding because a subprotocol name must be an
-  RFC 7230 token — standard base64's `/` and `=` make browsers throw at construction,
-  before any request is sent; **(2)** the server MUST echo a selected subprotocol, or a
-  client that offered one fails the connection — since the guest agent doesn't negotiate,
-  the hop that consumed the credential echoes `sandbox.shell.v1` via `ModifyResponse`
-  (this is why clients offer a second, credential-free entry: so the secret is never
-  reflected back); **(3)** subprotocol credentials are accepted on PUBLIC routes only —
-  the internal-control check runs BEFORE the fallback, because the caller picks the
-  upgrade headers, so "worker routes are never WebSockets" is not enforceable here.
-  Errors on WS endpoints (bad token, unknown id, failed wake, agent unreachable) are
-  delivered via `internal/wsutil.Reject`: complete the 101 handshake, then close with
-  code 4000+HTTPstatus and the message as the close reason — a plain 401/404 would reach
-  browsers as an opaque 1006. `Reject` must hijack via
-  `http.NewResponseController(w).Hijack()`, NOT a `w.(http.Hijacker)` assertion:
-  `httpapi.Middleware` wraps the writer in a `statusWriter` that embeds the
-  ResponseWriter *interface* and exposes only `Unwrap`, so the direct assertion fails and
-  every WS error silently degrades to the 1006 this whole mechanism exists to prevent
-  (that regression shipped, and made the SDK's pty unusable against the fleet). The SDK's
-  `sandbox.pty` maps 4401/4404 back onto AuthenticationError/NotFoundError.
+SUBPROTOCOL — never the query string.** Browsers can't set headers on a WebSocket,
+and `?access_token=` was removed in `6e4f1c0` (it leaks credentials into URLs, proxy
+traces and access logs; both bearerAuth middlewares reject query credentials and both
+proxies strip them). Clients instead offer two subprotocols:
+`sandbox.bearer.<base64url(token)>` plus the negotiable `sandbox.shell.v1`
+(`internal/wsutil`: `UpgradeAuthorization`, `StripBearerSubprotocol`,
+`EchoSubprotocol`). Three constraints make this work and are easy to break:
+**(1)** the token is base64url WITHOUT padding because a subprotocol name must be an
+RFC 7230 token — standard base64's `/` and `=` make browsers throw at construction,
+before any request is sent; **(2)** the server MUST echo a selected subprotocol, or a
+client that offered one fails the connection — since the guest agent doesn't negotiate,
+the hop that consumed the credential echoes `sandbox.shell.v1` via `ModifyResponse`
+(this is why clients offer a second, credential-free entry: so the secret is never
+reflected back); **(3)** subprotocol credentials are accepted on PUBLIC routes only —
+the internal-control check runs BEFORE the fallback, because the caller picks the
+upgrade headers, so "worker routes are never WebSockets" is not enforceable here.
+Errors on WS endpoints (bad token, unknown id, failed wake, agent unreachable) are
+delivered via `internal/wsutil.Reject`: complete the 101 handshake, then close with
+code 4000+HTTPstatus and the message as the close reason — a plain 401/404 would reach
+browsers as an opaque 1006. `Reject` must hijack via
+`http.NewResponseController(w).Hijack()`, NOT a `w.(http.Hijacker)` assertion:
+`httpapi.Middleware` wraps the writer in a `statusWriter` that embeds the
+ResponseWriter *interface* and exposes only `Unwrap`, so the direct assertion fails and
+every WS error silently degrades to the 1006 this whole mechanism exists to prevent
+(that regression shipped, and made the SDK's pty unusable against the fleet). The SDK's
+`sandbox.pty` maps 4401/4404 back onto AuthenticationError/NotFoundError.
 - **Clone reidentify is signaled by gratuitous ARP.** A fan-out/hot-create clone resumes on
-  an UNBRIDGED tap still carrying the snapshot's baked IP; the in-guest thaw agent adopts the
-  fresh identity from MMDS then broadcasts GARPs (`cmd/sandboxd/garp_linux.go`). The host
-  opens `provisioner.ListenARP` on the tap **before resume** and `finishClone` bridges the
-  moment the announce arrives (~200-400ms); timeout after 1.5 s falls back to bridging anyway
-  (matches snapshots whose baked agent predates the announce). New sandboxd must be baked via
-  `install-agent` for the fast path.
+an UNBRIDGED tap still carrying the snapshot's baked IP; the in-guest thaw agent adopts the
+fresh identity from MMDS then broadcasts GARPs (`cmd/sandboxd/garp_linux.go`). The host
+opens `provisioner.ListenARP` on the tap **before resume** and `finishClone` bridges the
+moment the announce arrives (~200-400ms); timeout after 1.5 s falls back to bridging anyway
+(matches snapshots whose baked agent predates the announce). New sandboxd must be baked via
+`install-agent` for the fast path.
 - **Guest wall clock is stepped on every snapshot resume.** Firecracker restore leaves the
-  guest's CLOCK_REALTIME frozen at snapshot-creation time (hours stale for golden-snapshot
-  hot creates on a long-lived server), and NTP is NOT a fallback (some deployments block
-  outbound UDP). Two host→guest signals cover all four resume paths (hot create, fan-out,
-  1:1 restore, hibernation wake — both same-identity and clone-path): `epoch_ms` in MMDS
-  (StartClone identity doc; `vm.PushEpoch` on restore/wake), which the thaw agent polls on
-  a 200ms tick, plus a deterministic `POST /clock` (`agentapi.ClockSyncRequest` →
-  clock_settime in the guest) fired by `syncGuestClock` right after each path's readiness
-  gate, so a sandbox is never handed out with a stale clock. Old baked agents 404 the
-  /clock call — logged, never fatal. Re-run `install-agent` to bake the new sandboxd.
+guest's CLOCK_REALTIME frozen at snapshot-creation time (hours stale for golden-snapshot
+hot creates on a long-lived server), and NTP is NOT a fallback (some deployments block
+outbound UDP). Two host→guest signals cover all four resume paths (hot create, fan-out,
+1:1 restore, hibernation wake — both same-identity and clone-path): `epoch_ms` in MMDS
+(StartClone identity doc; `vm.PushEpoch` on restore/wake), which the thaw agent polls on
+a 200ms tick, plus a deterministic `POST /clock` (`agentapi.ClockSyncRequest` →
+clock_settime in the guest) fired by `syncGuestClock` right after each path's readiness
+gate, so a sandbox is never handed out with a stale clock. Old baked agents 404 the
+/clock call — logged, never fatal. Re-run `install-agent` to bake the new sandboxd.
 - **UFFD lazy page-in on wake (opt-in).** With `"uffd_restore": true`, the same-identity
-  hibernation wake (`wakeRestore`) restores via Firecracker's userfaultfd memory backend
-  instead of the eager File backend: `vm.RestoreUFFD` issues `PUT /snapshot/load` over the
-  raw socket with `mem_backend={backend_type:"Uffd", backend_path:<sock>}` (SDK v1.0.0 has
-  no `mem_backend` field, so this reuses the clone path's raw `fcAPI`, not `WithSnapshot`)
-  and resumes before RAM is paged in; the guest faults its working set from the mem file
-  on demand. The handler (`internal/vm/uffd_linux.go`) receives the uffd over SCM_RIGHTS,
-  mmaps the (already-materialized, full) mem file read-only, and services each fault with
-  `UFFDIO_COPY`. Wake latency/I-O then track the working set, not guest size. The handler
-  is host-local (one page-fault goroutine + OS thread per awake UFFD VM); its mem mapping
-  is unmapped by that goroutine only after Firecracker exits (never by `close()`, which
-  just drops the socket) so a page copy can't race the unmap. **Only same-identity wake is
-  UFFD-backed; the clone-path wake still uses File.** **Default off, and fleet measurement
-  (2026-07-20) says keep it off for the current small-guest workload**: File-backend wake is
-  already ~80 ms warm (mem file is small + page-cache-warm, so the "eager" load just maps
-  cached pages), while UFFD's per-4 KiB-fault userspace round-trip adds ~30–50 ms. UFFD only
-  wins when eager load is expensive — large guests, cold/uncached mem files, or remote/GCS
-  memory (scale-to-zero Model B). NB `page_size_kib` in FC v1.15's UFFD message is actually
-  BYTES (4096), not KiB — `pageSizeBytes()` normalizes it; getting this wrong made 4 MiB
-  "pages" and an offset that panicked. The fault loop has a `recover()` so a handler bug
-  degrades to a failed wake, never a serve crash. See docs/uffd-roadmap.md.
-- **`/etc/resolv.conf` in the guest must be a REAL FILE, never a symlink to
-  `/proc/net/pnp`.** The config's nameservers reach the guest only through the kernel
-  `ip=` boot param, which the kernel re-exposes at `/proc/net/pnp` in resolv.conf
-  format, so symlinking the two looks like the clean way to honor the host config
-  without baking it in. It isn't: `/proc` files report `st_size=0`, and any resolver
-  that sizes a file before reading it sees an EMPTY config. c-ares — which backs
-  Node's `dns.resolve*`/undici, and therefore Claude Code's "Checking
-  connectivity..." probe — is one of those; finding no nameservers it falls back to
-  `127.0.0.1:53`, where nothing listens. The symptom is DNS that works for
-  curl/git/npm/python (glibc reads the symlink fine) and fails for anything
-  c-ares-based: an "unstable internet" that depends on which tool you reach for,
-  and a `claude` that dies with `Failed to connect to api.anthropic.com: ETIMEDOUT`
-  ~30 s in while `curl` to that same host takes 50 ms. So the pnp content is COPIED
-  into a regular file, in two places: `sandbox-resolvconf.service` at boot
-  (build-devbox-rootfs.sh) and `materializeResolvConf` on sandboxd startup
-  (cmd/sandboxd/resolvconf.go) — the latter is what repairs an older rootfs once a
-  new agent is baked in. Snapshot-restored guests (hot create, fan-out, wake) resume
-  a live process and re-run neither, but inherit the file through the rootfs.
+hibernation wake (`wakeRestore`) restores via Firecracker's userfaultfd memory backend
+instead of the eager File backend: `vm.RestoreUFFD` issues `PUT /snapshot/load` over the
+raw socket with `mem_backend={backend_type:"Uffd", backend_path:<sock>}` (SDK v1.0.0 has
+no `mem_backend` field, so this reuses the clone path's raw `fcAPI`, not `WithSnapshot`)
+and resumes before RAM is paged in; the guest faults its working set from the mem file
+on demand. The handler (`internal/vm/uffd_linux.go`) receives the uffd over SCM_RIGHTS,
+mmaps the (already-materialized, full) mem file read-only, and services each fault with
+`UFFDIO_COPY`. Wake latency/I-O then track the working set, not guest size. The handler
+is host-local (one page-fault goroutine + OS thread per awake UFFD VM); its mem mapping
+is unmapped by that goroutine only after Firecracker exits (never by `close()`, which
+just drops the socket) so a page copy can't race the unmap. **Only same-identity wake is
+UFFD-backed; the clone-path wake still uses File.** **Default off, and fleet measurement
+(2026-07-20) says keep it off for the current small-guest workload**: File-backend wake is
+already ~80 ms warm (mem file is small + page-cache-warm, so the "eager" load just maps
+cached pages), while UFFD's per-4 KiB-fault userspace round-trip adds ~30–50 ms. UFFD only
+wins when eager load is expensive — large guests, cold/uncached mem files, or remote/GCS
+memory (scale-to-zero Model B). NB `page_size_kib` in FC v1.15's UFFD message is actually
+BYTES (4096), not KiB — `pageSizeBytes()` normalizes it; getting this wrong made 4 MiB
+"pages" and an offset that panicked. The fault loop has a `recover()` so a handler bug
+degrades to a failed wake, never a serve crash. See docs/uffd-roadmap.md.
+- `/etc/resolv.conf` **in the guest must be a REAL FILE, never a symlink to**
+`/proc/net/pnp`**.** The config's nameservers reach the guest only through the kernel
+`ip=` boot param, which the kernel re-exposes at `/proc/net/pnp` in resolv.conf
+format, so symlinking the two looks like the clean way to honor the host config
+without baking it in. It isn't: `/proc` files report `st_size=0`, and any resolver
+that sizes a file before reading it sees an EMPTY config. c-ares — which backs
+Node's `dns.resolve*`/undici, and therefore Claude Code's "Checking
+connectivity..." probe — is one of those; finding no nameservers it falls back to
+`127.0.0.1:53`, where nothing listens. The symptom is DNS that works for
+curl/git/npm/python (glibc reads the symlink fine) and fails for anything
+c-ares-based: an "unstable internet" that depends on which tool you reach for,
+and a `claude` that dies with `Failed to connect to api.anthropic.com: ETIMEDOUT`
+~30 s in while `curl` to that same host takes 50 ms. So the pnp content is COPIED
+into a regular file, in two places: `sandbox-resolvconf.service` at boot
+(build-devbox-rootfs.sh) and `materializeResolvConf` on sandboxd startup
+(cmd/sandboxd/resolvconf.go) — the latter is what repairs an older rootfs once a
+new agent is baked in. Snapshot-restored guests (hot create, fan-out, wake) resume
+a live process and re-run neither, but inherit the file through the rootfs.
 - **Guest MTU is 1500 and the host fabric may be smaller, so the host clamps MSS.**
-  Firecracker's virtio-net hands the guest a fixed 1500-byte MTU with no way to pass
-  the host's through, so on GCP (VPC MTU 1460) every guest advertises an MSS 40 bytes
-  too large. It still works — the host drops the oversized frame and returns ICMP
-  frag-needed, PMTU discovery recovers — but it costs a drop + retransmit per new
-  connection per destination (measured ~2.4 retransmits/connection, and the PMTU
-  cache expires in ~10 min), and it hard-stalls wherever that ICMP is lost or
-  rate-limited. `EnsureNetwork` therefore adds a `-t mangle FORWARD ... TCPMSS
-  --clamp-mss-to-pmtu` rule; it's adaptive (a no-op on a 1500-MTU host like Hetzner)
-  and **best-effort**, since it needs `xt_TCPMSS` and a host missing that module
-  should still serve. The guest also sets `tcp_mtu_probing=1` as a black-hole
-  backstop. Don't "fix" the MTU by setting the tap/bridge instead — virtio-net won't
-  propagate it to the guest.
+Firecracker's virtio-net hands the guest a fixed 1500-byte MTU with no way to pass
+the host's through, so on GCP (VPC MTU 1460) every guest advertises an MSS 40 bytes
+too large. It still works — the host drops the oversized frame and returns ICMP
+frag-needed, PMTU discovery recovers — but it costs a drop + retransmit per new
+connection per destination (measured ~2.4 retransmits/connection, and the PMTU
+cache expires in ~10 min), and it hard-stalls wherever that ICMP is lost or
+rate-limited. `EnsureNetwork` therefore adds a `-t mangle FORWARD ... TCPMSS --clamp-mss-to-pmtu` rule; it's adaptive (a no-op on a 1500-MTU host like Hetzner)
+and **best-effort**, since it needs `xt_TCPMSS` and a host missing that module
+should still serve. The guest also sets `tcp_mtu_probing=1` as a black-hole
+backstop. Don't "fix" the MTU by setting the tap/bridge instead — virtio-net won't
+propagate it to the guest.
 - **SSH into a sandbox is CLI-owned and rides the authenticated API tunnel.** The base rootfs bakes
-  `openssh-server` (key-only login as the unprivileged **`sandbox` user**, uid
-  1000: `PermitRootLogin no`, `PasswordAuthentication no`, `AllowUsers sandbox`,
-  in `sshd_config.d/sandbox.conf`), and `ssh.service` is enabled (socket
-  activation disabled) so :22 listens the instant the guest boots. There is no
-  root login — `root@` is refused by sshd, not merely unauthorized.
-  **Host keys are unique per sandbox and never baked into the image**: the base
-  rootfs ships with none, and sandboxd's `POST /identity`
-  (`initializeGuestIdentity`, cmd/sandboxd/identity.go) removes any inherited
-  ones on every independent create — so no two sandboxes, golden clones
-  included, can impersonate each other. **The key is GENERATED LAZILY, on first
-  SSH use** (`ensureSSHHostKey`, called from sandboxd's `POST /ssh-key`), not at
-  create: create used to pay the `ssh-keygen` fork plus `restartSSHService` —
-  which SIGHUPs sshd then polls `/proc/net/tcp` every 1 ms for up to 500 ms
-  awaiting a replacement listener inode — measuring ~148 ms idle and ~685 ms
-  under a 16-way fanout, on sandboxes that overwhelmingly never use SSH, while a
-  32-way fanout is guest-CPU-bound. **Removal stays EAGER and so does stopping
-  the listener**, and that second part is the whole subtlety: deleting the key
-  files is not enough because a restored clone resumes a LIVE sshd that already
-  loaded the source's key into memory and would keep serving it. `stopSSHService`
-  is therefore strict about the OUTCOME rather than systemctl's exit code (it
-  verifies no inherited sshd master remains, SIGTERM then SIGKILL, and tolerates
-  "no such unit"), and `inheritedSSHDPID` guards against a stale `/run/sshd.pid`
-  and PID reuse — a restored guest resumes with whatever that file held at
-  snapshot time. Every SSH path reaches the lazy generation: `ssh_pubkey` at
-  create goes through `installSSHKey` (timeout raised 5 s → 30 s because the call
-  now does that work), and the CLI's hidden `ssh-proxy` ProxyCommand calls
-  `PrepareSSHTunnel` on EVERY connection, including plain `ssh`/`scp`/`rsync` via
-  the generated stanza. Consequence accepted: **:22 no longer listens the instant
-  a guest boots** (which is why socket activation was disabled) — first SSH use
-  pays ~150 ms.
-  **Measured, and the honest result is that this did NOT speed fanout up.**
-  Release `cd65a29`, fleet worker: the `identity` phase fell from 108-135 ms to
-  **15-17 ms** idle (266-317 ms → 37-48 ms under a 32-way fanout), but fanout
-  wall-clock was unchanged — **2567 ms vs 2575 ms at N=32** — because
-  `reidentify` expanded to absorb the freed CPU (367-447 ms idle vs 316-380 ms
-  before; 665-675 ms loaded vs 551-564 ms). Per-clone total went 648-676 ms →
-  637-665 ms, i.e. nothing. **The lesson is the useful part: the guest is
-  saturated during reidentify, so removing OTHER guest work just hands the time
-  to reidentify.** Keep the change — it removes ~100 ms of real guest CPU per
-  clone, which matters for burst CPU headroom and pool refill cost — but the only
-  thing that will move fanout latency is eliminating reidentify itself
-  (docs/guest-identity-cost-plan.md, Part 1: netns per VM).
-  A first attempt at this deferral was *worse than useless* and worth not
-  repeating: it ran `systemctl stop ssh.service` unconditionally, and that D-Bus
-  round trip costs ~120 ms in-guest — about what the eager keygen it replaced
-  cost. `stopSSHService` must check for a live sshd FIRST (`inheritedSSHDPIDFn`),
-  and the common case is that there is none, because the golden is itself built
-  by a cold boot that has no host key and so never starts sshd.
-  **Ed25519
-  only** (~7 ms), and `sandbox.conf` pins `HostKey
-  /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
-  RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
-  2-vCPU guest and was essentially the entire `/identity` call. That config is
-  written by both `build-devbox-rootfs.sh` and `install-agent` (the latter
-  repairs an older base image) — keep the two in sync. `sandbox ssh <id>` picks
-  the user's `~/.ssh/id_ed25519` or creates `~/.ssh/sandbox_ed25519`, then calls
-  `PUT /v1/sandboxes/{id}/ssh-access`. The worker wakes the sandbox, pushes that
-  key through sandboxd's `POST /ssh-key`, and records a port-22 tunnel
-  permission with no host port or public URL. OpenSSH runs a hidden
-  `sandbox ssh-proxy` ProxyCommand, which opens an authenticated WebSocket at
-  `GET /v1/sandboxes/{id}/connect/22`; the gateway's established upgrade proxy
-  routes that stream to the owning worker. No public raw port, worker address, guest IP, or
-  jump host reaches the user. The key lives in the rootfs, so it survives
-  hibernation/wake. The CONNECT path retains wake-on-connect and pins the
-  sandbox for the full SSH session. Old baked sandboxd 404s `/ssh-key`
-  (re-run `install-agent`; rebuild the base for openssh first).
-- **Current jailed production benchmark result (2026-08-01, release `c0d0c0f`;
-  pool hardening landed in `f12c004`):** the production pool is **8 ready VMs per active worker**
-  (`warm_pool_size: 8`). The full matrix passes with **no failures in any run** —
-  fleet default **32/32**, **64/64**, and **128/128**, fsync **64/64**, large
-  **64/64**, with cleanup verified for all 352 sandboxes and the fleet returning
-  to its pre-campaign baseline. Measured from the in-VPC control VM: 25-cycle
-  lifecycle create p50 **12 ms** / p95 **15 ms** (pause 255 ms, resume 831 ms,
-  terminate 876 ms); a 16-way hold burst **16/16** at create p50 **79 ms** /
-  p95 **114 ms** with zero capacity, pool, agent-timeout, or other errors;
-  direct default-source **22/25** ready-pool hits in **7–16 ms** with three
-  refill-bound creates at 734 ms / 984 ms / 1.381 s; snapshot-source create p50
-  **696 ms**; snapshot batch 1/2/4/8/16/32 all usable, flat at **~764 ms per
-  sandbox** from N=4 up versus 6.464 s for the 32-way default baseline.
-  **That flatness was a DEFECT, not a property of fanout** — read it as
-  "effective concurrency 1", diagnosed 2026-08-17 as the exclusive snapshot lock
-  plus the v1 batch issuing N fanouts of one (see the two architecture notes on
-  shared snapshot locking and chunked batches).
-  **Re-measured on release `4407075` (2026-08-17), single worker
-  `10.160.0.50:8080`, from the control VM** — N=1/2/4/8/16 operation wall
-  **1016 / 1016 / 1513 / 2521 / 5042 ms**, all usable (31/31), per-sandbox
-  1063 → **323 ms**. So 16 went 12.219 s → **5.164 s (2.37x)** and the
-  per-sandbox figure stops tracking N as slope-756. It is still ~linear past
-  N=8 (2521 → 5042 for 8 → 16) because `fanoutParallelism` caps one call at 8
-  and further permits are only opportunistic — that is the NEXT ceiling, and
-  per docs/burst-absorption-plan.md do not raise it without a measured
-  reidentify-vs-concurrency curve. Artifact: `/tmp/batch-4407075.json` on the
-  control VM.
-  **Always drive gateway-facing benchmarks from the control VM** — a laptop
-  tunnel adds hundreds of ms of transport RTT that reads as VM-creation cost.
-  Full report: `docs/benchmarks.md` (+ `docs/benchmark-report.html`); artifacts
-  in `production_extensive_c0d0c0f_20260801/`,
-  `production_lifecycle_c0d0c0f_20260801.json`, and
-  `production_burst_c0d0c0f_20260801.json`.
-  This closes BOTH blockers from the `9b6a9fc` campaign: the 128-way run was
-  80/128 there (a placement-eligible worker's jailer `io.max` referenced a block
-  device absent on that host — the `startup-worker.sh` data-disk admission fix
-  is now confirmed in production), and fsync was 63/64 on a guest SQLite
-  `database is locked`. A third defect was found and fixed DURING this campaign:
-  a 64-way teardown had **10/64** delete-then-verify reads answer 503
-  "not resolvable yet" for sandboxes the gateway had just deleted itself, because
-  a rate-limited adopt probe was the only way to prove absence; a completed
-  destroy now records the absence in the gateway's negative cache.
-  **Memory density re-measured 2026-08-17 on release `2e6ba08`** (the
-  shared-inode change), directly from the 8 resident ready VMs on a live worker
-  — no drain needed, because `/proc/<pid>/smaps_rollup` answers it: **43.1 MiB
-  PSS per VM** (345 MiB for 8), Shared_Clean ~69 MiB, Private_Dirty ~31 MiB, and
-  **all 8 VMs map the SAME snapshot-memory inode**. That is ~44% below the
-  previous best figure (76.9 MiB snapshot-source) and ~53% below default-source
-  (91.0 MiB), and it is a second effect of sharing one inode: Firecracker maps
-  the mem file `MAP_PRIVATE`, so unwritten pages are shared page-cache pages —
-  but only WITHIN an inode, so the old per-VM copies meant clones were never
-  actually sharing guest memory the way these notes claimed.
-  **The gap this exposes is the important part: admission charges 1180 MiB per
-  running sandbox while a resident ready VM actually costs ~43 MiB PSS — ~27x.**
-  That, not physical RAM, is what caps `warm_pool_size` at 8. Do NOT simply
-  admit ready VMs more cheaply: PSS measures pages TOUCHED, and a pool sized past
-  the budget is safe only while its VMs stay idle — the risk lands at claim time,
-  when each guest may dirty its full `mem_mib`. Sizing a large pool therefore
-  needs claim-time headroom or a balloon/free-page-reporting device, which is the
-  prerequisite already noted under "No memory overcommit".
-  The older figures below predate all of this.
-  **Memory density was NOT re-measured** on the `c0d0c0f` release:
-  `scripts/mem-density.sh`
-  requires the target worker to have zero sandboxes AND zero Firecracker
-  processes, which the resident 8-VM ready pool makes impossible without draining
-  a live worker. The last figures (release `9b6a9fc`) were 76.9 MiB PSS/VM
-  snapshot-source vs 91.0 MiB default-source, i.e. **452 MiB (15.5%)** saved
-  across 32 VMs; treat them as indicative, not current. To re-measure, use a
-  worker started with `warm_pool_size: 0`.
-  Correctness gates on the same release: fleet e2e **64/64**, stress suites
-  **12/12** on repeat, 64-way and 128-way bursts 64/64 and 128/128, churn
-  burst-bench **96/96** with zero errors in every class, PTY/WebSocket stress
-  **48/48** shells across churn rounds, `ssh_pubkey` create + real SSH login
-  12/12 with unique host keys and root refused, and the v1 contract + SDK v1
-  fleet probes passing.
-  Treat sub-500 ms as a ready-capacity objective, not an unconditional create
-  guarantee; validate jailer I/O devices before a worker becomes
-  placement-eligible.
-  A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
-  leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
-  clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and
-  memory capacity but is excluded from routes/lists; create atomically promotes
-  it to `running`, resets `created_at` to claim time, applies request fields/key,
-  and replenishes the pool concurrently in the background. A build remains
-  `preparing` and unclaimable until every launch/readiness/security gate has
-  completed; only then does `MarkWarmReady` promote it. The maintainer polls as
-  well as accepting kicks, so an unexpectedly dead ready VM is replenished.
-  Pool startup waits through the standby placement-delay window so refill VMs
-  can suspend without nested-VM interference. `sandbox_warming`,
-  `sandbox_warm_preparing`, `sandbox_warm_claims_total`,
-  `sandbox_warm_misses_total`, and `sandbox_warm_build_failures_total` expose
-  this lifecycle; the gateway also exports aggregate/per-host `warm_ready`.
-  **Corrected attribution:** phase timing on an exhausted pool measured a hot
-  jailed launch at roughly **24–47 ms** (`prepare` + process-to-API; a cold
-  first staging pass can be ~123 ms), not the previously inferred ~390 ms.
-  The resumed guest's network re-identification was **333–399 ms** and SSH
-  identity readiness **125–136 ms**; a private tap wake hint did not remove
-  that guest-resume floor. An exhausted ready pool therefore still falls back
-  to an ordinary secure clone (~734 ms end-to-end in the production probe).
-  Size the pool for the latency-critical arrival burst; do not weaken or bypass
-  the jailer/network/identity gates to make the fallback look faster.
+`openssh-server` (key-only login as the unprivileged `sandbox` **user**, uid
+1000: `PermitRootLogin no`, `PasswordAuthentication no`, `AllowUsers sandbox`,
+in `sshd_config.d/sandbox.conf`), and `ssh.service` is enabled (socket
+activation disabled) so :22 listens the instant the guest boots. There is no
+root login — `root@` is refused by sshd, not merely unauthorized.
+**Host keys are unique per sandbox and never baked into the image**: the base
+rootfs ships with none, and sandboxd's `POST /identity`
+(`initializeGuestIdentity`, cmd/sandboxd/identity.go) removes any inherited
+ones on every independent create — so no two sandboxes, golden clones
+included, can impersonate each other. **The key is GENERATED LAZILY, on first
+SSH use** (`ensureSSHHostKey`, called from sandboxd's `POST /ssh-key`), not at
+create: create used to pay the `ssh-keygen` fork plus `restartSSHService` —
+which SIGHUPs sshd then polls `/proc/net/tcp` every 1 ms for up to 500 ms
+awaiting a replacement listener inode — measuring ~148 ms idle and ~685 ms
+under a 16-way fanout, on sandboxes that overwhelmingly never use SSH, while a
+32-way fanout is guest-CPU-bound. **Removal stays EAGER and so does stopping
+the listener**, and that second part is the whole subtlety: deleting the key
+files is not enough because a restored clone resumes a LIVE sshd that already
+loaded the source's key into memory and would keep serving it. `stopSSHService`
+is therefore strict about the OUTCOME rather than systemctl's exit code (it
+verifies no inherited sshd master remains, SIGTERM then SIGKILL, and tolerates
+"no such unit"), and `inheritedSSHDPID` guards against a stale `/run/sshd.pid`
+and PID reuse — a restored guest resumes with whatever that file held at
+snapshot time. Every SSH path reaches the lazy generation: `ssh_pubkey` at
+create goes through `installSSHKey` (timeout raised 5 s → 30 s because the call
+now does that work), and the CLI's hidden `ssh-proxy` ProxyCommand calls
+`PrepareSSHTunnel` on EVERY connection, including plain `ssh`/`scp`/`rsync` via
+the generated stanza. Consequence accepted: **:22 no longer listens the instant
+a guest boots** (which is why socket activation was disabled) — first SSH use
+pays ~150 ms.
+**Measured, and the honest result is that this did NOT speed fanout up.**
+Release `cd65a29`, fleet worker: the `identity` phase fell from 108-135 ms to
+**15-17 ms** idle (266-317 ms → 37-48 ms under a 32-way fanout), but fanout
+wall-clock was unchanged — **2567 ms vs 2575 ms at N=32** — because
+`reidentify` expanded to absorb the freed CPU (367-447 ms idle vs 316-380 ms
+before; 665-675 ms loaded vs 551-564 ms). Per-clone total went 648-676 ms →
+637-665 ms, i.e. nothing. **The lesson is the useful part: the guest is
+saturated during reidentify, so removing OTHER guest work just hands the time
+to reidentify.** Keep the change — it removes ~100 ms of real guest CPU per
+clone, which matters for burst CPU headroom and pool refill cost — but the only
+thing that will move fanout latency is eliminating reidentify itself
+(docs/guest-identity-cost-plan.md, Part 1: netns per VM).
+A first attempt at this deferral was *worse than useless* and worth not
+repeating: it ran `systemctl stop ssh.service` unconditionally, and that D-Bus
+round trip costs ~120 ms in-guest — about what the eager keygen it replaced
+cost. `stopSSHService` must check for a live sshd FIRST (`inheritedSSHDPIDFn`),
+and the common case is that there is none, because the golden is itself built
+by a cold boot that has no host key and so never starts sshd.
+**Ed25519
+only** (~7 ms), and `sandbox.conf` pins `HostKey /etc/ssh/ssh_host_ed25519_key` so sshd doesn't warn about the absent
+RSA/ECDSA keys: `ssh-keygen -A` also built RSA-3072, which cost ~1.2 s in a
+2-vCPU guest and was essentially the entire `/identity` call. That config is
+written by both `build-devbox-rootfs.sh` and `install-agent` (the latter
+repairs an older base image) — keep the two in sync. `sandbox ssh <id>` picks
+the user's `~/.ssh/id_ed25519` or creates `~/.ssh/sandbox_ed25519`, then calls
+`PUT /v1/sandboxes/{id}/ssh-access`. The worker wakes the sandbox, pushes that
+key through sandboxd's `POST /ssh-key`, and records a port-22 tunnel
+permission with no host port or public URL. OpenSSH runs a hidden
+`sandbox ssh-proxy` ProxyCommand, which opens an authenticated WebSocket at
+`GET /v1/sandboxes/{id}/connect/22`; the gateway's established upgrade proxy
+routes that stream to the owning worker. No public raw port, worker address, guest IP, or
+jump host reaches the user. The key lives in the rootfs, so it survives
+hibernation/wake. The CONNECT path retains wake-on-connect and pins the
+sandbox for the full SSH session. Old baked sandboxd 404s `/ssh-key`
+(re-run `install-agent`; rebuild the base for openssh first).
+- **Current jailed production benchmark result (2026-08-01, release** `c0d0c0f`**;
+pool hardening landed in** `f12c004`**):** the production pool is **8 ready VMs per active worker**
+(`warm_pool_size: 8`). The full matrix passes with **no failures in any run** —
+fleet default **32/32**, **64/64**, and **128/128**, fsync **64/64**, large
+**64/64**, with cleanup verified for all 352 sandboxes and the fleet returning
+to its pre-campaign baseline. Measured from the in-VPC control VM: 25-cycle
+lifecycle create p50 **12 ms** / p95 **15 ms** (pause 255 ms, resume 831 ms,
+terminate 876 ms); a 16-way hold burst **16/16** at create p50 **79 ms** /
+p95 **114 ms** with zero capacity, pool, agent-timeout, or other errors;
+direct default-source **22/25** ready-pool hits in **7–16 ms** with three
+refill-bound creates at 734 ms / 984 ms / 1.381 s; snapshot-source create p50
+**696 ms**; snapshot batch 1/2/4/8/16/32 all usable, flat at **~764 ms per
+sandbox** from N=4 up versus 6.464 s for the 32-way default baseline.
+**That flatness was a DEFECT, not a property of fanout** — read it as
+"effective concurrency 1", diagnosed 2026-08-17 as the exclusive snapshot lock
+plus the v1 batch issuing N fanouts of one (see the two architecture notes on
+shared snapshot locking and chunked batches).
+**Re-measured on release** `4407075` **(2026-08-17), single worker**
+`10.160.0.50:8080`**, from the control VM** — N=1/2/4/8/16 operation wall
+**1016 / 1016 / 1513 / 2521 / 5042 ms**, all usable (31/31), per-sandbox
+1063 → **323 ms**. So 16 went 12.219 s → **5.164 s (2.37x)** and the
+per-sandbox figure stops tracking N as slope-756. It is still ~linear past
+N=8 (2521 → 5042 for 8 → 16) because `fanoutParallelism` caps one call at 8
+and further permits are only opportunistic — that is the NEXT ceiling, and
+per docs/burst-absorption-plan.md do not raise it without a measured
+reidentify-vs-concurrency curve. Artifact: `/tmp/batch-4407075.json` on the
+control VM.
+**Always drive gateway-facing benchmarks from the control VM** — a laptop
+tunnel adds hundreds of ms of transport RTT that reads as VM-creation cost.
+Full report: `docs/benchmarks.md` (+ `docs/benchmark-report.html`); artifacts
+in `production_extensive_c0d0c0f_20260801/`,
+`production_lifecycle_c0d0c0f_20260801.json`, and
+`production_burst_c0d0c0f_20260801.json`.
+This closes BOTH blockers from the `9b6a9fc` campaign: the 128-way run was
+80/128 there (a placement-eligible worker's jailer `io.max` referenced a block
+device absent on that host — the `startup-worker.sh` data-disk admission fix
+is now confirmed in production), and fsync was 63/64 on a guest SQLite
+`database is locked`. A third defect was found and fixed DURING this campaign:
+a 64-way teardown had **10/64** delete-then-verify reads answer 503
+"not resolvable yet" for sandboxes the gateway had just deleted itself, because
+a rate-limited adopt probe was the only way to prove absence; a completed
+destroy now records the absence in the gateway's negative cache.
+**Memory density re-measured 2026-08-17 on release** `2e6ba08` (the
+shared-inode change), directly from the 8 resident ready VMs on a live worker
+— no drain needed, because `/proc/<pid>/smaps_rollup` answers it: **43.1 MiB
+PSS per VM** (345 MiB for 8), Shared_Clean ~69 MiB, Private_Dirty ~31 MiB, and
+**all 8 VMs map the SAME snapshot-memory inode**. That is ~44% below the
+previous best figure (76.9 MiB snapshot-source) and ~53% below default-source
+(91.0 MiB), and it is a second effect of sharing one inode: Firecracker maps
+the mem file `MAP_PRIVATE`, so unwritten pages are shared page-cache pages —
+but only WITHIN an inode, so the old per-VM copies meant clones were never
+actually sharing guest memory the way these notes claimed.
+**The gap this exposes is the important part: admission charges 1180 MiB per
+running sandbox while a resident ready VM actually costs ~43 MiB PSS — ~27x.**
+That, not physical RAM, is what caps `warm_pool_size` at 8. Do NOT simply
+admit ready VMs more cheaply: PSS measures pages TOUCHED, and a pool sized past
+the budget is safe only while its VMs stay idle — the risk lands at claim time,
+when each guest may dirty its full `mem_mib`. Sizing a large pool therefore
+needs claim-time headroom or a balloon/free-page-reporting device, which is the
+prerequisite already noted under "No memory overcommit".
+The older figures below predate all of this.
+**Memory density was NOT re-measured** on the `c0d0c0f` release:
+`scripts/mem-density.sh`
+requires the target worker to have zero sandboxes AND zero Firecracker
+processes, which the resident 8-VM ready pool makes impossible without draining
+a live worker. The last figures (release `9b6a9fc`) were 76.9 MiB PSS/VM
+snapshot-source vs 91.0 MiB default-source, i.e. **452 MiB (15.5%)** saved
+across 32 VMs; treat them as indicative, not current. To re-measure, use a
+worker started with `warm_pool_size: 0`.
+Correctness gates on the same release: fleet e2e **64/64**, stress suites
+**12/12** on repeat, 64-way and 128-way bursts 64/64 and 128/128, churn
+burst-bench **96/96** with zero errors in every class, PTY/WebSocket stress
+**48/48** shells across churn rounds, `ssh_pubkey` create + real SSH login
+12/12 with unique host keys and root refused, and the v1 contract + SDK v1
+fleet probes passing.
+Treat sub-500 ms as a ready-capacity objective, not an unconditional create
+guarantee; validate jailer I/O devices before a worker becomes
+placement-eligible.
+A ready row is a normal jailed Firecracker VM with its own UID/GID, cgroup
+leaf, PID namespace, seccomp policy, tap/IP, rootfs, guest network identity,
+clock, and freshly rotated Ed25519 SSH host key. It consumes normal slot and
+memory capacity but is excluded from routes/lists; create atomically promotes
+it to `running`, resets `created_at` to claim time, applies request fields/key,
+and replenishes the pool concurrently in the background. A build remains
+`preparing` and unclaimable until every launch/readiness/security gate has
+completed; only then does `MarkWarmReady` promote it. The maintainer polls as
+well as accepting kicks, so an unexpectedly dead ready VM is replenished.
+Pool startup waits through the standby placement-delay window so refill VMs
+can suspend without nested-VM interference. `sandbox_warming`,
+`sandbox_warm_preparing`, `sandbox_warm_claims_total`,
+`sandbox_warm_misses_total`, and `sandbox_warm_build_failures_total` expose
+this lifecycle; the gateway also exports aggregate/per-host `warm_ready`.
+**Corrected attribution:** phase timing on an exhausted pool measured a hot
+jailed launch at roughly **24–47 ms** (`prepare` + process-to-API; a cold
+first staging pass can be ~123 ms), not the previously inferred ~390 ms.
+The resumed guest's network re-identification was **333–399 ms** and SSH
+identity readiness **125–136 ms**; a private tap wake hint did not remove
+that guest-resume floor. An exhausted ready pool therefore still falls back
+to an ordinary secure clone (~734 ms end-to-end in the production probe).
+Size the pool for the latency-critical arrival burst; do not weaken or bypass
+the jailer/network/identity gates to make the fallback look faster.
 - **known_hosts is keyed on the sandbox ID, not the API tunnel**
-  (`cmd/sandbox/ssh.go`). Host keys are unique per sandbox while transports are
-  disposable. The fix is
-  `HostKeyAlias=sandbox-<id>` (a UUID, never reused), which both `sandbox ssh`
-  and the generated stanza set, plus `CheckHostIP=no` (when on, OpenSSH *also*
-  stores an address-keyed entry and the collision returns; it only defaults off
-  since OpenSSH 8.5) and `StrictHostKeyChecking=accept-new` (a fresh alias has
-  no stored key to compare against, so the prompt is pure friction, while a
-  changed key for an alias already known still fails). Don't "fix" this with
-  `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — that disables
-  the check instead of scoping it, and it's why `tests/security-gate.sh` needs
-  those flags. `sshOptions` is the single source for the set; a test asserts the
-  wrapper and generated stanza can't drift. The gateway's WebSocket upgrade
-  proxy uses tenant auth externally and replaces it with the owning worker
-  credential; clients never receive that credential.
+(`cmd/sandbox/ssh.go`). Host keys are unique per sandbox while transports are
+disposable. The fix is
+`HostKeyAlias=sandbox-<id>` (a UUID, never reused), which both `sandbox ssh`
+and the generated stanza set, plus `CheckHostIP=no` (when on, OpenSSH *also*
+stores an address-keyed entry and the collision returns; it only defaults off
+since OpenSSH 8.5) and `StrictHostKeyChecking=accept-new` (a fresh alias has
+no stored key to compare against, so the prompt is pure friction, while a
+changed key for an alias already known still fails). Don't "fix" this with
+`StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — that disables
+the check instead of scoping it, and it's why `tests/security-gate.sh` needs
+those flags. `sshOptions` is the single source for the set; a test asserts the
+wrapper and generated stanza can't drift. The gateway's WebSocket upgrade
+proxy uses tenant auth externally and replaces it with the owning worker
+credential; clients never receive that credential.
 - **404 from the gateway means a PROVEN absence; anything indeterminate is 503.**
-  An id the gateway cannot resolve is not the same as an id that does not exist:
-  answering 404 when a host is merely throttled, at capacity, or mid-adopt tells
-  the SDK to raise NotFoundError, which reads as data loss for a sandbox that is
-  very much alive. So the only definitive verdict is a host answering 404 from
-  the shared durable store (cached in a bounded negative cache), and everything
-  else returns 503 + Retry-After. The corollary is easy to miss: that adopt
-  probe is RATE-LIMITED, so it cannot be the only way to prove absence — a bulk
-  teardown starves it and delete-then-verify starts failing with "not resolvable
-  yet" for sandboxes the gateway itself just deleted (measured: 10/64 on a
-  64-way fleet teardown). `handleGatewayDestroy` therefore records the absence
-  directly on a completed destroy. Nothing can wrongly resurrect that entry:
-  it is dropped only when a create/restore/adopt LANDS for the id, and a
-  destroyed id is never handed out again. DELETE of an already-absent sandbox
-  answers 404, matching a single host's `handleDestroy` — the gateway fronts the
-  same API and must not contradict a worker for the same id.
+An id the gateway cannot resolve is not the same as an id that does not exist:
+answering 404 when a host is merely throttled, at capacity, or mid-adopt tells
+the SDK to raise NotFoundError, which reads as data loss for a sandbox that is
+very much alive. So the only definitive verdict is a host answering 404 from
+the shared durable store (cached in a bounded negative cache), and everything
+else returns 503 + Retry-After. The corollary is easy to miss: that adopt
+probe is RATE-LIMITED, so it cannot be the only way to prove absence — a bulk
+teardown starves it and delete-then-verify starts failing with "not resolvable
+yet" for sandboxes the gateway itself just deleted (measured: 10/64 on a
+64-way fleet teardown). `handleGatewayDestroy` therefore records the absence
+directly on a completed destroy. Nothing can wrongly resurrect that entry:
+it is dropped only when a create/restore/adopt LANDS for the id, and a
+destroyed id is never handed out again. DELETE of an already-absent sandbox
+answers 404, matching a single host's `handleDestroy` — the gateway fronts the
+same API and must not contradict a worker for the same id.
 - **Guest agent readiness gates create.** `handleCreate` polls `http://guestIP:8090/health`
-  for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
-  lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
-  that's the first thing to check.
+for up to 60 s and tears the sandbox down if the agent never answers. If the base rootfs
+lacks sandboxd (fresh build, forgot `install-agent`), every create will fail this way —
+that's the first thing to check.
 - **The host→guest connection pool is keyed on the SANDBOX, never on the guest IP alone**
-  (`agentAuthority`/`dialAgentAuthority` in `internal/server/proxy.go`). Guest IPs come from
-  a small per-host pool and are recycled the instant a sandbox is destroyed or hibernated
-  (the tap/IP unique indexes only bind `running` rows), so an IP-keyed pool hands a
-  brand-new sandbox a live keep-alive connection to the **dead** VM that previously held
-  that address. The dead peer RSTs it, and net/http will **not** silently retry a POST/PUT
-  carrying a body — so this shows up as `502 agent unreachable: read: connection reset by
-  peer` on exec and file writes under churn, while GETs (which *are* retried) look perfectly
-  healthy. It stayed latent for as long as the path used `http.DefaultTransport` (2 idle
-  conns per host, evicted constantly past 100) and became a fleet-wide failure the moment
-  the path got a properly sized pool. The fix encodes the sandbox id in the URL authority —
-  a synthetic name that never reaches DNS, since the dialer parses the real address back out
-  and callers set `req.Host` so the guest still sees a plain `ip:port`. It also covers a
-  clone-path wake, which keeps the id but moves to a new IP. The once-per-bring-up calls
-  (`/identity`, `/clock`, `/ssh-key`, `/snapshot-poll`, `/health`) use a **keep-alive-free**
-  transport instead: they fire once per VM, so pooling bought nothing and only carried the
-  same hazard at the riskiest moment. `tests/pty-stress.ts` and `tests/sshkey-probe.ts`
-  drive both shapes across churn rounds; `internal/server/agentpool_test.go` pins the
-  pool-key behavior directly.
+(`agentAuthority`/`dialAgentAuthority` in `internal/server/proxy.go`). Guest IPs come from
+a small per-host pool and are recycled the instant a sandbox is destroyed or hibernated
+(the tap/IP unique indexes only bind `running` rows), so an IP-keyed pool hands a
+brand-new sandbox a live keep-alive connection to the **dead** VM that previously held
+that address. The dead peer RSTs it, and net/http will **not** silently retry a POST/PUT
+carrying a body — so this shows up as `502 agent unreachable: read: connection reset by peer` on exec and file writes under churn, while GETs (which *are* retried) look perfectly
+healthy. It stayed latent for as long as the path used `http.DefaultTransport` (2 idle
+conns per host, evicted constantly past 100) and became a fleet-wide failure the moment
+the path got a properly sized pool. The fix encodes the sandbox id in the URL authority —
+a synthetic name that never reaches DNS, since the dialer parses the real address back out
+and callers set `req.Host` so the guest still sees a plain `ip:port`. It also covers a
+clone-path wake, which keeps the id but moves to a new IP. The once-per-bring-up calls
+(`/identity`, `/clock`, `/ssh-key`, `/snapshot-poll`, `/health`) use a **keep-alive-free**
+transport instead: they fire once per VM, so pooling bought nothing and only carried the
+same hazard at the riskiest moment. `tests/pty-stress.ts` and `tests/sshkey-probe.ts`
+drive both shapes across churn rounds; `internal/server/agentpool_test.go` pins the
+pool-key behavior directly.
 - **Per-sandbox utilization is sampled host-side and lives only in RAM**
-  (`internal/server/sandboxmetrics.go`; wire types in `internal/metricsapi`).
-  It answers what a sandbox is CONSUMING, as opposed to the ledger below, which
-  bills what it is ALLOCATED. A ticker (`metrics_interval_sec`, default 5 s)
-  reads each running VM's jailer cgroup leaf (`cpu.stat`, `memory.current`), its
-  tap counters and its rootfs `st_blocks`, and — when `metrics_guest_stats` is
-  on — polls the guest agent's `GET /stats` for the two things the host cannot
-  see: memory actually in use and free disk. Served by
-  `GET /v1/sandboxes/{id}/metrics` from a bounded ring
-  (`metrics_history`, default 360 samples ≈ 30 min), never from SQLite and never
-  from Prometheus with a sandbox label — `/metrics` gets host AGGREGATES only,
-  including `sandbox_cpu_utilization` (a histogram, the only thing that measures
-  whether the ~6:1 CPU oversubscription is safe). **The sampler is deliberately
-  routed around the activity tracker and never calls `ensureRunning`**: a poll on
-  the ordinary agent path would reset every sandbox's idle-hibernation clock and
-  silently stop the fleet from ever freezing. `vmm_generation` marks counter
-  resets, since a wake/restore replaces the VMM and restarts them at zero.
-  Two measured facts that are easy to get wrong: `host_mem_bytes` is guest pages
-  TOUCHED and does not fall when the guest frees (0.9 MiB released after a
-  384 MiB alloc/free), and `rootfs_alloc_bytes` includes extents still shared
-  with the golden base, so it reads ~2.2 GiB on a sandbox that has written
-  nothing — watch its growth, not its level. **`sandboxd`'s `/stats` is
-  image-pinned**, so enabling guest stats needs a rebake + MIG roll; watch
-  `sandbox_guest_stat_failures_total` to catch a half-rolled fleet, which
-  otherwise looks identical to the feature being off. See
-  docs/sandbox-metrics-plan.md and the utilization table in docs/benchmarks.md.
+(`internal/server/sandboxmetrics.go`; wire types in `internal/metricsapi`).
+It answers what a sandbox is CONSUMING, as opposed to the ledger below, which
+bills what it is ALLOCATED. A ticker (`metrics_interval_sec`, default 5 s)
+reads each running VM's jailer cgroup leaf (`cpu.stat`, `memory.current`), its
+tap counters and its rootfs `st_blocks`, and — when `metrics_guest_stats` is
+on — polls the guest agent's `GET /stats` for the two things the host cannot
+see: memory actually in use and free disk. Served by
+`GET /v1/sandboxes/{id}/metrics` from a bounded ring
+(`metrics_history`, default 360 samples ≈ 30 min), never from SQLite and never
+from Prometheus with a sandbox label — `/metrics` gets host AGGREGATES only,
+including `sandbox_cpu_utilization` (a histogram, the only thing that measures
+whether the ~6:1 CPU oversubscription is safe). **The sampler is deliberately
+routed around the activity tracker and never calls** `ensureRunning`: a poll on
+the ordinary agent path would reset every sandbox's idle-hibernation clock and
+silently stop the fleet from ever freezing. `vmm_generation` marks counter
+resets, since a wake/restore replaces the VMM and restarts them at zero.
+Two measured facts that are easy to get wrong: `host_mem_bytes` is guest pages
+TOUCHED and does not fall when the guest frees (0.9 MiB released after a
+384 MiB alloc/free), and `rootfs_alloc_bytes` includes extents still shared
+with the golden base, so it reads ~2.2 GiB on a sandbox that has written
+nothing — watch its growth, not its level. `sandboxd`**'s** `/stats` **is
+image-pinned**, so enabling guest stats needs a rebake + MIG roll; watch
+`sandbox_guest_stat_failures_total` to catch a half-rolled fleet, which
+otherwise looks identical to the feature being off. See
+docs/sandbox-metrics-plan.md and the utilization table in docs/benchmarks.md.
 - **Billable usage is a ledger keyed on the VMM lifetime, and it outlives the
-  sandbox.** One `usage_intervals` row per Firecracker process that served a
-  user-visible sandbox (`internal/registry/usage.go`), opened at `MarkRunning`
-  / warm claim / wake and closed by every teardown path — so a hibernate/wake
-  cycle bills two intervals and the frozen span in between bills nothing. Ready-
-  pool and `starting`/`stopping` VMs never bill. The row must be a separate
-  table because `Destroy` deletes the sandbox row outright; usage of a
-  terminated sandbox would otherwise have nowhere to live. Billed = ALLOCATED
-  (`vcpus`/`mem_mib` × duration, resolved through `effectiveResources` at open,
-  since the registry's `0` means "template default"); consumed `cpu_usec` from
-  the cgroup leaf is recorded but NOT billed (CPU is oversubscribed). An open
-  interval is measured to `last_seen_at` — never to now — so a crashed host
-  cannot bill an outage. Closed rows spool to `gs://<bucket>/usage/<host>/<date>/`
-  and **the bucket, not SQLite, is the billing record**: local rows are pruned 7
-  days after they are durable. Read paths: `GET /v1/usage` (fleet, scatter-
-  gathered over EVERY host including empty ones, fails closed on any
-  unreachable host), `GET /v1/sandboxes/{id}/usage` (id-routed, so it cannot
-  answer for a deleted sandbox — `/v1/usage?sandbox_id=` can). Totals are SQL-
-  aggregated over the whole selection while only rows paginate, so the amount
-  owed never depends on `page_size`; windows select by OVERLAP and report
-  intervals whole, because `cpu_usec` is one counter that cannot be apportioned.
-  See docs/usage-metering-plan.md.
+sandbox.** One `usage_intervals` row per Firecracker process that served a
+user-visible sandbox (`internal/registry/usage.go`), opened at `MarkRunning`
+/ warm claim / wake and closed by every teardown path — so a hibernate/wake
+cycle bills two intervals and the frozen span in between bills nothing. Ready-
+pool and `starting`/`stopping` VMs never bill. The row must be a separate
+table because `Destroy` deletes the sandbox row outright; usage of a
+terminated sandbox would otherwise have nowhere to live. Billed = ALLOCATED
+(`vcpus`/`mem_mib` × duration, resolved through `effectiveResources` at open,
+since the registry's `0` means "template default"); consumed `cpu_usec` from
+the cgroup leaf is recorded but NOT billed (CPU is oversubscribed). An open
+interval is measured to `last_seen_at` — never to now — so a crashed host
+cannot bill an outage. Closed rows spool to `gs://<bucket>/usage/<host>/<date>/`
+and **the bucket, not SQLite, is the billing record**: local rows are pruned 7
+days after they are durable. Read paths: `GET /v1/usage` (fleet, scatter-
+gathered over EVERY host including empty ones, fails closed on any
+unreachable host), `GET /v1/sandboxes/{id}/usage` (id-routed, so it cannot
+answer for a deleted sandbox — `/v1/usage?sandbox_id=` can). Totals are SQL-
+aggregated over the whole selection while only rows paginate, so the amount
+owed never depends on `page_size`; windows select by OVERLAP and report
+intervals whole, because `cpu_usec` is one counter that cannot be apportioned.
+See docs/usage-metering-plan.md.
 - **Memory is admission-checked; CPU is deliberately oversubscribed (~6:1).**
-  `mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
-  total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running
-  sandbox's effective `mem_mib` + 156 MiB VMM overhead; hibernated VMs hold none. The
-  check runs inside the registry TX of `Create`/`CreateRestoreStarting`/**`Wake`** (waking
-  re-commits the snapshot's baked memory; a rejected wake rolls back to hibernated and
-  surfaces as 503 on agent-bound requests / close code 4503 on the shell WS), returns
-  `ErrMemExhausted` (wraps `ErrPoolExhausted` so 503 + gateway failover fire unchanged),
-  and bounds `FreeSlots` — a big-mem sandbox eats multiple slots' worth of `slots_free`,
-  so placement and autoscaling see the truth and the Nomad cgroup can never be
-  OOM-blown by `mem_mib` overrides. `maxMemMIB` (the per-sandbox override ceiling and
-  `GET /info` MaxMemMIB) is clamped to the budget. vcpus have NO sum guard by design:
-  the Nomad task runs CPU *shares*, so contention degrades to fair-share slowdown —
-  there is no CPU analogue of the OOM killer.
+`mem_budget_mib` in the config (deploy-job.sh injects `SLOTS×1180`; 0 = derive host
+total − 2 GiB; <0 = off) caps the SUM of committed guest memory — each running
+sandbox's effective `mem_mib` + 156 MiB VMM overhead; hibernated VMs hold none. The
+check runs inside the registry TX of `Create`/`CreateRestoreStarting`/`Wake` (waking
+re-commits the snapshot's baked memory; a rejected wake rolls back to hibernated and
+surfaces as 503 on agent-bound requests / close code 4503 on the shell WS), returns
+`ErrMemExhausted` (wraps `ErrPoolExhausted` so 503 + gateway failover fire unchanged),
+and bounds `FreeSlots` — a big-mem sandbox eats multiple slots' worth of `slots_free`,
+so placement and autoscaling see the truth and the Nomad cgroup can never be
+OOM-blown by `mem_mib` overrides. `maxMemMIB` (the per-sandbox override ceiling and
+`GET /info` MaxMemMIB) is clamped to the budget. vcpus have NO sum guard by design:
+the Nomad task runs CPU *shares*, so contention degrades to fair-share slowdown —
+there is no CPU analogue of the OOM killer.
 - **Identical jailed VM inputs share ONE inode, because the page cache is keyed
-  on inode.** This is what made fanout scale with N, and it was invisible in
-  every obvious place. Each clone used to stage its own copy of the kernel image
-  and the snapshot's mem/state — files that are byte-identical across clones —
-  via `cp --reflink`. Reflink makes the copy free in disk SPACE (~1 ms for a
-  1 GiB file, measured) which is exactly why it looked harmless; but N copies are
-  N **inodes**, so N clones read the same gigabyte off the disk N times.
-  Measured on a fleet worker (2026-08-17): 16 concurrent cold reads of one 1 GiB
-  mem file took **33.7 s as 16 reflinked copies vs 2.9 s as 16 hardlinks**, and
-  `vmstat` during a 16-way fanout showed **~1% user CPU, 45-64% iowait,
-  ~500 MB/s reads** — it was never CPU or lock contention. `stageSharedReadonly`
-  now stages those inputs once per host and hardlinks them into each jail.
-  Three constraints that are easy to get wrong: the shared file must be a COPY
-  of the source, not a link to it, because staging chowns/chmods what it stages
-  and linking the original would rewrite the snapshot artifact's own 0600 mode
-  (guest memory must not become world-readable); it lives in a **0700 root-only**
-  directory and is root-owned 0444, exactly what the per-VM copies already were,
-  so jails reach it only via their own hardlinks; and identity is
-  **(path, size, mtime)** so a rebuilt kernel or golden cannot be served from a
-  stale copy. Any link failure falls back to a private copy — slower than
-  intended, never wrong. `ReconcileJailer` sweeps entries with **link count 1**
-  at startup so stale-mtime copies can't accumulate. The rootfs stays per-VM: it
-  is writable, so it cannot share an inode, and its reads are the next candidate.
-  Result on release `2e6ba08`, single worker: N=1/2/4/8/16/32 operation wall
-  **1017 / 511 / 509 / 1012 / 1515 / 3027 ms**, per-sandbox **764 ms -> 102 ms**,
-  raw fanout of 8 in **703 ms**. **The ceiling moved, it did not disappear**:
-  at 32-way the same `vmstat` shows iowait ~0-1% and ~58% GUEST cpu with ~4%
-  idle, i.e. the host is now saturated by the guests' own thaw work (eth0
-  reconfigure + GARP + Ed25519 keygen). 32 guests cannot do that in the time 8
-  guests take on 16 cores, so **constant-time fanout past ~8 needs less
-  per-guest thaw work, a ready pool, or more hosts — not a bigger
-  `fanoutParallelism`.**
+on inode.** This is what made fanout scale with N, and it was invisible in
+every obvious place. Each clone used to stage its own copy of the kernel image
+and the snapshot's mem/state — files that are byte-identical across clones —
+via `cp --reflink`. Reflink makes the copy free in disk SPACE (~1 ms for a
+1 GiB file, measured) which is exactly why it looked harmless; but N copies are
+N **inodes**, so N clones read the same gigabyte off the disk N times.
+Measured on a fleet worker (2026-08-17): 16 concurrent cold reads of one 1 GiB
+mem file took **33.7 s as 16 reflinked copies vs 2.9 s as 16 hardlinks**, and
+`vmstat` during a 16-way fanout showed **~1% user CPU, 45-64% iowait,
+~500 MB/s reads** — it was never CPU or lock contention. `stageSharedReadonly`
+now stages those inputs once per host and hardlinks them into each jail.
+Three constraints that are easy to get wrong: the shared file must be a COPY
+of the source, not a link to it, because staging chowns/chmods what it stages
+and linking the original would rewrite the snapshot artifact's own 0600 mode
+(guest memory must not become world-readable); it lives in a **0700 root-only**
+directory and is root-owned 0444, exactly what the per-VM copies already were,
+so jails reach it only via their own hardlinks; and identity is
+**(path, size, mtime)** so a rebuilt kernel or golden cannot be served from a
+stale copy. Any link failure falls back to a private copy — slower than
+intended, never wrong. `ReconcileJailer` sweeps entries with **link count 1**
+at startup so stale-mtime copies can't accumulate. The rootfs stays per-VM: it
+is writable, so it cannot share an inode, and its reads are the next candidate.
+Result on release `2e6ba08`, single worker: N=1/2/4/8/16/32 operation wall
+**1017 / 511 / 509 / 1012 / 1515 / 3027 ms**, per-sandbox **764 ms -> 102 ms**,
+raw fanout of 8 in **703 ms**. **The ceiling moved, it did not disappear**:
+at 32-way the same `vmstat` shows iowait ~0-1% and ~58% GUEST cpu with ~4%
+idle, i.e. the host is now saturated by the guests' own thaw work (eth0
+reconfigure + GARP + Ed25519 keygen). 32 guests cannot do that in the time 8
+guests take on 16 cores, so **constant-time fanout past ~8 needs less
+per-guest thaw work, a ready pool, or more hosts — not a bigger**
+`fanoutParallelism`**.**
 - **Task-cgroup delegation runs ONCE at serve startup, and serve's own forked
-  helpers are not foreign processes.** `prepareCurrentCgroupDelegation`
-  (internal/vm/jailer.go) refuses to delegate a task cgroup containing a process
-  it does not control — correct, but `currentProcessFamily()` walks only
-  ANCESTORS, so every helper serve forks (`cp --reflink` in CloneRootfs, `ip
-  tuntap add`/`ip link set` in CreateTapUnbridged, iptables in EnsureNetwork)
-  read as foreign because they are DESCENDANTS. That made delegation a race
-  against our own subprocesses, and it failed closed in the worst possible way:
-  the refusal happens before serve is moved into the `sandbox-control` leaf, so
-  the `base(rel) == controlLeaf` short-circuit never engages and **every later
-  launch re-runs the same losing race** — one transient `cp` at the wrong moment
-  takes the host out permanently. Cold boot then fails downstream with
-  `configure VM cgroup memory.max: permission denied` because `subtree_control`
-  was never enabled, which is the symptom you actually see. This shipped and
-  broke the fleet on 2026-08-17: it stayed latent for as long as the snapshot
-  stage lock *accidentally* serialized every golden-derived bring-up (hot creates
-  AND warm-pool builds all share the golden's `SourceRootfsPath`), and surfaced
-  fleet-wide the moment that serialization was removed — 8 concurrent warm builds
-  guarantee a helper is in the cgroup. Two fixes, both needed: `cgroupProcOurs`
-  accepts serve's descendants as well as its ancestors (a foreign tenant still
-  fails closed), and `vm.PrepareCgroupDelegation` runs from `serve` **before this
-  process forks anything** so the common case never races at all. A pid that
-  exited between reading `cgroup.procs` and the move is success, not failure
-  (ESRCH/ENOENT). The lesson generalizes: **removing a lock in this codebase can
-  expose latent races in code you did not touch** — the accidental serialization
-  was load-bearing.
+helpers are not foreign processes.** `prepareCurrentCgroupDelegation`
+(internal/vm/jailer.go) refuses to delegate a task cgroup containing a process
+it does not control — correct, but `currentProcessFamily()` walks only
+ANCESTORS, so every helper serve forks (`cp --reflink` in CloneRootfs, `ip tuntap add`/`ip link set` in CreateTapUnbridged, iptables in EnsureNetwork)
+read as foreign because they are DESCENDANTS. That made delegation a race
+against our own subprocesses, and it failed closed in the worst possible way:
+the refusal happens before serve is moved into the `sandbox-control` leaf, so
+the `base(rel) == controlLeaf` short-circuit never engages and **every later
+launch re-runs the same losing race** — one transient `cp` at the wrong moment
+takes the host out permanently. Cold boot then fails downstream with
+`configure VM cgroup memory.max: permission denied` because `subtree_control`
+was never enabled, which is the symptom you actually see. This shipped and
+broke the fleet on 2026-08-17: it stayed latent for as long as the snapshot
+stage lock *accidentally* serialized every golden-derived bring-up (hot creates
+AND warm-pool builds all share the golden's `SourceRootfsPath`), and surfaced
+fleet-wide the moment that serialization was removed — 8 concurrent warm builds
+guarantee a helper is in the cgroup. Two fixes, both needed: `cgroupProcOurs`
+accepts serve's descendants as well as its ancestors (a foreign tenant still
+fails closed), and `vm.PrepareCgroupDelegation` runs from `serve` **before this
+process forks anything** so the common case never races at all. A pid that
+exited between reading `cgroup.procs` and the move is success, not failure
+(ESRCH/ENOENT). The lesson generalizes: **removing a lock in this codebase can
+expose latent races in code you did not touch** — the accidental serialization
+was load-bearing.
 - **Creates are bounded and capacity-classed.** A per-host semaphore
-  (`"create_concurrency"` in the config; 0 = min(2×NumCPU, 16)) gates every bring-up
-  (hot clone, cold boot, 1:1 restore) so a burst queues in-process instead of
-  boot-storming the host into agent timeouts — the 60 s agent gate starts ticking only
-  after acquisition. Pool exhaustion (`registry.ErrPoolExhausted` from the tap/IP/port
-  pickers) returns **503 + Retry-After**, not 500, so the gateway/SDK can tell capacity
-  from failure; `client.APIError` carries the status code through `internal/client`.
+(`"create_concurrency"` in the config; 0 = min(2×NumCPU, 16)) gates every bring-up
+(hot clone, cold boot, 1:1 restore) so a burst queues in-process instead of
+boot-storming the host into agent timeouts — the 60 s agent gate starts ticking only
+after acquisition. Pool exhaustion (`registry.ErrPoolExhausted` from the tap/IP/port
+pickers) returns **503 + Retry-After**, not 500, so the gateway/SDK can tell capacity
+from failure; `client.APIError` carries the status code through `internal/client`.
 - **exec kills whole process groups.** sandboxd runs commands with `Setpgid` and kills
-  `-pgid` on timeout so shell children don't outlive the request. stdout/stderr are capped
-  at 2 MiB each (`agentapi.MaxOutputBytes`).
+`-pgid` on timeout so shell children don't outlive the request. stdout/stderr are capped
+at 2 MiB each (`agentapi.MaxOutputBytes`).
 - **Streaming exec is NDJSON, not SSE.** `POST .../exec/stream` emits
-  `agentapi.ExecEvent` lines (stdout/stderr/exit); the server proxy wraps the
-  ResponseWriter in a flush-on-write writer so chunks pass through immediately. All
-  non-Type ExecEvent fields are omitempty — decoders must treat absent fields as zero.
+`agentapi.ExecEvent` lines (stdout/stderr/exit); the server proxy wraps the
+ResponseWriter in a flush-on-write writer so chunks pass through immediately. All
+non-Type ExecEvent fields are omitempty — decoders must treat absent fields as zero.
 - **Interactive shell is a WebSocket PTY.** `GET /sandboxes/{id}/shell` upgrades and
-  `handleShellProxy` reverse-proxies it to the guest's `/shell` via `httputil.ReverseProxy`
-  (Go handles the Upgrade handshake + raw byte copy natively, so the host needs no
-  WebSocket lib and it works over both the Unix socket and the TCP listener). In the guest,
-  sandboxd runs `bash -l` on a real pty (`creack/pty`): binary frames are raw terminal bytes
-  both ways, text frames are JSON `agentapi.ShellControl` resizes. Clean exit closes the
-  socket with reason `exit:<code>`; client disconnect kills the shell's process group. See
-  the protocol doc-comment in `agentapi`.
+`handleShellProxy` reverse-proxies it to the guest's `/shell` via `httputil.ReverseProxy`
+(Go handles the Upgrade handshake + raw byte copy natively, so the host needs no
+WebSocket lib and it works over both the Unix socket and the TCP listener). In the guest,
+sandboxd runs `bash -l` on a real pty (`creack/pty`): binary frames are raw terminal bytes
+both ways, text frames are JSON `agentapi.ShellControl` resizes. Clean exit closes the
+socket with reason `exit:<code>`; client disconnect kills the shell's process group. See
+the protocol doc-comment in `agentapi`.
 - **TTL reaper.** `POST /sandboxes` accepts optional `{"timeout_sec":N}`; a 10 s ticker
-  goroutine in `Serve` destroys rows whose `expires_at` passed (running AND hibernated).
-  `POST .../timeout` resets (0 clears). No default TTL — absent means live forever.
+goroutine in `Serve` destroys rows whose `expires_at` passed (running AND hibernated).
+`POST .../timeout` resets (0 clears). No default TTL — absent means live forever.
 - **Server shutdown hibernates, never destroys.** `shutdownAll` freezes every
-  running sandbox (bounded-parallel, 100 s budget, `force` past activity pins;
-  fallback destroy per sandbox on failure). This is what makes MIG standby-pool
-  stop/start cycles and autoscaler scale-in non-destructive: the frozen rows +
-  artifacts live on the persistent disk, and the next `serve` start re-binds
-  their port listeners and heartbeats their ids. Requires `vmCtx` to be
-  DECOUPLED from the serve ctx (a cancelled serve ctx makes the firecracker
-  SDK / clone CommandContext kill VMs before anything can be frozen).
+running sandbox (bounded-parallel, 100 s budget, `force` past activity pins;
+fallback destroy per sandbox on failure). This is what makes MIG standby-pool
+stop/start cycles and autoscaler scale-in non-destructive: the frozen rows +
+artifacts live on the persistent disk, and the next `serve` start re-binds
+their port listeners and heartbeats their ids. Requires `vmCtx` to be
+DECOUPLED from the serve ctx (a cancelled serve ctx makes the firecracker
+SDK / clone CommandContext kill VMs before anything can be frozen).
 - **Diff hibernation + the diffBase map.** Hibernate (and user snapshots)
-  write a DIFF against the golden base only while `Server.diffBase` has an
-  entry for the machine: set when a clone is loaded from a snapshot, deleted
-  after ANY snapshot attempt (Firecracker resets the dirty bitmap at snapshot
-  creation) and never set for hibernation-woken machines (their bitmap tracks
-  the hib artifacts, not the golden). Do NOT gate diffs on `sb.BaseSnapshotID`
-  — it is never cleared, and trusting it silently corrupts memory on restore.
-  A diff freeze writes a `diff_base` marker next to the mem file; wake rebases
-  via `materializeHibMem` (reflink + sparse overlay; GCS base pull fallback).
+write a DIFF against the golden base only while `Server.diffBase` has an
+entry for the machine: set when a clone is loaded from a snapshot, deleted
+after ANY snapshot attempt (Firecracker resets the dirty bitmap at snapshot
+creation) and never set for hibernation-woken machines (their bitmap tracks
+the hib artifacts, not the golden). Do NOT gate diffs on `sb.BaseSnapshotID`
+— it is never cleared, and trusting it silently corrupts memory on restore.
+A diff freeze writes a `diff_base` marker next to the mem file; wake rebases
+via `materializeHibMem` (reflink + sparse overlay; GCS base pull fallback).
 - **Idle hibernation** (`internal/server/hibernate.go`; `"hibernate_after_sec"` in the
-  config sets the host default, 0 = off; `POST /sandboxes` accepts a per-sandbox
-  `hibernate_after_sec` override — >0 custom window, -1 never, 0 inherit — also on
-  restore/fanout bodies and SDK `hibernateAfterMs`). Sandboxes idle past their window
-  are paused + full-snapshotted
-  (mem/state under `snapshots/hib-<id>`; the rootfs file just stays put), the VM killed,
-  and the row flipped to `status=hibernated` — releasing tap/IP back to the pools
-  (their partial unique indexes only bind `running`), so hibernated sandboxes hold no
-  slot and survive server restarts (reconcile skips them). Host ports are the exception:
-  they stay hard-reserved (`uniq_port_held` covers hibernated rows, `loadUsed` counts
-  them as used) because the port-proxy listeners stay bound across the freeze. Any
-  agent-bound request (exec/files/dir/shell) wakes transparently via `ensureRunning`:
-  same-identity plain restore when the old tap+IP are free — the common case, because
-  the pool pickers soft-avoid hibernated taps/IPs — else the fan-out clone path (fresh
-  identity, MMDS reidentify with a fresh Gen, GARP). Manual trigger: `POST .../hibernate`
-  / `sandbox hibernate <id>`. Activity = API traffic AND forwarded-port traffic:
-  in-flight requests (open shells, exec streams) and open forwarded-port connections
-  pin the sandbox running, and **a connection to a forwarded host port wakes a
-  hibernated sandbox** (the userspace proxy wakes via `ensureRunning`, then dials the
-  guest's current IP). Heartbeats report hibernated ids for routing but exclude them
-  from `slots_used`.
+config sets the host default, 0 = off; `POST /sandboxes` accepts a per-sandbox
+`hibernate_after_sec` override — >0 custom window, -1 never, 0 inherit — also on
+restore/fanout bodies and SDK `hibernateAfterMs`). Sandboxes idle past their window
+are paused + full-snapshotted
+(mem/state under `snapshots/hib-<id>`; the rootfs file just stays put), the VM killed,
+and the row flipped to `status=hibernated` — releasing tap/IP back to the pools
+(their partial unique indexes only bind `running`), so hibernated sandboxes hold no
+slot and survive server restarts (reconcile skips them). Host ports are the exception:
+they stay hard-reserved (`uniq_port_held` covers hibernated rows, `loadUsed` counts
+them as used) because the port-proxy listeners stay bound across the freeze. Any
+agent-bound request (exec/files/dir/shell) wakes transparently via `ensureRunning`:
+same-identity plain restore when the old tap+IP are free — the common case, because
+the pool pickers soft-avoid hibernated taps/IPs — else the fan-out clone path (fresh
+identity, MMDS reidentify with a fresh Gen, GARP). Manual trigger: `POST .../hibernate`
+/ `sandbox hibernate <id>`. Activity = API traffic AND forwarded-port traffic:
+in-flight requests (open shells, exec streams) and open forwarded-port connections
+pin the sandbox running, and **a connection to a forwarded host port wakes a
+hibernated sandbox** (the userspace proxy wakes via `ensureRunning`, then dials the
+guest's current IP). Heartbeats report hibernated ids for routing but exclude them
+from `slots_used`.
 - **Port forwarding is a userspace TCP proxy, not DNAT**
-  (`internal/server/portproxy.go`). The server binds every explicitly mapped
-  host port (`sandbox_ports` rows) with an in-process listener: accept → record
-  activity + pin (same `act.begin` mechanism as API requests) → `ensureRunning` (wakes
-  if hibernated) → re-read the row for the CURRENT guest IP (a clone-path wake changes
-  it — never cache it) → dial guest → bidirectional copy with TCP half-close. Listeners
-  open on expose, persist through hibernation (that's what makes
-  wake-on-connect work), re-bind at startup for hibernated rows (`reopenPortListeners`),
-  and close on destroy. `RemovePortForward*` (iptables `-D`) is kept and still called in
-  destroy/reconcile purely as legacy cleanup for hosts upgrading from the DNAT scheme.
+(`internal/server/portproxy.go`). The server binds every explicitly mapped
+host port (`sandbox_ports` rows) with an in-process listener: accept → record
+activity + pin (same `act.begin` mechanism as API requests) → `ensureRunning` (wakes
+if hibernated) → re-read the row for the CURRENT guest IP (a clone-path wake changes
+it — never cache it) → dial guest → bidirectional copy with TCP half-close. Listeners
+open on expose, persist through hibernation (that's what makes
+wake-on-connect work), re-bind at startup for hibernated rows (`reopenPortListeners`),
+and close on destroy. `RemovePortForward*` (iptables `-D`) is kept and still called in
+destroy/reconcile purely as legacy cleanup for hosts upgrading from the DNAT scheme.
 - **Port mappings** live in the `sandbox_ports` table and draw host ports from the
-  configured port pool. destroy() and reconcile()
-  must close their listeners (and remove legacy DNAT rules) — read mappings before
-  deleting rows. `exposePort` works on a hibernated sandbox without waking it: the new
-  listener is just another wake-on-connect entry point.
-- **`vmCtx` ≠ request ctx.** `handleCreate` must pass `s.vmCtx` (server-scoped) to `vm.NewMachine`
-  and `vm.Start`, NOT `r.Context()` — the request ctx cancels when the handler returns, and the
-  firecracker SDK SIGTERMs the VM when its ctx cancels. This was an early bug that wasted hours.
+configured port pool. destroy() and reconcile()
+must close their listeners (and remove legacy DNAT rules) — read mappings before
+deleting rows. `exposePort` works on a hibernated sandbox without waking it: the new
+listener is just another wake-on-connect entry point.
+- `vmCtx` **≠ request ctx.** `handleCreate` must pass `s.vmCtx` (server-scoped) to `vm.NewMachine`
+and `vm.Start`, NOT `r.Context()` — the request ctx cancels when the handler returns, and the
+firecracker SDK SIGTERMs the VM when its ctx cancels. This was an early bug that wasted hours.
 - **Pools allocated atomically via SQLite.** `registry.Create` runs INSERT inside a TX with
-  partial unique indexes (`uniq_tap_running`, `uniq_ip_running`) guaranteeing no two
-  running sandboxes share a tap/IP; `sandbox_ports.host_port` is independently unique. Concurrent
-  creates that race lose to UNIQUE constraint and surface as 500.
+partial unique indexes (`uniq_tap_running`, `uniq_ip_running`) guaranteeing no two
+running sandboxes share a tap/IP; `sandbox_ports.host_port` is independently unique. Concurrent
+creates that race lose to UNIQUE constraint and surface as 500.
 - **The port pool is sized independently of tap/IP/memory, because hibernation doesn't
-  release it.** Taps/IPs/`mem_budget_mib` bound concurrently *running* sandboxes (real
-  compute capacity); a hibernated sandbox holds only its port (taps/IPs free on hibernate),
-  so the port pool is really the ceiling on *total* sandboxes (running + hibernated) per
-  host. `deploy-job.sh` generates `PortMax` from `PORTS_PER_HOST` (defaults to 4×
-  `SLOTS_PER_HOST` if unset, matching the fleet's original fixed ratio) rather than tying it
-  to `SLOTS_PER_HOST` directly — raise it independently when sandboxes run much smaller than
-  `MEM_PER_SLOT_MIB` and you want more hibernated at once than the default ratio allows.
-- **The guest subnet width is configurable (`guest_subnet_bits`), and it — not a hard-coded
-  /24 — is the ceiling on concurrently RUNNING sandboxes per host.** Every running sandbox
-  needs a guest IP; a /24 holds ~253, /22 ~1021, /20 ~4093. The prefix is applied at three
-  sites that MUST agree or guests can't route to the gateway: the bridge/gateway CIDR
-  (`cmd/sandbox/serve.go`), the cold-boot guest CIDR (`server.go` handleCreate), and the
-  clone-path MMDS reidentify prefix (`CloneParams.Prefix` in `snapshot.go` fan-out +
-  `hibernate.go` wake — the in-guest thaw agent flushes eth0 and re-adds `ip/prefix`, so
-  hot-created clones adopt the configured width even if the golden was baked at a different
-  one). Widen it via `GUEST_SUBNET_BITS` in `config.env`; `deploy-job.sh` then spans the
-  guest-IP pool across octets (proper 32-bit IP arithmetic, no longer last-octet-only) and
-  refuses a `SLOTS_PER_HOST` that would overrun the subnet's usable range or hit its
-  broadcast address. Default 24 keeps every existing config byte-identical.
-- **Committed memory per slot is a knob (`MEM_PER_SLOT_MIB`, default 1180), decoupled from
-  the 1 GiB template assumption.** `mem_budget_mib` (admission ceiling) and the Nomad task
-  cgroup (`TASK_MEMORY`) both derive as `SLOTS_PER_HOST × MEM_PER_SLOT_MIB` (+2 GiB for
-  serve). A small-sandbox fleet (e.g. 128 MiB guests) lowers it to ~300 so the same host RAM
-  admits many more running sandboxes; the memory-admission check in `registry` still sums
-  each sandbox's *actual* effective `mem_mib` + overhead, so this only sizes the budget, not
-  the per-sandbox charge.
+release it.** Taps/IPs/`mem_budget_mib` bound concurrently *running* sandboxes (real
+compute capacity); a hibernated sandbox holds only its port (taps/IPs free on hibernate),
+so the port pool is really the ceiling on *total* sandboxes (running + hibernated) per
+host. `deploy-job.sh` generates `PortMax` from `PORTS_PER_HOST` (defaults to 4×
+`SLOTS_PER_HOST` if unset, matching the fleet's original fixed ratio) rather than tying it
+to `SLOTS_PER_HOST` directly — raise it independently when sandboxes run much smaller than
+`MEM_PER_SLOT_MIB` and you want more hibernated at once than the default ratio allows.
+- **The guest subnet width is configurable (**`guest_subnet_bits`**), and it — not a hard-coded
+/24 — is the ceiling on concurrently RUNNING sandboxes per host.** Every running sandbox
+needs a guest IP; a /24 holds ~253, /22 ~1021, /20 ~4093. The prefix is applied at three
+sites that MUST agree or guests can't route to the gateway: the bridge/gateway CIDR
+(`cmd/sandbox/serve.go`), the cold-boot guest CIDR (`server.go` handleCreate), and the
+clone-path MMDS reidentify prefix (`CloneParams.Prefix` in `snapshot.go` fan-out +
+`hibernate.go` wake — the in-guest thaw agent flushes eth0 and re-adds `ip/prefix`, so
+hot-created clones adopt the configured width even if the golden was baked at a different
+one). Widen it via `GUEST_SUBNET_BITS` in `config.env`; `deploy-job.sh` then spans the
+guest-IP pool across octets (proper 32-bit IP arithmetic, no longer last-octet-only) and
+refuses a `SLOTS_PER_HOST` that would overrun the subnet's usable range or hit its
+broadcast address. Default 24 keeps every existing config byte-identical.
+- **Committed memory per slot is a knob (**`MEM_PER_SLOT_MIB`**, default 1180), decoupled from
+the 1 GiB template assumption.** `mem_budget_mib` (admission ceiling) and the Nomad task
+cgroup (`TASK_MEMORY`) both derive as `SLOTS_PER_HOST × MEM_PER_SLOT_MIB` (+2 GiB for
+serve). A small-sandbox fleet (e.g. 128 MiB guests) lowers it to ~300 so the same host RAM
+admits many more running sandboxes; the memory-admission check in `registry` still sums
+each sandbox's *actual* effective `mem_mib` + overhead, so this only sizes the budget, not
+the per-sandbox charge.
 - **Per-VM rootfs is a CoW clone where the filesystem allows it.** `provisioner.CloneFile`
-  (used by `PrepareRootfs` for cold boot, and by `CloneRootfs`/`CopyFileSparse` for
-  restore/fan-out/hibernate) tries `cp --reflink=always` first — instant, near-zero disk
-  on XFS/btrfs (the GCP data disk is formatted XFS specifically for this) — and falls back
-  to a full `cp --sparse=always` only when the filesystem can't reflink (e.g. ext4, where
-  it's ~2 GB-sparse copy in ~1 s and I/O scales linearly with N). Don't share the rootfs
-  between VMs — ext4 corrupts under concurrent mount.
+(used by `PrepareRootfs` for cold boot, and by `CloneRootfs`/`CopyFileSparse` for
+restore/fan-out/hibernate) tries `cp --reflink=always` first — instant, near-zero disk
+on XFS/btrfs (the GCP data disk is formatted XFS specifically for this) — and falls back
+to a full `cp --sparse=always` only when the filesystem can't reflink (e.g. ext4, where
+it's ~2 GB-sparse copy in ~1 s and I/O scales linearly with N). Don't share the rootfs
+between VMs — ext4 corrupts under concurrent mount.
 - **The worker boot/readiness path is instrumented per stage** (`internal/server/bootphase.go`).
-  Autoscale latency is ~10 s of control loop plus a much larger "make this host usable" span
-  that used to be one opaque block in the profile. Three writers that can't share memory
-  contribute phases: `startup-worker.sh` and the Nomad task's `run.sh` append
-  `"<phase>\t<epoch_ms>"` to **`/run/sandbox/boot-phases`** (fixed path — the startup script
-  runs before any config is read; `SANDBOX_BOOT_PHASES` overrides for tests), serve marks its
-  own (`serve_process_start`, `reconcile_done`, `golden_settled`, `first_heartbeat_ok`,
-  `capacity_advertised`), and `kernel_boot` comes from `/proc/stat` btime as a free stand-in
-  for "GCE reported RUNNING". `/metrics` exports `sandbox_boot_phase_timestamp_seconds{phase}`,
-  `sandbox_boot_phase_seconds{phase}` (offset from the anchor) and the headline
-  `sandbox_worker_ready_seconds`; all federate through `/metrics/hosts` with a `host` label
-  automatically (`injectHostLabel` merges into existing labels). **These are absolute
-  timestamps, not rates — so the normal 10 s scrape recovers ms-accurate boundaries and
-  profiling needs no special scrape interval.** Marks are first-write-wins (the 5 s heartbeat
-  re-marks forever). `capacity_advertised`, not `first_heartbeat_ok`, is the real "new capacity
-  online" moment: an unwarmed host deliberately heartbeats `slots_free=0`. Note `/run` is
-  tmpfs, so a *stopped* standby worker gets a clean timeline on boot while a *suspended* one
-  keeps its original boot's file — correct, since a resumed worker re-runs neither the startup
-  script nor serve. NB `parseMetrics` in the server tests skips float-valued lines for these
-  families; it still fails on genuinely malformed output.
+Autoscale latency is ~10 s of control loop plus a much larger "make this host usable" span
+that used to be one opaque block in the profile. Three writers that can't share memory
+contribute phases: `startup-worker.sh` and the Nomad task's `run.sh` append
+`"<phase>\t<epoch_ms>"` to `/run/sandbox/boot-phases` (fixed path — the startup script
+runs before any config is read; `SANDBOX_BOOT_PHASES` overrides for tests), serve marks its
+own (`serve_process_start`, `reconcile_done`, `golden_settled`, `first_heartbeat_ok`,
+`capacity_advertised`), and `kernel_boot` comes from `/proc/stat` btime as a free stand-in
+for "GCE reported RUNNING". `/metrics` exports `sandbox_boot_phase_timestamp_seconds{phase}`,
+`sandbox_boot_phase_seconds{phase}` (offset from the anchor) and the headline
+`sandbox_worker_ready_seconds`; all federate through `/metrics/hosts` with a `host` label
+automatically (`injectHostLabel` merges into existing labels). **These are absolute
+timestamps, not rates — so the normal 10 s scrape recovers ms-accurate boundaries and
+profiling needs no special scrape interval.** Marks are first-write-wins (the 5 s heartbeat
+re-marks forever). `capacity_advertised`, not `first_heartbeat_ok`, is the real "new capacity
+online" moment: an unwarmed host deliberately heartbeats `slots_free=0`. Note `/run` is
+tmpfs, so a *stopped* standby worker gets a clean timeline on boot while a *suspended* one
+keeps its original boot's file — correct, since a resumed worker re-runs neither the startup
+script nor serve. NB `parseMetrics` in the server tests skips float-valued lines for these
+families; it still fails on genuinely malformed output.
 - **The autoscaler's scale-out confirmation budget is a scale-up BLACKOUT, so it's tuned
-  SHORT.** The gce-mig target polls for MIG-wide stability after a resize, and while that runs
-  the policy sits in `StateScaling` where every evaluation is dropped ("skipping scaling,
-  target still scaling"). The upstream default of 15 attempts × 10 s meant **150 s during which
-  a growing burst could not add a second wave of hosts**, and it always ended in
-  `failed to confirm scale out GCE Instance Group: reached retry limit` — because with a
-  standby pool, stability is unreachable by construction: the MIG keeps replenishing suspended
-  workers in the background (~190 s). We don't need GCE's confirmation, since real readiness
-  arrives on the gateway heartbeat (now measured by `sandbox_worker_ready_seconds`). So
-  `retry_attempts` is set from `AUTOSCALER_RETRY_ATTEMPTS` (default 3).
-  **This does NOT shorten the blackout to 30 s — that earlier claim was wrong and was
-  disproved on 2026-07-25.** `retry_attempts=3` only makes the
-  `failed to confirm scale out ... reached retry limit` ERROR appear sooner (~21 s, 3 attempts
-  × ~7 s gRPC timeout); the policy is not released then. Timing consecutive
-  `calculating scaling target` lines measured **188.87 s and 188.94 s** in a single 160-burst —
-  a deterministic ~189 s blackout, matching the background standby-replenish window, and not
-  explained by `cooldown = "1m"`. **Always re-verify a blackout claim by the gap between
-  consecutive `calculating scaling target` lines, never by the error timestamp.** The practical
-  consequence: a burst gets exactly ONE scaling action, then ~3 min of nothing; and because the
-  check uses `max_over_time(...[15m])`, the post-blackout evaluation replays the stale peak and
-  over-scales *after* demand is gone. Failing fast is still safe: on confirm failure the handler
-  returns to Idle **without** entering
-  cooldown, and the next evaluation compares desired against the MIG target size the resize
-  already set, so it no-ops unless demand genuinely grew. Requires **autoscaler ≥ 0.4.8**
-  (older builds silently ignore the key and keep 150 s) — hence the bump to 0.5.0, which also
-  brings 0.4.9's "don't issue scaling requests when no change is needed" and 0.5.0's scale-in
-  node-selection fix. `control-install.sh` now compares the installed binary's version and
-  re-fetches on mismatch; it previously guarded with `command -v nomad-autoscaler ||`, so
-  **bumping `AUTOSCALER_VERSION` never actually upgraded anything**.
+SHORT.** The gce-mig target polls for MIG-wide stability after a resize, and while that runs
+the policy sits in `StateScaling` where every evaluation is dropped ("skipping scaling,
+target still scaling"). The upstream default of 15 attempts × 10 s meant **150 s during which
+a growing burst could not add a second wave of hosts**, and it always ended in
+`failed to confirm scale out GCE Instance Group: reached retry limit` — because with a
+standby pool, stability is unreachable by construction: the MIG keeps replenishing suspended
+workers in the background (~190 s). We don't need GCE's confirmation, since real readiness
+arrives on the gateway heartbeat (now measured by `sandbox_worker_ready_seconds`). So
+`retry_attempts` is set from `AUTOSCALER_RETRY_ATTEMPTS` (default 3).
+**This does NOT shorten the blackout to 30 s — that earlier claim was wrong and was
+disproved on 2026-07-25.** `retry_attempts=3` only makes the
+`failed to confirm scale out ... reached retry limit` ERROR appear sooner (~21 s, 3 attempts
+× ~7 s gRPC timeout); the policy is not released then. Timing consecutive
+`calculating scaling target` lines measured **188.87 s and 188.94 s** in a single 160-burst —
+a deterministic ~189 s blackout, matching the background standby-replenish window, and not
+explained by `cooldown = "1m"`. **Always re-verify a blackout claim by the gap between
+consecutive** `calculating scaling target` **lines, never by the error timestamp.** The practical
+consequence: a burst gets exactly ONE scaling action, then ~3 min of nothing; and because the
+check uses `max_over_time(...[15m])`, the post-blackout evaluation replays the stale peak and
+over-scales *after* demand is gone. Failing fast is still safe: on confirm failure the handler
+returns to Idle **without** entering
+cooldown, and the next evaluation compares desired against the MIG target size the resize
+already set, so it no-ops unless demand genuinely grew. Requires **autoscaler ≥ 0.4.8**
+(older builds silently ignore the key and keep 150 s) — hence the bump to 0.5.0, which also
+brings 0.4.9's "don't issue scaling requests when no change is needed" and 0.5.0's scale-in
+node-selection fix. `control-install.sh` now compares the installed binary's version and
+re-fetches on mismatch; it previously guarded with `command -v nomad-autoscaler ||`, so
+**bumping** `AUTOSCALER_VERSION` **never actually upgraded anything**.
 - **Build tags**: `//go:build linux` for SDK code, `//go:build !linux` for the stub. Keep the
-  signatures identical in both files.
-- **`disableValidation` arg on `NewMachine`** lets you build the SDK config on non-Linux for
-  dry runs. Server passes `false`.
+signatures identical in both files.
+- `disableValidation` **arg on** `NewMachine` lets you build the SDK config on non-Linux for
+dry runs. Server passes `false`.
 - **Firecracker stderr/stdout is captured** to `firecracker-<vmid>.log` in the server's cwd.
-  After `/logger` is bootstrapped, firecracker writes most logs to its log FIFO (drained by
-  the SDK, never persisted). For deep-dive debugging, switch `LogFifo` to a regular file path.
+After `/logger` is bootstrapped, firecracker writes most logs to its log FIFO (drained by
+the SDK, never persisted). For deep-dive debugging, switch `LogFifo` to a regular file path.
+
+
 
 ## Conventions
 
 - Config merging: JSON file < CLI flags. Only `--config` and `--socket` flags exist now;
-  per-VM overrides in `POST /sandboxes` are limited to `name`, `timeout_sec`,
-  `hibernate_after_sec`, `vcpus`, `mem_mib`, and `ssh_pubkey`.
+per-VM overrides in `POST /sandboxes` are limited to `name`, `timeout_sec`,
+`hibernate_after_sec`, `vcpus`, `mem_mib`, and `ssh_pubkey`.
 - Socket paths auto-generate UUIDs when left empty.
 - Use `signal.NotifyContext` for signal handling, not raw `signal.Notify` + channel.
 - Commits: short imperative subject lines (see `git log`). No co-author trailer.
-  Land on `main` directly; don't open PRs or auto-branch.
+Land on `main` directly; don't open PRs or auto-branch.
 - Use `modernc.org/sqlite` (pure-Go) NOT `github.com/mattn/go-sqlite3` — we need
-  `CGO_ENABLED=0` to cross-compile from macOS.
+`CGO_ENABLED=0` to cross-compile from macOS.
 - **Releasing the TS SDK** (from `sdk/typescript`) is five things, and the repo
-  version being bumped does NOT mean a release happened — 1.0.0 sat bumped and
-  unreleased for five days while consumers installed 0.4.0. Bump `version` in
-  `package.json`, add a `CHANGELOG.md` entry, repoint the **pinned install URL**
-  in `README.md` (it names an exact tarball, so a stale one keeps serving the old
-  release), then `npm pack` (builds via `prepack`) and
-  `gh release create sdk-v<version> sandbox-<version>.tgz`. Verify with
-  `npm run typecheck`, `npm test`, and `npm run check:api` (regenerates
-  `src/generated/api-v1.ts` from `api/openapi.yaml` and fails on drift). The
-  install path is a GitHub Releases tarball, not a registry — there are no semver
-  ranges, so "upgrading" means handing users a new URL.
+version being bumped does NOT mean a release happened — 1.0.0 sat bumped and
+unreleased for five days while consumers installed 0.4.0. Bump `version` in
+`package.json`, add a `CHANGELOG.md` entry, repoint the **pinned install URL**
+in `README.md` (it names an exact tarball, so a stale one keeps serving the old
+release), then `npm pack` (builds via `prepack`) and
+`gh release create sdk-v<version> sandbox-<version>.tgz`. Verify with
+`npm run typecheck`, `npm test`, and `npm run check:api` (regenerates
+`src/generated/api-v1.ts` from `api/openapi.yaml` and fails on drift). The
+install path is a GitHub Releases tarball, not a registry — there are no semver
+ranges, so "upgrading" means handing users a new URL.
+
+
 
 ## Not done yet
 
-- **Only vcpus/mem are overridable on `POST /sandboxes`.** Kernel image, kernel args,
-  rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
-  `hibernate_after_sec`, `vcpus`, `mem_mib`, and `ssh_pubkey`.
+- **Only vcpus/mem are overridable on** `POST /sandboxes`**.** Kernel image, kernel args,
+rootfs, etc. remain template-wide. The body carries `name`, `timeout_sec`,
+`hibernate_after_sec`, `vcpus`, `mem_mib`, and `ssh_pubkey`.
 - **No memory overcommit.** Guest memory is provisioned 1:1 (admission-enforced via
-  `mem_budget_mib` — see the memory-admission note above). Hot-created clones share the
-  golden snapshot's page cache and idle guests touch a fraction of their RAM, so real
-  density headroom exists — but without a virtio-balloon/free-page-reporting device,
-  dirtied pages never return until hibernation. Add a balloon before any overcommit knob.
+`mem_budget_mib` — see the memory-admission note above). Hot-created clones share the
+golden snapshot's page cache and idle guests touch a fraction of their RAM, so real
+density headroom exists — but without a virtio-balloon/free-page-reporting device,
+dirtied pages never return until hibernation. Add a balloon before any overcommit knob.
 - **Few tests on the Go side.** `internal/gateway` (placement, queue, metrics),
-  `internal/registry` (hibernate/wake state machine, hibernated-port pinning, resource
-  persistence), and `internal/server` (port proxy: forwarding, wake-on-connect, activity
-  pinning; resource-override validation) have unit tests; the rest is covered by the
-  TS SDK mock-server suite + the fleet e2e suite in `tests/`.
+`internal/registry` (hibernate/wake state machine, hibernated-port pinning, resource
+persistence), and `internal/server` (port proxy: forwarding, wake-on-connect, activity
+pinning; resource-override validation) have unit tests; the rest is covered by the
+TS SDK mock-server suite + the fleet e2e suite in `tests/`.
 - **No TLS on the TCP listener.** `serve --listen <tailnet-ip>:8080 --token <tok>` exposes
-  the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
-  transport security. Don't bind it to a public interface. The Unix socket stays auth-free
-  (mode 0600). The local token for the dev machine lives in `.sandbox-token` (gitignored).
+the API over TCP with bearer auth (constant-time compare); we rely on Tailscale for
+transport security. Don't bind it to a public interface. The Unix socket stays auth-free
+(mode 0600). The local token for the dev machine lives in `.sandbox-token` (gitignored).
+
