@@ -5,7 +5,6 @@ package apiv1
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,30 +17,50 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/createops"
 	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/google/uuid"
 )
 
 type Handler struct {
-	legacy http.Handler
-	idem   *httpapi.Store
-
-	mu         sync.RWMutex
-	operations map[string]*Operation
+	legacy      http.Handler
+	idem        *httpapi.Store
+	createOps   createops.Store
+	executor    createops.Executor
+	dispatchMu  sync.Mutex
+	dispatching map[string]bool
+	dispatchWG  sync.WaitGroup
+	wake        chan struct{}
 }
 
 func New(legacy http.Handler) *Handler {
 	return &Handler{
-		legacy:     legacy,
-		idem:       httpapi.NewStore(24 * time.Hour),
-		operations: make(map[string]*Operation),
+		legacy:      legacy,
+		idem:        httpapi.NewStore(24 * time.Hour),
+		dispatching: make(map[string]bool), wake: make(chan struct{}, 1),
 	}
+}
+
+// NewWithCreateOperations enables durable public create acceptance. New has
+// deliberately no RAM fallback: a process restart must not lose accepted work.
+func NewWithCreateOperations(legacy http.Handler, store createops.Store, executor createops.Executor) *Handler {
+	h := New(legacy)
+	h.createOps, h.executor = store, executor
+	return h
+}
+
+func (h *Handler) Close() error {
+	if h.createOps != nil {
+		return h.createOps.Close()
+	}
+	return nil
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/sandboxes", h.listSandboxes)
-	mux.Handle("POST /v1/sandboxes", h.idem.Wrap(http.HandlerFunc(h.createSandbox)))
+	mux.HandleFunc("POST /v1/sandboxes", h.createSandbox)
+	mux.HandleFunc("POST /v1/sandbox-creations", h.createSandboxAsync)
 	mux.HandleFunc("GET /v1/sandboxes/{id}", h.getSandbox)
 	mux.Handle("PATCH /v1/sandboxes/{id}", h.idem.Wrap(http.HandlerFunc(h.updateSandbox)))
 	mux.Handle("DELETE /v1/sandboxes/{id}", h.idem.Wrap(http.HandlerFunc(h.deleteSandbox)))
@@ -53,7 +72,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/templates", h.listTemplates)
 	mux.HandleFunc("GET /v1/templates/{id}", h.getTemplate)
 	mux.HandleFunc("PATCH /v1/templates/{id}", h.updateTemplate)
-	mux.Handle("POST /v1/sandbox-batches", h.idem.Wrap(http.HandlerFunc(h.createBatch)))
+	mux.HandleFunc("POST /v1/sandbox-batches", h.createBatch)
 	mux.HandleFunc("GET /v1/operations", h.listOperations)
 	mux.HandleFunc("GET /v1/operations/{id}", h.getOperation)
 	mux.Handle("POST /v1/sandboxes/{id}/port-forwards", h.idem.Wrap(http.HandlerFunc(h.createPortForward)))
@@ -130,12 +149,23 @@ type Sandbox struct {
 }
 
 type Snapshot struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name,omitempty"`
-	SourceSandboxID string     `json:"source_sandbox_id"`
-	State           string     `json:"state"`
-	CreatedAt       time.Time  `json:"created_at"`
-	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name,omitempty"`
+	SourceSandboxID string          `json:"source_sandbox_id"`
+	State           string          `json:"state"`
+	Upload          *SnapshotUpload `json:"upload,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+}
+
+// SnapshotUpload reports an original capture's asynchronous durability work.
+// A nil value does not mean local snapshots are permanently unavailable: this
+// worker may only have a peer cache and can still restore from another host.
+type SnapshotUpload struct {
+	State         string     `json:"state"`
+	Attempts      int        `json:"attempts"`
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	Error         string     `json:"error,omitempty"`
 }
 
 type createRequest struct {
@@ -163,13 +193,15 @@ type listResponse[T any] struct {
 }
 
 type BatchItem struct {
-	Index   int              `json:"index"`
-	Sandbox *Sandbox         `json:"sandbox,omitempty"`
-	Error   *httpapi.Problem `json:"error,omitempty"`
+	Index    int              `json:"index"`
+	Progress *CreateProgress  `json:"progress,omitempty"`
+	Sandbox  *Sandbox         `json:"sandbox,omitempty"`
+	Error    *httpapi.Problem `json:"error,omitempty"`
 }
 
 type Operation struct {
 	ID          string      `json:"id"`
+	RequestID   string      `json:"request_id,omitempty"`
 	Type        string      `json:"type"`
 	Status      string      `json:"status"`
 	Requested   int         `json:"requested"`
@@ -178,24 +210,6 @@ type Operation struct {
 	Results     []BatchItem `json:"results,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
 	CompletedAt *time.Time  `json:"completed_at,omitempty"`
-}
-
-func (h *Handler) createSandbox(w http.ResponseWriter, r *http.Request) {
-	var body createRequest
-	if !decodeBody(w, r, &body, true) {
-		return
-	}
-	if err := validateCreate(body); err != nil {
-		httpapi.WriteProblem(w, r, 400, "invalid_request", err.Error())
-		return
-	}
-	sb, status, detail := h.create(r, body)
-	if status != http.StatusCreated {
-		httpapi.WriteProblem(w, r, status, "", detail)
-		return
-	}
-	w.Header().Set("Location", "/v1/sandboxes/"+url.PathEscape(sb.ID))
-	writeJSON(w, http.StatusCreated, sb)
 }
 
 // normalizeSource fills in the default source type and reports whether the
@@ -212,56 +226,6 @@ func normalizeSource(source Source) (Source, bool) {
 	fromSnapshot := source.Type == "snapshot" ||
 		(source.Type == "template" && source.ID != defaultTemplateID)
 	return source, fromSnapshot
-}
-
-func legacyCreateBody(body createRequest) map[string]any {
-	legacyBody := map[string]any{
-		"name":                body.Name,
-		"timeout_sec":         body.Lifecycle.TTLSeconds,
-		"hibernate_after_sec": body.Lifecycle.IdleTimeoutSeconds,
-	}
-	if body.Resources != nil {
-		legacyBody["vcpus"] = body.Resources.VCPU
-		legacyBody["mem_mib"] = body.Resources.MemoryMIB
-	}
-	return legacyBody
-}
-
-func (h *Handler) create(r *http.Request, body createRequest) (Sandbox, int, string) {
-	source, fromSnapshot := normalizeSource(body.Source)
-	legacyBody := legacyCreateBody(body)
-	path := "/sandboxes"
-	if fromSnapshot {
-		path = "/snapshots/" + url.PathEscape(source.ID) + "/fanout"
-		legacyBody["count"] = 1
-	}
-	rec := h.call(r, http.MethodPost, path, legacyBody)
-	if rec.Code < 200 || rec.Code >= 300 {
-		return Sandbox{}, rec.Code, legacyDetail(rec)
-	}
-	var raw registry.Sandbox
-	if fromSnapshot {
-		var list []registry.Sandbox
-		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != 1 {
-			return Sandbox{}, 502, "invalid batch-create response from worker"
-		}
-		raw = list[0]
-	} else if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
-		return Sandbox{}, 502, "invalid create response from worker"
-	}
-	return h.annotate(r, raw, body, source)
-}
-
-// annotate persists the public source/metadata fields the worker API doesn't
-// know about and returns the finished public view.
-func (h *Handler) annotate(r *http.Request, raw registry.Sandbox, body createRequest, source Source) (Sandbox, int, string) {
-	fields := map[string]any{"source_type": source.Type, "source_id": source.ID, "metadata": nonNilMetadata(body.Metadata)}
-	annotated := h.call(r, http.MethodPatch, "/sandboxes/"+url.PathEscape(raw.ID)+"/public-fields", fields)
-	if annotated.Code < 200 || annotated.Code >= 300 {
-		return Sandbox{}, annotated.Code, legacyDetail(annotated)
-	}
-	_ = json.Unmarshal(annotated.Body.Bytes(), &raw)
-	return publicSandbox(raw), http.StatusCreated, ""
 }
 
 func (h *Handler) listSandboxes(w http.ResponseWriter, r *http.Request) {
@@ -341,8 +305,8 @@ func (h *Handler) updateSandbox(w http.ResponseWriter, r *http.Request) {
 		if body.Lifecycle.IdleTimeoutSeconds != nil {
 			idle = *body.Lifecycle.IdleTimeoutSeconds
 		}
-		if ttl < 0 || idle < 0 {
-			httpapi.WriteProblem(w, r, 400, "invalid_request", "lifecycle durations must be non-negative")
+		if ttl < 0 || idle < -1 {
+			httpapi.WriteProblem(w, r, 400, "invalid_request", "ttl_seconds must be non-negative and idle_timeout_seconds must be at least -1")
 			return
 		}
 	}
@@ -433,7 +397,7 @@ func (h *Handler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, snap := range raw {
-		if !snap.Golden && snap.ID == r.PathValue("id") {
+		if !snap.Golden && snap.Role != registry.SnapshotRoleBase && snap.ID == r.PathValue("id") {
 			writeJSON(w, 200, publicSnapshot(snap))
 			return
 		}
@@ -453,7 +417,7 @@ func (h *Handler) listSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]Snapshot, 0, len(raw))
 	for _, snap := range raw {
-		if !snap.Golden {
+		if !snap.Golden && snap.Role != registry.SnapshotRoleBase {
 			items = append(items, publicSnapshot(snap))
 		}
 	}
@@ -615,12 +579,16 @@ func (h *Handler) updateTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) createBatch(w http.ResponseWriter, r *http.Request) {
+	if !h.durableCreatesReady(w, r) {
+		return
+	}
 	var body struct {
 		Count          int           `json:"count"`
 		Sandbox        createRequest `json:"sandbox"`
 		MaxParallelism int           `json:"max_parallelism"`
 	}
-	if !decodeBody(w, r, &body, true) {
+	raw, ok := decodeRawBody(w, r, &body)
+	if !ok {
 		return
 	}
 	if body.Count < 1 || body.Count > 100 {
@@ -638,195 +606,11 @@ func (h *Handler) createBatch(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteProblem(w, r, 400, "invalid_request", "max_parallelism must be between 1 and 32")
 		return
 	}
-	op := &Operation{
-		ID: uuid.NewString(), Type: "sandbox_batch_create", Status: "pending",
-		Requested: body.Count, CreatedAt: time.Now(), Results: make([]BatchItem, body.Count),
+	members := make([]createops.Member, body.Count)
+	for i := range members {
+		members[i] = createops.Member{ID: uuid.NewString(), Index: i, Spec: durableSpec(body.Sandbox)}
 	}
-	h.mu.Lock()
-	h.pruneOperationsLocked(time.Now())
-	h.operations[op.ID] = op
-	h.mu.Unlock()
-	background := r.Clone(context.WithoutCancel(r.Context()))
-	w.Header().Set("Location", "/v1/operations/"+op.ID)
-	writeJSON(w, http.StatusAccepted, cloneOperation(op))
-	go h.runBatch(background, op.ID, body.Count, body.MaxParallelism, body.Sandbox)
-}
-
-func (h *Handler) runBatch(parent *http.Request, id string, count, parallel int, create createRequest) {
-	h.mu.Lock()
-	h.operations[id].Status = "running"
-	h.mu.Unlock()
-
-	record := func(index int, sb Sandbox, status int, detail string) {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		op := h.operations[id]
-		if status == http.StatusCreated {
-			op.Succeeded++
-			op.Results[index] = BatchItem{Index: index, Sandbox: &sb}
-			return
-		}
-		op.Failed++
-		op.Results[index] = BatchItem{Index: index, Error: &httpapi.Problem{
-			Type: "https://sandbox.dev/problems/batch_item_failed", Title: http.StatusText(status),
-			Status: status, Detail: detail, Code: "batch_item_failed", RequestID: httpapi.RequestID(parent),
-		}}
-	}
-	// A snapshot-sourced batch is ONE fanout, not `count` fanouts of one. Issuing
-	// them separately made max_parallelism a lie: every single-clone fanout takes
-	// the worker's per-snapshot lock for its whole bring-up, so N of them ran
-	// strictly one at a time (measured dead-linear: 756 ms × N, so a 15-sandbox
-	// batch took ~11.3 s). One fanout of N gets the worker's own batch
-	// parallelism instead.
-	if _, fromSnapshot := normalizeSource(create.Source); fromSnapshot && count > 1 {
-		h.runSnapshotBatch(parent, count, parallel, create, record)
-	} else {
-		h.runCreateBatch(parent, count, parallel, create, record)
-	}
-	now := time.Now()
-	h.mu.Lock()
-	op := h.operations[id]
-	op.CompletedAt = &now
-	switch {
-	case op.Failed == 0:
-		op.Status = "succeeded"
-	case op.Succeeded == 0:
-		op.Status = "failed"
-	default:
-		op.Status = "partially_succeeded"
-	}
-	h.mu.Unlock()
-}
-
-type batchRecorder func(index int, sb Sandbox, status int, detail string)
-
-// runCreateBatch issues `count` independent creates, `parallel` at a time. This
-// is the right shape for the default source: those creates share no per-source
-// lock and are served from the host's ready pool.
-func (h *Handler) runCreateBatch(parent *http.Request, count, parallel int, create createRequest, record batchRecorder) {
-	sem := make(chan struct{}, parallel)
-	var wg sync.WaitGroup
-	for i := 0; i < count; i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			sb, status, detail := h.create(h.forkRequest(parent), create)
-			record(index, sb, status, detail)
-		}(i)
-	}
-	wg.Wait()
-}
-
-// fanoutChunk bounds how many clones one fanout call asks for. A single call is
-// capped at the worker's own fanoutParallelism, so a larger chunk buys no extra
-// worker-side concurrency — and it costs fleet spread, because the gateway
-// reserves a whole fanout's slots on ONE host. Chunking keeps both: each chunk
-// pipelines at full worker parallelism, and separate chunks can be placed on
-// different hosts.
-const fanoutChunk = 8
-
-// runSnapshotBatch clones `count` sandboxes using chunked fanout calls, then
-// annotates each result. max_parallelism bounds clones in flight, so it caps
-// both the chunk size and how many chunks run at once. A short chunk is
-// reported item-by-item: the worker returns however many clones came up, and
-// any shortfall is recorded as failed rather than silently dropped.
-func (h *Handler) runSnapshotBatch(parent *http.Request, count, parallel int, create createRequest, record batchRecorder) {
-	source, _ := normalizeSource(create.Source)
-	size := min(count, parallel, fanoutChunk)
-	concurrent := max(1, parallel/size)
-
-	sem := make(chan struct{}, concurrent)
-	var wg sync.WaitGroup
-	for offset := 0; offset < count; offset += size {
-		n := min(size, count-offset)
-		wg.Add(1)
-		go func(offset, n int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			h.fanoutChunkInto(parent, offset, n, create, source, record)
-		}(offset, n)
-	}
-	wg.Wait()
-}
-
-// fanoutChunkInto issues one fanout of n clones and records them at
-// [offset, offset+n).
-func (h *Handler) fanoutChunkInto(parent *http.Request, offset, n int, create createRequest, source Source, record batchRecorder) {
-	legacyBody := legacyCreateBody(create)
-	legacyBody["count"] = n
-
-	failAll := func(status int, detail string) {
-		for i := 0; i < n; i++ {
-			record(offset+i, Sandbox{}, status, detail)
-		}
-	}
-	rec := h.call(h.forkRequest(parent), http.MethodPost,
-		"/snapshots/"+url.PathEscape(source.ID)+"/fanout", legacyBody)
-	if rec.Code < 200 || rec.Code >= 300 {
-		failAll(rec.Code, legacyDetail(rec))
-		return
-	}
-	var list []registry.Sandbox
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		failAll(502, "invalid batch-create response from worker")
-		return
-	}
-	for i := len(list); i < n; i++ {
-		record(offset+i, Sandbox{}, 503, "worker returned fewer clones than requested")
-	}
-	if len(list) > n {
-		list = list[:n]
-	}
-
-	var wg sync.WaitGroup
-	for i, raw := range list {
-		wg.Add(1)
-		go func(index int, raw registry.Sandbox) {
-			defer wg.Done()
-			sb, status, detail := h.annotate(h.forkRequest(parent), raw, create, source)
-			record(index, sb, status, detail)
-		}(offset+i, raw)
-	}
-	wg.Wait()
-}
-
-// forkRequest clones the batch's parent request for one worker call, preserving
-// the request id so worker-side logs correlate with the operation.
-func (h *Handler) forkRequest(parent *http.Request) *http.Request {
-	req := parent.Clone(parent.Context())
-	req.Header.Set(httpapi.RequestIDHeader, parent.Header.Get(httpapi.RequestIDHeader))
-	return req
-}
-
-func (h *Handler) getOperation(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	h.pruneOperationsLocked(time.Now())
-	op := cloneOperation(h.operations[r.PathValue("id")])
-	h.mu.Unlock()
-	if op == nil {
-		httpapi.WriteProblem(w, r, 404, "operation_not_found", "operation not found")
-		return
-	}
-	writeJSON(w, 200, op)
-}
-
-func (h *Handler) listOperations(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	h.pruneOperationsLocked(time.Now())
-	ops := make([]Operation, 0, len(h.operations))
-	for _, op := range h.operations {
-		ops = append(ops, *cloneOperation(op))
-	}
-	h.mu.Unlock()
-	sort.Slice(ops, func(i, j int) bool { return ops[i].CreatedAt.After(ops[j].CreatedAt) })
-	page, next, ok := paginate(w, r, ops)
-	if !ok {
-		return
-	}
-	writeJSON(w, 200, map[string]any{"operations": page, "next_page_token": next})
+	h.acceptCreate(w, r, raw, "sandbox_batch_create", body.MaxParallelism, members)
 }
 
 func (h *Handler) createPortForward(w http.ResponseWriter, r *http.Request) {
@@ -964,11 +748,6 @@ func publicSandbox(sb registry.Sandbox) Sandbox {
 }
 
 func (h *Handler) pruneOperationsLocked(now time.Time) {
-	for id, op := range h.operations {
-		if now.Sub(op.CreatedAt) > 24*time.Hour {
-			delete(h.operations, id)
-		}
-	}
 }
 
 func publicSnapshot(s registry.Snapshot) Snapshot {
@@ -976,10 +755,17 @@ func publicSnapshot(s registry.Snapshot) Snapshot {
 	if state == "" {
 		state = "local"
 	}
-	return Snapshot{
+	public := Snapshot{
 		ID: s.ID, Name: s.Name, SourceSandboxID: s.SourceID, State: state,
 		CreatedAt: s.CreatedAt, ExpiresAt: s.ExpiresAt,
 	}
+	if s.Upload != nil && state != "durable" {
+		public.Upload = &SnapshotUpload{
+			State: s.Upload.State, Attempts: s.Upload.Attempts,
+			NextAttemptAt: s.Upload.NextAttemptAt, Error: s.Upload.Error,
+		}
+	}
+	return public
 }
 
 // publicPort renders one exposure in the /v1 shape. Address fields are omitted
@@ -1038,11 +824,16 @@ func validateCreate(body createRequest) error {
 	default:
 		return errors.New("source.type must be default, template, or snapshot")
 	}
-	if body.Lifecycle.TTLSeconds < 0 || body.Lifecycle.IdleTimeoutSeconds < 0 {
-		return errors.New("lifecycle durations must be non-negative")
+	if body.Lifecycle.TTLSeconds < 0 || body.Lifecycle.IdleTimeoutSeconds < -1 {
+		return errors.New("ttl_seconds must be non-negative and idle_timeout_seconds must be at least -1")
 	}
-	if body.Resources != nil && (body.Resources.VCPU < 1 || body.Resources.MemoryMIB < 128) {
-		return errors.New("resources.vcpu must be positive and resources.memory_mib must be at least 128")
+	if resources := body.Resources; resources != nil {
+		if resources.VCPU < 0 || resources.MemoryMIB < 0 || (resources.MemoryMIB > 0 && resources.MemoryMIB < 128) {
+			return errors.New("resources.vcpu must be non-negative and resources.memory_mib must be zero or at least 128")
+		}
+		if _, snapshot := normalizeSource(source); snapshot && (resources.VCPU != 0 || resources.MemoryMIB != 0) {
+			return errors.New("snapshot resources cannot be overridden")
+		}
 	}
 	if len(body.Metadata) > 64 {
 		return errors.New("metadata must contain at most 64 entries")

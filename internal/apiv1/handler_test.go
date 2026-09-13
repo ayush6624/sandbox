@@ -1,6 +1,7 @@
 package apiv1
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/createops"
 	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/registry"
 )
@@ -226,9 +228,92 @@ func (f *fakeLegacy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func testHandler(t *testing.T, legacy http.Handler) http.Handler {
 	t.Helper()
+	store, err := createops.Open(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	mux := http.NewServeMux()
-	New(legacy).Register(mux)
+	h := NewWithCreateOperations(legacy, store, legacyCreateExecutor{legacy: legacy})
+	h.Register(mux)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go h.RunCreateOperations(ctx)
 	return httpapi.Middleware(mux)
+}
+
+type legacyCreateExecutor struct{ legacy http.Handler }
+
+func (legacyCreateExecutor) Place(context.Context, createops.Spec, int) (createops.Placement, error) {
+	return createops.Placement{Worker: createops.Worker{HostID: "test", RegistryID: "test"}, Release: func([]createops.Outcome) {}}, nil
+}
+func (e legacyCreateExecutor) Execute(ctx context.Context, _ createops.Worker, cmd createops.Command) ([]createops.Outcome, error) {
+	if len(cmd.Members) > 1 {
+		source, snap := normalizeSource(Source{Type: cmd.Members[0].Spec.Source.Type, ID: cmd.Members[0].Spec.Source.ID})
+		if snap {
+			data, _ := json.Marshal(map[string]any{"count": len(cmd.Members)})
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/snapshots/"+source.ID+"/fanout", strings.NewReader(string(data)))
+			w := httptest.NewRecorder()
+			e.legacy.ServeHTTP(w, req)
+			var raws []registry.Sandbox
+			if w.Code < 200 || w.Code >= 300 || json.Unmarshal(w.Body.Bytes(), &raws) != nil {
+				return nil, nil
+			}
+			out := make([]createops.Outcome, 0, len(cmd.Members))
+			for i, m := range cmd.Members {
+				if i < len(raws) {
+					raw := raws[i]
+					out = append(out, createops.Outcome{ID: m.ID, Sandbox: &raw})
+				} else {
+					out = append(out, createops.Outcome{ID: m.ID, Failure: &createops.Failure{Status: 503, Code: "short_response"}})
+				}
+			}
+			return out, nil
+		}
+	}
+	out := make([]createops.Outcome, 0, len(cmd.Members))
+	for _, m := range cmd.Members {
+		body := map[string]any{"name": m.Spec.Name, "timeout_sec": m.Spec.Lifecycle.TTLSeconds, "hibernate_after_sec": m.Spec.Lifecycle.IdleTimeoutSeconds}
+		if m.Spec.Resources != nil {
+			body["vcpus"] = m.Spec.Resources.VCPU
+			body["mem_mib"] = m.Spec.Resources.MemoryMIB
+		}
+		source, from := normalizeSource(Source{Type: m.Spec.Source.Type, ID: m.Spec.Source.ID})
+		path := "/sandboxes"
+		if from {
+			path = "/snapshots/" + source.ID + "/fanout"
+			body["count"] = 1
+		}
+		data, _ := json.Marshal(body)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, path, strings.NewReader(string(data)))
+		w := httptest.NewRecorder()
+		e.legacy.ServeHTTP(w, req)
+		if w.Code < 200 || w.Code >= 300 {
+			out = append(out, createops.Outcome{ID: m.ID, Failure: &createops.Failure{Status: w.Code, Code: "batch_item_failed", Detail: w.Body.String()}})
+			continue
+		}
+		var raw registry.Sandbox
+		if from {
+			var xs []registry.Sandbox
+			if json.Unmarshal(w.Body.Bytes(), &xs) != nil || len(xs) != 1 {
+				out = append(out, createops.Outcome{ID: m.ID, Failure: &createops.Failure{Status: 502, Code: "invalid_upstream_response", Detail: "invalid fanout"}})
+				continue
+			}
+			raw = xs[0]
+		} else if json.Unmarshal(w.Body.Bytes(), &raw) != nil {
+			out = append(out, createops.Outcome{ID: m.ID, Failure: &createops.Failure{Status: 502, Code: "invalid_upstream_response", Detail: "invalid create"}})
+			continue
+		}
+		fields, _ := json.Marshal(map[string]any{"source_type": source.Type, "source_id": source.ID, "metadata": m.Spec.Metadata, "name": m.Spec.Name})
+		patch, _ := http.NewRequestWithContext(ctx, http.MethodPatch, "/sandboxes/"+raw.ID+"/public-fields", strings.NewReader(string(fields)))
+		pw := httptest.NewRecorder()
+		e.legacy.ServeHTTP(pw, patch)
+		if pw.Code >= 200 && pw.Code < 300 {
+			_ = json.Unmarshal(pw.Body.Bytes(), &raw)
+		}
+		out = append(out, createops.Outcome{ID: m.ID, Sandbox: &raw})
+	}
+	return out, nil
 }
 
 func TestListSanitizesInternalsAndPaginates(t *testing.T) {
@@ -348,6 +433,53 @@ func TestLifecycleSnapshotTemplateAndPortResources(t *testing.T) {
 	}
 	if got := call("POST", "/v1/sandboxes/existing/port-forwards", `{"guest_port":0}`, "bad-port"); got.Code != 400 {
 		t.Fatalf("bad port=%d body=%s", got.Code, got.Body.String())
+	}
+}
+
+func TestSnapshotUploadProjectionAndBaseFiltering(t *testing.T) {
+	legacy := newFakeLegacy()
+	next := time.Now().Add(time.Minute).Round(time.Second)
+	legacy.snaps["captured"] = registry.Snapshot{
+		ID: "captured", SourceID: "sandbox", Durability: "local", CreatedAt: time.Now(),
+		Upload: &registry.SnapshotUpload{State: "retrying", Attempts: 2, NextAttemptAt: &next, Error: "temporary storage outage"},
+	}
+	legacy.snaps["cached"] = registry.Snapshot{ID: "cached", SourceID: "sandbox", Durability: "local", CreatedAt: time.Now()}
+	legacy.snaps["base"] = registry.Snapshot{ID: "base", SourceID: "sandbox", Role: registry.SnapshotRoleBase, CreatedAt: time.Now()}
+	legacy.snaps["durable"] = registry.Snapshot{
+		ID: "durable", SourceID: "sandbox", Durability: "durable", CreatedAt: time.Now(),
+		Upload: &registry.SnapshotUpload{State: "retrying", Attempts: 9},
+	}
+	h := testHandler(t, legacy)
+
+	list := httptest.NewRecorder()
+	h.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/snapshots", nil))
+	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), `"id":"base"`) {
+		t.Fatalf("list=%d body=%s", list.Code, list.Body.String())
+	}
+	var page struct {
+		Snapshots []Snapshot `json:"snapshots"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]Snapshot, len(page.Snapshots))
+	for _, snapshot := range page.Snapshots {
+		byID[snapshot.ID] = snapshot
+	}
+	if got := byID["captured"].Upload; got == nil || got.State != "retrying" || got.Attempts != 2 || got.NextAttemptAt == nil || got.Error != "temporary storage outage" {
+		t.Fatalf("captured upload=%+v", got)
+	}
+	if got := byID["cached"].Upload; got != nil {
+		t.Fatalf("cache upload=%+v, want nil", got)
+	}
+	if got := byID["durable"].Upload; got != nil {
+		t.Fatalf("durable upload=%+v, want nil", got)
+	}
+
+	get := httptest.NewRecorder()
+	h.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/v1/snapshots/base", nil))
+	if get.Code != http.StatusNotFound {
+		t.Fatalf("base get=%d body=%s", get.Code, get.Body.String())
 	}
 }
 
@@ -483,9 +615,7 @@ func TestBatchOperationConcurrentPollingProducesValidJSON(t *testing.T) {
 		}
 		fake.ServeHTTP(w, r)
 	})
-	mux := http.NewServeMux()
-	New(legacy).Register(mux)
-	h := http.Handler(mux)
+	h := testHandler(t, legacy)
 	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-batches",
 		strings.NewReader(`{"count":100,"sandbox":{},"max_parallelism":32}`))
 	req.Header.Set("Idempotency-Key", "concurrent-poll")
