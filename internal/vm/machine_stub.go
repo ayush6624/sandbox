@@ -10,6 +10,9 @@ import (
 // ErrLinuxOnly is returned on non-Linux platforms.
 var ErrLinuxOnly = errors.New("firecracker requires Linux with /dev/kvm")
 
+// ErrLaunchExitUnconfirmed means a failed launch may still execute.
+var ErrLaunchExitUnconfirmed = errors.New("failed VM launch exit unconfirmed")
+
 // Machine is a placeholder on non-Linux platforms.
 type Machine struct{}
 
@@ -25,12 +28,17 @@ func StartClone(_ context.Context, _ RunOptions, _ CloneParams) (*Machine, Runti
 	return nil, RuntimeConfig{}, ErrLinuxOnly
 }
 
-func RestoreUFFD(_ context.Context, _ RunOptions, _, _ string) (*Machine, RuntimeConfig, error) {
-	return nil, RuntimeConfig{}, ErrLinuxOnly
+func StartCloneUFFD(_ context.Context, opts RunOptions, _ CloneParams) (*Machine, RuntimeConfig, error) {
+	return nil, RuntimeConfig{}, errors.Join(ErrLinuxOnly, opts.UFFDChunks.close())
+}
+
+func RestoreUFFD(_ context.Context, opts RunOptions, _, _ string) (*Machine, RuntimeConfig, error) {
+	return nil, RuntimeConfig{}, errors.Join(ErrLinuxOnly, opts.UFFDChunks.close())
 }
 
 func Start(_ context.Context, _ *Machine) error                    { return ErrLinuxOnly }
 func StopForce(_ *Machine) error                                   { return ErrLinuxOnly }
+func PreserveFailureLog(_ *Machine) string                         { return "" }
 func ShutdownGuest(_ context.Context, _ *Machine) error            { return ErrLinuxOnly }
 func Wait(_ context.Context, _ *Machine) error                     { return ErrLinuxOnly }
 func PID(_ *Machine) (int, error)                                  { return 0, ErrLinuxOnly }

@@ -22,10 +22,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 
 	fcsdk "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
+
+// ErrLaunchExitUnconfirmed means a failed launch may still execute. Callers
+// must retain its execution claim until termination is independently proved.
+// StartClone, StartCloneUFFD, and RestoreUFFD return the Machine and runtime
+// identity with this error so callers can retain and terminate the launch.
+var ErrLaunchExitUnconfirmed = errors.New("failed VM launch exit unconfirmed")
 
 // Machine wraps a Firecracker VM. Cold-booted and 1:1-restored VMs use the
 // embedded SDK machine; fan-out clones (StartClone) use raw, because the clone
@@ -37,6 +44,7 @@ type Machine struct {
 	*fcsdk.Machine
 	raw                *rawMachine
 	log                *vmmLog
+	launchCommand      *exec.Cmd
 	launchCleanup      func()
 	processPID         func() (int, error)
 	prepareOutput      func(string) (string, func() error, error)
@@ -87,10 +95,14 @@ func UFFDWorkingSet(m *Machine) []uint64 {
 // UFFD restore path), driving its API over the unix socket instead of through
 // the SDK.
 type rawMachine struct {
-	cmd     *exec.Cmd
-	sock    string
-	doneCh  chan struct{} // closed when the process exits
-	waitErr error         // exit error, valid once doneCh is closed
+	cmd         *exec.Cmd
+	sock        string
+	doneCh      chan struct{} // closed after exit and cleanup
+	waitErr     error         // launcher exit error, valid once processDone is closed
+	processDone chan struct{}
+	// Set before publishing a raw launch result; immutable thereafter.
+	launchExitProofRequired bool
+	finishOnce              sync.Once
 	// uffd is the page-fault handler backing a UFFD-restored VM's memory; nil
 	// for cold boots and clones. It must outlive the VM (the guest faults
 	// throughout its run) and be torn down when the VM exits.
@@ -102,6 +114,15 @@ type rawMachine struct {
 	beginSnapshotWrite func(bool) (func() error, error)
 	cgroupLeaf         string
 	cleanupOnce        sync.Once
+}
+
+func (m *rawMachine) finishExit() {
+	m.finishOnce.Do(func() {
+		m.uffd.close()
+		m.log.finishExit(m.waitErr)
+		m.cleanupLaunch()
+		close(m.doneCh)
+	})
 }
 
 func (m *rawMachine) cleanupLaunch() {
@@ -302,6 +323,7 @@ func NewMachine(ctx context.Context, opts RunOptions, disableValidation bool) (*
 	return &Machine{
 		Machine:            m,
 		log:                logCloser,
+		launchCommand:      prepared.Command,
 		launchCleanup:      prepared.Cleanup,
 		processPID:         prepared.ProcessPID,
 		prepareOutput:      prepared.PrepareOutput,
@@ -358,6 +380,7 @@ func NewMachineFromSnapshot(ctx context.Context, opts RunOptions, memPath, state
 	return &Machine{
 		Machine:            m,
 		log:                logCloser,
+		launchCommand:      prepared.Command,
 		launchCleanup:      prepared.Cleanup,
 		processPID:         prepared.ProcessPID,
 		prepareOutput:      prepared.PrepareOutput,
@@ -375,13 +398,25 @@ func Start(ctx context.Context, m *Machine) error {
 		return fmt.Errorf("nil machine")
 	}
 	if err := m.Machine.Start(ctx); err != nil {
-		if m.processPID != nil {
-			if pid, pidErr := m.processPID(); pidErr == nil {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
+		m.log.preserveFailure()
+		if m.launchCommand == nil || m.launchCommand.Process == nil {
+			_ = m.log.Close()
+			m.cleanupLaunch()
+			return err
 		}
-		_ = m.log.Close()
-		m.cleanupLaunch()
+		// SDK Wait can report a socket startup failure before cmd.Wait has
+		// completed. Confirm kernel exit before its waiter removes the jail.
+		if stopErr := terminateFailedLaunch(m.launchCommand, m.processPID, m.cgroupLeaf, nil, 5*time.Second); stopErr != nil {
+			return errors.Join(err, stopErr)
+		}
+		m.startSDKWait()
+		waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		select {
+		case <-m.waitDone:
+		case <-waitCtx.Done():
+			return errors.Join(err, fmt.Errorf("%w: SDK waiter: %v", ErrLaunchExitUnconfirmed, waitCtx.Err()))
+		}
 		return err
 	}
 	m.startSDKWait()
@@ -455,6 +490,19 @@ func StopForce(m *Machine) error {
 	return m.Machine.StopVMM()
 }
 
+// PreserveFailureLog keeps the existing bounded console log through rollback.
+// Call before stopping a failed VM; a log already removed at exit cannot be
+// recovered. Retained diagnostics still use the configured age and count limits.
+func PreserveFailureLog(m *Machine) string {
+	if m == nil {
+		return ""
+	}
+	if m.raw != nil {
+		return m.raw.log.preserveFailure()
+	}
+	return m.log.preserveFailure()
+}
+
 // ShutdownGuest requests ACPI-style shutdown via CtrlAltDel. Clones have no SDK
 // machine to drive ACPI, so we SIGTERM the VMM (prompt exit) instead — good
 // enough for a disposable sandbox and keeps destroy() from blocking on Wait.
@@ -472,12 +520,25 @@ func ShutdownGuest(ctx context.Context, m *Machine) error {
 	return m.Machine.Shutdown(ctx)
 }
 
-// Wait blocks until the Firecracker process exits.
+// Wait blocks until the Firecracker process exits. Retained failed launches
+// require kernel or cgroup exit proof before cleanup. ErrLaunchExitUnconfirmed
+// means the caller must keep the handle and execution claim for another attempt.
 func Wait(ctx context.Context, m *Machine) error {
 	if m == nil {
 		return fmt.Errorf("nil machine")
 	}
 	if m.raw != nil {
+		if m.raw.launchExitProofRequired {
+			select {
+			case <-m.raw.doneCh:
+				return m.raw.waitErr
+			default:
+			}
+			if err := awaitLaunchExit(ctx, m.raw.cmd, m.raw.processPID, m.raw.cgroupLeaf, m.raw.processDone, false); err != nil {
+				return err
+			}
+			m.raw.finishExit()
+		}
 		select {
 		case <-m.raw.doneCh:
 			return m.raw.waitErr
@@ -663,9 +724,32 @@ func finalizeSnapshotOutputs(finalizers ...func() error) error {
 //  4. resume.
 //
 // The caller must have created c.TapDevice (unbridged) beforehand, and should
-// attach it to the bridge only after the guest has reidentified.
-func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machine, rt RuntimeConfig, err error) {
+// attach it to the bridge only after the guest has reidentified. An error with
+// ErrLaunchExitUnconfirmed also returns the Machine and runtime identity; the
+// caller must retain them until termination is independently proved.
+func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (*Machine, RuntimeConfig, error) {
+	return startClone(ctx, opts, c, fileClone)
+}
+
+// StartCloneUFFD restores a fresh clone identity before resuming with demand-paged
+// memory. UFFDChunks, when set, supplies RAM without a local memory file. It has
+// the same failed-launch ownership contract as StartClone.
+func StartCloneUFFD(ctx context.Context, opts RunOptions, c CloneParams) (*Machine, RuntimeConfig, error) {
+	return startClone(ctx, opts, c, uffdClone)
+}
+
+type cloneBackend uint8
+
+const (
+	fileClone cloneBackend = iota
+	uffdClone
+)
+
+func startClone(ctx context.Context, opts RunOptions, c CloneParams, backend cloneBackend) (mm *Machine, rt RuntimeConfig, err error) {
 	if err = opts.applyDefaults(); err != nil {
+		if backend == uffdClone {
+			err = errors.Join(err, opts.UFFDChunks.close())
+		}
 		return nil, RuntimeConfig{}, err
 	}
 	var timings LaunchTimings
@@ -675,9 +759,45 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 	opts.RootfsPath = c.CloneRootfsPath
 
 	phaseStarted := time.Now()
-	prepared, err := prepareLaunch(ctx, opts, LaunchHotClone, vmID, opts.SocketPath)
+	mode := LaunchHotClone
+	var src pageSource
+	if backend == uffdClone {
+		mode = LaunchUFFDRestore
+		src, err = buildUFFDSource(opts, c.MemPath)
+		if err != nil {
+			return nil, RuntimeConfig{}, fmt.Errorf("build uffd source: %w", err)
+		}
+		if opts.UFFDChunks != nil {
+			opts.SnapshotMemPath = ""
+		}
+	}
+	prepared, err := prepareLaunch(ctx, opts, mode, vmID, opts.SocketPath)
 	if err != nil {
+		if src != nil {
+			_ = src.close()
+		}
 		return nil, RuntimeConfig{}, err
+	}
+	var h *uffdHandler
+	if src != nil {
+		h, err = startUffdHandler(prepared.HostUFFDPath, src)
+		if err != nil {
+			_ = src.close()
+			prepared.cleanup()
+			return nil, RuntimeConfig{}, fmt.Errorf("start uffd handler: %w", err)
+		}
+		defer func() {
+			if err != nil && mm == nil {
+				h.close()
+			}
+		}()
+		if prepared.ConfigureSocket != nil {
+			if err = prepared.ConfigureSocket(prepared.HostUFFDPath); err != nil {
+				h.close()
+				prepared.cleanup()
+				return nil, RuntimeConfig{}, fmt.Errorf("configure uffd socket permissions: %w", err)
+			}
+		}
 	}
 	timings.Prepare = time.Since(phaseStarted)
 	cmd := prepared.Command
@@ -701,6 +821,8 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		cmd:                cmd,
 		sock:               opts.SocketPath,
 		doneCh:             make(chan struct{}),
+		processDone:        make(chan struct{}),
+		uffd:               h,
 		log:                logCloser,
 		launchCleanup:      prepared.Cleanup,
 		processPID:         prepared.ProcessPID,
@@ -708,16 +830,37 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		beginSnapshotWrite: prepared.BeginSnapshotWrite,
 		cgroupLeaf:         prepared.CgroupLeaf,
 	}
+	if h != nil {
+		h.fatal.set(func(err error) {
+			fmt.Fprintf(os.Stderr, "uffd: terminating VM %s: %v\n", vmID, err)
+			killLaunchProcess(cmd)
+		})
+	}
+	launchResolved := make(chan struct{})
 	go func() {
 		rm.waitErr = cmd.Wait()
-		rm.log.finishExit(rm.waitErr)
-		rm.cleanupLaunch()
-		close(rm.doneCh)
+		close(rm.processDone)
+		<-launchResolved
+		if !rm.launchExitProofRequired {
+			rm.finishExit()
+		}
 	}()
-	// Kill the process on any error below so we don't leak a firecracker.
+	// Returning no Machine permits the caller to reopen its execution claim.
+	// Prove termination before doing so, even when the request was cancelled.
 	defer func() {
+		defer close(launchResolved)
 		if err != nil {
-			killLaunchProcess(cmd)
+			rm.launchExitProofRequired = true
+			rm.log.preserveFailure()
+			stopErr := terminateFailedLaunch(cmd, rm.processPID, rm.cgroupLeaf, rm.processDone, 5*time.Second)
+			if stopErr == nil {
+				rm.finishExit()
+			}
+			err = errors.Join(err, stopErr)
+			if errors.Is(err, ErrLaunchExitUnconfirmed) {
+				mm = &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf, diffCapable: backend == fileClone}
+				rt = RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID, LaunchTimings: timings}
+			}
 		}
 	}()
 
@@ -740,6 +883,10 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		"enable_diff_snapshots": true,
 		"resume_vm":             false,
 		"network_overrides":     []map[string]any{{"iface_id": "1", "host_dev_name": c.TapDevice}},
+	}
+	if backend == uffdClone {
+		load["mem_backend"] = map[string]any{"backend_type": "Uffd", "backend_path": prepared.Paths.UFFD}
+		delete(load, "enable_diff_snapshots")
 	}
 	phaseStarted = time.Now()
 	if err = fcAPI(ctx, client, "PUT", "/snapshot/load", load); err != nil {
@@ -774,8 +921,11 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 		return nil, RuntimeConfig{}, fmt.Errorf("resume: %w", err)
 	}
 	timings.Resume = time.Since(phaseStarted)
+	if h != nil {
+		h.startPrewarm()
+	}
 
-	return &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf, diffCapable: true}, RuntimeConfig{
+	return &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf, diffCapable: backend == fileClone}, RuntimeConfig{
 		SocketPath: opts.SocketPath, VMID: vmID, LaunchTimings: timings,
 	}, nil
 }
@@ -786,13 +936,18 @@ func StartClone(ctx context.Context, opts RunOptions, c CloneParams) (mm *Machin
 // StartClone it drives Firecracker over the raw socket, because SDK v1.0.0's
 // WithSnapshot exposes no mem_backend field. The caller must have recreated the
 // baked tap and staged the rootfs at its baked path first; there is no
-// network_overrides / drive relocation, so this is a plain load+resume.
+// network_overrides / drive relocation, so this is a plain load+resume. It has
+// the same failed-launch ownership contract as StartClone.
 func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string) (mm *Machine, rt RuntimeConfig, err error) {
 	if err = opts.applyDefaults(); err != nil {
+		err = errors.Join(err, opts.UFFDChunks.close())
 		return nil, RuntimeConfig{}, err
 	}
 	vmID := uuid.NewString()
 	opts.SnapshotMemPath = memPath
+	if opts.UFFDChunks != nil {
+		opts.SnapshotMemPath = ""
+	}
 	opts.SnapshotStatePath = statePath
 
 	// Build the page source (local mmap, local chunks, or an injected GCS chunk
@@ -822,7 +977,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		}
 	}
 	defer func() {
-		if err != nil {
+		if err != nil && mm == nil {
 			h.close()
 		}
 	}()
@@ -847,6 +1002,7 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 		cmd:                cmd,
 		sock:               opts.SocketPath,
 		doneCh:             make(chan struct{}),
+		processDone:        make(chan struct{}),
 		uffd:               h,
 		log:                logCloser,
 		launchCleanup:      prepared.Cleanup,
@@ -860,20 +1016,36 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	// instead: the wake fails cleanly and the sandbox stays hibernated for a
 	// retry. Set before LoadSnapshot (which is when FC connects and the fault
 	// goroutine starts), so the fault path always observes the callback.
-	h.fatal.set(func(error) { _ = cmd.Process.Kill() })
+	h.fatal.set(func(err error) {
+		fmt.Fprintf(os.Stderr, "uffd: terminating VM %s: %v\n", vmID, err)
+		killLaunchProcess(cmd)
+	})
 	// When Firecracker exits, the uffd read fails and faultLoop returns on its
 	// own — but tear the handler down explicitly too, to unmap the mem file and
 	// remove the socket.
+	launchResolved := make(chan struct{})
 	go func() {
 		rm.waitErr = cmd.Wait()
-		h.close()
-		rm.log.finishExit(rm.waitErr)
-		rm.cleanupLaunch()
-		close(rm.doneCh)
+		close(rm.processDone)
+		<-launchResolved
+		if !rm.launchExitProofRequired {
+			rm.finishExit()
+		}
 	}()
 	defer func() {
+		defer close(launchResolved)
 		if err != nil {
-			killLaunchProcess(cmd)
+			rm.launchExitProofRequired = true
+			rm.log.preserveFailure()
+			stopErr := terminateFailedLaunch(cmd, rm.processPID, rm.cgroupLeaf, rm.processDone, 5*time.Second)
+			if stopErr == nil {
+				rm.finishExit()
+			}
+			err = errors.Join(err, stopErr)
+			if errors.Is(err, ErrLaunchExitUnconfirmed) {
+				mm = &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf}
+				rt = RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}
+			}
 		}
 	}()
 
@@ -900,6 +1072,90 @@ func RestoreUFFD(ctx context.Context, opts RunOptions, memPath, statePath string
 	// faults, exactly like fault-ahead prefetch (which is safe at high concurrency).
 	h.startPrewarm()
 	return &Machine{raw: rm, cgroupLeaf: rm.cgroupLeaf, diffCapable: false}, RuntimeConfig{SocketPath: opts.SocketPath, VMID: vmID}, nil
+}
+
+// A jailer parent can exit before its Firecracker child. Kernel process handles
+// and the dedicated cgroup establish exit independently of launcher/SDK Wait.
+func terminateFailedLaunch(cmd *exec.Cmd, processPID func() (int, error), cgroupLeaf string, done <-chan struct{}, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return awaitLaunchExit(ctx, cmd, processPID, cgroupLeaf, done, true)
+}
+
+// Awaiting an unconfirmed launch is read-only. Only failed-launch rollback
+// sends signals; callers retain the handle when exit cannot be proved.
+func awaitLaunchExit(ctx context.Context, cmd *exec.Cmd, processPID func() (int, error), cgroupLeaf string, done <-chan struct{}, terminate bool) error {
+	var fds []unix.PollFd
+	defer func() {
+		for _, fd := range fds {
+			_ = unix.Close(int(fd.Fd))
+		}
+	}()
+	var proofErr error
+	watch := func(pid int, kill bool) {
+		fd, err := unix.PidfdOpen(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			proofErr = errors.Join(proofErr, err)
+			return
+		}
+		fds = append(fds, unix.PollFd{Fd: int32(fd), Events: unix.POLLIN})
+		if kill {
+			_ = unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
+		}
+	}
+	watch(cmd.Process.Pid, false)
+	if processPID != nil {
+		if pid, err := processPID(); err == nil {
+			if pid != cmd.Process.Pid {
+				watch(pid, terminate)
+			}
+		} else if cgroupLeaf == "" {
+			proofErr = errors.Join(proofErr, err)
+		}
+	}
+	if terminate {
+		killLaunchProcess(cmd)
+		if cgroupLeaf != "" {
+			// The process group is also killed for kernels without cgroup.kill.
+			_ = os.WriteFile(filepath.Join(cgroupLeaf, "cgroup.kill"), []byte("1"), 0200)
+		}
+	}
+	if proofErr != nil {
+		return fmt.Errorf("%w: %v", ErrLaunchExitUnconfirmed, proofErr)
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		exited := true
+		if _, err := unix.Poll(fds, 0); err != nil && !errors.Is(err, syscall.EINTR) {
+			return fmt.Errorf("%w: poll: %v", ErrLaunchExitUnconfirmed, err)
+		}
+		for _, fd := range fds {
+			exited = exited && fd.Revents&(unix.POLLIN|unix.POLLHUP) != 0
+		}
+		if exited && cgroupLeaf != "" {
+			b, err := os.ReadFile(filepath.Join(cgroupLeaf, "cgroup.events"))
+			exited = errors.Is(err, os.ErrNotExist) || (err == nil && strings.Contains("\n"+string(b), "\npopulated 0\n"))
+		}
+		if exited {
+			if done == nil {
+				return nil
+			}
+			select {
+			case <-done:
+				return nil
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrLaunchExitUnconfirmed, ctx.Err())
+		case <-tick.C:
+		}
+	}
 }
 
 func killLaunchProcess(cmd *exec.Cmd) {

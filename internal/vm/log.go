@@ -69,15 +69,16 @@ func (w *boundedLogFile) Close() error {
 
 var _ io.WriteCloser = (*boundedLogFile)(nil)
 
-// vmmLog owns one Firecracker diagnostic file. Expected lifecycle exits are
-// deleted after the process has stopped; unexpected exits retain their capped
-// file for debugging. Retained files are pruned by both age and count.
+// vmmLog owns one Firecracker diagnostic file. Normal lifecycle exits delete
+// their logs; crashes and failed-readiness rollbacks retain their capped file.
+// Retained files are pruned by both age and count.
 type vmmLog struct {
 	*boundedLogFile
 	path      string
 	retention time.Duration
 	maxFiles  int
 	expected  atomic.Bool
+	failure   atomic.Bool
 	finish    sync.Once
 }
 
@@ -120,9 +121,17 @@ func (l *vmmLog) markExpectedExit() {
 	}
 }
 
+func (l *vmmLog) preserveFailure() string {
+	if l == nil {
+		return ""
+	}
+	l.failure.Store(true)
+	return l.path
+}
+
 // finishExit must run only after the VMM process has exited. Clean and
-// explicitly requested exits remove their diagnostics immediately. A crash
-// retains the bounded file for the configured diagnostic window.
+// explicitly requested exits remove their diagnostics unless failure retention
+// was requested. Retained files use the configured diagnostic window.
 func (l *vmmLog) finishExit(waitErr error) {
 	if l == nil {
 		return
@@ -132,7 +141,7 @@ func (l *vmmLog) finishExit(waitErr error) {
 		activeVMMLogs.Lock()
 		delete(activeVMMLogs.paths, l.path)
 		activeVMMLogs.Unlock()
-		if waitErr == nil || l.expected.Load() {
+		if !l.failure.Load() && (waitErr == nil || l.expected.Load()) {
 			_ = os.Remove(l.path)
 		}
 		_ = pruneVMMLogs(filepath.Dir(l.path), l.retention, l.maxFiles, time.Now())

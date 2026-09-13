@@ -102,6 +102,56 @@ func TestVMMLogUnexpectedExitIsRetained(t *testing.T) {
 	}
 }
 
+func TestVMMLogFailureSurvivesRollbackExit(t *testing.T) {
+	for _, clean := range []bool{false, true} {
+		name := "killed"
+		if clean {
+			name = "clean"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "firecracker-readiness.log")
+			log, err := openVMMLog(path, 32, time.Hour, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := log.Write([]byte("guest thaw diagnostic")); err != nil {
+				t.Fatal(err)
+			}
+			if got := log.preserveFailure(); got != path {
+				t.Fatalf("diagnostic path %q, want %q", got, path)
+			}
+			log.markExpectedExit()
+			var exitErr error
+			if !clean {
+				exitErr = errors.New("signal: killed")
+			}
+			log.finishExit(exitErr)
+			log.finishExit(nil)
+			if got, err := os.ReadFile(path); err != nil || string(got) != "guest thaw diagnostic" {
+				t.Fatalf("rollback discarded failure console: %q, %v", got, err)
+			}
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("retained log permissions: %v, %v", info, err)
+			}
+			if err := pruneVMMLogs(dir, time.Hour, 8, time.Now().Add(2*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("failure diagnostic escaped retention limit: %v", err)
+			}
+		})
+	}
+}
+
+func TestVMMLogFailureRetentionWithoutLog(t *testing.T) {
+	var log *vmmLog
+	if path := log.preserveFailure(); path != "" {
+		t.Fatalf("missing log returned path %q", path)
+	}
+}
+
 func TestPruneVMMLogsBoundsAgeCountAndPermissions(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()

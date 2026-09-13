@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -55,6 +56,10 @@ type uffdHandler struct {
 	stopFD int
 	stopMu sync.Mutex // serializes signalStop vs closeStop (no write-after-close)
 
+	connMu sync.Mutex
+	conn   *net.UnixConn
+	closed bool
+
 	closeOnce sync.Once // guards listener close + stop signal + socket removal
 	srcOnce   sync.Once // guards src.close() + stopFD close (owned by fault goroutine)
 }
@@ -90,6 +95,14 @@ func (h *uffdHandler) accept() {
 	if err != nil {
 		return // listener closed before Firecracker connected (restore failed)
 	}
+	h.connMu.Lock()
+	if h.closed {
+		h.connMu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	h.conn = conn
+	h.connMu.Unlock()
 	h.serve(conn)
 }
 
@@ -102,18 +115,21 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 	oob := make([]byte, unix.CmsgSpace(4)) // room for a single fd
 	n, oobn, _, _, err := conn.ReadMsgUnix(body, oob)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "uffd: recv mappings: %v\n", err)
+		h.fail(fmt.Errorf("uffd: recv mappings: %w", err))
 		return
 	}
 	scms, err := unix.ParseSocketControlMessage(oob[:oobn])
 	if err != nil || len(scms) == 0 {
-		fmt.Fprintf(os.Stderr, "uffd: parse control message: %v\n", err)
+		h.fail(fmt.Errorf("uffd: missing or invalid control message: %v", err))
 		return
 	}
 	fds, err := unix.ParseUnixRights(&scms[0])
 	if err != nil || len(fds) == 0 {
-		fmt.Fprintf(os.Stderr, "uffd: no fd in control message: %v\n", err)
+		h.fail(fmt.Errorf("uffd: missing or invalid fd: %v", err))
 		return
+	}
+	for _, fd := range fds[1:] {
+		_ = unix.Close(fd)
 	}
 	uffd := fds[0]
 	defer unix.Close(uffd)
@@ -122,15 +138,20 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 	// close() on FC process-exit) gives faultLoop a deterministic exit — the uffd's
 	// own POLLHUP is unreliable on FC teardown (see the stopFD comment).
 	if err := unix.SetNonblock(uffd, true); err != nil {
-		fmt.Fprintf(os.Stderr, "uffd: set nonblock: %v\n", err)
+		h.fail(fmt.Errorf("uffd: set nonblock: %w", err))
+		return
 	}
 
 	var regions []guestRegion
 	if err := json.Unmarshal(body[:n], &regions); err != nil {
-		fmt.Fprintf(os.Stderr, "uffd: parse mappings %q: %v\n", string(body[:n]), err)
+		h.fail(fmt.Errorf("uffd: parse mappings: %w", err))
 		return
 	}
 
+	if len(regions) == 0 {
+		h.fail(fmt.Errorf("uffd: empty memory mappings"))
+		return
+	}
 	h.faultLoop(uffd, regions)
 	fmt.Fprintf(os.Stderr, "uffd: handler exiting: %s\n", h.hist.summary())
 }
@@ -146,7 +167,7 @@ func (h *uffdHandler) serve(conn *net.UnixConn) {
 func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "uffd: fault loop panic (wake will fail, serve survives): %v\n", r)
+			h.fail(fmt.Errorf("uffd: fault loop panic: %v", r))
 		}
 	}()
 	// One-time dump of the real region layout — base/size/offset/page size —
@@ -166,6 +187,7 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 			if err == unix.EINTR {
 				continue
 			}
+			h.fail(fmt.Errorf("uffd: poll faults: %w", err))
 			return
 		}
 		// Stop eventfd signaled by close() = Firecracker exited. Return so serve()
@@ -186,6 +208,7 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 			if err == unix.EAGAIN || err == unix.EINTR {
 				continue
 			}
+			h.fail(fmt.Errorf("uffd: read faults: %w", err))
 			return
 		}
 		if n <= 0 {
@@ -209,7 +232,7 @@ func (h *uffdHandler) faultLoop(uffd int, regions []guestRegion) {
 func (h *uffdHandler) copyWindow(uffd int, regions []guestRegion, addr uint64) {
 	dst, srcOff, length, ok := faultWindow(regions, addr, prefetchPages)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "uffd: fault @%#x maps to no region\n", addr)
+		h.fail(fmt.Errorf("uffd: fault @%#x maps to no region", addr))
 		return
 	}
 	h.copyRange(uffd, dst, srcOff, length)
@@ -236,12 +259,12 @@ func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
 		// File-backend wake, rather than hanging the guest. localSource never
 		// errors; the GCS source (B2) does. fatal fires once, then poll() sees
 		// POLLHUP as FC dies and serve() tears down normally.
-		fmt.Fprintf(os.Stderr, "uffd: source at %#x len %d: %v\n", srcOff, length, err)
-		h.fatal.fire(err)
+		h.fail(fmt.Errorf("source at %#x len %d: %w", srcOff, length, err))
 		return
 	}
-	if len(buf) == 0 {
-		return // nothing at this offset (past image end); guest refaults if needed
+	if len(buf) == 0 || len(buf)%4096 != 0 || uint64(len(buf)) > length {
+		h.fail(fmt.Errorf("uffd: source returned invalid length %d for fault at %#x length %d", len(buf), srcOff, length))
+		return
 	}
 	arg := uffdioCopyArg{
 		Dst: dst,
@@ -249,12 +272,24 @@ func (h *uffdHandler) copyRange(uffd int, dst, srcOff, length uint64) {
 		Len: uint64(len(buf)),
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(uffd), uintptr(uffdioCopy), uintptr(unsafe.Pointer(&arg)))
+	// The kernel reads through arg.Src, an integer the GC cannot trace.
+	runtime.KeepAlive(buf)
 	// EEXIST: part of the run was already populated (prewarm, a prior fault-ahead,
 	// or a racing fault) — benign; a faulting page is at the run's head and gets
 	// copied up to the first present page, so the guest still progresses.
 	// EAGAIN: the mapping changed under us (removed) — the guest will refault.
 	if errno != 0 && errno != unix.EEXIST && errno != unix.EAGAIN {
-		fmt.Fprintf(os.Stderr, "uffd: copy %d bytes @%#x: %v\n", len(buf), dst, errno)
+		h.fail(fmt.Errorf("uffd: copy %d bytes @%#x: %w", len(buf), dst, errno))
+	}
+}
+
+// fail terminates an unservable guest unless its teardown already started.
+func (h *uffdHandler) fail(err error) {
+	h.connMu.Lock()
+	closed := h.closed
+	h.connMu.Unlock()
+	if !closed && h.fatal.fire(err) {
+		fmt.Fprintf(os.Stderr, "uffd: stopped VM after unservable fault: %v\n", err)
 	}
 }
 
@@ -268,6 +303,12 @@ func (h *uffdHandler) close() {
 		return
 	}
 	h.closeOnce.Do(func() {
+		h.connMu.Lock()
+		h.closed = true
+		if h.conn != nil {
+			_ = h.conn.Close()
+		}
+		h.connMu.Unlock()
 		h.signalStop() // wake faultLoop's poll() so it exits and releaseSource runs
 		if h.ln != nil {
 			_ = h.ln.Close()

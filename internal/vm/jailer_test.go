@@ -195,8 +195,8 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 	memHighPath := filepath.Join(leaf, "memory.high")
 	if got, err := os.ReadFile(memHighPath); err != nil {
 		t.Fatal(err)
-	} else if want := strconv.FormatInt(memCurrent+snapshotMemoryHighMargin(1237319680-memCurrent), 10); string(got) != want {
-		t.Fatalf("snapshot memory.high = %q, want %q (current + margin)", got, want)
+	} else if want := strconv.FormatInt(((req.MemMIB+cfg.EffectiveMemoryOverheadMIB())<<20)+snapshotMemoryHighMarginMax, 10); string(got) != want {
+		t.Fatalf("snapshot memory.high = %q, want %q (resident UFFD guest allowance + cache margin)", got, want)
 	}
 	ioMaxPath := filepath.Join(leaf, "io.max")
 	if got, err := os.ReadFile(ioMaxPath); err != nil {

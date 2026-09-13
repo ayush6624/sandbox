@@ -6,6 +6,7 @@ package vm
 // x/sys/unix supports darwin, so the mmap-backed localSource builds there too.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -258,8 +259,11 @@ func newLocalChunkedSource(memPath string, chunkBytes uint64) (*chunkedSource, e
 // chunked source if a chunk size is set (B1); else the whole-file mmap (default).
 func buildUFFDSource(opts RunOptions, memPath string) (pageSource, error) {
 	if c := opts.UFFDChunks; c != nil {
-		// Injected loader (server's GCS fetch); no local backing store to close.
-		return newChunkedSource(c.Total, c.ChunkSize, c.Prefetch, c.Load, nil, c.Prewarm), nil
+		if c.Total == 0 || c.Total%4096 != 0 || c.ChunkSize == 0 || c.ChunkSize%4096 != 0 || c.Load == nil {
+			err := fmt.Errorf("uffd chunks require positive page-aligned total and chunk sizes and a loader")
+			return nil, errors.Join(err, c.close())
+		}
+		return newChunkedSource(c.Total, c.ChunkSize, c.Prefetch, c.Load, c.close, c.Prewarm), nil
 	}
 	if opts.UFFDChunkBytes > 0 {
 		return newLocalChunkedSource(memPath, opts.UFFDChunkBytes)
@@ -318,7 +322,14 @@ func (cs *chunkedSource) chunk(idx uint64) ([]byte, error) {
 	cs.inflight[idx] = cl
 	cs.mu.Unlock()
 
-	cl.buf, cl.err = cs.load(idx)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				cl.err = fmt.Errorf("load chunk %d panicked: %v", idx, r)
+			}
+		}()
+		cl.buf, cl.err = cs.load(idx)
+	}()
 
 	cs.mu.Lock()
 	if cl.err == nil && cl.buf != nil && !cs.closed {
@@ -437,7 +448,13 @@ func (cs *chunkedSource) startPrewarm() {
 	if n := uint64(len(indices)); n < workers {
 		workers = n
 	}
+	cs.mu.Lock()
+	if cs.closed {
+		cs.mu.Unlock()
+		return
+	}
 	cs.wg.Add(int(workers))
+	cs.mu.Unlock()
 	for w := uint64(0); w < workers; w++ {
 		go func() {
 			defer cs.wg.Done()

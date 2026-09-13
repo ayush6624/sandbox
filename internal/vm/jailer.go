@@ -508,7 +508,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		}
 		return "/snapshots/" + name, finalize, nil
 	}
-	beginSnapshotWrite := snapshotWriteWindow(cfg, req.VMID, req.MemMIB)
+	beginSnapshotWrite := snapshotWriteWindow(cfg, req.VMID, req.MemMIB, req.Mode)
 
 	return PreparedLaunch{
 		Command:            cmd,
@@ -577,7 +577,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 // an error and vm.Snapshot aborts before issuing /snapshot/create. The VMM is
 // still alive and paused at that point, so the caller's resume succeeds and the
 // sandbox survives — an error instead of silent destruction.
-func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(bool) (func() error, error) {
+func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64, mode LaunchMode) func(bool) (func() error, error) {
 	leaf := jailerCgroupLeaf(cfg, vmID)
 	ioPath := filepath.Join(leaf, "io.max")
 	relaxIO := cfg.IODevice != "" && cfg.IOWriteBPS > 0
@@ -587,6 +587,12 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(
 	// make room for. Captured here because only the launcher knows the guest's
 	// size; Snapshot only has to say which kind of snapshot it is taking.
 	burst := guestMemMIB << 20
+	var footprintFloor int64
+	if mode == LaunchUFFDRestore {
+		// Full capture faults every missing UFFD page into private guest RAM.
+		// Its resident footprint can therefore grow after the window opens.
+		footprintFloor = (guestMemMIB + cfg.EffectiveMemoryOverheadMIB()) << 20
+	}
 
 	return func(_ bool) (func() error, error) {
 		var (
@@ -597,12 +603,12 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(
 		// itself, so independent diff snapshots can still write in parallel.
 		snapshotReservationMu.Lock()
 		var err error
-		restoreMax, err = reserveSnapshotMemory(cfg, leaf, burst)
+		restoreMax, err = reserveSnapshotMemory(cfg, leaf, burst, footprintFloor)
 		snapshotReservationMu.Unlock()
 		if err != nil {
 			return nil, err
 		}
-		restoreHigh, err := armSnapshotMemoryHigh(leaf)
+		restoreHigh, err := armSnapshotMemoryHigh(leaf, footprintFloor)
 		if err != nil {
 			snapshotReservationMu.Lock()
 			_ = restoreMax()
@@ -628,10 +634,10 @@ func snapshotWriteWindow(cfg JailerConfig, vmID string, guestMemMIB int64) func(
 						errs = append(errs, fmt.Errorf("restore snapshot write throttle: %w", err))
 					}
 				}
-				// memory.max comes back BEFORE memory.high is lifted: the
-				// ceiling has kept actual usage low throughout, so lowering the
-				// hard limit here reclaims nothing and cannot OOM. Lifting the
-				// ceiling first would remove that guarantee.
+				// Restore the hard limit while the write-cache ceiling is still
+				// active. UFFD capture may have populated all guest RAM; lowering
+				// the limit can reclaim the bounded file cache above its ordinary
+				// RAM-plus-overhead allowance.
 				snapshotReservationMu.Lock()
 				err := restoreMax()
 				snapshotReservationMu.Unlock()
@@ -666,7 +672,7 @@ const serveMemoryReserve = int64(2 << 30)
 // cgroup, so it is bounded by what is genuinely unreserved there. Overcommitting
 // the parent is the one failure mode worth refusing service over: it OOMs serve
 // and every VM on the host at once.
-func reserveSnapshotMemory(cfg JailerConfig, leaf string, burst int64) (func() error, error) {
+func reserveSnapshotMemory(cfg JailerConfig, leaf string, burst, footprintFloor int64) (func() error, error) {
 	limit, err := cgroupLimitBytes(filepath.Join(leaf, "memory.max"))
 	if err != nil {
 		return nil, fmt.Errorf("read VM memory limit: %w", err)
@@ -681,7 +687,7 @@ func reserveSnapshotMemory(cfg JailerConfig, leaf string, burst int64) (func() e
 
 	// Room for the guest's footprint plus a fully dirty copy of the write, plus
 	// one margin so memory.high has a band to work in above the footprint.
-	want := current + burst + snapshotMemoryHighMarginMax
+	want := max(current, footprintFloor) + burst + snapshotMemoryHighMarginMax
 	if want <= limit {
 		return func() error { return nil }, nil // the leaf is already big enough
 	}
@@ -794,21 +800,15 @@ func snapshotMemoryHighMargin(slack int64) int64 {
 	return margin
 }
 
-// armSnapshotMemoryHigh installs a reclaim ceiling just above the VM's current
-// footprint and returns the restore callback.
+// armSnapshotMemoryHigh installs a reclaim ceiling above the resident footprint
+// and returns the restore callback. UFFD capture supplies the full guest RAM
+// allowance as a floor because reading missing pages makes them resident. File
+// restores use current usage: reading their untouched zero pages does not create
+// the same private anonymous allocation.
 //
-// The ceiling is derived from memory.current rather than from mem_mib because
-// what matters is what the guest has actually TOUCHED: untouched guest pages map
-// to the shared zero page and are never charged, so a configured size tells us
-// nothing about the real headroom. Deriving it also means this needs no
-// knowledge of the guest's configuration.
-//
-// It must land ABOVE the current footprint: memory.swap.max is 0, so guest
-// anonymous pages cannot be reclaimed at all. A ceiling below them would throttle
-// against memory that can never be freed — a hard stall, then the OOM this is
-// meant to avoid. Reclaim can only target the snapshot file's page cache, which
-// is precisely the intent.
-func armSnapshotMemoryHigh(leaf string) (func() error, error) {
+// With swap disabled, guest anonymous memory cannot be reclaimed. The ceiling
+// must cover that memory, leaving only a bounded band for snapshot write cache.
+func armSnapshotMemoryHigh(leaf string, footprintFloor int64) (func() error, error) {
 	highPath := filepath.Join(leaf, "memory.high")
 	previous, err := os.ReadFile(highPath)
 	if err != nil {
@@ -835,12 +835,13 @@ func armSnapshotMemoryHigh(leaf string) (func() error, error) {
 		return nil, fmt.Errorf("read VM memory usage: %w", err)
 	}
 
-	if current >= limit {
+	footprint := max(current, footprintFloor)
+	if footprint >= limit {
 		// Already at the fence: there is nowhere to put a ceiling, so the
 		// kernel is the only thing standing between this write and an OOM kill.
 		// Refuse while the VMM is alive and resumable.
-		return nil, fmt.Errorf("snapshot cannot proceed safely: the VM is already using %d of its %d MiB limit (see docs/cgroup-memory-model.md)",
-			current>>20, limit>>20)
+		return nil, fmt.Errorf("snapshot cannot proceed safely: the VM needs a %d MiB resident allowance within its %d MiB limit (see docs/cgroup-memory-model.md)",
+			footprint>>20, limit>>20)
 	}
 
 	// Size the band from the slack actually available, then clamp under the
@@ -849,15 +850,15 @@ func armSnapshotMemoryHigh(leaf string) (func() error, error) {
 	// is strictly better than the unprotected write that used to happen here.
 	// Refusing instead would break small sandboxes that already worked — a
 	// 128 MiB guest sits close to its own limit because that limit is small.
-	high := current + snapshotMemoryHighMargin(limit-current)
+	high := footprint + snapshotMemoryHighMargin(limit-footprint)
 	if high >= limit {
 		high = limit - snapshotMemoryHighReserve
 	}
-	if high < current {
+	if high < footprint {
 		// Never place the ceiling below the current footprint: with no swap the
 		// guest's anonymous pages cannot be reclaimed, so that would throttle
 		// against memory which can never be freed.
-		high = current
+		high = footprint
 	}
 	if err := os.WriteFile(highPath, []byte(strconv.FormatInt(high, 10)), 0600); err != nil {
 		return nil, fmt.Errorf("arm snapshot memory ceiling (snapshot would risk OOM-killing the VMM): %w", err)

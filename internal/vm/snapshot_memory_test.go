@@ -55,7 +55,7 @@ func TestArmSnapshotMemoryHighUsesCurrentPlusMargin(t *testing.T) {
 		"memory.high":    "max",
 	})
 
-	restore, err := armSnapshotMemoryHigh(leaf)
+	restore, err := armSnapshotMemoryHigh(leaf, 0)
 	if err != nil {
 		t.Fatalf("arm: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestArmSnapshotMemoryHighStaysAboveCurrentFootprint(t *testing.T) {
 		"memory.high":    "max",
 	})
 
-	if _, err := armSnapshotMemoryHigh(leaf); err != nil {
+	if _, err := armSnapshotMemoryHigh(leaf, 0); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	high, err := strconv.ParseInt(readLeaf(t, leaf, "memory.high"), 10, 64)
@@ -112,7 +112,7 @@ func TestArmSnapshotMemoryHighClampsWhenMarginDoesNotFit(t *testing.T) {
 		"memory.high":    "max",
 	})
 
-	if _, err := armSnapshotMemoryHigh(leaf); err != nil {
+	if _, err := armSnapshotMemoryHigh(leaf, 0); err != nil {
 		t.Fatalf("a tight cgroup must still be protected, not refused: %v", err)
 	}
 	high, err := strconv.ParseInt(readLeaf(t, leaf, "memory.high"), 10, 64)
@@ -138,10 +138,10 @@ func TestArmSnapshotMemoryHighRefusesAtTheFence(t *testing.T) {
 		"memory.high":    "max",
 	})
 
-	if _, err := armSnapshotMemoryHigh(leaf); err == nil {
+	if _, err := armSnapshotMemoryHigh(leaf, 0); err == nil {
 		t.Fatal("expected a refusal for a VM already at its memory limit")
-	} else if !strings.Contains(err.Error(), "already using") {
-		t.Fatalf("error should say the VM is already at its limit, got: %v", err)
+	} else if !strings.Contains(err.Error(), "resident allowance") {
+		t.Fatalf("error should explain that the resident allowance reaches the limit, got: %v", err)
 	}
 	// The refusal must not leave a ceiling behind on a VM that keeps running.
 	if got := readLeaf(t, leaf, "memory.high"); got != "max" {
@@ -158,7 +158,7 @@ func TestArmSnapshotMemoryHighSkipsUnlimitedCgroup(t *testing.T) {
 		"memory.high":    "max",
 	})
 
-	restore, err := armSnapshotMemoryHigh(leaf)
+	restore, err := armSnapshotMemoryHigh(leaf, 0)
 	if err != nil {
 		t.Fatalf("arm: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestArmSnapshotMemoryHighFailsClosedOnMissingFiles(t *testing.T) {
 		"empty leaf": {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := armSnapshotMemoryHigh(fakeLeaf(t, files)); err == nil {
+			if _, err := armSnapshotMemoryHigh(fakeLeaf(t, files), 0); err == nil {
 				t.Fatal("expected the guard to fail closed")
 			}
 		})
@@ -217,7 +217,7 @@ func TestSnapshotWriteWindowGuardsMemoryWithoutIOLimits(t *testing.T) {
 		}
 	}
 
-	window := snapshotWriteWindow(cfg, "vm-1", 1024)
+	window := snapshotWriteWindow(cfg, "vm-1", 1024, LaunchHotClone)
 	if window == nil {
 		t.Fatal("jailed launch must always get a snapshot window: the memory guard is not optional")
 	}
@@ -268,7 +268,7 @@ func TestSnapshotWriteWindowRefusesWhenParentHasNoHeadroom(t *testing.T) {
 		}
 	}
 
-	_, err := snapshotWriteWindow(cfg, "vm-1", 1024)(true)
+	_, err := snapshotWriteWindow(cfg, "vm-1", 1024, LaunchHotClone)(true)
 	if err == nil {
 		t.Fatal("expected a refusal when the task cgroup has nothing unreserved")
 	}
@@ -308,7 +308,7 @@ func TestSnapshotWriteWindowDiffReservesWorstCaseBurst(t *testing.T) {
 		}
 	}
 
-	restore, err := snapshotWriteWindow(cfg, "vm-1", 1024)(false)
+	restore, err := snapshotWriteWindow(cfg, "vm-1", 1024, LaunchHotClone)(false)
 	if err != nil {
 		t.Fatalf("open diff window: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestSnapshotWriteWindowAccountsForConcurrentReservations(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		windows = append(windows, snapshotWriteWindow(cfg, vmID, 1024))
+		windows = append(windows, snapshotWriteWindow(cfg, vmID, 1024, LaunchHotClone))
 	}
 
 	restoreFirst, err := windows[0](false)
@@ -398,7 +398,7 @@ func TestReserveSnapshotMemoryRaisesAndRestores(t *testing.T) {
 		}
 	}
 
-	restore, err := reserveSnapshotMemory(cfg, leafPath, burst)
+	restore, err := reserveSnapshotMemory(cfg, leafPath, burst, 0)
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestReserveSnapshotMemoryNoOpWhenLeafIsBigEnough(t *testing.T) {
 		}
 	}
 
-	if _, err := reserveSnapshotMemory(cfg, leafPath, 1024<<20); err != nil {
+	if _, err := reserveSnapshotMemory(cfg, leafPath, 1024<<20, 0); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 	if got := readLeaf(t, leafPath, "memory.max"); got != strconv.FormatInt(limit, 10) {
@@ -558,5 +558,82 @@ func TestSnapshotMemoryHighMarginScalesWithSlack(t *testing.T) {
 	slack := int64(112 << 20)
 	if margin := snapshotMemoryHighMargin(slack); margin > slack/2 {
 		t.Fatalf("margin %d MiB consumes more than half of %d MiB of slack", margin>>20, slack>>20)
+	}
+}
+
+// A live UFFD capture stalled with memory.high=573943808, usage=729235456,
+// and its writer blocked in mem_cgroup_handle_over_high. The old guard sampled
+// 506834944 bytes before full capture began faulting in the rest of a 1 GiB VM.
+func TestSnapshotWriteWindowUFFDAllowsFullResidentRAM(t *testing.T) {
+	const (
+		initialCurrent = int64(506834944)
+		guestRAM       = int64(1024 << 20)
+		ordinaryLimit  = int64(1180 << 20)
+	)
+	for _, tc := range []struct {
+		name       string
+		full       bool
+		parentMax  int64
+		wantRefuse bool
+	}{
+		{"full capture", true, 57 << 30, false},
+		{"dirty capture", false, 57 << 30, false},
+		// The old reservation fits, but the resident guest plus write burst does
+		// not. Refuse before changing policy, rather than overcommit the parent.
+		{"insufficient resident headroom", true, serveMemoryReserve + initialCurrent + guestRAM + snapshotMemoryHighMarginMax, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := JailerConfig{CgroupRoot: t.TempDir(), CgroupParent: "task", MemoryOverheadMIB: 156}
+			leaf := jailerCgroupLeaf(cfg, "vm-lazy")
+			if err := os.MkdirAll(leaf, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeParentLimit(t, cfg, tc.parentMax)
+			for name, value := range map[string]string{
+				"memory.max":     strconv.FormatInt(ordinaryLimit, 10),
+				"memory.current": strconv.FormatInt(initialCurrent, 10),
+				"memory.high":    "max",
+			} {
+				if err := os.WriteFile(filepath.Join(leaf, name), []byte(value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restore, err := snapshotWriteWindow(cfg, "vm-lazy", 1024, LaunchUFFDRestore)(tc.full)
+			if tc.wantRefuse {
+				if err == nil || !strings.Contains(err.Error(), "unreserved") {
+					t.Fatalf("expected resident-memory reservation refusal, got %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				high, err := cgroupLimitBytes(filepath.Join(leaf, "memory.high"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				raised, err := cgroupLimitBytes(filepath.Join(leaf, "memory.max"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if high <= ordinaryLimit || high > ordinaryLimit+snapshotMemoryHighMarginMax {
+					t.Fatalf("high=%d must cover all guest RAM and overhead with a bounded cache band", high)
+				}
+				if raised < ordinaryLimit+guestRAM || high >= raised {
+					t.Fatalf("raised=%d high=%d: missing full resident RAM plus write reservation", raised, high)
+				}
+				if err := restore(); err != nil {
+					t.Fatal(err)
+				}
+				if err := restore(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := readLeaf(t, leaf, "memory.max"); got != strconv.FormatInt(ordinaryLimit, 10) {
+				t.Fatalf("memory.max=%s after close/refusal", got)
+			}
+			if got := readLeaf(t, leaf, "memory.high"); got != "max" {
+				t.Fatalf("memory.high=%s after close/refusal", got)
+			}
+		})
 	}
 }

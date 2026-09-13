@@ -95,16 +95,26 @@ func processArgs(socketPath, vmID string, disableSeccomp bool) []string {
 // GCS-resident chunks without the vm package importing gcsblob. Total/ChunkSize
 // come from the chunk manifest; Prefetch is the chunk-level fault-ahead window;
 // Load returns the decompressed bytes of chunk idx (nil past the image, error =
-// unservable fault → the VM is killed).
+// unservable fault → the VM is killed). StartCloneUFFD and RestoreUFFD consume
+// the source when called. They invoke Close exactly once on every failure, or
+// after the UFFD fault handler and its background loads have drained.
 type UFFDChunkSource struct {
 	Total     uint64
 	ChunkSize uint64
 	Prefetch  uint64
 	Load      func(idx uint64) ([]byte, error)
+	Close     func() error
 	// Prewarm is last wake's working set (chunk indices) to bulk-fetch in the
 	// background as the guest resumes, so a cold wake doesn't fault-storm GCS one
 	// chunk at a time (roadmap B3). Empty on the first wake (nothing recorded yet).
 	Prewarm []uint64
+}
+
+func (s *UFFDChunkSource) close() error {
+	if s == nil || s.Close == nil {
+		return nil
+	}
+	return s.Close()
 }
 
 // RuntimeConfig captures identifiers after the SDK config is built.
