@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.10.0 - 2026-09-13
+
+### Added
+
+- **Durable single creates.** `Sandbox.createAsync()` and
+  `client.sandboxes.createAsync()` accept one create through
+  `POST /v1/sandbox-creations` and return an `Operation<Sandbox>` before the
+  sandbox is ready. A dropped connection is recovered by reading the
+  operation, not by retrying the create and getting a second sandbox.
+- **`CreateAcceptanceError`.** Thrown when acceptance itself is unconfirmed.
+  It carries the `idempotencyKey` to replay with; recovery must use the same
+  endpoint and key, never a different create endpoint.
+- **Create progress.** `CreateProgress`, `CreateStageMark`,
+  `CreateCompletedStageMark`, `CreateWorkerProgress`, and
+  `CreateCoordination` expose per-stage create state on an operation's
+  members.
+- **`client.snapshots.waitForDurable(id)`.** Resolves once a snapshot reaches
+  `durable`, and throws `snapshot_upload_failed` on a terminal upload failure
+  instead of polling forever. `SnapshotResource.upload` reports that state;
+  it is present only on the host that owns an unfinished original capture.
+- **`SandboxResourceOverrides`.** `vcpus` and `memoryMib` are now
+  independently optional. Missing or zero takes the worker's template
+  default and preserves warm-pool eligibility; a positive value forces a cold
+  create.
+- **`RequestOpts.redirect`.** Overrides fetch redirect handling for requests
+  that must stay on one endpoint.
+
+### Changed
+
+- `CreateSandboxOptions.resources` is now `SandboxResourceOverrides` rather
+  than `SandboxResources`. This widens the type, so existing code that passes
+  both fields type-checks unchanged.
+- Creating from a snapshot or a non-default template with a positive `vcpus`
+  or `memoryMib` now throws client-side. It previously reached the server and
+  came back as a 400; a snapshot restores whatever resources it captured.
+- `idleTimeoutMs: -1` disables idle hibernation. Other negative values still
+  throw.
+- Error and documentation examples no longer embed a real fleet IP address.
+
+Supported server contract: `/v1` (`api/openapi.yaml` version `1.7.0`).
+
 ## 2.9.1 - 2026-09-03
 
 ### Fixed
