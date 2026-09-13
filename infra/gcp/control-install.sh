@@ -132,6 +132,7 @@ ExecStart=/usr/local/bin/sandbox gateway --listen ${CONTROL_IP}:${GW_PORT} \
   --worker-token-file /etc/sandbox-gateway/worker-control.tokens ${EDGE_ARGS} \
   --queue-wait ${QUEUE_WAIT:-240s} --queue-max ${QUEUE_MAX:-4096} \
   --worker-release-file /var/lib/sandbox-gateway/worker-release \
+  --operation-db /var/lib/sandbox-gateway/operations.db \
   --direct-scale-project ${PROJECT} \
   --direct-scale-zone ${ZONE} \
   --direct-scale-mig ${MIG_NAME} \

@@ -36,7 +36,7 @@
   "warm_pool_budget": 12,
   "hibernate_after_sec": 600,
   "metrics_guest_stats": true,
-  "uffd_restore": false,
+  "uffd_restore": true,
   "uffd_chunk_gcs": true,
   "uffd_chunk_prefetch": 32,
   "pools": {

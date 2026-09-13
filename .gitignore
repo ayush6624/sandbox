@@ -18,3 +18,8 @@ infra/gcp/config.*.env
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .worktrees/
+.agents/skills
+.audit
+.claude/skills
+agent/
+docs/verification/
