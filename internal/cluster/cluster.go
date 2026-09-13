@@ -21,7 +21,9 @@ const SnapshotPeerHeader = "X-Sandbox-Snapshot-Peer"
 type Heartbeat struct {
 	// HostID is a stable identifier for the host (defaults to its hostname),
 	// so a restarted host reclaims its identity rather than duplicating it.
-	HostID string `json:"host_id"`
+	HostID         string `json:"host_id"`
+	RegistryID     string `json:"registry_id,omitempty"`
+	CreateProgress bool   `json:"create_progress,omitempty"`
 	// Addr is the host's TCP API address the gateway dials back (e.g. its
 	// tailnet IP:port). Must match the host's `serve --listen` address.
 	Addr string `json:"addr"`
@@ -83,6 +85,9 @@ type Heartbeat struct {
 	// They appear in SandboxIDs (requests must route here to wake them) but
 	// consume no slots.
 	Hibernated int `json:"hibernated,omitempty"`
+	// HandoffPending counts retained handoffs still needed by backup or receiver
+	// hydration. A negative value means the count is unknown and blocks scale-in.
+	HandoffPending int `json:"handoff_pending"`
 	// SandboxIDs are the IDs of the running sandboxes the host owns. The
 	// gateway derives its routing table from these.
 	SandboxIDs []string `json:"sandbox_ids"`
