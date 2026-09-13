@@ -1,27 +1,20 @@
 package server
 
-// Cross-host adopt / release (roadmap B4b). These are the host-side halves the
-// gateway drives (B4c) to wake a hibernated sandbox on a host that never created
-// it — dead-host recovery, or a drain off a live host.
+// Cross-host adoption claims shared ownership before reconstructing and waking
+// the checkpoint. Eligible releases retain a peer generation and upload its
+// backup asynchronously; other releases wait for the ordinary durable record.
 //
-//   POST /sandboxes/{id}/adopt    reconstruct from GCS (record + state + rootfs +
-//                                 mem) under a fresh local identity, CAS the owner
-//                                 fence, and wake via the clone path.
-//   POST /sandboxes/{id}/release  freeze if running, confirm the sandbox is
-//                                 durable in GCS, then drop the LOCAL row +
-//                                 artifacts (GCS untouched) so another host can
-//                                 adopt it. The drain source side.
-//
-// B4b uses the File backend for the adopt wake: it materializes the full mem
-// image locally (assemble chunks, or rebase a diff) before the clone resume. The
-// LAZY UFFD-chunk clone wake — resume-then-stream, the actual cross-host perf win
-// — needs a vm.StartCloneUFFD and lands with the B4c measurement.
+// Chunked durable records may use the UFFD clone backend and fault memory from
+// the captured manifest. Legacy diff records remain file-backed: an overlay is
+// normalized during new publication but old records still need a local rebase.
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"time"
@@ -31,9 +24,8 @@ import (
 	"github.com/ayush6624/sandbox/internal/vm"
 )
 
-// releaseDurableWait bounds how long /release waits for a just-frozen sandbox's
-// background durability upload to publish its record.json commit marker before
-// giving up (and keeping the sandbox local, safely un-adoptable).
+// releaseDurableWait bounds an explicit durability wait. An asynchronous
+// handoff may already be offered when this wait expires.
 const releaseDurableWait = 90 * time.Second
 
 // fetchHibRecord pulls a hibernated sandbox's durable record (the cross-host
@@ -76,7 +68,11 @@ func (s *Server) materializeChunkedMem(ctx context.Context, id, dest string) err
 		defer cancel()
 		return s.blob.GetBytes(fctx, chunkObj(hash))
 	}
-	load := newChunkLoad(m, s.chunkCacheDir(), fetch)
+	load := newChunkLoad(m, s.memoryChunkCache(), fetch)
+	return materializeMemoryChunks(dest, m, load)
+}
+
+func materializeMemoryChunks(dest string, m *chunkManifest, load func(uint64) ([]byte, error)) error {
 	f, err := os.Create(dest)
 	if err != nil {
 		return err
@@ -100,60 +96,130 @@ func (s *Server) materializeChunkedMem(ctx context.Context, id, dest string) err
 	return f.Sync()
 }
 
-// reconstructHibArtifacts stages a hibernated sandbox's mem, state, and rootfs
-// on THIS host from GCS, returning the local full-mem and state paths the clone
-// wake loads. rootfsPath must already be the identity-neutral per-sandbox path
-// the FC state baked (RootfsPathFor(id) — fleet-wide config makes it match).
-func (s *Server) reconstructHibArtifacts(ctx context.Context, rec *hibRecord, rootfsPath string) (memPath, statePath string, err error) {
+type stagedHibernation struct {
+	MemPath   string
+	StatePath string
+	Chunks    *vm.UFFDChunkSource
+	Peer      *hibPeerSource
+	hydration *peerHydrationTask
+}
+
+func (s *stagedHibernation) takeChunks() *vm.UFFDChunkSource {
+	chunks := s.Chunks
+	s.Chunks = nil
+	return chunks
+}
+
+func (s *stagedHibernation) takeHydration() *peerHydrationTask {
+	hydration := s.hydration
+	s.hydration = nil
+	return hydration
+}
+
+// Close releases every source that staging still owns. A source removed with a
+// take method belongs to its consumer and is deliberately skipped here.
+func (s *stagedHibernation) Close() error {
+	var err error
+	if chunks := s.takeChunks(); chunks != nil && chunks.Close != nil {
+		err = errors.Join(err, chunks.Close())
+	}
+	if hydration := s.takeHydration(); hydration != nil {
+		err = errors.Join(err, hydration.Close())
+	}
+	return err
+}
+
+// reconstructHibArtifacts stages state and rootfs from the retained peer or GCS,
+// returning either a lazy chunk source or a complete memory file. rootfsPath
+// must match the identity-neutral path baked into the Firecracker state.
+func (s *Server) reconstructHibArtifacts(ctx context.Context, rec *hibRecord, rootfsPath string) (stagedHibernation, error) {
+	if rec.Peer != nil && rec.MemForm == memFormChunked {
+		staged, err := s.reconstructPeerHibernation(ctx, rec, rootfsPath)
+		if err == nil {
+			return staged, nil
+		}
+		s.met.hibPeerFallbacks.Add(1)
+		fmt.Fprintf(os.Stderr, "[%s] peer reconstruction unavailable (%v); using GCS\n", rec.ID, err)
+		// Peer paths may contain partial sparse overlays. Cloud staging starts
+		// clean, especially for holes absent from the durable stream.
+		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(rec.ID))
+		_ = os.Remove(rootfsPath)
+	}
 	id := rec.ID
-	memPath, statePath, _, err = s.cfg.Provisioner.SnapshotPaths(hibID(id))
+	memPath, statePath, _, err := s.cfg.Provisioner.SnapshotPaths(hibID(id))
 	if err != nil {
-		return "", "", err
+		return stagedHibernation{}, err
 	}
 
 	// State.
 	if err := s.blob.GetSparse(ctx, hibStateObj(id), statePath); err != nil {
-		return "", "", fmt.Errorf("pull state: %w", err)
+		return stagedHibernation{}, fmt.Errorf("pull state: %w", err)
 	}
 
 	// Rootfs: reflink the base and overlay the diff extents, or pull the whole
 	// sparse image for a cold-boot.
 	if rec.RootfsForm == rootfsFormDiff && rec.RootfsBaseID != "" {
-		_, baseRootfs, berr := s.ensureBaseLocal(ctx, rec.RootfsBaseID)
+		baseRootfs, berr := s.ensureBaseRootfsLocal(ctx, rec.RootfsBaseID)
 		if berr != nil {
-			return "", "", fmt.Errorf("pull rootfs base %s: %w", rec.RootfsBaseID, berr)
+			return stagedHibernation{}, fmt.Errorf("pull rootfs base %s: %w", rec.RootfsBaseID, berr)
 		}
 		if err := provisioner.CloneFile(baseRootfs, rootfsPath); err != nil {
-			return "", "", fmt.Errorf("stage base rootfs: %w", err)
+			return stagedHibernation{}, fmt.Errorf("stage base rootfs: %w", err)
 		}
 		if err := s.blob.GetSparse(ctx, hibRootfsObj(id), rootfsPath); err != nil {
-			return "", "", fmt.Errorf("overlay rootfs diff: %w", err)
+			return stagedHibernation{}, fmt.Errorf("overlay rootfs diff: %w", err)
 		}
 	} else {
 		if err := s.blob.GetSparse(ctx, hibRootfsObj(id), rootfsPath); err != nil {
-			return "", "", fmt.Errorf("pull rootfs: %w", err)
+			return stagedHibernation{}, fmt.Errorf("pull rootfs: %w", err)
 		}
 	}
 
+	// A committed chunked record may start lazily; legacy diff records retain
+	// the eager rebase fallback because their overlay is not a fault source.
+	if rec.MemForm == memFormChunked && s.cfg.UFFDRestore {
+		chunks, err := s.loadHibChunkSource(ctx, id)
+		if err != nil {
+			return stagedHibernation{}, fmt.Errorf("load hibernation chunks: %w", err)
+		}
+		pending := stagedHibernation{Chunks: chunks}
+		if chunks.Total == 0 || chunks.Total%(1<<20) != 0 || chunks.Total>>20 > uint64(math.MaxInt64) {
+			return stagedHibernation{}, errors.Join(
+				fmt.Errorf("invalid hibernation chunk memory size %d", chunks.Total),
+				pending.Close(),
+			)
+		}
+		actualMIB := int64(chunks.Total >> 20)
+		if rec.MemMIB == 0 {
+			rec.MemMIB = actualMIB
+		}
+		if rec.MemMIB < 0 || rec.MemMIB != actualMIB {
+			return stagedHibernation{}, errors.Join(
+				fmt.Errorf("hibernation chunk memory %d does not match record %d MiB", chunks.Total, rec.MemMIB),
+				pending.Close(),
+			)
+		}
+		return stagedHibernation{StatePath: statePath, Chunks: pending.takeChunks()}, nil
+	}
 	// Mem: assemble chunks (full), or pull + rebase the diff onto the base.
 	if rec.MemForm == memFormDiff {
 		if err := s.blob.GetSparse(ctx, hibMemDiffObj(id), memPath); err != nil {
-			return "", "", fmt.Errorf("pull diff mem: %w", err)
+			return stagedHibernation{}, fmt.Errorf("pull diff mem: %w", err)
 		}
 		full, merr := s.materializeHibMem(ctx, memPath, rec.MemBaseID)
 		if merr != nil {
-			return "", "", fmt.Errorf("rebase diff mem: %w", merr)
+			return stagedHibernation{}, fmt.Errorf("rebase diff mem: %w", merr)
 		}
 		memPath = full
 	} else {
 		if err := s.materializeChunkedMem(ctx, id, memPath); err != nil {
-			return "", "", fmt.Errorf("assemble chunked mem: %w", err)
+			return stagedHibernation{}, fmt.Errorf("assemble chunked mem: %w", err)
 		}
 	}
-	return memPath, statePath, nil
+	return stagedHibernation{MemPath: memPath, StatePath: statePath}, nil
 }
 
-// handleAdopt reconstructs a hibernated sandbox from GCS on this host and wakes
+// handleAdopt reconstructs a durable hibernated sandbox on this host and wakes
 // it under a fresh local identity. Dispatched by the gateway on a route miss
 // (owner gone) or a drain. Idempotent: a sandbox already local is served by the
 // normal path.
@@ -198,30 +264,44 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseCreate()
 
-	rec, err := s.fetchHibRecord(ctx, id)
+	claim, err := s.claimHandoff(ctx, id)
 	if err != nil {
-		httpError(w, http.StatusNotFound, fmt.Errorf("sandbox %s not adoptable: %w", id, err))
-		return
-	}
-
-	// Claim ownership before any local work — a lost CAS means another host is
-	// adopting concurrently; back off and let it win.
-	if _, err := s.acquireOwner(ctx, id); err != nil {
+		status := http.StatusInternalServerError
 		if errors.Is(err, ErrOwnerContended) {
-			w.Header().Set("Retry-After", "2")
-			httpError(w, http.StatusServiceUnavailable, err)
-			return
+			status = http.StatusServiceUnavailable
 		}
-		httpError(w, 500, fmt.Errorf("claim ownership: %w", err))
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		httpError(w, status, fmt.Errorf("claim adoption %s: %w", id, err))
 		return
 	}
-
-	sb, err := s.adopt(ctx, rec)
+	sb, err := s.adoptWithClaim(ctx, &claim.Control.Record, claim)
 	if err != nil {
+		err = s.finishFailedAdoption(claim, err)
 		capacityOrHTTPError(w, 500, fmt.Errorf("adopt %s: %w", id, err))
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.effectiveResources(sb))
+}
+
+func (s *Server) finishFailedAdoption(claim *handoffClaim, attemptErr error) error {
+	if attemptErr == nil || claim == nil {
+		return attemptErr
+	}
+	id := claim.Control.Record.ID
+	if _, live := s.machines.Load(id); live {
+		return attemptErr
+	}
+	recoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := s.reg.Get(recoveryCtx, id); !errors.Is(err, sql.ErrNoRows) {
+		return attemptErr
+	}
+	if err := s.reopenHandoff(recoveryCtx, claim); err != nil {
+		return errors.Join(attemptErr, fmt.Errorf("reopen failed adoption: %w", err))
+	}
+	return attemptErr
 }
 
 // adopt does the reconstruct + local-row insert + clone wake. Caller holds the
@@ -229,14 +309,27 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 // state back (GCS + fence untouched, so a retry — here or elsewhere — still
 // works).
 func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, error) {
+	return s.adoptWithClaim(ctx, rec, nil)
+}
+
+func (s *Server) adoptWithClaim(ctx context.Context, rec *hibRecord, claim *handoffClaim) (result registry.Sandbox, retErr error) {
 	id := rec.ID
 	rootfsPath := s.cfg.Provisioner.RootfsPathFor(id)
-	memPath, statePath, err := s.reconstructHibArtifacts(ctx, rec, rootfsPath)
+	var staged stagedHibernation
+	var err error
+	if claim != nil && claim.Control.Descriptor != nil {
+		staged, err = s.reconstructHandoff(ctx, claim.Control.Descriptor, rootfsPath)
+	} else {
+		staged, err = s.reconstructHibArtifacts(ctx, rec, rootfsPath)
+	}
 	if err != nil {
 		_ = s.cfg.Provisioner.RemoveRootfs(rootfsPath)
 		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 		return registry.Sandbox{}, err
 	}
+	defer func() {
+		retErr = errors.Join(retErr, staged.Close())
+	}()
 
 	var expiresAt *time.Time
 	if rec.ExpiresAtUnix != nil {
@@ -292,11 +385,19 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 
 	// Clone-path wake (fresh identity: unbridged tap, MMDS reidentify, GARP),
 	// File backend off the reconstructed local mem.
-	if err := s.wakeClone(ctx, sb, memPath, statePath); err != nil {
-		s.adoptRollback(sb)
-		return registry.Sandbox{}, fmt.Errorf("clone wake: %w", err)
+	if claim != nil {
+		if err := s.authorizeHandoffRun(ctx, claim); err != nil {
+			return registry.Sandbox{}, errors.Join(err, s.adoptRollback(sb))
+		}
+	}
+	lazy := staged.Chunks != nil
+	if err := s.wakeClone(ctx, sb, &staged); err != nil {
+		return registry.Sandbox{}, errors.Join(fmt.Errorf("clone wake: %w", err), s.adoptRollback(sb))
 	}
 	sb.Status = registry.StatusRunning
+	if lazy {
+		s.clearHibernationLineage(id)
+	}
 	// Open the restored explicit-port listeners.
 	if serr := s.syncSandboxPorts(ctx, sb); serr != nil {
 		fmt.Fprintf(os.Stderr, "[%s] adopt: sync port listeners: %v\n", id, serr)
@@ -305,12 +406,14 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 	// commit marker so a later route miss or host failure cannot resurrect the
 	// old checkpoint as a second copy.
 	if err := s.invalidateHibernationRecord(ctx, id); err != nil {
-		s.adoptRollback(sb)
-		return registry.Sandbox{}, err
+		return registry.Sandbox{}, errors.Join(err, s.adoptRollback(sb))
 	}
 	// The reconstructed local mem/state were consumed into the live VM; drop them.
 	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
 	s.act.touch(id)
+	if hydration := staged.takeHydration(); hydration != nil {
+		s.startPeerHydration(id, hydration)
+	}
 	fmt.Fprintf(os.Stderr, "[%s] adopted onto this host (mem=%s rootfs=%s)\n", id, rec.MemForm, rec.RootfsForm)
 	return sb, nil
 }
@@ -318,17 +421,24 @@ func (s *Server) adopt(ctx context.Context, rec *hibRecord) (registry.Sandbox, e
 // adoptRollback removes the half-adopted local state after a failed clone wake.
 // GCS artifacts and the owner fence are left intact — the sandbox stays
 // adoptable (by a retry here, or another host). Caller holds the wake lock.
-func (s *Server) adoptRollback(sb registry.Sandbox) {
-	if v, ok := s.machines.LoadAndDelete(sb.ID); ok {
-		_ = vm.StopForce(v.(*vm.Machine))
+func (s *Server) adoptRollback(sb registry.Sandbox) error {
+	if v, ok := s.machines.Load(sb.ID); ok {
+		m := v.(*vm.Machine)
+		vm.PreserveFailureLog(m)
+		_ = vm.StopForce(m)
+		if stopped, err := waitMachine(func(ctx context.Context) error { return vm.Wait(ctx, m) }, forcedExitGrace); !stopped {
+			return fmt.Errorf("handoff VM exit unconfirmed: %w", err)
+		}
+		s.machines.Delete(sb.ID)
 	}
 	s.pf.CloseSandbox(sb.ID)
 	_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(sb.ID))
 	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
 	if err := s.reg.Destroy(context.Background(), sb.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] adopt rollback: destroy row: %v\n", sb.ID, err)
+		return fmt.Errorf("adopt rollback: destroy row: %w", err)
 	}
+	return nil
 }
 
 // handleRelease is the drain source side: freeze the sandbox if running, confirm
@@ -339,12 +449,20 @@ func (s *Server) adoptRollback(sb registry.Sandbox) {
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if s.canHandoff() {
+		s.handleHandoffRelease(w, r)
+		return
+	}
 	if s.blob == nil {
 		httpError(w, http.StatusBadRequest, errors.New("release requires a snapshot bucket"))
 		return
 	}
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) && s.hasRetainedHibernation(id) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		httpError(w, http.StatusNotFound, err)
 		return
 	}
@@ -383,17 +501,14 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Drop the local row + artifacts (GCS untouched). Inlined rather than
-	// s.destroy (which would re-take the wake lock we already hold).
-	s.pf.CloseSandbox(id)
-	_ = s.cfg.Provisioner.CleanupSnapshot(hibID(id))
-	_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
-	if err := s.reg.Destroy(ctx, id); err != nil {
-		httpError(w, 500, fmt.Errorf("drop local row: %w", err))
+	peer, err := s.releaseHibernation(ctx, sb)
+	if err != nil {
+		httpError(w, 500, err)
 		return
 	}
-	s.act.forget(id)
-	fmt.Fprintf(os.Stderr, "[%s] released from this host (durable in GCS; adoptable elsewhere)\n", id)
+	if peer != nil {
+		w.Header().Set("X-Sandbox-Hibernation-Generation", peer.Generation)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

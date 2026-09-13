@@ -53,9 +53,11 @@ func hibOwnerObj(id string) string   { return "hib/" + id + "/owner" }
 // the mem/state/rootfs it must pull. Written last as the commit marker — a
 // sandbox is cross-host-wakeable iff its record.json exists.
 type hibRecord struct {
-	Version int    `json:"version"`
-	ID      string `json:"id"`
-	Name    string `json:"name,omitempty"`
+	Generation string      `json:"generation,omitempty"`
+	Peer       *hibPeerRef `json:"peer,omitempty"`
+	Version    int         `json:"version"`
+	ID         string      `json:"id"`
+	Name       string      `json:"name,omitempty"`
 	// Guest resources baked into the snapshot (a restore/clone can't override
 	// them; they're reported truthfully to clients).
 	Vcpus  int64 `json:"vcpus"`
@@ -176,23 +178,26 @@ func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.S
 
 	// --- mem ---
 	var memForm, memBaseID string
+	memForm = memFormChunked
+	chunkInput := memPath
 	if snapType == vm.SnapshotDiff {
-		memForm, memBaseID = memFormDiff, memDiffBaseID
-		if _, err := s.blob.PutSparse(ctx, hibMemDiffObj(id), memPath); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: upload diff mem: %v\n", id, err)
+		// A durable hibernation record must name a complete fault source. Keep
+		// the sparse diff and marker for same-host wake, but normalize its
+		// base+overlay once while the upload context still owns the freeze.
+		full, err := s.materializeHibMem(ctx, memPath, memDiffBaseID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: normalize diff memory: %v\n", id, err)
 			return
 		}
-	} else {
-		memForm = memFormChunked
-		if err := s.uploadMemChunks(ctx, id, memPath, roundChunkSize(s.cfg.UFFDChunkBytes), workingSet); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: %v\n", id, err)
-			return
-		}
-		// Stamp the manifest as belonging to THIS frozen generation, so the wake
-		// path may fault the guest's RAM in from it (hibChunkMarker).
-		if err := os.WriteFile(hibChunkMarker(memPath), nil, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] durable hibernate: stamp chunk generation: %v\n", id, err)
-		}
+		chunkInput = full
+	}
+	if err := s.uploadMemChunks(ctx, id, chunkInput, roundChunkSize(s.cfg.UFFDChunkBytes), workingSet); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] durable hibernate aborted: %v\n", id, err)
+		return
+	}
+	// Stamp against the original freeze directory, including normalized diffs.
+	if err := os.WriteFile(hibChunkMarker(memPath), nil, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] durable hibernate: stamp chunk generation: %v\n", id, err)
 	}
 
 	// --- device state ---
@@ -220,7 +225,10 @@ func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.S
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] durable hibernate: read last usage sequence: %v\n", id, err)
 	}
-	rec := buildHibRecord(sb, ports, memForm, memBaseID, rootfsForm, rootfsBaseID, usageSeq)
+	// Registry rows may retain zero resource overrides for default-template
+	// sandboxes. Durable records are a cross-host boundary and must carry the
+	// effective size the frozen VM actually has.
+	rec := buildHibRecord(s.effectiveResources(sb), ports, memForm, memBaseID, rootfsForm, rootfsBaseID, usageSeq)
 	meta, err := json.Marshal(rec)
 	if err == nil {
 		// Every payload for THIS generation is published, so the record about to
@@ -233,6 +241,10 @@ func (s *Server) uploadHibernation(ctx context.Context, id string, sb registry.S
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] durable hibernate: write record: %v\n", id, err)
+		return
+	}
+	if err := s.publishLocalHibernation(ctx, &rec); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] publish hibernation ownership: %v\n", id, err)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[%s] durable hibernation record written to gs://%s (mem=%s rootfs=%s) in %s\n",

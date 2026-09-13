@@ -2,6 +2,10 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -89,11 +93,12 @@ func TestNewChunkLoad(t *testing.T) {
 	cacheDir := t.TempDir()
 	dataA := bytes.Repeat([]byte{0x11}, chunkSz)
 	gzA, _ := gzipBytes(dataA)
+	hashA := testChunkHash(dataA)
 
 	m := &chunkManifest{
 		Version: chunkManifestVersion, MemSize: chunkSz * 3, ChunkSize: chunkSz, Codec: chunkCodecGzip,
 		Chunks: []chunkEntry{
-			{Hash: "hashA", CLen: len(gzA)},
+			{Hash: hashA, CLen: len(gzA)},
 			{Hash: chunkZeroHash},
 			{Hash: "missing", CLen: 5},
 		},
@@ -102,28 +107,28 @@ func TestNewChunkLoad(t *testing.T) {
 	fetch := func(hash string) ([]byte, error) {
 		fetches[hash]++
 		switch hash {
-		case "hashA":
+		case hashA:
 			return gzA, nil
 		default:
 			return nil, errors.New("no such object")
 		}
 	}
-	load := newChunkLoad(m, cacheDir, fetch)
+	load := newChunkLoad(m, testChunkCache(t, cacheDir, defaultChunkCacheBytes), fetch)
 
 	// Chunk 0: fetch + decompress + cache.
 	got, err := load(0)
 	if err != nil || !bytes.Equal(got, dataA) {
 		t.Fatalf("load(0): err=%v equal=%v", err, bytes.Equal(got, dataA))
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "hashA")); err != nil {
+	if _, err := os.Stat(filepath.Join(cacheDir, hashA)); err != nil {
 		t.Errorf("chunk not written through to cache: %v", err)
 	}
 	// Second load hits the warm cache — no additional fetch.
 	if _, err := load(0); err != nil {
 		t.Fatal(err)
 	}
-	if fetches["hashA"] != 1 {
-		t.Errorf("hashA fetched %d times, want 1 (cache hit second time)", fetches["hashA"])
+	if fetches[hashA] != 1 {
+		t.Errorf("hashA fetched %d times, want 1 (cache hit second time)", fetches[hashA])
 	}
 	// Chunk 1: zero sentinel → zeroed buffer, no fetch.
 	z, err := load(1)
@@ -152,13 +157,14 @@ func TestNewChunkLoadConcurrentSameHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := testChunkHash(data)
 	// Two indices, one shared hash.
 	m := &chunkManifest{
 		Version: chunkManifestVersion, MemSize: chunkSz * 2, ChunkSize: chunkSz, Codec: chunkCodecGzip,
-		Chunks: []chunkEntry{{Hash: "dup", CLen: len(gz)}, {Hash: "dup", CLen: len(gz)}},
+		Chunks: []chunkEntry{{Hash: hash, CLen: len(gz)}, {Hash: hash, CLen: len(gz)}},
 	}
 	fetch := func(string) ([]byte, error) { return gz, nil }
-	load := newChunkLoad(m, cacheDir, fetch)
+	load := newChunkLoad(m, testChunkCache(t, cacheDir, defaultChunkCacheBytes), fetch)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
@@ -169,7 +175,7 @@ func TestNewChunkLoadConcurrentSameHash(t *testing.T) {
 	wg.Wait()
 
 	// The published cache file is complete and correct (not a torn interleave).
-	cached, err := os.ReadFile(filepath.Join(cacheDir, "dup"))
+	cached, err := os.ReadFile(filepath.Join(cacheDir, hash))
 	if err != nil {
 		t.Fatalf("cache file missing: %v", err)
 	}
@@ -179,7 +185,7 @@ func TestNewChunkLoadConcurrentSameHash(t *testing.T) {
 	// No leftover temp files.
 	ents, _ := os.ReadDir(cacheDir)
 	for _, e := range ents {
-		if e.Name() != "dup" {
+		if e.Name() != hash && e.Name() != ".lock" {
 			t.Errorf("leftover temp file in cache dir: %s", e.Name())
 		}
 	}
@@ -204,5 +210,104 @@ func TestRoundChunkSize(t *testing.T) {
 		if got := roundChunkSize(c.in); got != c.want {
 			t.Errorf("roundChunkSize(%d) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+func testChunkHash(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestChunkLoadRejectsCorruption(t *testing.T) {
+	raw := bytes.Repeat([]byte{17}, 4096)
+	bad := bytes.Repeat([]byte{18}, 4096)
+	hash := testChunkHash(raw)
+	goodGzip, _ := gzipBytes(raw)
+	badGzip, _ := gzipBytes(bad)
+	m := &chunkManifest{Version: 1, Codec: "gzip", MemSize: 4096, ChunkSize: 4096,
+		Chunks: []chunkEntry{{Hash: hash, CLen: len(goodGzip)}}}
+	cache := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cache, hash), bad, 0600); err != nil {
+		t.Fatal(err)
+	}
+	fetches := 0
+	load := newChunkLoad(m, testChunkCache(t, cache, defaultChunkCacheBytes), func(string) ([]byte, error) { fetches++; return goodGzip, nil })
+	got, err := load(0)
+	if err != nil || !bytes.Equal(got, raw) || fetches != 1 {
+		t.Fatalf("corrupt cache was not repaired: fetches=%d err=%v", fetches, err)
+	}
+	load = newChunkLoad(m, testChunkCache(t, t.TempDir(), defaultChunkCacheBytes), func(string) ([]byte, error) { return badGzip, nil })
+	if _, err := load(0); err == nil {
+		t.Fatal("same-size corrupt object accepted")
+	}
+	oversized, _ := gzipBytes(append(raw, 1))
+	load = newChunkLoad(m, testChunkCache(t, t.TempDir(), defaultChunkCacheBytes), func(string) ([]byte, error) { return oversized, nil })
+	if _, err := load(0); err == nil {
+		t.Fatal("oversized object accepted")
+	}
+}
+
+func TestChunkManifestValidation(t *testing.T) {
+	valid := func() chunkManifest {
+		return chunkManifest{Version: 1, Codec: "gzip", MemSize: 8192, ChunkSize: 4096,
+			Chunks: []chunkEntry{{Hash: testChunkHash(make([]byte, 4096)), CLen: 40}, {Hash: chunkZeroHash}}}
+	}
+	m := valid()
+	if err := m.validate(); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*chunkManifest){
+		"version":        func(m *chunkManifest) { m.Version++ },
+		"codec":          func(m *chunkManifest) { m.Codec = "raw" },
+		"empty":          func(m *chunkManifest) { m.MemSize = 0 },
+		"alignment":      func(m *chunkManifest) { m.ChunkSize = 4095 },
+		"missing chunk":  func(m *chunkManifest) { m.Chunks = m.Chunks[:1] },
+		"extra chunk":    func(m *chunkManifest) { m.Chunks = append(m.Chunks, chunkEntry{Hash: chunkZeroHash}) },
+		"path traversal": func(m *chunkManifest) { m.Chunks[0].Hash = "../memory" },
+		"zero payload":   func(m *chunkManifest) { m.Chunks[1].CLen = 1 },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := valid()
+			mutate(&m)
+			if m.validate() == nil {
+				t.Fatal("invalid manifest accepted")
+			}
+		})
+	}
+}
+
+func TestHibChunkSourceSurvivesRequestAndManifestReplacement(t *testing.T) {
+	store := newUploadTestStore(t)
+	s, _ := testLifecycleServer(t)
+	s.blob = store.client
+	first := bytes.Repeat([]byte{31}, 4096)
+	second := bytes.Repeat([]byte{32}, 4096)
+	hash := testChunkHash(first)
+	gz, _ := gzipBytes(first)
+	m := chunkManifest{Version: 1, Codec: "gzip", MemSize: 4096, ChunkSize: 4096,
+		Chunks: []chunkEntry{{Hash: hash, CLen: len(gz)}}}
+	ctx := context.Background()
+	data, _ := json.Marshal(m)
+	if err := store.client.PutBytes(ctx, hibManifestObj("frozen"), data); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.client.PutBytes(ctx, chunkObj(hash), gz); err != nil {
+		t.Fatal(err)
+	}
+	request, cancel := context.WithCancel(ctx)
+	source, err := s.loadHibChunkSource(request, "frozen")
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Chunks[0].Hash = testChunkHash(second)
+	data, _ = json.Marshal(m)
+	if err := store.client.PutBytes(ctx, hibManifestObj("frozen"), data); err != nil {
+		t.Fatal(err)
+	}
+	got, err := source.Load(0)
+	if err != nil || !bytes.Equal(got, first) {
+		t.Fatalf("live source changed generation or used expired request: %v", err)
 	}
 }

@@ -350,6 +350,39 @@ func (s *Server) ensureBaseLocal(ctx context.Context, baseID string) (mem, rootf
 	return mem, rootfs, nil
 }
 
+// ensureBaseRootfsLocal is the disk-only half of ensureBaseLocal. Lazy
+// hibernation adoption needs the base rootfs to overlay a diff, but must not
+// turn that into an eager download of the base guest memory.
+func (s *Server) ensureBaseRootfsLocal(ctx context.Context, baseID string) (string, error) {
+	if base, err := s.reg.GetSnapshot(ctx, baseID); err == nil {
+		if _, statErr := os.Stat(base.RootfsPath); statErr == nil {
+			return base.RootfsPath, nil
+		}
+	}
+	_, rootfs := s.baseCachePaths(baseID)
+	mu := s.pullLock("base:" + baseID)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := os.Stat(rootfs); err == nil {
+		return rootfs, nil
+	}
+	if s.blob == nil {
+		return "", fmt.Errorf("base template %s rootfs is not on disk and no snapshot bucket is configured", baseID)
+	}
+	if err := os.MkdirAll(filepath.Dir(rootfs), 0o755); err != nil {
+		return "", err
+	}
+	tmp := rootfs + ".tmp"
+	if err := s.blob.GetSparse(ctx, baseObj(baseID, "rootfs.sz"), tmp); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, rootfs); err != nil {
+		return "", err
+	}
+	return rootfs, nil
+}
+
 // materializeMem returns a full, restorable mem file for snap: the file
 // itself for full snapshots, or (for diff snapshots) a cached rebase of the
 // dirty pages onto a reflinked copy of the base mem — Firecracker's

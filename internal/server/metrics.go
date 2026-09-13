@@ -62,6 +62,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	gauge("sandbox_committed_mem_mib", "Sum of running and warming sandboxes' effective mem_mib + VMM overhead.", st.CommittedMemMIB)
 	gauge("sandbox_mem_budget_mib", "Committed-memory admission ceiling (0 = disabled).", st.MemBudgetMIB)
+	cache := s.memoryChunkCache().stats()
+	gauge("sandbox_chunk_cache_ready", "1 when cache inventory and exclusive ownership permit admission.", cache.Ready)
+	gauge("sandbox_chunk_cache_limit_bytes", "Budget for cache payload and temporary or hydration reservations.", cache.Limit)
+	gauge("sandbox_chunk_cache_resident_bytes", "Payload bytes in managed final cache files.", cache.Resident)
+	gauge("sandbox_chunk_cache_reserved_bytes", "Bytes reserved for missing hydration chunks.", cache.Reserved)
+	gauge("sandbox_chunk_cache_allocated_bytes", "Observed filesystem allocation of cache files, excluding directory metadata.", cache.Allocated)
+	gauge("sandbox_chunk_cache_residue_bytes", "Unmanaged or failed-cleanup bytes counted against cache admission.", cache.Residue)
+	counter("sandbox_chunk_cache_reclaimed_bytes_total", "Cache payload and abandoned temporary bytes successfully unlinked.", cache.Reclaimed)
+	counter("sandbox_chunk_cache_errors_total", "Cache inventory, write, or cleanup errors.", cache.Errors)
+	counter("sandbox_chunk_cache_bypassed_total", "Verified loads served without admitting a cache write.", cache.Bypassed)
 
 	var goldenReady int64
 	if s.golden.Load() != nil {
@@ -80,6 +90,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	counter("sandbox_snapshot_peer_pull_failures_total", "Peer snapshot pulls that failed before falling back to durable storage.", s.met.snapshotPeerFailures.Load())
 	counter("sandbox_snapshot_peer_serves_total", "Sparse snapshot artifacts successfully streamed to peer workers.", s.met.snapshotPeerServes.Load())
 	counter("sandbox_snapshot_peer_payload_bytes_total", "Uncompressed allocated snapshot bytes streamed to peer workers.", s.met.snapshotPeerBytes.Load())
+	counter("sandbox_hib_peer_chunks_total", "Verified hibernation chunks fetched from a peer.", s.met.hibPeerChunks.Load())
+	counter("sandbox_hib_peer_chunk_bytes_total", "Raw hibernation memory bytes fetched from peers.", s.met.hibPeerChunkBytes.Load())
+	counter("sandbox_hib_peer_fallbacks_total", "Hibernation peer attempts falling back to durable storage.", s.met.hibPeerFallbacks.Load())
+	counter("sandbox_hib_peer_artifacts_total", "Hibernation state and rootfs artifacts fetched from peers.", s.met.hibPeerArtifacts.Load())
+	counter("sandbox_hib_peer_artifact_bytes_total", "Sparse wire bytes fetched for hibernation artifacts.", s.met.hibPeerArtifactBytes.Load())
+	counter("sandbox_hib_peer_hydrated_total", "Peer hibernation caches fully populated and acknowledged.", s.met.hibPeerHydrated.Load())
+	counter("sandbox_hib_peer_hydrate_failures_total", "Peer hibernation background fills or acknowledgments that failed.", s.met.hibPeerHydrateFailures.Load())
+	counter("sandbox_hib_peer_serves_total", "Hibernation artifact and memory responses served to peers.", s.met.hibPeerServes.Load())
+	counter("sandbox_hib_peer_serve_bytes_total", "Uncompressed hibernation artifact and memory payload bytes served.", s.met.hibPeerServeBytes.Load())
+	retained, retainedBytes := s.peerHibernationStats()
+	gauge("sandbox_hib_peer_retained", "Retained hibernation peer checkpoints.", retained)
+	gauge("sandbox_hib_peer_retained_logical_bytes", "Logical file bytes retained for peer checkpoints, including sparse holes and shared extents.", retainedBytes)
 	counter("sandbox_snapshot_gcs_fallbacks_total", "Snapshot pulls sent to GCS after a peer hint failed.", s.met.snapshotGCSFallbacks.Load())
 	type warmMetricRow struct {
 		id string

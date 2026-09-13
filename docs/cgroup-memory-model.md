@@ -328,6 +328,24 @@ silent, unrecoverable data loss on a documented feature.
 
 ---
 
+### Releasing reservations after termination
+
+The reservation ends when the VM's cgroup directory is removed. Reaping
+Firecracker does not guarantee that the kernel has finished tearing down its
+cgroup. A September 5 development run caught `rmdir` returning `EBUSY` after
+source termination during snapshot upload. Cleanup discarded that error and
+deleted the jail, leaving an empty leaf that still reserved 1180 MiB.
+
+`removeVMMCgroup` now retries `EBUSY` every 10 ms for up to two seconds.
+Cleanup removes the cgroup before deleting the jail and releasing its identity.
+If removal still fails, it logs the error and retains the recovery state.
+Startup reconciliation also removes empty cgroups with canonical VM UUID names
+when their jail is already absent. It refuses populated or unverifiable orphans.
+
+Reservation accounting still includes empty leaves. A newly admitted VM can
+have a reserved cgroup before its process starts, so ignoring every empty leaf
+would allow the worker to promise the same memory twice.
+
 ## 7. Performance
 
 | | Effect |
@@ -380,3 +398,24 @@ dedicated snapshot headroom so this remains available at ordinary slot
 saturation rather than merely failing closed.
 [usage-metering-plan.md](usage-metering-plan.md) covers the billing ledger,
 which is how the bug was found.
+
+## 9. Lazy guest snapshots need a resident-memory floor
+
+A UFFD guest can begin a snapshot with only part of its RAM resident. Reading
+its remaining memory for a full capture allocates private anonymous pages in
+the VMM's cgroup. A reclaim threshold based only on pre-capture usage can then
+fall below unreclaimable guest RAM.
+
+The first cross-worker lazy-adoption verification reproduced this on September
+6, 2026. The VMM had 729,235,456 bytes resident above a 573,943,808-byte
+`memory.high`; full memory pressure reached 99%, and its write thread blocked
+in `mem_cgroup_handle_over_high`. The next snapshot stalled for minutes even
+though the first adoption completed in 1.944 seconds.
+
+UFFD snapshot windows now use the larger of measured usage and complete guest
+RAM plus configured VMM overhead for both reservation and reclaim-threshold
+calculation. The threshold adds the existing bounded cache margin. Parent
+headroom checks still reject a snapshot when its complete reservation cannot
+fit. The File backend keeps its existing measured-usage policy. See
+[lazy adoption verification](lazy-cross-worker-adoption.md) for the regression
+fixture and live results.

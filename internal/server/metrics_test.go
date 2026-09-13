@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayush6624/sandbox/internal/provisioner"
 	"github.com/ayush6624/sandbox/internal/registry"
 	"github.com/ayush6624/sandbox/internal/vm"
 )
@@ -60,11 +61,14 @@ func metricsTestServer(t *testing.T) *Server {
 	t.Cleanup(func() { reg.Close() })
 	// MemBudgetMIB < 0 disables memory admission, so slots_free is bound purely
 	// by the deterministic tap/IP pools rather than the host's real RAM.
-	return New(Config{
+	s := New(Config{
+		Provisioner:  &provisioner.Provisioner{SnapshotDir: t.TempDir()},
 		VMTemplate:   vm.RunOptions{Vcpus: 2, MemMIB: 1024},
 		HotCreate:    false,
 		MemBudgetMIB: -1,
 	}, reg)
+	t.Cleanup(func() { s.memoryChunkCache().close() })
+	return s
 }
 
 // TestHandleMetrics exercises the endpoint end to end against a real registry:

@@ -90,8 +90,8 @@ type Config struct {
 	// MetricsGuestStats polls each guest's sandboxd for its own memory/disk
 	// view. See config.MetricsGuestStats; requires a rebaked agent.
 	MetricsGuestStats bool
-	// UFFDRestore restores same-identity hibernation wakes with the userfaultfd
-	// memory backend (lazy page-in) instead of the eager File backend. See
+	// UFFDRestore uses userfaultfd for hibernation wakes and chunked cross-host
+	// adoptions, loading RAM on demand. See
 	// config.UFFDRestore and uffd_linux.go.
 	UFFDRestore bool
 	// UFFDChunkBytes selects the UFFD page source: 0 = whole-file mmap, >0 = lazy
@@ -106,6 +106,12 @@ type Config struct {
 	// UFFDChunkPrefetch is the chunk-level fault-ahead window for the GCS source
 	// (0 → 4). See config.UFFDChunkPrefetch.
 	UFFDChunkPrefetch int
+	// UFFDChunkCacheBytes caps disk cache payload and reservation bytes.
+	// Zero selects 4 GiB; negative disables disk caching.
+	UFFDChunkCacheBytes int64
+	// OwnedHandoffStorage writes isolated generation payloads after all workers
+	// have reader support. It does not enable automatic collection.
+	OwnedHandoffStorage bool
 	// SnapshotBucket enables GCS snapshot durability: user snapshots upload
 	// in the background and restore/fanout pull missing snapshots down from
 	// the bucket, so any host can serve them. Empty = host-local only.
@@ -135,6 +141,7 @@ type Server struct {
 	vmCtx              context.Context // long-lived; tied to Serve's ctx, NOT request ctx
 	gatewayCredentials *management.Credentials
 	workerCredentials  *management.Credentials
+	handoffShutdown    handoffShutdown
 
 	// golden is the snapshot POST /sandboxes clones from when hot create is on.
 	// nil until ensureGolden adopts or builds one; cleared if it's deleted.
@@ -146,7 +153,8 @@ type Server struct {
 	stageLocks keyedMutexes
 
 	// blob is the GCS client for snapshot durability; nil when disabled.
-	blob *gcsblob.Client
+	blob           *gcsblob.Client
+	chunkOwnership chunkOwnership
 	// deleteObject overrides the durability store's object delete. Kept
 	// injectable because blob is a concrete client, and the behaviour of the
 	// hibernation invalidation paths when the object store is UNAVAILABLE is the
@@ -171,6 +179,8 @@ type Server struct {
 	// without an Exists round-trip each (roadmap Phase B2 dedup/CoW).
 	chunkUpMu      sync.Mutex
 	chunksUploaded map[string]bool
+	chunkCacheOnce sync.Once
+	chunkCache     *chunkCache
 
 	// act tracks per-sandbox API activity for idle hibernation; wakesMu/wakes
 	// serialize hibernate/wake/destroy per sandbox id.
@@ -296,11 +306,20 @@ type serverMetrics struct {
 	warmByTemplate sync.Map     // snapshot id -> *templateWarmMetrics
 	// Peer snapshot transfer counters separate the low-latency VPC cache path
 	// from durable GCS fallback without adding snapshot-id cardinality.
-	snapshotPeerPulls    atomic.Int64
-	snapshotPeerFailures atomic.Int64
-	snapshotPeerServes   atomic.Int64
-	snapshotPeerBytes    atomic.Int64
-	snapshotGCSFallbacks atomic.Int64
+	snapshotPeerPulls      atomic.Int64
+	snapshotPeerFailures   atomic.Int64
+	snapshotPeerServes     atomic.Int64
+	snapshotPeerBytes      atomic.Int64
+	hibPeerChunks          atomic.Int64
+	hibPeerChunkBytes      atomic.Int64
+	hibPeerFallbacks       atomic.Int64
+	hibPeerArtifacts       atomic.Int64
+	hibPeerArtifactBytes   atomic.Int64
+	hibPeerHydrated        atomic.Int64
+	hibPeerHydrateFailures atomic.Int64
+	hibPeerServes          atomic.Int64
+	hibPeerServeBytes      atomic.Int64
+	snapshotGCSFallbacks   atomic.Int64
 	// guestStatFailures counts utilization ticks where a running guest's agent
 	// did not answer GET /stats (old baked agent, timeout, unreachable).
 	guestStatFailures atomic.Int64
@@ -457,14 +476,27 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	s.reconcile(ctx)
 	s.phases.mark(phaseReconcileDone)
+	cache := s.memoryChunkCache()
+	defer cache.close()
 	if s.blob != nil {
 		uploadCtx, stopUploads := context.WithCancel(ctx)
+		handoffCtx, stopHandoffs := context.WithCancel(context.WithoutCancel(ctx))
 		uploadsDone := make(chan struct{})
+		handoffDone := make(chan struct{})
+		readerReleasesDone := make(chan struct{})
+		go func() {
+			defer close(readerReleasesDone)
+			s.runChunkReleases(handoffCtx)
+		}()
+		go func() {
+			defer close(handoffDone)
+			s.runHandoffBackups(handoffCtx)
+		}()
 		go func() {
 			defer close(uploadsDone)
 			s.runSnapshotUploads(uploadCtx)
 		}()
-		defer func() { stopUploads(); <-uploadsDone }()
+		defer func() { stopUploads(); stopHandoffs(); <-uploadsDone; <-handoffDone; <-readerReleasesDone }()
 	}
 	// Hibernated sandboxes survived reconcile; re-bind their port-forward
 	// listeners or wake-on-connect breaks after a server restart.
@@ -500,6 +532,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Always runs: even with no host-wide default, individual sandboxes can
 	// opt in via hibernate_after_sec at create time.
 	go s.hibernateLoop(ctx)
+	go s.peerHibernationLoop(ctx)
 	if s.cfg.HibernateAfter > 0 {
 		fmt.Fprintf(os.Stderr, "idle hibernation on: default freeze after %s idle (per-sandbox hibernate_after_sec overrides)\n", s.cfg.HibernateAfter)
 	}
@@ -555,8 +588,13 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /sandboxes/{id}/adopt", s.handleAdopt)
 	mux.HandleFunc("POST /sandboxes/{id}/release", s.handleRelease)
 	mux.HandleFunc("POST /internal/v1/sandboxes/{action}", s.handleInternalSandboxAction)
+	mux.HandleFunc("POST /internal/v1/create-commands", s.handleCreateCommand)
 	mux.HandleFunc("GET /internal/v1/snapshots/{id}", s.handlePeerSnapshotMeta)
 	mux.HandleFunc("GET /internal/v1/snapshots/{id}/{artifact}", s.handlePeerSnapshotArtifact)
+	mux.HandleFunc("GET /internal/v1/hibernations/{generation}", s.handlePeerHibernation)
+	mux.HandleFunc("DELETE /internal/v1/hibernations/{generation}", s.handlePeerHibernation)
+	mux.HandleFunc("GET /internal/v1/hibernations/{generation}/{artifact}", s.handlePeerHibernation)
+	mux.HandleFunc("GET /internal/v1/hibernations/{generation}/chunks/{hash}", s.handlePeerHibernation)
 	mux.HandleFunc("POST /templates/build", s.handleTemplateBuild)
 	mux.HandleFunc("GET /snapshots", s.handleListSnapshots)
 	mux.HandleFunc("POST /snapshots/{id}/rename", s.handleRenameSnapshot)
@@ -580,7 +618,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	go func() { defer close(progressDone); s.runCreateProgressDelivery(createCtx, operationStore) }()
 	defer func() { stopCreates(); <-progressDone }()
 
-	publicHandler := httpapi.Middleware(mux)
+	publicHandler := httpapi.Middleware(s.handoffShutdownHandler(mux))
 	servers := []*http.Server{{Handler: publicHandler}}
 	srvErr := make(chan error, 2)
 	go func() { srvErr <- servers[0].Serve(ln) }()
@@ -636,7 +674,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			tcpLn = tls.NewListener(tcpLn, tlsConfig)
 		}
 		tcpSrv := &http.Server{
-			Handler:   httpapi.Middleware(bearerAuth(clientCreds, workerCreds, mux)),
+			Handler:   httpapi.Middleware(bearerAuth(clientCreds, workerCreds, s.handoffShutdownHandler(mux))),
 			TLSConfig: tlsConfig,
 		}
 		servers = append(servers, tcpSrv)
@@ -647,10 +685,13 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 115*time.Second)
+		defer stopCancel()
+		s.drainHandoffsBeforeShutdown(stopCtx)
 		// Short drain: freezing sandboxes (below) matters more than letting
 		// slow API requests finish — the whole stop window is ~120 s (Nomad
 		// kill_timeout / GCE stop) and hibernation needs most of it.
-		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shCtx, cancel := context.WithTimeout(stopCtx, 10*time.Second)
 		for _, srv := range servers {
 			if err := srv.Shutdown(shCtx); err != nil {
 				// Shutdown's deadline does not close active connections. Force
@@ -660,11 +701,11 @@ func (s *Server) Serve(ctx context.Context) error {
 			}
 		}
 		cancel()
-		s.shutdownAll()
+		s.shutdownAllContext(stopCtx)
 		// shutdownAll froze every sandbox, which closed their intervals. This is
 		// the most valuable flush of a worker's life — and on a scale-in that
 		// deletes the instance, the only one that can still happen.
-		s.drainUsage()
+		s.drainUsageBeforeShutdown(stopCtx)
 		s.pf.CloseAll() // hibernated sandboxes' listeners; reopened next startup
 		return nil
 	case err := <-srvErr:
@@ -770,12 +811,16 @@ func secureUnixSocket(path string) error {
 // Bounded parallelism: the mem writes all hit one disk. A sandbox that can't
 // be frozen in the window is destroyed, as before.
 func (s *Server) shutdownAll() {
+	s.shutdownAllContext(context.Background())
+}
+
+func (s *Server) shutdownAllContext(parent context.Context) {
 	// Every interval closed from here on is a platform event, not a customer
 	// one: a fleet roll must not read on an invoice as every sandbox happening
 	// to go idle at the same instant.
 	s.shuttingDown.Store(true)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 100*time.Second)
 	defer cancel()
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
@@ -789,7 +834,7 @@ func (s *Server) shutdownAll() {
 			if sb, err := s.reg.Get(ctx, id); err == nil &&
 				(sb.Status == registry.StatusPreparing || sb.Status == registry.StatusWarming ||
 					sb.Status == registry.StatusStarting || sb.Status == registry.StatusStopping) {
-				if err := s.destroy(context.Background(), id); err != nil {
+				if err := s.destroy(ctx, id); err != nil {
 					fmt.Fprintf(os.Stderr, "[%s] shutdown destroy warm sandbox: %v\n", id, err)
 				}
 				return
@@ -798,7 +843,7 @@ func (s *Server) shutdownAll() {
 			// a busy pin must not condemn the sandbox to destruction.
 			if err := s.hibernate(ctx, id, true); err != nil {
 				fmt.Fprintf(os.Stderr, "[%s] shutdown hibernate failed (%v), destroying\n", id, err)
-				_ = s.destroy(context.Background(), id)
+				_ = s.destroy(ctx, id)
 			}
 		}()
 		return true
@@ -809,7 +854,7 @@ func (s *Server) shutdownAll() {
 	// that was already inside an HTTP handler when draining began can publish
 	// its Machine just after the range passed its key. Reconcile the registry
 	// once more so no starting/running row or late VMM escapes shutdown.
-	rows, err := s.reg.All(context.Background())
+	rows, err := s.reg.All(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "shutdown: list stragglers: %v\n", err)
 		return
@@ -825,7 +870,7 @@ func (s *Server) shutdownAll() {
 				}
 			}
 		}
-		if err := s.destroy(context.Background(), sb.ID); err != nil {
+		if err := s.destroy(ctx, sb.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "[%s] shutdown destroy straggler: %v\n", sb.ID, err)
 		}
 	}
@@ -1518,6 +1563,9 @@ func (s *Server) destroyLocked(ctx context.Context, id string) error {
 	// Stop the durability writer before anything else: it must not publish a
 	// commit marker for a sandbox that is being torn down.
 	s.cancelHibernationUpload(id)
+	if err := s.destroyHandoff(ctx, id); err != nil {
+		return fmt.Errorf("destroy handoff ownership: %w", err)
+	}
 	// Un-route the sandbox BEFORE invalidating its durable generation. The
 	// reverse order cost us the recovery path on every failure: MarkStopping can
 	// legitimately fail (a status a sandbox can't stop from, a registry error),

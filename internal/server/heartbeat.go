@@ -202,6 +202,11 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	} else {
 		fmt.Fprintf(os.Stderr, "heartbeat: list snapshots: %v\n", err)
 	}
+	handoffPending, err := s.pendingHandoffCount(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "heartbeat: count pending handoffs: %v\n", err)
+		handoffPending = -1
+	}
 	hb := cluster.Heartbeat{
 		HostID:              hostID,
 		RegistryID:          s.reg.RegistryID(),
@@ -214,6 +219,7 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 		WarmReady:           warmReady,
 		WarmReadyByTemplate: warmByTemplate,
 		Hibernated:          hibernated,
+		HandoffPending:      handoffPending,
 		SandboxIDs:          ids,
 		SnapshotIDs:         snapIDs,
 		RawRoutes:           rawRoutes,

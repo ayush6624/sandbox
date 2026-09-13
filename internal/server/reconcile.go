@@ -19,6 +19,7 @@ import (
 // can no longer control via the SDK. Both get torn down and their resources
 // (DNAT rules, tap, rootfs copy, row) released.
 func (s *Server) reconcile(ctx context.Context) {
+	s.reconcileReleasedHibernationArtifacts(ctx)
 	// Every private post-wake lineage belongs to a Firecracker bitmap held by
 	// the previous process, so none can survive a server restart. Sweep the
 	// directory rather than only known rows: a crash between row deletion and

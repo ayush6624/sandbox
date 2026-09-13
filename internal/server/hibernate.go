@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -341,6 +343,7 @@ func (s *Server) hibernateLoop(ctx context.Context) {
 
 // hibernateMode selects the policy checks a freeze applies.
 type hibernateMode struct {
+	handoff bool
 	// force skips the busy check — server shutdown freezes even pinned
 	// sandboxes (their connections are dying with the server either way).
 	force bool
@@ -507,6 +510,12 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, mode hibernat
 	// guest shutdown, the guest must not observe anything.
 	s.machines.Delete(id)
 	_ = vm.StopForce(m)
+	if mode.handoff {
+		if stopped, err := waitMachine(func(ctx context.Context) error { return vm.Wait(ctx, m) }, forcedExitGrace); !stopped {
+			s.machines.Store(id, m)
+			return fmt.Errorf("source exit unconfirmed: %w", err)
+		}
+	}
 
 	// Release host-side resources. The port-forward listeners deliberately
 	// stay bound: a connection to any of them wakes the sandbox.
@@ -530,7 +539,13 @@ func (s *Server) hibernateWithMode(ctx context.Context, id string, mode hibernat
 	// the far host rebases onto the durable golden base. diffBaseID is the golden
 	// a diff mem/rootfs rebases onto ("" for a full freeze).
 	if s.cfg.UFFDChunkGCS && s.blob != nil {
-		s.startHibernationUpload(id, sb, memPath, statePath, rootfsPath, snapType, diffBaseID, workingSet)
+		if mode.handoff {
+			if data, err := json.Marshal(workingSet); err == nil {
+				_ = os.WriteFile(filepath.Join(filepath.Dir(memPath), "working-set.json"), data, 0o600)
+			}
+		} else {
+			s.startHibernationUpload(id, sb, memPath, statePath, rootfsPath, snapType, diffBaseID, workingSet)
+		}
 	}
 	return nil
 }
@@ -568,7 +583,7 @@ func (s *Server) wake(ctx context.Context, id string) (registry.Sandbox, error) 
 }
 
 // wakeLocked implements wake while the caller holds wakeLock(id).
-func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, error) {
+func (s *Server) wakeLocked(ctx context.Context, id string) (result registry.Sandbox, retErr error) {
 	sb, err := s.reg.Get(ctx, id)
 	if err != nil {
 		return sb, err
@@ -582,6 +597,13 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 	// Stop every background reader/writer of the local frozen files before
 	// restore consumes and then unlinks them.
 	s.cancelHibernationUpload(id)
+	claim, err := s.claimLocalHandoff(ctx, id)
+	if err != nil {
+		return sb, err
+	}
+	defer func() {
+		retErr = s.finishFailedWake(claim, retErr)
+	}()
 
 	memPath, statePath, _, err := s.cfg.Provisioner.SnapshotPaths(hibID(id))
 	if err != nil {
@@ -614,6 +636,11 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 	}
 
 	t0 := time.Now()
+	if claim != nil {
+		if err := s.authorizeHandoffRun(ctx, claim); err != nil {
+			return sb, err
+		}
+	}
 	sb, same, err := s.reg.Wake(ctx, id)
 	if err != nil {
 		return sb, err
@@ -621,14 +648,14 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 	if same {
 		err = s.wakeRestore(ctx, sb, memPath, statePath)
 	} else {
-		err = s.wakeClone(ctx, sb, memPath, statePath)
+		staged := stagedHibernation{MemPath: memPath, StatePath: statePath}
+		err = s.wakeClone(ctx, sb, &staged)
 	}
 	if err != nil {
 		// Roll the row back to hibernated — the artifacts are untouched, so
 		// the sandbox stays wakeable (or destroyable) later.
 		s.met.wakeFailures.Add(1)
-		s.rollbackWake(sb)
-		return sb, fmt.Errorf("wake %s: %w", id, err)
+		return sb, errors.Join(fmt.Errorf("wake %s: %w", id, err), s.rollbackWake(sb))
 	}
 	s.met.wakes.Add(1)
 
@@ -669,6 +696,25 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 	return sb, nil
 }
 
+func (s *Server) finishFailedWake(claim *handoffClaim, attemptErr error) error {
+	if attemptErr == nil || claim == nil {
+		return attemptErr
+	}
+	id := claim.Control.Record.ID
+	if _, live := s.machines.Load(id); live {
+		return attemptErr
+	}
+	recoveryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if sb, err := s.reg.Get(recoveryCtx, id); err != nil || sb.Status != registry.StatusHibernated {
+		return attemptErr
+	}
+	if err := s.reopenHandoff(recoveryCtx, claim); err != nil {
+		return errors.Join(attemptErr, fmt.Errorf("reopen failed local wake: %w", err))
+	}
+	return attemptErr
+}
+
 // rollbackWake undoes a failed wake attempt: kills any half-started VM,
 // removes whatever host-side resources were added, and flips the row back to
 // hibernated. Best-effort throughout — the artifacts on disk stay intact, and
@@ -681,9 +727,15 @@ func (s *Server) wakeLocked(ctx context.Context, id string) (registry.Sandbox, e
 // same-identity path, restore the snapshot on its old baked IP, and poll the new
 // one until the agent gate times out — leaving the sandbox permanently
 // unwakeable, 30 s at a time, on every exec and every forwarded connection.
-func (s *Server) rollbackWake(sb registry.Sandbox) {
-	if v, ok := s.machines.LoadAndDelete(sb.ID); ok {
-		_ = vm.StopForce(v.(*vm.Machine))
+func (s *Server) rollbackWake(sb registry.Sandbox) error {
+	if v, ok := s.machines.Load(sb.ID); ok {
+		m := v.(*vm.Machine)
+		vm.PreserveFailureLog(m)
+		_ = vm.StopForce(m)
+		if stopped, err := waitMachine(func(ctx context.Context) error { return vm.Wait(ctx, m) }, forcedExitGrace); !stopped {
+			return fmt.Errorf("wake VM exit unconfirmed: %w", err)
+		}
+		s.machines.Delete(sb.ID)
 	}
 	// sb.TapDevice is the tap this attempt created (fresh on the clone path,
 	// the frozen one on the same-identity path); either way it is ours to drop.
@@ -691,8 +743,9 @@ func (s *Server) rollbackWake(sb registry.Sandbox) {
 		_ = s.cfg.Provisioner.DeleteTap(sb.TapDevice)
 	}
 	if err := s.reg.RollbackWake(context.Background(), sb.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] rollback to hibernated failed: %v\n", sb.ID, err)
+		return fmt.Errorf("rollback to hibernated: %w", err)
 	}
+	return nil
 }
 
 // wakeRestore resumes the snapshot on its original identity — the tap and
@@ -731,6 +784,9 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 		// guest faults its RAM in lazily from memPath (with fault-ahead) instead
 		// of paying a full eager fault-in before resume (uffd_linux.go).
 		m, rt, err = vm.RestoreUFFD(s.vmCtx, opts, memPath, statePath)
+		if m != nil {
+			s.machines.Store(sb.ID, m)
+		}
 		if err != nil {
 			return fmt.Errorf("restore (uffd): %w", err)
 		}
@@ -739,11 +795,14 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 		if err != nil {
 			return fmt.Errorf("new machine from snapshot: %w", err)
 		}
+		s.machines.Store(sb.ID, m)
 		if serr := vm.Start(s.vmCtx, m); serr != nil {
+			vm.PreserveFailureLog(m)
 			_ = vm.StopForce(m)
 			return fmt.Errorf("load snapshot + resume: %w", serr)
 		}
 	}
+	s.machines.Store(sb.ID, m)
 	pid, err := vm.PID(m)
 	if err != nil {
 		_ = vm.StopForce(m)
@@ -775,7 +834,7 @@ func (s *Server) wakeRestore(ctx context.Context, sb registry.Sandbox, memPath, 
 // dance as fan-out: unbridged tap, MMDS reidentify, bridge on the GARP
 // announce. Gen must differ from anything the frozen agent has seen, or it
 // would skip the reidentify.
-func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, statePath string) error {
+func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, staged *stagedHibernation) error {
 	startedAt := time.Now()
 	if err := s.cfg.Provisioner.CreateTapUnbridged(sb.TapDevice); err != nil {
 		return fmt.Errorf("create tap: %w", err)
@@ -788,9 +847,9 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 	opts := s.restoreOptions(sb)
 	setupTime := time.Since(startedAt)
 	guestMAC := randomMAC()
-	m, rt, err := vm.StartClone(s.vmCtx, opts, vm.CloneParams{
-		MemPath:         memPath,
-		StatePath:       statePath,
+	params := vm.CloneParams{
+		MemPath:         staged.MemPath,
+		StatePath:       staged.StatePath,
 		CloneRootfsPath: sb.RootfsPath, // its own rootfs, exactly where the snapshot expects it
 		TapDevice:       sb.TapDevice,
 		GuestIP:         sb.GuestIP,
@@ -798,7 +857,18 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 		GatewayIP:       s.cfg.GatewayIP,
 		Prefix:          s.guestSubnetBits(),
 		Gen:             uuid.NewString(),
-	})
+	}
+	var m *vm.Machine
+	var rt vm.RuntimeConfig
+	if chunks := staged.takeChunks(); chunks != nil {
+		opts.UFFDChunks = chunks
+		m, rt, err = vm.StartCloneUFFD(s.vmCtx, opts, params)
+	} else {
+		m, rt, err = vm.StartClone(s.vmCtx, opts, params)
+	}
+	if m != nil {
+		s.machines.Store(sb.ID, m)
+	}
 	if err != nil {
 		if arp != nil {
 			_ = arp.Close()
@@ -808,6 +878,7 @@ func (s *Server) wakeClone(ctx context.Context, sb registry.Sandbox, memPath, st
 	if err := provisioner.WakeThawAgent(sb.TapDevice); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] thaw wake on %s failed (poll fallback remains): %v\n", sb.ID, sb.TapDevice, err)
 	}
+	s.machines.Store(sb.ID, m)
 	c := &clone{
 		sb: sb, m: m, vmID: rt.VMID, sock: rt.SocketPath, arp: arp,
 		guestMAC:  guestMAC,

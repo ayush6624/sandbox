@@ -105,6 +105,25 @@ func (s *Server) relinquishIfAdoptedAway(ctx context.Context, sb registry.Sandbo
 	if s.blob == nil {
 		return false
 	}
+	control, _, err := s.readHandoff(ctx, sb.ID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reconcile: read handoff %s (keeping row): %v\n", sb.ID, err)
+		return false
+	}
+	if control != nil {
+		if s.ownsHandoff(control) && control.Phase != handoffDestroyed {
+			return false
+		}
+		if err := s.reg.Destroy(ctx, sb.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "reconcile: relinquish managed %s: %v\n", sb.ID, err)
+			return false
+		}
+		s.cancelHibernationUpload(sb.ID)
+		s.pf.CloseSandbox(sb.ID)
+		_ = s.cfg.Provisioner.CleanupSnapshot(hibID(sb.ID))
+		_ = s.cfg.Provisioner.RemoveRootfs(sb.RootfsPath)
+		return true
+	}
 	owner, ok, err := s.readOwner(ctx, sb.ID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reconcile: read owner fence for %s (keeping row): %v\n", sb.ID, err)

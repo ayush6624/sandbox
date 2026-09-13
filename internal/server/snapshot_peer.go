@@ -41,10 +41,11 @@ func (s *Server) handlePeerSnapshotMeta(w http.ResponseWriter, r *http.Request) 
 	defer op.RUnlock()
 
 	snap, err := s.reg.GetSnapshot(r.Context(), id)
-	if err != nil || snap.Golden {
+	if err != nil || snap.Golden || snap.Role == registry.SnapshotRoleBase {
 		http.NotFound(w, r)
 		return
 	}
+	snap.Upload = nil
 	writeJSON(w, http.StatusOK, snap)
 }
 
@@ -60,7 +61,7 @@ func (s *Server) handlePeerSnapshotArtifact(w http.ResponseWriter, r *http.Reque
 	defer op.RUnlock()
 
 	snap, err := s.reg.GetSnapshot(r.Context(), id)
-	if err != nil || snap.Golden {
+	if err != nil || snap.Golden || snap.Role == registry.SnapshotRoleBase {
 		http.NotFound(w, r)
 		return
 	}
@@ -169,7 +170,7 @@ func (s *Server) pullSnapshotFromPeer(ctx context.Context, snapID, rawPeer strin
 	if decodeErr != nil {
 		return registry.Snapshot{}, 0, fmt.Errorf("decode metadata: %w", decodeErr)
 	}
-	if meta.ID != snapID || meta.Golden {
+	if meta.ID != snapID || meta.Golden || meta.Role == registry.SnapshotRoleBase {
 		return registry.Snapshot{}, 0, errors.New("peer returned mismatched or built-in snapshot metadata")
 	}
 	if meta.Format == "" {
@@ -238,6 +239,7 @@ func (s *Server) pullSnapshotFromPeer(ctx context.Context, snapID, rawPeer strin
 	committed = true
 
 	row := meta
+	row.Upload = nil
 	row.MemPath, row.StatePath, row.RootfsPath = memPath, statePath, rootfsPath
 	row.Golden = false
 	if err := s.reg.CreateSnapshot(ctx, row); err != nil {

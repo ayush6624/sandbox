@@ -27,16 +27,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ayush6624/sandbox/internal/vm"
 )
 
 const (
-	chunkManifestVersion = 1
-	chunkCodecGzip       = "gzip"
+	chunkManifestVersion      = 1
+	chunkCodecGzip            = "gzip"
+	chunkManifestRawVersion   = 2
+	chunkManifestOwnedVersion = 3
+	chunkCodecRawSHA256       = "raw-sha256"
 	// chunkZeroHash marks an all-zero chunk: never uploaded, never fetched, served
 	// as a freshly-zeroed buffer. Not a valid sha256 hex, so it can't collide with
 	// a real content hash.
@@ -62,11 +67,12 @@ type chunkEntry struct {
 
 // chunkManifest is the geometry + chunk list for one hibernation mem image.
 type chunkManifest struct {
-	Version   int          `json:"version"`
-	MemSize   uint64       `json:"mem_size"`
-	ChunkSize uint64       `json:"chunk_size"`
-	Codec     string       `json:"codec"`
-	Chunks    []chunkEntry `json:"chunks"`
+	Version   int              `json:"version"`
+	MemSize   uint64           `json:"mem_size"`
+	ChunkSize uint64           `json:"chunk_size"`
+	Codec     string           `json:"codec"`
+	Chunks    []chunkEntry     `json:"chunks"`
+	Storage   *chunkStorageRef `json:"storage,omitempty"`
 }
 
 // chunkLen returns the byte length of chunk idx (ChunkSize, or short for the
@@ -261,10 +267,55 @@ func (s *Server) fetchChunkManifest(ctx context.Context, id string) (*chunkManif
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("decode chunk manifest: %w", err)
 	}
-	if m.ChunkSize == 0 || m.MemSize == 0 {
-		return nil, fmt.Errorf("chunk manifest for %s is degenerate (size=%d chunk=%d)", id, m.MemSize, m.ChunkSize)
+	if err := m.validate(); err != nil {
+		return nil, fmt.Errorf("chunk manifest for %s: %w", id, err)
+	}
+	if m.Storage != nil {
+		return nil, fmt.Errorf("owned manifest requires a generation handoff descriptor")
 	}
 	return &m, nil
+}
+
+func (m *chunkManifest) validate() error {
+	compressed := m.Version == chunkManifestVersion && m.Codec == chunkCodecGzip
+	raw := (m.Version == chunkManifestRawVersion || m.Version == chunkManifestOwnedVersion) && m.Codec == chunkCodecRawSHA256
+	if !compressed && !raw {
+		return fmt.Errorf("unsupported version %d or codec %q", m.Version, m.Codec)
+	}
+	if m.Version == chunkManifestOwnedVersion {
+		if m.Storage == nil || !validHibPeerGeneration(m.Storage.SetID) || m.Storage.SetID == "00000000-0000-0000-0000-000000000000" || m.Storage.RootID == "" {
+			return fmt.Errorf("owned manifest requires generation and root identities")
+		}
+	} else if m.Storage != nil {
+		return fmt.Errorf("legacy manifest cannot carry storage ownership")
+	}
+	if m.MemSize == 0 || m.MemSize > math.MaxInt64 || m.MemSize%4096 != 0 || m.ChunkSize == 0 || m.ChunkSize >= math.MaxInt64 || m.ChunkSize%4096 != 0 {
+		return fmt.Errorf("invalid memory geometry: size=%d chunk=%d", m.MemSize, m.ChunkSize)
+	}
+	if uint64(len(m.Chunks)) != 1+(m.MemSize-1)/m.ChunkSize {
+		return fmt.Errorf("chunk count does not cover memory image")
+	}
+	for i, entry := range m.Chunks {
+		if entry.Hash == chunkZeroHash {
+			if entry.CLen != 0 {
+				return fmt.Errorf("zero chunk %d has compressed bytes", i)
+			}
+			continue
+		}
+		hash, err := hex.DecodeString(entry.Hash)
+		if err != nil || len(hash) != sha256.Size || entry.Hash != strings.ToLower(entry.Hash) || (compressed && entry.CLen <= 0) || (raw && entry.CLen != 0) {
+			return fmt.Errorf("invalid chunk %d", i)
+		}
+	}
+	return nil
+}
+
+func chunkMatches(raw []byte, size uint64, hash string) bool {
+	if uint64(len(raw)) != size {
+		return false
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]) == hash
 }
 
 // fetchWorkingSet pulls the persisted working set (chunk indices from the last
@@ -291,18 +342,24 @@ func (s *Server) fetchWorkingSet(ctx context.Context, id string, numChunks uint6
 
 // chunkCacheDir is the host-local cache of materialized (decompressed) chunks,
 // content-addressed so it's shared across VMs. Under SnapshotDir to share the
-// XFS reflink domain. No eviction yet (roadmap: B4/ops).
+// XFS reflink domain. memoryChunkCache owns its bounded lifetime and writes.
 func (s *Server) chunkCacheDir() string {
 	return filepath.Join(s.cfg.Provisioner.SnapshotDir, "chunkcache")
 }
 
 // newChunkLoad is the testable core of the GCS load path: given the manifest, a
-// cache dir, and a fetch(hash) that returns the COMPRESSED chunk object, it
+// cache, and a fetch(hash) that returns the COMPRESSED chunk object, it
 // returns a load(idx) that serves a decompressed chunk from local cache →
 // fetch, write-through caching each miss. The zero sentinel is served directly.
 // A fetch/decompress error propagates so the UFFD handler kills the VM rather
 // than hang on an unserved fault.
-func newChunkLoad(m *chunkManifest, cacheDir string, fetch func(hash string) ([]byte, error)) func(uint64) ([]byte, error) {
+func newChunkLoad(m *chunkManifest, cache *chunkCache, fetch func(hash string) ([]byte, error)) func(uint64) ([]byte, error) {
+	return newChunkLoadWithPeer(m, cache, nil, fetch)
+}
+
+// peerRaw must return verified raw bytes. A peer miss or integrity error falls
+// through to the immutable cloud hash; cache verification applies to both.
+func newChunkLoadWithPeer(m *chunkManifest, cache *chunkCache, peerRaw func(string, uint64) ([]byte, error), fetch func(hash string) ([]byte, error)) func(uint64) ([]byte, error) {
 	return func(idx uint64) ([]byte, error) {
 		if idx >= uint64(len(m.Chunks)) {
 			return nil, nil // past the image
@@ -312,42 +369,34 @@ func newChunkLoad(m *chunkManifest, cacheDir string, fetch func(hash string) ([]
 		if e.Hash == chunkZeroHash {
 			return make([]byte, clen), nil
 		}
-		cpath := filepath.Join(cacheDir, e.Hash)
-		if raw, err := os.ReadFile(cpath); err == nil && uint64(len(raw)) == clen {
+		if raw := cache.get(e.Hash, clen); raw != nil {
 			return raw, nil // warm: cache holds decompressed bytes, no gunzip
 		}
-		comp, err := fetch(e.Hash)
-		if err != nil {
-			return nil, fmt.Errorf("fetch chunk %d (%s): %w", idx, e.Hash, err)
-		}
-		raw, err := gunzipBytes(comp)
-		if err != nil {
-			return nil, fmt.Errorf("decompress chunk %d (%s): %w", idx, e.Hash, err)
-		}
-		if uint64(len(raw)) != clen {
-			return nil, fmt.Errorf("chunk %d (%s) is %d bytes, manifest says %d", idx, e.Hash, len(raw), clen)
-		}
-		// Write-through cache, best-effort. Use a UNIQUE temp file per write, not a
-		// fixed cacheDir/<hash>.tmp: two DIFFERENT chunk indices that dedup to the
-		// same content hash are loaded by separate single-flight entries (chunk() is
-		// keyed by index, not hash), so they can fetch+write concurrently. A shared
-		// temp path lets those concurrent writes truncate/interleave, leaving a torn
-		// cache file — benign to what the guest receives (that comes from the
-		// in-memory `raw`, and a torn file fails the len-check on the next read and
-		// re-fetches) but wasteful. CreateTemp gives each writer its own file; the
-		// rename is atomic and, since both wrote identical bytes, either winning is
-		// correct.
-		if err := os.MkdirAll(cacheDir, 0o755); err == nil {
-			if tf, terr := os.CreateTemp(cacheDir, "."+e.Hash+".tmp-*"); terr == nil {
-				_, werr := tf.Write(raw)
-				cerr := tf.Close()
-				if werr == nil && cerr == nil {
-					_ = os.Rename(tf.Name(), cpath)
-				} else {
-					_ = os.Remove(tf.Name())
-				}
+		var raw []byte
+		if peerRaw != nil {
+			if candidate, err := peerRaw(e.Hash, clen); err == nil && chunkMatches(candidate, clen, e.Hash) {
+				raw = candidate
 			}
 		}
+		if raw == nil {
+			comp, err := fetch(e.Hash)
+			if err != nil {
+				return nil, fmt.Errorf("fetch chunk %d (%s): %w", idx, e.Hash, err)
+			}
+			zr, err := gzip.NewReader(bytes.NewReader(comp))
+			if err != nil {
+				return nil, fmt.Errorf("decompress chunk %d (%s): %w", idx, e.Hash, err)
+			}
+			raw, err = io.ReadAll(io.LimitReader(zr, int64(clen)+1))
+			_ = zr.Close()
+			if err != nil {
+				return nil, fmt.Errorf("decompress chunk %d (%s): %w", idx, e.Hash, err)
+			}
+			if !chunkMatches(raw, clen, e.Hash) {
+				return nil, fmt.Errorf("chunk %d (%s) failed size or content verification", idx, e.Hash)
+			}
+		}
+		cache.put(e.Hash, raw)
 		return raw, nil
 	}
 }
@@ -356,12 +405,19 @@ func newChunkLoad(m *chunkManifest, cacheDir string, fetch func(hash string) ([]
 // GCS manifest, or returns nil (with a reason logged by the caller) when chunks
 // aren't available — the wake then falls back to the local mem file.
 func (s *Server) gcsChunkSource(ctx context.Context, id string) *vm.UFFDChunkSource {
+	source, _ := s.loadHibChunkSource(ctx, id)
+	return source
+}
+
+// loadHibChunkSource captures one manifest before the VM starts. Later faults
+// use its immutable content hashes even after the hibernation record is removed.
+func (s *Server) loadHibChunkSource(ctx context.Context, id string) (*vm.UFFDChunkSource, error) {
 	if s.blob == nil {
-		return nil
+		return nil, fmt.Errorf("snapshot bucket is not configured")
 	}
 	m, err := s.fetchChunkManifest(ctx, id)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	prefetch := s.cfg.UFFDChunkPrefetch
 	if prefetch <= 0 {
@@ -376,7 +432,7 @@ func (s *Server) gcsChunkSource(ctx context.Context, id string) *vm.UFFDChunkSou
 		Total:     m.MemSize,
 		ChunkSize: m.ChunkSize,
 		Prefetch:  uint64(prefetch),
-		Load:      newChunkLoad(m, s.chunkCacheDir(), fetch),
+		Load:      newChunkLoad(m, s.memoryChunkCache(), fetch),
 		Prewarm:   s.fetchWorkingSet(ctx, id, uint64(len(m.Chunks))),
-	}
+	}, nil
 }

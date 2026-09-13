@@ -26,14 +26,30 @@ func TestSyncIsAtomicAgainstCloseSandbox(t *testing.T) {
 	for iter := 0; iter < 200; iter++ {
 		f := testForwarder(t, dial, func(string) func() { return func() {} })
 		desired := map[int]int{}
+		var reservations []net.Listener
 		for i := 0; i < want; i++ {
-			desired[freePort(t)] = 8000 + i
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			reservations = append(reservations, ln)
+			desired[ln.Addr().(*net.TCPAddr).Port] = 8000 + i
+		}
+		// Keep reservations open until all ports are distinct. Closing each
+		// immediately lets the kernel return the same port again in this batch.
+		for _, ln := range reservations {
+			_ = ln.Close()
 		}
 		var wg sync.WaitGroup
+		var syncErr error
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = f.Sync("sb", desired) }()
+		go func() { defer wg.Done(); syncErr = f.Sync("sb", desired) }()
 		go func() { defer wg.Done(); f.CloseSandbox("sb") }()
 		wg.Wait()
+		if syncErr != nil {
+			t.Fatalf("iteration %d: listener bind failed: %v", iter, syncErr)
+		}
 
 		f.mu.Lock()
 		n := len(f.listeners["sb"])
