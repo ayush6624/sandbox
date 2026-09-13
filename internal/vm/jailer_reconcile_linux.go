@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // JailerReconcileResult summarizes abandoned isolation state removed before
@@ -74,16 +76,47 @@ func ReconcileJailer(cfg JailerConfig) (JailerReconcileResult, error) {
 			}
 			result.ProcessesTerminated++
 		}
+		if cfg.CgroupParent != "" {
+			leaf := jailerCgroupLeaf(cfg, vmID)
+			if _, err := os.Lstat(leaf); err == nil {
+				if err := removeVMMCgroup(leaf); err != nil {
+					return result, err
+				}
+				result.CgroupsRemoved++
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return result, err
+			}
+		}
 		if err := os.RemoveAll(jailDir); err != nil {
 			return result, fmt.Errorf("remove stale jail %s: %w", jailDir, err)
 		}
 		result.JailsRemoved++
-		if cfg.CgroupParent != "" {
-			if err := os.Remove(jailerCgroupLeaf(cfg, vmID)); err == nil {
-				result.CgroupsRemoved++
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return result, fmt.Errorf("remove stale cgroup %s: %w", vmID, err)
+	}
+	// Older cleanup deleted the jail before a failed rmdir, leaving no jail
+	// entry to discover. Production VM cgroup names are generated UUIDs.
+	if cfg.CgroupParent != "" {
+		parent := filepath.Join(cfg.CgroupRoot, cfg.CgroupParent)
+		groups, err := os.ReadDir(parent)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return result, err
+		}
+		for _, group := range groups {
+			id, err := uuid.Parse(group.Name())
+			if !group.IsDir() || err != nil || id.String() != group.Name() {
+				continue
 			}
+			leaf := filepath.Join(parent, group.Name())
+			events, err := os.ReadFile(filepath.Join(leaf, "cgroup.events"))
+			if err != nil {
+				return result, fmt.Errorf("inspect orphan cgroup %s: %w", leaf, err)
+			}
+			if !strings.Contains("\n"+string(events), "\npopulated 0\n") {
+				return result, fmt.Errorf("refusing to remove populated or unverifiable orphan cgroup %s", leaf)
+			}
+			if err := removeVMMCgroup(leaf); err != nil {
+				return result, err
+			}
+			result.CgroupsRemoved++
 		}
 	}
 	allocDir := filepath.Join(cfg.ChrootBaseDir, ".allocations")

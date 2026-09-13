@@ -386,7 +386,7 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 	cleanupCgroup := true
 	defer func() {
 		if retErr != nil && cleanupCgroup {
-			_ = os.Remove(jailerCgroupLeaf(cfg, req.VMID))
+			retErr = errors.Join(retErr, removeVMMCgroup(jailerCgroupLeaf(cfg, req.VMID)))
 		}
 	}()
 
@@ -415,8 +415,14 @@ func (l *jailerProcessLauncher) Prepare(ctx context.Context, req LaunchRequest) 
 		return PreparedLaunch{}, fmt.Errorf("prepare jail directories: %w", err)
 	}
 	cleanupJail := func() {
-		_ = os.RemoveAll(jailDir)
-		_ = os.Remove(jailerCgroupLeaf(cfg, req.VMID))
+		if err := removeVMMCgroup(jailerCgroupLeaf(cfg, req.VMID)); err != nil {
+			fmt.Fprintf(os.Stderr, "jailer cleanup: %v; retaining jail and identity for reconciliation\n", err)
+			return
+		}
+		if err := os.RemoveAll(jailDir); err != nil {
+			fmt.Fprintf(os.Stderr, "jailer cleanup: remove jail %s: %v; retaining identity for reconciliation\n", jailDir, err)
+			return
+		}
 		releaseIdentity()
 	}
 	cleanupCgroup = false
@@ -1457,7 +1463,7 @@ func prepareVMMCgroup(cfg JailerConfig, req LaunchRequest) (retErr error) {
 	}
 	defer func() {
 		if retErr != nil {
-			_ = os.Remove(leaf)
+			retErr = errors.Join(retErr, removeVMMCgroup(leaf))
 		}
 	}()
 

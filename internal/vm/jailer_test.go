@@ -266,6 +266,25 @@ func TestJailerPrepareStagesAssetsAndAppliesOnePolicy(t *testing.T) {
 		t.Fatalf("unjailed PID file was trusted: PID=%d err=%v", pid, err)
 	}
 
+	// Regular fixture files force a removal failure, unlike kernel-owned
+	// cgroup controls. Recovery state must survive that failure.
+	prepared.cleanup()
+	if _, err := os.Stat(filepath.Join(cfg.ChrootBaseDir, "firecracker", req.VMID)); err != nil {
+		t.Fatalf("failed cgroup cleanup removed the jail: %v", err)
+	}
+	retained, err := os.ReadDir(filepath.Join(cfg.ChrootBaseDir, ".allocations"))
+	if err != nil || len(retained) != 1 {
+		t.Fatalf("failed cgroup cleanup released the identity: %v, %v", retained, err)
+	}
+	controls, err := os.ReadDir(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, control := range controls {
+		if err := os.Remove(filepath.Join(leaf, control.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
 	prepared.cleanup()
 	prepared.cleanup()
 	if _, err := os.Stat(filepath.Join(cfg.ChrootBaseDir, "firecracker", req.VMID)); !os.IsNotExist(err) {
