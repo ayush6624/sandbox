@@ -202,6 +202,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		UFFDChunkBytes:         uint64(cfg.UFFDChunkKiB) * 1024,
 		UFFDChunkGCS:           cfg.UFFDChunkGCS,
 		UFFDChunkPrefetch:      cfg.UFFDChunkPrefetch,
+		UFFDChunkCacheBytes:    cfg.UFFDChunkCacheMIB * (1 << 20),
+		OwnedHandoffStorage:    cfg.OwnedHandoffStorage,
 		SnapshotBucket:         cfg.SnapshotBucket,
 		UsageBucket:            cfg.UsageBucket,
 		GatewayURL:             cfg.GatewayURL,

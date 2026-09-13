@@ -39,6 +39,7 @@ var (
 	gwScaleMemPerSlot  int64
 	gwScaleMemOverhead int64
 	gwReleaseFile      string
+	gwOperationDB      string
 	gwIngressBucket    string
 	gwRawHost          string
 	gwRawMin           int
@@ -99,6 +100,7 @@ token to the caller and must therefore never be reachable with a client key.`,
 	cmd.Flags().Int64Var(&gwScaleMemPerSlot, "direct-scale-mem-per-slot-mib", 0, "memory represented by one autoscaling slot (0 = count every create as one slot)")
 	cmd.Flags().Int64Var(&gwScaleMemOverhead, "direct-scale-mem-overhead-mib", 156, "per-sandbox VMM memory charge added to queued memory overrides")
 	cmd.Flags().StringVar(&gwReleaseFile, "worker-release-file", "", "persisted expected worker release used to gate stale allocations")
+	cmd.Flags().StringVar(&gwOperationDB, "operation-db", "operations.db", "SQLite database for public create operations and replay")
 	cmd.Flags().StringVar(&gwIngressBucket, "ingress-bucket", "", "GCS bucket for durable raw TCP allocations (empty disables E4)")
 	cmd.Flags().StringVar(&gwRawHost, "raw-public-host", "", "public hostname returned for raw TCP allocations")
 	cmd.Flags().IntVar(&gwRawMin, "raw-port-min", 20000, "public raw TCP port range start")
@@ -164,6 +166,7 @@ func runGateway(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	g.ConfigureOperationDB(gwOperationDB)
 	if gwScaleProject != "" || gwScaleZone != "" || gwScaleMIG != "" {
 		scaler, err := gcemig.New(gwScaleProject, gwScaleZone, gwScaleMIG, gwScaleMax)
 		if err != nil {
