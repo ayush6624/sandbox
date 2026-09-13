@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/vm"
 )
 
 func TestStopMachineForcesAfterShutdownTimeout(t *testing.T) {
@@ -74,5 +76,28 @@ func TestStopMachineReportsForceFailure(t *testing.T) {
 	}
 	if err := stopMachineWith(ops, time.Millisecond, time.Millisecond, time.Millisecond); !errors.Is(err, want) {
 		t.Fatalf("stop error = %v, want %v", err, want)
+	}
+}
+
+func TestWaitMachineAcceptsTerminalStartupTimeout(t *testing.T) {
+	exited, err := waitMachine(func(context.Context) error { return context.DeadlineExceeded }, time.Second)
+	if !exited || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("terminal startup error mistaken for unfinished wait: %v %v", exited, err)
+	}
+}
+
+func TestStopMachineRejectsUnconfirmedLaunchExit(t *testing.T) {
+	proofErr := errors.Join(errors.New("child PID unavailable"), vm.ErrLaunchExitUnconfirmed)
+	forced := false
+	ops := machineStopOps{
+		shutdown: func(context.Context) error { return nil },
+		wait:     func(context.Context) error { return proofErr },
+		force:    func() error { forced = true; return nil },
+	}
+	if err := stopMachineWith(ops, time.Second, time.Second, time.Second); !errors.Is(err, vm.ErrLaunchExitUnconfirmed) {
+		t.Fatalf("unproven exit accepted as terminal: %v", err)
+	}
+	if !forced {
+		t.Fatal("missing exit proof did not attempt forced stop")
 	}
 }

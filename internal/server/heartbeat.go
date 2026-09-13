@@ -204,6 +204,8 @@ func (s *Server) sendHeartbeat(ctx context.Context, client *http.Client, url, ho
 	}
 	hb := cluster.Heartbeat{
 		HostID:              hostID,
+		RegistryID:          s.reg.RegistryID(),
+		CreateProgress:      true,
 		Addr:                advertise,
 		InstanceName:        gceInstanceName(ctx),
 		Release:             s.cfg.WorkerRelease,

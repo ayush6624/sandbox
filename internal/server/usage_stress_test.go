@@ -396,7 +396,10 @@ func TestConcurrentWarmClaimsBillFromClaimNotFromPoolBuild(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, ok := s.claimWarm(ctx, "", nil, 0)
+			_, ok, err := s.claimWarm(ctx, "", nil, 0)
+			if err != nil {
+				t.Errorf("claim warm: %v", err)
+			}
 			claims[i] = ok
 		}(i)
 	}

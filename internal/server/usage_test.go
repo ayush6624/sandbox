@@ -75,7 +75,10 @@ func TestWarmPoolVMIsNotMeteredBeforeClaim(t *testing.T) {
 		t.Fatalf("a ready pool VM opened %d billable intervals, want 0", n)
 	}
 
-	claimed, ok := s.claimWarm(ctx, "mine", nil, 0)
+	claimed, ok, err := s.claimWarm(ctx, "mine", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok {
 		t.Fatal("claimWarm found no ready VM")
 	}

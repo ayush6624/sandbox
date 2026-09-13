@@ -510,14 +510,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 // clone is one in-flight fan-out clone between Phase 1 (resume) and Phase 2 (bridge).
 type clone struct {
-	sb         registry.Sandbox
-	m          *vm.Machine
-	vmID, sock string
-	startedAt  time.Time
-	setupTime  time.Duration
-	launchTime vm.LaunchTimings
-	arp        *provisioner.ARPListener // opened on the unbridged tap before resume; nil = fixed-sleep fallback
-	guestMAC   string
+	progressIntent registry.CreateIntent
+	sb             registry.Sandbox
+	m              *vm.Machine
+	vmID, sock     string
+	startedAt      time.Time
+	setupTime      time.Duration
+	launchTime     vm.LaunchTimings
+	arp            *provisioner.ARPListener // opened on the unbridged tap before resume; nil = fixed-sleep fallback
+	guestMAC       string
 	// baseSnap is the snapshot this machine was loaded from — the base its
 	// dirty-page bitmap tracks against (recorded into Server.diffBase by
 	// finishClone). Empty for machines whose load source is not a snapshot
@@ -764,14 +765,27 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 	// point; the file is permanent now, so the barrier bought nothing but
 	// wall-clock — every clone had to resume before any clone could bridge.
 	live := make([]registry.Sandbox, 0, body.Count)
+	var claimErr error
 	for len(live) < body.Count {
-		ready, ok := s.claimWarmForTemplate(ctx, snapID, "", expiresAt, body.HibernateAfterSec)
+		ready, ok, err := s.claimWarmForTemplate(ctx, snapID, "", expiresAt, body.HibernateAfterSec)
+		if err != nil {
+			claimErr = err
+			break
+		}
 		if !ok {
 			break
 		}
 		live = append(live, ready)
 	}
 	remaining := body.Count - len(live)
+	if claimErr != nil {
+		if len(live) == 0 {
+			httpError(w, 500, claimErr)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[fanout %s] warm claim failed: %v\n", snapID, claimErr)
+		remaining = 0
+	}
 	clones := make([]*clone, remaining)
 	live = append(live, s.fanoutClones(ctx, snapID, snap, clones, limit, expiresAt, body.HibernateAfterSec)...)
 
@@ -797,7 +811,11 @@ func (s *Server) handleFanout(w http.ResponseWriter, r *http.Request) {
 
 // bringUpClone allocates resources for one clone and resumes it on an unbridged
 // tap. The tap is NOT yet on the bridge — finishClone does that after reidentify.
-func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int, warming bool) *clone {
+func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int, warming bool, intent ...registry.CreateIntent) *clone {
+	var progressIntent registry.CreateIntent
+	if len(intent) == 1 {
+		progressIntent = intent[0]
+	}
 	startedAt := time.Now()
 	id := uuid.NewString()
 	lifecycle := s.wakeLock(id)
@@ -821,18 +839,24 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 	if warming {
 		sb, err = s.reg.CreateWarmForTemplate(ctx, id, rootfsPath, baseID, snap.ID, snap.Vcpus, snap.MemMIB)
 	} else {
-		sb, err = s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB)
+		sb, err = s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, baseID, hibernateAfterSec, snap.Vcpus, snap.MemMIB, intent...)
 	}
 	if err != nil {
 		return &clone{err: fmt.Errorf("registry create: %w", err)}
 	}
 	if _, err := s.cfg.Provisioner.CloneRootfs(id, snap.RootfsPath); err != nil {
+		s.recordCreateFailure(ctx, id, createFailureRootfs)
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("clone rootfs: %w", err)}
 	}
 	if err := s.cfg.Provisioner.CreateTapUnbridged(sb.TapDevice); err != nil {
+		s.recordCreateFailure(ctx, id, createFailureNetwork)
 		s.rollbackPreVM(id, sb)
 		return &clone{sb: sb, err: fmt.Errorf("create tap: %w", err)}
+	}
+	if err := s.reg.AdvanceCreateProgress(ctx, progressIntent, registry.CreateStageVM); err != nil {
+		s.rollbackPreVM(id, sb)
+		return &clone{sb: sb, err: fmt.Errorf("record clone start: %w", err)}
 	}
 	// Listen for the guest's reidentify announce BEFORE resuming, so it can't
 	// be missed. Failure is non-fatal: finishClone falls back to a fixed sleep.
@@ -859,9 +883,9 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 		if arp != nil {
 			_ = arp.Close()
 		}
-		s.rollbackPreVM(id, sb)
-		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", err)}
+		return &clone{sb: sb, err: fmt.Errorf("start clone: %w", s.rollbackCloneLaunch(ctx, sb, m, err))}
 	}
+	s.machines.Store(id, m)
 	if err := provisioner.WakeThawAgent(sb.TapDevice); err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] thaw wake on %s failed (poll fallback remains): %v\n", id, sb.TapDevice, err)
 	}
@@ -871,7 +895,20 @@ func (s *Server) bringUpClone(ctx context.Context, snap registry.Snapshot, name 
 		guestMAC: guestMAC,
 		baseSnap: snap.ID, independent: true, startedAt: startedAt,
 		setupTime: setupTime, launchTime: rt.LaunchTimings, lifecycle: lifecycle,
+		progressIntent: progressIntent,
 	}
+}
+
+func (s *Server) rollbackCloneLaunch(ctx context.Context, sb registry.Sandbox, m *vm.Machine, launchErr error) error {
+	if m != nil {
+		s.machines.Store(sb.ID, m)
+	}
+	s.recordCreateFailure(ctx, sb.ID, createFailureVM)
+	if m != nil {
+		return errors.Join(launchErr, s.destroyLocked(context.Background(), sb.ID))
+	}
+	s.rollbackPreVM(sb.ID, sb)
+	return launchErr
 }
 
 // finishClone waits for the guest's reidentify announce, then bridges the
@@ -882,6 +919,14 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		defer c.lifecycle.Unlock()
 	}
 	sb, m := c.sb, c.m
+	s.machines.Store(sb.ID, m)
+	if err := s.reg.AdvanceCreateProgress(ctx, c.progressIntent, registry.CreateStageNetwork); err != nil {
+		if c.arp != nil {
+			_ = c.arp.Close()
+			c.arp = nil
+		}
+		return fmt.Errorf("record guest network: %w", err)
+	}
 
 	phaseStarted := time.Now()
 	reidentified := false
@@ -915,11 +960,11 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	phaseStarted = time.Now()
 	pid, err := vm.PID(m)
 	if err != nil {
-		_ = vm.StopForce(m)
+		s.recordCreateFailure(ctx, sb.ID, createFailureVM)
 		return fmt.Errorf("pid: %w", err)
 	}
 	if err := s.cfg.Provisioner.AttachTapToBridge(sb.TapDevice); err != nil {
-		_ = vm.StopForce(m)
+		s.recordCreateFailure(ctx, sb.ID, createFailureNetwork)
 		return fmt.Errorf("attach tap: %w", err)
 	}
 	if reidentified {
@@ -928,21 +973,30 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 		}
 	}
 	if err := s.reg.FinishStart(ctx, sb.ID, pid, c.vmID, c.sock); err != nil {
-		_ = vm.StopForce(m)
+		s.recordCreateFailure(ctx, sb.ID, createFailurePublish)
 		return fmt.Errorf("finish start: %w", err)
 	}
-	s.machines.Store(sb.ID, m)
 	if c.baseSnap != "" {
 		s.diffBase.Store(sb.ID, c.baseSnap)
 	}
 	s.act.touch(sb.ID)
 	s.watchMachine(sb.ID, m, "clone VM")
+	if err := s.reg.AdvanceCreateProgress(ctx, c.progressIntent, registry.CreateStageAgent); err != nil {
+		return fmt.Errorf("record agent readiness: %w", err)
+	}
 	finishStartTime := time.Since(phaseStarted)
 	phaseStarted = time.Now()
 	if err := waitForAgent(ctx, sb.GuestIP, 30*time.Second); err != nil {
+		s.recordCreateFailure(ctx, sb.ID, createFailureAgent)
+		fmt.Fprintf(os.Stderr, "[%s] clone readiness failure; console retained at %s\n", sb.ID, vm.PreserveFailureLog(m))
 		return fmt.Errorf("agent never ready on %s: %w", sb.GuestIP, err)
 	}
 	agentTime := time.Since(phaseStarted)
+	if c.independent {
+		if err := s.reg.AdvanceCreateProgress(ctx, c.progressIntent, registry.CreateStageIdentity); err != nil {
+			return fmt.Errorf("record guest identity: %w", err)
+		}
+	}
 	// Deterministic clock step before the clone is handed out — covers hot
 	// creates, fan-out, and clone-path wakes (StartClone's MMDS epoch_ms is
 	// polled and can lag the readiness gate by a tick).
@@ -953,12 +1007,14 @@ func (s *Server) finishClone(ctx context.Context, c *clone) error {
 	if c.independent {
 		phaseStarted = time.Now()
 		if err := initializeGuestIdentity(ctx, sb.GuestIP, sb.ID); err != nil {
+			s.recordCreateFailure(ctx, sb.ID, createFailureIdentity)
 			return fmt.Errorf("initialize guest identity: %w", err)
 		}
 		identityTime = time.Since(phaseStarted)
 	}
 	if sb.Status == registry.StatusStarting {
 		if err := s.reg.MarkRunning(ctx, sb.ID); err != nil {
+			s.recordCreateFailure(ctx, sb.ID, createFailurePublish)
 			return fmt.Errorf("publish running clone: %w", err)
 		}
 		c.sb.Status = registry.StatusRunning

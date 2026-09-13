@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ayush6624/sandbox/internal/apiv1"
+	"github.com/ayush6624/sandbox/internal/createops"
 	"github.com/ayush6624/sandbox/internal/gcsblob"
 	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/management"
@@ -173,8 +174,9 @@ type Server struct {
 
 	// act tracks per-sandbox API activity for idle hibernation; wakesMu/wakes
 	// serialize hibernate/wake/destroy per sandbox id.
-	act   *activityTracker
-	wakes keyedMutexes
+	act            *activityTracker
+	wakes          keyedMutexes
+	createRequests keyedMutexes
 	// Hibernation payloads upload after the VM is stopped. Wake/destroy cancel
 	// and join the current upload before consuming or deleting its local files,
 	// preventing late commit-marker resurrection and read-vs-unlink races.
@@ -251,6 +253,7 @@ type Server struct {
 	// concurrency bound is testable without a real VMM (bring-up needs Linux
 	// and KVM). nil selects the real method.
 	finishCloneFn func(context.Context, *clone) error
+	stopMachineFn func(*vm.Machine) error
 
 	// phases records the worker boot/readiness timeline (see bootphase.go) so
 	// the autoscale "host becomes usable" span is attributable per stage
@@ -562,7 +565,20 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("PATCH /snapshots/{id}/public-fields", s.handleSnapshotPublicFields)
 	mux.HandleFunc("PATCH /snapshots/{id}/warm-target", s.handleSnapshotWarmTarget)
 	mux.HandleFunc("DELETE /snapshots/{id}", s.handleDeleteSnapshot)
-	apiv1.New(mux).Register(mux)
+	operationStore, err := createops.Open(s.reg.Path() + ".operations.db")
+	if err != nil {
+		return fmt.Errorf("open public create operations: %w", err)
+	}
+	defer operationStore.Close()
+	publicAPI := apiv1.NewWithCreateOperations(mux, operationStore, s)
+	publicAPI.Register(mux)
+	createCtx, stopCreates := context.WithCancel(ctx)
+	createsDone := make(chan struct{})
+	go func() { defer close(createsDone); publicAPI.RunCreateOperations(createCtx) }()
+	defer func() { stopCreates(); <-createsDone }()
+	progressDone := make(chan struct{})
+	go func() { defer close(progressDone); s.runCreateProgressDelivery(createCtx, operationStore) }()
+	defer func() { stopCreates(); <-progressDone }()
 
 	publicHandler := httpapi.Middleware(mux)
 	servers := []*http.Server{{Handler: publicHandler}}
@@ -876,7 +892,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	hot := false
 	if body.Vcpus == 0 && body.MemMIB == 0 {
 		if snap := s.golden.Load(); snap != nil {
-			if ready, ok := s.claimWarmForTemplate(ctx, snap.ID, body.Name, expiresAt, body.HibernateAfterSec); ok {
+			if ready, ok, err := s.claimWarmForTemplate(ctx, snap.ID, body.Name, expiresAt, body.HibernateAfterSec); err != nil {
+				s.met.createsErr.Add(1)
+				httpError(w, 500, err)
+				return
+			} else if ok {
 				sb, hot = ready, true
 			}
 		}
@@ -1038,7 +1058,17 @@ func (s *Server) tryAcquireCreate() bool {
 // host's configured base, and anything else is a template build booting a
 // container-image rootfs (see handleTemplateBuild), which also needs the kernel
 // pointed at sandboxd as init since such an image has no init system.
-func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64, rootfsBase string) (registry.Sandbox, error) {
+func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Time, hibernateAfterSec int, vcpus, memMIB int64, rootfsBase string, intent ...registry.CreateIntent) (registry.Sandbox, error) {
+	if vcpus == 0 {
+		vcpus = s.cfg.VMTemplate.Vcpus
+	}
+	if memMIB == 0 {
+		memMIB = s.cfg.VMTemplate.MemMIB
+	}
+	var progressIntent registry.CreateIntent
+	if len(intent) == 1 {
+		progressIntent = intent[0]
+	}
 	id := uuid.NewString()
 	lifecycle := s.wakeLock(id)
 	lifecycle.Lock()
@@ -1048,7 +1078,7 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	// Allocate identity + admission BEFORE the rootfs copy: a capacity-rejected
 	// create (pool/memory exhaustion — routine under gateway failover) must not
 	// pay a multi-GB copy + cleanup on a host that's already full.
-	sb, err := s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB)
+	sb, err := s.reg.CreateStarting(ctx, id, name, rootfsPath, expiresAt, "", hibernateAfterSec, vcpus, memMIB, intent...)
 	if err != nil {
 		return registry.Sandbox{}, fmt.Errorf("registry create: %w", err)
 	}
@@ -1058,13 +1088,19 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 		base = s.cfg.Provisioner.RootfsBase
 	}
 	if _, err := s.cfg.Provisioner.PrepareRootfsFrom(base, id); err != nil {
+		s.recordCreateFailure(ctx, id, createFailureRootfs)
 		s.rollbackPreVM(id, sb)
 		return registry.Sandbox{}, fmt.Errorf("prepare rootfs: %w", err)
 	}
 
 	if err := s.cfg.Provisioner.CreateTap(sb.TapDevice); err != nil {
+		s.recordCreateFailure(ctx, id, createFailureNetwork)
 		s.rollbackPreVM(id, sb)
 		return registry.Sandbox{}, fmt.Errorf("create tap: %w", err)
+	}
+	if err := s.reg.AdvanceCreateProgress(ctx, progressIntent, registry.CreateStageVM); err != nil {
+		s.rollbackPreVM(id, sb)
+		return registry.Sandbox{}, fmt.Errorf("record VM start: %w", err)
 	}
 
 	opts := s.cfg.VMTemplate
@@ -1091,42 +1127,38 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 
 	m, rt, err := vm.NewMachine(s.vmCtx, opts, false)
 	if err != nil {
+		s.recordCreateFailure(ctx, id, createFailureVM)
 		s.rollbackPreVM(id, sb)
 		return registry.Sandbox{}, fmt.Errorf("new machine: %w", err)
 	}
-	if err := vm.Start(s.vmCtx, m); err != nil {
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		return registry.Sandbox{}, fmt.Errorf("start: %w", err)
-	}
-	pid, err := vm.PID(m)
+	pid, err := s.startColdMachine(ctx, sb, m, rt, vm.Start, vm.PID)
 	if err != nil {
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		return registry.Sandbox{}, fmt.Errorf("pid: %w", err)
+		return registry.Sandbox{}, err
 	}
-
-	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
-		s.pf.CloseSandbox(id)
-		_ = vm.StopForce(m)
-		s.rollbackPreVM(id, sb)
-		return registry.Sandbox{}, fmt.Errorf("finish start: %w", err)
-	}
-
-	s.machines.Store(id, m)
 	s.act.touch(id)
 
 	s.watchMachine(id, m, "VM")
+	if err := s.reg.AdvanceCreateProgress(ctx, progressIntent, registry.CreateStageAgent); err != nil {
+		_ = s.destroyLocked(context.Background(), id)
+		return registry.Sandbox{}, fmt.Errorf("record agent readiness: %w", err)
+	}
 
 	if err := waitForAgent(ctx, sb.GuestIP, 60*time.Second); err != nil {
+		s.recordCreateFailure(ctx, id, createFailureAgent)
 		_ = s.destroyLocked(context.Background(), id)
 		return registry.Sandbox{}, fmt.Errorf("sandbox booted but agent never became ready: %w", err)
 	}
+	if err := s.reg.AdvanceCreateProgress(ctx, progressIntent, registry.CreateStageIdentity); err != nil {
+		_ = s.destroyLocked(context.Background(), id)
+		return registry.Sandbox{}, fmt.Errorf("record guest identity: %w", err)
+	}
 	if err := initializeGuestIdentity(ctx, sb.GuestIP, id); err != nil {
+		s.recordCreateFailure(ctx, id, createFailureIdentity)
 		_ = s.destroyLocked(context.Background(), id)
 		return registry.Sandbox{}, fmt.Errorf("sandbox booted but identity initialization failed: %w", err)
 	}
 	if err := s.reg.MarkRunning(ctx, id); err != nil {
+		s.recordCreateFailure(ctx, id, createFailurePublish)
 		_ = s.destroyLocked(context.Background(), id)
 		return registry.Sandbox{}, fmt.Errorf("publish running sandbox: %w", err)
 	}
@@ -1139,6 +1171,35 @@ func (s *Server) createCold(ctx context.Context, name string, expiresAt *time.Ti
 	// clone or cold boot, the agent gate, identity rotation — is our latency.
 	s.meterStart(ctx, sb)
 	return sb, nil
+}
+
+// startColdMachine runs with the sandbox lifecycle lock held.
+func (s *Server) startColdMachine(ctx context.Context, sb registry.Sandbox, m *vm.Machine, rt vm.RuntimeConfig, start func(context.Context, *vm.Machine) error, machinePID func(*vm.Machine) (int, error)) (int, error) {
+	id := sb.ID
+	if err := start(s.vmCtx, m); err != nil {
+		if errors.Is(err, vm.ErrLaunchExitUnconfirmed) {
+			s.machines.Store(id, m)
+			s.recordCreateFailure(ctx, id, createFailureVM)
+			err = errors.Join(err, s.destroyLocked(context.Background(), id))
+		} else {
+			s.recordCreateFailure(ctx, id, createFailureVM)
+			s.rollbackPreVM(id, sb)
+		}
+		return 0, fmt.Errorf("start: %w", err)
+	}
+	s.machines.Store(id, m)
+	pid, err := machinePID(m)
+	if err != nil {
+		s.recordCreateFailure(ctx, id, createFailureVM)
+		return 0, fmt.Errorf("pid: %w", errors.Join(err, s.destroyLocked(context.Background(), id)))
+	}
+
+	if err := s.reg.FinishStart(ctx, id, pid, rt.VMID, rt.SocketPath); err != nil {
+		s.recordCreateFailure(ctx, id, createFailurePublish)
+		return 0, fmt.Errorf("finish start: %w", errors.Join(err, s.destroyLocked(context.Background(), id)))
+	}
+
+	return pid, nil
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -1394,8 +1455,8 @@ func (s *Server) handlePublicFields(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
-	if idle < 0 {
-		httpError(w, 400, errors.New("idle_timeout_seconds must be non-negative"))
+	if idle < -1 {
+		httpError(w, 400, errors.New("idle_timeout_seconds must be >= -1"))
 		return
 	}
 	if len(metadata) > 64 {
@@ -1483,7 +1544,11 @@ func (s *Server) destroyLocked(ctx context.Context, id string) error {
 		// and therefore its consumed-CPU total — with it. The few hundred ms of
 		// teardown CPU this misses is not worth a hook inside vm's cleanup.
 		s.meterStop(ctx, id, registry.EndDestroy)
-		if err := stopMachineBounded(m); err != nil {
+		stop := s.stopMachineFn
+		if stop == nil {
+			stop = stopMachineBounded
+		}
+		if err := stop(m); err != nil {
 			return fmt.Errorf("stop VM: %w", err)
 		}
 		s.machines.Delete(id)

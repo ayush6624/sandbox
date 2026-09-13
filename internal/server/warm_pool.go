@@ -74,22 +74,19 @@ func (s *Server) kickWarmPool() {
 // claimWarm promotes a fully initialized hidden VM into the routed inventory.
 // No security setup is skipped: the replenisher already performed the jailed
 // launch, network re-identification, clock sync, and SSH host-key rotation.
-func (s *Server) claimWarm(ctx context.Context, name string, expiresAt *time.Time, idleTimeout int) (registry.Sandbox, bool) {
+func (s *Server) claimWarm(ctx context.Context, name string, expiresAt *time.Time, idleTimeout int) (registry.Sandbox, bool, error) {
 	return s.claimWarmForTemplate(ctx, "", name, expiresAt, idleTimeout)
 }
 
-func (s *Server) claimWarmForTemplate(ctx context.Context, templateID, name string, expiresAt *time.Time, idleTimeout int) (registry.Sandbox, bool) {
-	sb, err := s.reg.ClaimWarmForTemplate(ctx, templateID, name, expiresAt, idleTimeout)
+func (s *Server) claimWarmForTemplate(ctx context.Context, templateID, name string, expiresAt *time.Time, idleTimeout int, intent ...registry.CreateIntent) (registry.Sandbox, bool, error) {
+	sb, err := s.reg.ClaimWarmForTemplate(ctx, templateID, name, expiresAt, idleTimeout, intent...)
 	if errors.Is(err, sql.ErrNoRows) {
 		s.met.warmMisses.Add(1)
 		s.met.forTemplate(templateID).misses.Add(1)
-		return registry.Sandbox{}, false
+		return registry.Sandbox{}, false, nil
 	}
 	if err != nil {
-		s.met.warmMisses.Add(1)
-		s.met.forTemplate(templateID).misses.Add(1)
-		fmt.Fprintf(os.Stderr, "claim warm sandbox: %v\n", err)
-		return registry.Sandbox{}, false
+		return registry.Sandbox{}, false, fmt.Errorf("claim warm sandbox: %w", err)
 	}
 	s.met.warmClaims.Add(1)
 	s.met.forTemplate(templateID).claims.Add(1)
@@ -99,7 +96,7 @@ func (s *Server) claimWarmForTemplate(ctx context.Context, templateID, name stri
 	// moment, so the row and the ledger agree on when the customer got it.
 	s.meterStart(ctx, sb)
 	s.kickWarmPool()
-	return sb, true
+	return sb, true, nil
 }
 
 func (s *Server) maintainWarmPool(ctx context.Context) {

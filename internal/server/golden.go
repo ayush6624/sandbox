@@ -276,13 +276,13 @@ func (s *Server) ensureStagedRootfs(snap registry.Snapshot) error {
 
 // createFromSnapshot brings up one identity-neutral clone of snap — the same
 // two-phase resume-then-bridge dance as fan-out, for a single sandbox.
-func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int) (registry.Sandbox, error) {
+func (s *Server) createFromSnapshot(ctx context.Context, snap registry.Snapshot, name string, expiresAt *time.Time, hibernateAfterSec int, intent ...registry.CreateIntent) (registry.Sandbox, error) {
 	if err := s.ensureStagedRootfs(snap); err != nil {
 		return registry.Sandbox{}, fmt.Errorf("stage snapshot rootfs: %w", err)
 	}
 
 	t0 := time.Now()
-	c := s.bringUpClone(ctx, snap, name, expiresAt, hibernateAfterSec, false)
+	c := s.bringUpClone(ctx, snap, name, expiresAt, hibernateAfterSec, false, intent...)
 	if c.err != nil {
 		return registry.Sandbox{}, c.err
 	}

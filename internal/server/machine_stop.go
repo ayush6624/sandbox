@@ -62,13 +62,16 @@ func stopMachineWith(ops machineStopOps, shutdownGrace, exitGrace, forceGrace ti
 	return nil
 }
 
-// vm.Wait returns the process's exit error when it has exited. Only a context
-// error means the process is still running.
+// SDK terminal errors may wrap an earlier startup timeout. Only this wait's
+// context determines whether we timed out waiting for termination.
 func waitMachine(wait func(context.Context) error, timeout time.Duration) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	err := wait(ctx)
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if errors.Is(err, vm.ErrLaunchExitUnconfirmed) {
 		return false, err
 	}
 	return true, err
