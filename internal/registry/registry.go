@@ -344,10 +344,12 @@ type MemAccounting struct {
 //	db  — every write and every transaction. Single connection (see Open).
 //	rdb — pure reads only. Read-only at the driver level, N connections.
 type Registry struct {
-	db    *sql.DB
-	rdb   *sql.DB
-	pools Pools
-	mem   MemAccounting
+	db         *sql.DB
+	rdb        *sql.DB
+	pools      Pools
+	path       string
+	registryID string
+	mem        MemAccounting
 
 	// portReads counts port-mapping reads. It exists to keep one invariant
 	// testable: sampling the host's public routes must cost ONE query
@@ -394,8 +396,29 @@ func Open(dbPath string, pools Pools) (*Registry, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	r := &Registry{db: db, pools: pools}
+	r := &Registry{db: db, pools: pools, path: dbPath}
 	if err := r.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	if err := r.migrateCreateRequests(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := r.migrateHibernationHandoffs(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := r.migrateHibernationHandoffAttempts(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := r.migrateChunkRootReleases(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := r.migrateChunkReaders(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -818,8 +841,8 @@ func (r *Registry) Create(ctx context.Context, id, name, rootfsPath string, expi
 
 // CreateStarting reserves capacity without publishing a user sandbox. The
 // server calls MarkRunning only after all readiness gates complete.
-func (r *Registry) CreateStarting(ctx context.Context, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
-	return r.create(ctx, StatusStarting, id, name, rootfsPath, expiresAt, baseSnapshotID, "", hibernateAfterSec, vcpus, memMIB)
+func (r *Registry) CreateStarting(ctx context.Context, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID string, hibernateAfterSec int, vcpus, memMIB int64, intent ...CreateIntent) (Sandbox, error) {
+	return r.create(ctx, StatusStarting, id, name, rootfsPath, expiresAt, baseSnapshotID, "", hibernateAfterSec, vcpus, memMIB, intent...)
 }
 
 // CreateWarm allocates a hidden, capacity-holding row for a pre-started VM.
@@ -831,7 +854,7 @@ func (r *Registry) CreateWarmForTemplate(ctx context.Context, id, rootfsPath, ba
 	return r.create(ctx, StatusPreparing, id, "", rootfsPath, nil, baseSnapshotID, warmTemplateID, -1, vcpus, memMIB)
 }
 
-func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID, warmTemplateID string, hibernateAfterSec int, vcpus, memMIB int64) (Sandbox, error) {
+func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath string, expiresAt *time.Time, baseSnapshotID, warmTemplateID string, hibernateAfterSec int, vcpus, memMIB int64, intent ...CreateIntent) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -862,10 +885,13 @@ func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath stri
 	if err != nil {
 		return Sandbox{}, fmt.Errorf("insert sandbox: %w", err)
 	}
+	if err := linkCreateRequest(ctx, tx, id, intent); err != nil {
+		return Sandbox{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Sandbox{}, err
 	}
-	return Sandbox{
+	sb := Sandbox{
 		ID:                id,
 		Name:              name,
 		TapDevice:         tap,
@@ -879,7 +905,9 @@ func (r *Registry) create(ctx context.Context, status, id, name, rootfsPath stri
 		HibernateAfterSec: hibernateAfterSec,
 		Vcpus:             vcpus,
 		MemMIB:            memMIB,
-	}, nil
+	}
+	applyCreateFields(&sb, intent)
+	return sb, nil
 }
 
 // CreateRestoreStarting reserves a snapshot's fixed identity without routing
@@ -959,16 +987,22 @@ func (r *Registry) FinishStart(ctx context.Context, id string, pid int, vmID, so
 // ready. Keeping this separate from FinishStart prevents list and heartbeat
 // readers from observing a half-initialized endpoint.
 func (r *Registry) MarkRunning(ctx context.Context, id string) error {
-	res, err := r.db.ExecContext(ctx,
-		`UPDATE sandboxes SET status=? WHERE id=? AND status=?`,
-		StatusRunning, id, StatusStarting)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE sandboxes SET status=? WHERE id=? AND status=?`, StatusRunning, id, StatusStarting)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return fmt.Errorf("sandbox %s is not starting", id)
 	}
-	return nil
+	if err := completeCreateRequest(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MarkStopping removes a capacity-holding sandbox from routing before teardown.
@@ -1259,6 +1293,9 @@ func (r *Registry) Destroy(ctx context.Context, id string) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sandbox_ports WHERE sandbox_id=?`, id); err != nil {
+		return err
+	}
+	if err := failAllocatedCreateRequest(ctx, tx, id); err != nil {
 		return err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM sandboxes WHERE id=?`, id)
@@ -1801,7 +1838,7 @@ func (r *Registry) ClaimWarm(ctx context.Context, name string, expiresAt *time.T
 	return r.ClaimWarmForTemplate(ctx, "", name, expiresAt, idleTimeout)
 }
 
-func (r *Registry) ClaimWarmForTemplate(ctx context.Context, templateID, name string, expiresAt *time.Time, idleTimeout int) (Sandbox, error) {
+func (r *Registry) ClaimWarmForTemplate(ctx context.Context, templateID, name string, expiresAt *time.Time, idleTimeout int, intent ...CreateIntent) (Sandbox, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Sandbox{}, err
@@ -1829,6 +1866,12 @@ func (r *Registry) ClaimWarmForTemplate(ctx context.Context, templateID, name st
 	if n, _ := res.RowsAffected(); n != 1 {
 		return Sandbox{}, sql.ErrNoRows
 	}
+	if err := linkCreateRequest(ctx, tx, sb.ID, intent); err != nil {
+		return Sandbox{}, err
+	}
+	if err := completeCreateRequest(ctx, tx, sb.ID); err != nil {
+		return Sandbox{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Sandbox{}, err
 	}
@@ -1837,6 +1880,7 @@ func (r *Registry) ClaimWarmForTemplate(ctx context.Context, templateID, name st
 	sb.CreatedAt = claimedAt
 	sb.ExpiresAt = expiresAt
 	sb.HibernateAfterSec = idleTimeout
+	applyCreateFields(&sb, intent)
 	return sb, nil
 }
 
