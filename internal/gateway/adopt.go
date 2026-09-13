@@ -406,6 +406,7 @@ func (g *Gateway) handleDrain(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.unpinRouteLocked(id)
 		g.mu.Unlock()
+		g.notFound.drop(id)
 		if _, outcome := g.resolveViaAdopt(id, exclude, drainResolve); outcome == resolveAdopted {
 			moved++
 		} else {

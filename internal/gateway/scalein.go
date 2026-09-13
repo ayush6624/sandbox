@@ -187,7 +187,7 @@ func (g *Gateway) retireDrainedHosts(ctx context.Context) {
 		if now.Sub(h.lastSeen) > g.ttl {
 			continue
 		}
-		if h.load() > 0 {
+		if h.load() > 0 || h.handoffPending != 0 {
 			continue
 		}
 		drained = append(drained, target{id: h.id, instance: h.instanceName})

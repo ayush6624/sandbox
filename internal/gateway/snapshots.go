@@ -61,12 +61,7 @@ func (g *Gateway) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 		// A pulled snapshot exists on several hosts — dedupe by id.
 		for _, sn := range snaps {
 			if index, ok := seen[sn.ID]; ok {
-				// Warm policy is host-local. The fleet list exposes the largest
-				// configured target so a warmed copy is not hidden by an unwarmed
-				// duplicate returned first in map iteration order.
-				if sn.WarmTarget > out[index].WarmTarget {
-					out[index].WarmTarget = sn.WarmTarget
-				}
+				out[index] = mergeSnapshotListing(out[index], sn)
 				continue
 			}
 			seen[sn.ID] = len(out)
@@ -75,6 +70,32 @@ func (g *Gateway) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	writeJSON(w, 200, out)
+}
+
+// mergeSnapshotListing makes duplicate cache rows converge on the creator's
+// useful view. A durable record always wins a local cache, and an upload
+// projection is retained only for local records that actually own a job.
+func mergeSnapshotListing(current, candidate registry.Snapshot) registry.Snapshot {
+	warmTarget := current.WarmTarget
+	if candidate.WarmTarget > warmTarget {
+		warmTarget = candidate.WarmTarget
+	}
+	if current.Durability != "durable" && candidate.Durability == "durable" {
+		candidate.WarmTarget = warmTarget
+		candidate.Upload = nil
+		return candidate
+	}
+	if current.Durability == "durable" {
+		current.WarmTarget = warmTarget
+		current.Upload = nil
+		return current
+	}
+	if current.Upload == nil && candidate.Upload != nil {
+		candidate.WarmTarget = warmTarget
+		return candidate
+	}
+	current.WarmTarget = warmTarget
+	return current
 }
 
 // snapshotSlotsNeeded reports how much host capacity a snapshot op consumes:

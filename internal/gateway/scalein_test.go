@@ -1,14 +1,19 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ayush6624/sandbox/internal/cluster"
 )
 
 // fakeScaler records what the gateway asked the provider to do.
@@ -264,6 +269,62 @@ func TestScaleInDeletesOnlyDrainedHosts(t *testing.T) {
 	}
 	if _, ok := g.hosts["b"]; ok {
 		t.Error("removed host is still in the routing table")
+	}
+}
+
+func TestScaleInRetainsPendingHandoffSourceUntilHeartbeatClearsIt(t *testing.T) {
+	for _, count := range []int{1, -1, 2147483647} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			g, scaler := scaleInGateway(t, 1,
+				&host{id: "keep", instanceName: "vm-keep", slotsTotal: 10, slotsFree: 10},
+				&host{id: "source", instanceName: "vm-source", slotsTotal: 10, slotsFree: 10},
+			)
+			g.hosts["source"].draining = true
+			heartbeat := func(pending int) {
+				t.Helper()
+				body, err := json.Marshal(cluster.Heartbeat{HostID: "source", Addr: "http://127.0.0.1:18080", InstanceName: "vm-source", SlotsTotal: 10, HandoffPending: pending})
+				if err != nil {
+					t.Fatal(err)
+				}
+				response := httptest.NewRecorder()
+				g.handleRegister(response, httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body)))
+				if response.Code != http.StatusNoContent {
+					t.Fatalf("heartbeat HTTP %d: %s", response.Code, response.Body.String())
+				}
+			}
+			heartbeat(count)
+			g.retireDrainedHosts(context.Background())
+			if names := scaler.deletedNames(); len(names) != 0 {
+				t.Fatalf("deleted source with pending/unknown handoff count %d: %v", count, names)
+			}
+			heartbeat(0)
+			g.retireDrainedHosts(context.Background())
+			if names := scaler.deletedNames(); len(names) != 1 || names[0] != "vm-source" {
+				t.Fatalf("completed handoff did not release source for scale-in: %v", names)
+			}
+		})
+	}
+}
+
+func TestDrainClearsNegativeCacheAfterRelease(t *testing.T) {
+	id := testID(723)
+	source, _ := fakeHost(t, http.StatusNoContent, "")
+	target, _ := fakeHost(t, http.StatusCreated, `{"id":"`+id+`","status":"running"}`)
+	g := New("tok", 20*time.Second, 0, 0)
+	addTestHost(g, "source", strings.TrimPrefix(source.URL, "http://"), 1, 24)
+	addTestHost(g, "target", strings.TrimPrefix(target.URL, "http://"), 0, 24)
+	g.route[id] = "source"
+	g.notFound.add(id)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/hosts/source/drain", nil)
+	request.SetPathValue("host", "source")
+	g.handleDrain(response, request)
+	var result struct{ Moved, Skipped int }
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || result.Moved != 1 || result.Skipped != 0 {
+		t.Fatalf("released sandbox stayed negatively cached: HTTP %d, %s", response.Code, response.Body.String())
 	}
 }
 

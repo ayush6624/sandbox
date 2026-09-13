@@ -6,8 +6,35 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+type queueWaitOutcome uint8
+
+const (
+	queueWaitReserved queueWaitOutcome = iota
+	queueWaitTimeout
+	queueWaitCanceled
+)
+
+var queueWaitOutcomes = [...]string{"reserved", "timeout", "canceled"}
+var queueWaitBounds = [...]time.Duration{time.Millisecond, 10 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond, time.Second, 5 * time.Second, 30 * time.Second}
+
+type queueWaitMetric struct {
+	buckets [len(queueWaitBounds) + 1]atomic.Uint64
+	sumNS   atomic.Uint64
+}
+
+func (m *queueWaitMetric) observe(elapsed time.Duration) {
+	m.sumNS.Add(uint64(elapsed))
+	for i, bound := range queueWaitBounds {
+		if elapsed <= bound {
+			m.buckets[i].Add(1)
+		}
+	}
+	m.buckets[len(queueWaitBounds)].Add(1)
+}
 
 // handleMetrics serves the gateway's fleet state in Prometheus text exposition
 // format (v0.0.4). It's hand-rolled rather than pulling in client_golang — the
@@ -152,6 +179,17 @@ func (g *Gateway) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Queue depth remains a request count for clients/dashboards. The companion
 	// demand gauge weights memory-heavy requests in the units fleetDemand uses.
 	gauge("sandbox_create_queue_depth", "Creates waiting in the gateway's bounded queue for a free slot.", int(g.queued.Load()))
+	fmt.Fprintf(&b, "# HELP sandbox_create_queue_wait_seconds Time in each admitted gateway capacity wait, by exit outcome; retries may contribute multiple waits.\n# TYPE sandbox_create_queue_wait_seconds histogram\n")
+	for i, outcome := range queueWaitOutcomes {
+		m := &g.queueWaitMetrics[i]
+		for j, bound := range queueWaitBounds {
+			fmt.Fprintf(&b, "sandbox_create_queue_wait_seconds_bucket{outcome=%q,le=%q} %d\n", outcome, fmt.Sprint(bound.Seconds()), m.buckets[j].Load())
+		}
+		count := m.buckets[len(queueWaitBounds)].Load()
+		fmt.Fprintf(&b, "sandbox_create_queue_wait_seconds_bucket{outcome=%q,le=\"+Inf\"} %d\n", outcome, count)
+		fmt.Fprintf(&b, "sandbox_create_queue_wait_seconds_sum{outcome=%q} %g\n", outcome, float64(m.sumNS.Load())/float64(time.Second))
+		fmt.Fprintf(&b, "sandbox_create_queue_wait_seconds_count{outcome=%q} %d\n", outcome, count)
+	}
 	gauge("sandbox_create_queue_demand_slots", "Queued create demand in default-slot equivalents (memory-aware).", g.queueDemandUnits())
 	// Cross-host adopt on a route miss. suppressed{reason} is the load a
 	// hostname scan is NOT allowed to put on the workers: malformed = rejected

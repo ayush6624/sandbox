@@ -4,7 +4,7 @@
 // id-scoped request (exec, files, shell, …) to the host that owns the sandbox,
 // and aggregates lists.
 //
-// The gateway holds no durable state. Hosts push heartbeats (see
+// Public create operations persist in SQLite. Hosts push heartbeats (see
 // internal/cluster) carrying their address, capacity, and owned sandbox IDs;
 // the gateway rebuilds its routing table from those, so it self-heals after a
 // restart once every host has reported once.
@@ -34,6 +34,7 @@ import (
 	"github.com/ayush6624/sandbox/internal/apiv1"
 	"github.com/ayush6624/sandbox/internal/client"
 	"github.com/ayush6624/sandbox/internal/cluster"
+	"github.com/ayush6624/sandbox/internal/createops"
 	"github.com/ayush6624/sandbox/internal/httpapi"
 	"github.com/ayush6624/sandbox/internal/management"
 	"github.com/ayush6624/sandbox/internal/registry"
@@ -42,11 +43,13 @@ import (
 
 // host is the gateway's view of one registered `sandbox serve` node.
 type host struct {
-	id         string
-	addr       string // TCP API address the gateway dials
-	token      string // bearer presented when dialing addr
-	release    string // worker artifact generation reported by the host
-	slotsTotal int
+	id             string
+	registryID     string
+	createProgress bool
+	addr           string // TCP API address the gateway dials
+	token          string // bearer presented when dialing addr
+	release        string // worker artifact generation reported by the host
+	slotsTotal     int
 	// slotsUsed starts with the worker heartbeat count and is optimistically
 	// advanced as create responses land. It is capped at slotsTotal because a
 	// heartbeat can already include a registry-committed create whose response
@@ -69,6 +72,7 @@ type host struct {
 	// this map is empty, only the built-in "default" template may use it.
 	warmReadyByTemplate map[string]int
 	hibernated          int // idle sandboxes frozen to disk on the host (hold no slot)
+	handoffPending      int // nonzero or unknown prevents deleting retained source bytes
 	// reservedCount is set only on the COPY returned by a reservation: how many
 	// slots it covers. A fanout of N reserves N at once, so releasing it has to
 	// undo the same N.
@@ -288,6 +292,7 @@ type Gateway struct {
 	placementSelectedPacked atomic.Uint64
 	placementLatencyCount   [8]atomic.Uint64
 	placementLatencySumUS   atomic.Uint64
+	queueWaitMetrics        [len(queueWaitOutcomes)]queueWaitMetric
 	// slotFreed is replaced and the old channel closed whenever capacity may
 	// have appeared. Closing broadcasts to every queued create: a fresh worker
 	// can expose dozens of slots in one heartbeat, so waking only one waiter
@@ -353,6 +358,7 @@ type Gateway struct {
 	// restarts and updated by deploy-job.sh before it submits the new job.
 	expectedRelease string
 	releaseFile     string
+	operationDBPath string
 	releaseUpdateMu sync.Mutex
 
 	mu        sync.RWMutex
@@ -573,11 +579,19 @@ func (g *Gateway) ConfigureWorkerReleaseFile(path string) error {
 	return nil
 }
 
+// ConfigureOperationDB selects the persistent public operation database.
+func (g *Gateway) ConfigureOperationDB(path string) { g.operationDBPath = path }
+
 // Serve listens on addr until ctx is cancelled.
 func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	if err := g.transport.ValidateListener(addr); err != nil {
 		return err
 	}
+	store, err := createops.Open(g.operationDBPath)
+	if err != nil {
+		return fmt.Errorf("open create operations: %w", err)
+	}
+	defer store.Close()
 	if g.raw != nil {
 		if err := g.raw.load(ctx); err != nil {
 			return fmt.Errorf("load raw ingress allocator: %w", err)
@@ -646,7 +660,16 @@ func (g *Gateway) Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("PATCH /snapshots/{id}/public-fields", g.handleSnapshotOp)
 	mux.HandleFunc("PATCH /snapshots/{id}/warm-target", g.handleSnapshotOp)
 	mux.HandleFunc("DELETE /snapshots/{id}", g.handleSnapshotOp)
-	apiv1.New(mux).Register(mux)
+	mux.HandleFunc("POST /internal/v1/create-progress", g.createProgressHandler(store))
+	publicAPI := apiv1.NewWithCreateOperations(mux, store, g)
+	publicAPI.Register(mux)
+	operationCtx, stopOperations := context.WithCancel(ctx)
+	operationsDone := make(chan struct{})
+	go func() {
+		defer close(operationsDone)
+		publicAPI.RunCreateOperations(operationCtx)
+	}()
+	defer func() { stopOperations(); <-operationsDone }()
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -742,12 +765,18 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h := g.hosts[hb.HostID]
+	if h != nil && h.registryID != "" && h.registryID != hb.RegistryID {
+		g.dropHostLocked(hb.HostID)
+		h = nil
+	}
 	if h == nil {
 		h = &host{id: hb.HostID}
 		g.hosts[hb.HostID] = h
 		fmt.Fprintf(os.Stderr, "gateway: host %s registered (%s)\n", hb.HostID, hb.Addr)
 	}
 	h.addr = hb.Addr
+	h.registryID = hb.RegistryID
+	h.createProgress = hb.CreateProgress
 	h.token = callbackToken
 	h.release = hb.Release
 	// Only ever adopt a non-empty name: a worker that momentarily fails its
@@ -825,6 +854,7 @@ func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
 		h.slotsFree = 0
 	}
 	h.hibernated = hb.Hibernated
+	h.handoffPending = hb.HandoffPending
 	h.lastSeen = time.Now()
 	// Rebuild this host's routes: drop stale entries, add current ones.
 	// A route this gateway recorded itself is kept while its pin is unexpired
@@ -1059,14 +1089,22 @@ func (g *Gateway) reserveHostForTemplate(exclude map[string]bool, needed int, pr
 // mirrors releaseReservation: true debits the advertised free count until the
 // next heartbeat, false just frees the reservation and wakes a queued create.
 func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
-	n := reserved.reservedCount
-	if n <= 1 {
-		g.releaseReservation(reserved, landed)
-		return
+	landedCount := 0
+	if landed {
+		landedCount = max(1, reserved.reservedCount)
 	}
+	g.releaseCreateReservation(reserved, landedCount)
+	if landed {
+		g.createsOK.Add(1)
+	}
+
+}
+
+func (g *Gateway) releaseCreateReservation(reserved *host, landedCount int) {
+	n := max(1, reserved.reservedCount)
 	g.mu.Lock()
 	h := g.hosts[reserved.id]
-	if h == nil {
+	if h == nil || (reserved.registryID != "" && h.registryID != reserved.registryID) {
 		g.mu.Unlock()
 		return
 	}
@@ -1089,21 +1127,13 @@ func (g *Gateway) releaseReservationN(reserved *host, landed bool) {
 		h.reservedUnits = 0
 	}
 	releaseWarmReservation(h, reserved)
-	if landed {
-		for i := 0; i < n; i++ {
-			if h.slotsUsed < h.slotsTotal {
-				h.slotsUsed++
-			}
-			if i < capacityCount && h.slotsFree > 0 {
-				h.slotsFree--
-			}
-		}
+	h.slotsUsed = min(h.slotsTotal, h.slotsUsed+landedCount)
+	charge := min(landedCount, capacityCount)
+	if n == 1 && landedCount > 0 {
+		charge = units
 	}
+	h.slotsFree = max(0, h.slotsFree-charge)
 	g.mu.Unlock()
-	if landed {
-		g.createsOK.Add(1)
-		return
-	}
 	g.notifySlotFreed()
 }
 
@@ -1501,6 +1531,8 @@ func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, demandU
 		g.queued.Add(-1)
 		return nil
 	}
+	queuedAt := time.Now()
+	outcome := queueWaitTimeout
 	if demandUnits <= 0 {
 		demandUnits = 1
 	}
@@ -1510,6 +1542,7 @@ func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, demandU
 	// Evaluations coalesce, so the extra notifies are nearly free.
 	g.notifyDirectScale()
 	defer func() {
+		g.queueWaitMetrics[outcome].observe(time.Since(queuedAt))
 		g.queued.Add(-1)
 		g.queuedUnits.Add(-int64(demandUnits))
 		// Re-baseline the watermark once the queue drains.
@@ -1522,19 +1555,26 @@ func (g *Gateway) awaitHostWith(ctx context.Context, deadline time.Time, demandU
 	defer tick.Stop()
 	for {
 		slotFreed := g.slotFreedSignal()
+		if ctx.Err() != nil {
+			outcome = queueWaitCanceled
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		// Subscribe before checking so a release during placement stays visible.
+		if h := reserve(); h != nil {
+			outcome = queueWaitReserved
+			return h
+		}
 		select {
 		case <-ctx.Done():
+			outcome = queueWaitCanceled
 			return nil
 		case <-timeout.C:
 			return nil
 		case <-slotFreed:
-			if h := reserve(); h != nil {
-				return h
-			}
 		case <-tick.C:
-			if h := reserve(); h != nil {
-				return h
-			}
 		}
 	}
 }
@@ -2183,6 +2223,7 @@ func validateWorkerRelease(release string) error {
 func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 	type hostView struct {
 		ID         string `json:"id"`
+		RegistryID string `json:"registry_id,omitempty"`
 		Addr       string `json:"addr"`
 		Release    string `json:"release,omitempty"`
 		Compatible bool   `json:"release_compatible"`
@@ -2199,7 +2240,7 @@ func (g *Gateway) handleHosts(w http.ResponseWriter, r *http.Request) {
 	for _, h := range g.hosts {
 		compatible := g.expectedRelease == "" || h.release == g.expectedRelease
 		views = append(views, hostView{
-			ID: h.id, Addr: h.addr, Release: h.release, Compatible: compatible,
+			ID: h.id, RegistryID: h.registryID, Addr: h.addr, Release: h.release, Compatible: compatible,
 			SlotsTotal: h.slotsTotal, SlotsUsed: h.slotsUsed,
 			Hibernated: h.hibernated, Free: h.free(), Alive: time.Since(h.lastSeen) <= g.ttl,
 			WarmReady:  h.warmFree(),

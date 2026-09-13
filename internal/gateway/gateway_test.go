@@ -80,6 +80,25 @@ func TestPickHostTieBreakByID(t *testing.T) {
 	}
 }
 
+func TestMergeSnapshotListingPrefersDurableAndCreatorUploadInEitherOrder(t *testing.T) {
+	durable := registry.Snapshot{ID: "snap", Durability: "durable", WarmTarget: 1, Upload: &registry.SnapshotUpload{State: "retrying", Attempts: 3}}
+	cache := registry.Snapshot{ID: "snap", Durability: "local", WarmTarget: 4}
+	for _, pair := range [][2]registry.Snapshot{{durable, cache}, {cache, durable}} {
+		got := mergeSnapshotListing(pair[0], pair[1])
+		if got.Durability != "durable" || got.Upload != nil || got.WarmTarget != 4 {
+			t.Fatalf("durable merge=%+v", got)
+		}
+	}
+
+	creator := registry.Snapshot{ID: "snap", Durability: "local", Upload: &registry.SnapshotUpload{State: "retrying", Attempts: 2}}
+	for _, pair := range [][2]registry.Snapshot{{creator, cache}, {cache, creator}} {
+		got := mergeSnapshotListing(pair[0], pair[1])
+		if got.Upload == nil || got.Upload.State != "retrying" || got.Upload.Attempts != 2 {
+			t.Fatalf("creator merge=%+v", got)
+		}
+	}
+}
+
 func TestPickHostSkipsFullAndStale(t *testing.T) {
 	g := liveGateway(
 		&host{id: "full", slotsTotal: 24, slotsUsed: 24}, // no capacity
@@ -274,6 +293,21 @@ func TestCapacityNotificationWakesAllQueuedCreates(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 			t.Fatalf("waiter %d was not woken by capacity broadcast", i)
 		}
+	}
+}
+
+func TestAwaitHostChecksCapacityBeforeWaitingForNotification(t *testing.T) {
+	g := liveGateway(&host{id: "a", slotsTotal: 1, slotsFree: 1})
+	g.queueWait, g.queueMax = time.Second, 8
+	// Capacity was freed after the caller's first placement attempt but before
+	// it subscribed. A deadline shorter than the fallback poll must still work.
+	g.notifySlotFreed()
+	h := g.awaitHost(context.Background(), time.Now().Add(queuePollInterval/2), nil)
+	if h == nil || h.id != "a" {
+		t.Fatalf("available capacity was missed before subscription: %+v", h)
+	}
+	if g.queued.Load() != 0 || g.hosts["a"].reserved != 1 {
+		t.Fatal("queue or reservation accounting changed")
 	}
 }
 
