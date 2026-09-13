@@ -149,7 +149,8 @@ type Snapshot struct {
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
 	// Durability is "local" until the immutable artifacts and commit marker
 	// are present in the configured object store, then "durable".
-	Durability string `json:"durability,omitempty"`
+	Durability string          `json:"durability,omitempty"`
+	Upload     *SnapshotUpload `json:"upload,omitempty"`
 	// Golden marks the server-managed pristine snapshot that POST /sandboxes
 	// clones from. At most one snapshot is golden (partial unique index).
 	Golden bool `json:"golden,omitempty"`
@@ -183,6 +184,7 @@ const (
 	SnapshotRoleBuiltin  = "builtin"
 	SnapshotRoleTemplate = "template"
 	SnapshotRoleUser     = "user"
+	SnapshotRoleBase     = "base"
 )
 
 // Snapshot formats.
@@ -373,7 +375,7 @@ func Open(dbPath string, pools Pools) (*Registry, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir db parent: %w", err)
 	}
-	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -539,6 +541,17 @@ func (r *Registry) migrate() error {
 		, role             TEXT NOT NULL DEFAULT 'user'
 		, warm_target      INTEGER NOT NULL DEFAULT 0
 	);
+	CREATE TABLE IF NOT EXISTS snapshot_uploads (
+		snapshot_id TEXT PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
+		state TEXT NOT NULL CHECK (state IN ('pending', 'uploading', 'retrying', 'failed')),
+		attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+		next_attempt_at INTEGER,
+		error TEXT NOT NULL DEFAULT '',
+		CHECK ((state IN ('pending', 'retrying') AND next_attempt_at IS NOT NULL)
+		    OR (state IN ('uploading', 'failed') AND next_attempt_at IS NULL))
+	);
+	CREATE INDEX IF NOT EXISTS snapshot_uploads_due ON snapshot_uploads(next_attempt_at)
+		WHERE state IN ('pending', 'retrying');
 	`
 	if _, err := r.db.Exec(schema); err != nil {
 		return err
@@ -1447,11 +1460,22 @@ func (r *Registry) DeletePort(ctx context.Context, id string, guestPort int) err
 // --- snapshots ---
 
 // snapshotCols is the column list every snapshot SELECT uses, in scan order.
-const snapshotCols = `id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability, role, warm_target`
+const snapshotCols = `id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability, role, warm_target, snapshot_uploads.state, snapshot_uploads.attempts, snapshot_uploads.next_attempt_at, snapshot_uploads.error`
+
+const snapshotFrom = `snapshots LEFT JOIN snapshot_uploads ON snapshot_uploads.snapshot_id = snapshots.id`
 
 // CreateSnapshot records a snapshot's metadata. The artifact files
 // (mem/state/rootfs) are written by the caller before this is called.
 func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
+	return r.createSnapshot(ctx, s, false)
+}
+
+func (r *Registry) createSnapshot(ctx context.Context, s Snapshot, upload bool) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	golden := 0
 	if s.Golden {
 		golden = 1
@@ -1467,14 +1491,19 @@ func (r *Registry) CreateSnapshot(ctx context.Context, s Snapshot) error {
 			s.Role = SnapshotRoleUser
 		}
 	}
-	_, err := r.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO snapshots (id, source_id, tap_device, guest_ip, guest_mac, mem_path, state_path, rootfs_path, source_rootfs_path, created_at, golden, base_mtime, base_size, format, base_id, vcpus, mem_mib, name, expires_at, durability, role, warm_target)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.ID, s.SourceID, s.TapDevice, s.GuestIP, s.GuestMAC, s.MemPath, s.StatePath, s.RootfsPath, s.SourceRootfsPath, s.CreatedAt.Unix(), golden, s.BaseMtime, s.BaseSize, format, s.BaseID, s.Vcpus, s.MemMIB, s.Name, unixOrNil(s.ExpiresAt), snapshotDurability(s.Durability), s.Role, s.WarmTarget)
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
-	return nil
+	if upload {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO snapshot_uploads (snapshot_id, state, next_attempt_at) VALUES (?, 'pending', ?)`, s.ID, time.Now().UnixMilli()); err != nil {
+			return fmt.Errorf("insert snapshot upload: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // SetSnapshotWarmTarget changes only ready-pool policy; snapshot artifacts
@@ -1496,19 +1525,19 @@ func (r *Registry) SetSnapshotWarmTarget(ctx context.Context, id string, target 
 
 // GoldenSnapshot returns the snapshot marked golden (sql.ErrNoRows if none).
 func (r *Registry) GoldenSnapshot(ctx context.Context) (Snapshot, error) {
-	row := r.rdb.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=1`)
+	row := r.rdb.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM `+snapshotFrom+` WHERE golden=1`)
 	return scanSnapshot(row)
 }
 
 // GetSnapshot returns a snapshot by id.
 func (r *Registry) GetSnapshot(ctx context.Context, id string) (Snapshot, error) {
-	row := r.rdb.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE id=?`, id)
+	row := r.rdb.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM `+snapshotFrom+` WHERE id=?`, id)
 	return scanSnapshot(row)
 }
 
 // ListSnapshots returns all snapshots (most recent first).
 func (r *Registry) ListSnapshots(ctx context.Context) ([]Snapshot, error) {
-	rows, err := r.rdb.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots ORDER BY created_at DESC`)
+	rows, err := r.rdb.QueryContext(ctx, `SELECT `+snapshotCols+` FROM `+snapshotFrom+` ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1556,7 +1585,7 @@ func (r *Registry) SetSnapshotDurability(ctx context.Context, id, durability str
 // ExpiredSnapshots returns non-golden snapshots whose retention deadline has
 // passed. Deletion still performs dependency checks.
 func (r *Registry) ExpiredSnapshots(ctx context.Context, now time.Time) ([]Snapshot, error) {
-	rows, err := r.rdb.QueryContext(ctx, `SELECT `+snapshotCols+` FROM snapshots WHERE golden=0 AND expires_at IS NOT NULL AND expires_at < ? ORDER BY expires_at`, now.Unix())
+	rows, err := r.rdb.QueryContext(ctx, `SELECT `+snapshotCols+` FROM `+snapshotFrom+` WHERE golden=0 AND role <> 'base' AND expires_at IS NOT NULL AND expires_at < ? ORDER BY expires_at`, now.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -1613,9 +1642,18 @@ func scanSnapshot(r rowScanner) (Snapshot, error) {
 	var createdAt int64
 	var expiresAt sql.NullInt64
 	var golden int
-	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.GuestMAC, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability, &s.Role, &s.WarmTarget)
+	var uploadState, uploadError sql.NullString
+	var uploadAttempts, uploadNext sql.NullInt64
+	err := r.Scan(&s.ID, &s.SourceID, &s.TapDevice, &s.GuestIP, &s.GuestMAC, &s.MemPath, &s.StatePath, &s.RootfsPath, &s.SourceRootfsPath, &createdAt, &golden, &s.BaseMtime, &s.BaseSize, &s.Format, &s.BaseID, &s.Vcpus, &s.MemMIB, &s.Name, &expiresAt, &s.Durability, &s.Role, &s.WarmTarget, &uploadState, &uploadAttempts, &uploadNext, &uploadError)
 	if err != nil {
 		return s, err
+	}
+	if uploadState.Valid {
+		s.Upload = &SnapshotUpload{State: uploadState.String, Attempts: int(uploadAttempts.Int64), Error: uploadError.String}
+		if uploadNext.Valid {
+			next := time.UnixMilli(uploadNext.Int64)
+			s.Upload.NextAttemptAt = &next
+		}
 	}
 	s.CreatedAt = time.Unix(createdAt, 0)
 	if expiresAt.Valid {
