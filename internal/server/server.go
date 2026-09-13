@@ -153,16 +153,18 @@ type Server struct {
 	// a wake, or a destroy). nil in production.
 	deleteObject func(ctx context.Context, object string) error
 	// baseUpMu/basesUploaded gate the once-per-base template upload.
-	baseUpMu      sync.Mutex
-	basesUploaded map[string]bool
+	baseUpMu       sync.Mutex
+	basesUploaded  map[string]bool
+	baseUploadGate chan struct{}
 	// pulls serializes concurrent GCS pulls of the same snapshot id.
 	pulls keyedMutexes
 	// snapshotLocks serialize a snapshot's creation/upload, restore/fanout use,
 	// and deletion. uploads are separately cancellable so delete never waits
 	// for the full background timeout or lets a cancelled upload re-commit.
-	snapshotLocks   keyedMutexes
-	snapshotUpMu    sync.Mutex
-	snapshotUploads map[string]*backgroundUpload
+	snapshotLocks      keyedMutexes
+	snapshotUpMu       sync.Mutex
+	snapshotUploads    map[string]*backgroundUpload
+	snapshotUploadWake chan struct{}
 	// chunkUpMu/chunksUploaded remember content-addressed chunks this process has
 	// already pushed, so re-hibernations skip re-uploading unchanged chunks
 	// without an Exists round-trip each (roadmap Phase B2 dedup/CoW).
@@ -333,8 +335,10 @@ const fcOverheadMIB = 156
 
 func New(cfg Config, reg *registry.Registry) *Server {
 	s := &Server{cfg: cfg, reg: reg, basesUploaded: map[string]bool{},
-		snapshotUploads: map[string]*backgroundUpload{},
-		chunksUploaded:  map[string]bool{}, act: newActivityTracker(),
+		baseUploadGate:     make(chan struct{}, 1),
+		snapshotUploads:    map[string]*backgroundUpload{},
+		snapshotUploadWake: make(chan struct{}, 1),
+		chunksUploaded:     map[string]bool{}, act: newActivityTracker(),
 		hibUploads: map[string]*backgroundUpload{},
 		startedAt:  time.Now(), bootAge: linuxBootAge, phases: newPhaseRecorder(),
 		stats: newSandboxStats(cfg.MetricsHistory)}
@@ -450,6 +454,15 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	s.reconcile(ctx)
 	s.phases.mark(phaseReconcileDone)
+	if s.blob != nil {
+		uploadCtx, stopUploads := context.WithCancel(ctx)
+		uploadsDone := make(chan struct{})
+		go func() {
+			defer close(uploadsDone)
+			s.runSnapshotUploads(uploadCtx)
+		}()
+		defer func() { stopUploads(); <-uploadsDone }()
+	}
 	// Hibernated sandboxes survived reconcile; re-bind their port-forward
 	// listeners or wake-on-connect breaks after a server restart.
 	s.reopenPortListeners(ctx)

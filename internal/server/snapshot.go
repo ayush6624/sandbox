@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -302,7 +303,11 @@ func (s *Server) snapshotSandboxWithRole(ctx context.Context, id string, golden 
 		Vcpus:  sb.Vcpus,
 		MemMIB: sb.MemMIB,
 	}
-	if err := s.reg.CreateSnapshot(ctx, snap); err != nil {
+	createSnapshot := s.reg.CreateSnapshot
+	if !golden && s.blob != nil {
+		createSnapshot = s.reg.CreateCapturedSnapshot
+	}
+	if err := createSnapshot(ctx, snap); err != nil {
 		_ = s.cfg.Provisioner.CleanupSnapshot(snapID)
 		return registry.Snapshot{}, 500, fmt.Errorf("record snapshot: %w", err)
 	}
@@ -315,7 +320,8 @@ func (s *Server) snapshotSandboxWithRole(ctx context.Context, id string, golden 
 	// Durability: ship the snapshot to GCS in the background. The caller gets
 	// its 201 now; until meta.json lands the snapshot is host-local only.
 	if !golden && s.blob != nil {
-		s.startSnapshotUpload(snap)
+		s.wakeSnapshotUploads()
+		snap.Upload = &registry.SnapshotUpload{State: "pending"}
 	}
 	return snap, 201, nil
 }
@@ -996,8 +1002,10 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.deleteSnapshot(r.Context(), id); err != nil {
-		code := http.StatusNotFound
-		if errors.Is(err, registry.ErrSnapshotInUse) {
+		code := http.StatusInternalServerError
+		if errors.Is(err, sql.ErrNoRows) {
+			code = http.StatusNotFound
+		} else if errors.Is(err, registry.ErrSnapshotInUse) {
 			code = http.StatusConflict
 		}
 		httpError(w, code, err)
@@ -1018,7 +1026,7 @@ func (s *Server) deleteSnapshotLocked(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if snap.Golden {
+	if snap.Golden || snap.Role == registry.SnapshotRoleBase {
 		return fmt.Errorf("%w: server-managed template snapshot cannot be deleted", registry.ErrSnapshotInUse)
 	}
 	if dependencies, err := s.reg.SnapshotDependencyCount(ctx, id); err != nil {
@@ -1030,10 +1038,10 @@ func (s *Server) deleteSnapshotLocked(ctx context.Context, id string) error {
 	// after this point.
 	s.cancelSnapshotUpload(id)
 	if s.blob != nil {
-		// Remove the durable commit before deleting the local row. If GCS is
+		// Fence the durable commit before deleting the local row. If GCS is
 		// unavailable, keep the snapshot locally registered and return an error
 		// rather than claim deletion while another host can still restore it.
-		if err := s.blob.Delete(ctx, snapObj(id, "meta.json")); err != nil {
+		if err := s.tombstoneSnapshot(ctx, id); err != nil {
 			return fmt.Errorf("delete durable snapshot commit: %w", err)
 		}
 	}

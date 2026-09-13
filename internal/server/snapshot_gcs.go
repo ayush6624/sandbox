@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,102 +34,80 @@ func baseObj(id, name string) string { return "bases/" + id + "/" + name }
 // uploadTimeout bounds one background snapshot upload end to end.
 const uploadTimeout = 30 * time.Minute
 
-// uploadSnapshot ships a freshly created snapshot to GCS in the background:
-// (base template if needed) → artifacts → meta.json. Failures are logged and
-// leave the snapshot host-local only — the next snapshot retries the base.
-func (s *Server) uploadSnapshot(ctx context.Context, snap registry.Snapshot) {
+// uploadSnapshot performs one recoverable attempt. The dispatcher owns retry
+// state; this function publishes immutable artifacts and commits metadata last.
+func (s *Server) uploadSnapshot(ctx context.Context, snap registry.Snapshot) error {
 	t0 := time.Now()
-
+	committed, err := s.snapshotCommitted(ctx, snap.ID)
+	if err != nil || committed {
+		return err
+	}
+	for _, path := range []string{snap.RootfsPath, snap.MemPath, snap.StatePath} {
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: %s", errSnapshotArtifacts, path)
+		}
+	}
 	var rootfsRanges []provisioner.Range
 	if snap.Format == registry.FormatDiff {
 		base, err := s.reg.GetSnapshot(ctx, snap.BaseID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: base %s missing", errSnapshotArtifacts, snap.BaseID)
+		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[snapshot %s] upload aborted: base %s vanished: %v\n", snap.ID, snap.BaseID, err)
-			return
+			return err
 		}
 		if err := s.ensureBaseUploaded(ctx, base); err != nil {
-			fmt.Fprintf(os.Stderr, "[snapshot %s] upload aborted: base template: %v\n", snap.ID, err)
-			return
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: base files missing: %v", errSnapshotArtifacts, err)
+			}
+			return fmt.Errorf("upload base template: %w", err)
 		}
 		rootfsRanges, err = s.cfg.Provisioner.DiffExtents(snap.RootfsPath, base.RootfsPath)
 		if err != nil {
-			// Conservative fallback: encode the whole file as one overlay.
-			// Zeros compress away; correctness is unaffected.
-			fmt.Fprintf(os.Stderr, "[snapshot %s] extent diff failed (%v); uploading full rootfs range\n", snap.ID, err)
-			if fi, serr := os.Stat(snap.RootfsPath); serr == nil {
-				rootfsRanges = []provisioner.Range{{Off: 0, Len: fi.Size()}}
-			} else {
-				fmt.Fprintf(os.Stderr, "[snapshot %s] upload aborted: %v\n", snap.ID, serr)
-				return
+			// A full overlay is valid even when the base is unavailable locally.
+			info, statErr := os.Stat(snap.RootfsPath)
+			if statErr != nil {
+				return fmt.Errorf("%w: %v", errSnapshotArtifacts, statErr)
 			}
+			rootfsRanges = []provisioner.Range{{Off: 0, Len: info.Size()}}
 		}
 	}
 
 	var memBytes, rootfsBytes int64
-	var err error
 	if snap.Format == registry.FormatDiff {
-		// The diff mem file is sparse (data = dirty pages) — PutSparse encodes
-		// exactly the delta.
-		if rootfsBytes, err = s.blob.PutRanges(ctx, snapObj(snap.ID, "rootfs.sz"), snap.RootfsPath, toBlobRanges(rootfsRanges)); err == nil {
-			memBytes, err = s.blob.PutSparse(ctx, snapObj(snap.ID, "mem.sz"), snap.MemPath)
-		}
+		rootfsBytes, err = s.blob.PutRanges(ctx, snapObj(snap.ID, "rootfs.sz"), snap.RootfsPath, toBlobRanges(rootfsRanges))
 	} else {
-		if rootfsBytes, err = s.blob.PutSparse(ctx, snapObj(snap.ID, "rootfs.sz"), snap.RootfsPath); err == nil {
-			memBytes, err = s.blob.PutSparse(ctx, snapObj(snap.ID, "mem.sz"), snap.MemPath)
-		}
+		rootfsBytes, err = s.blob.PutSparse(ctx, snapObj(snap.ID, "rootfs.sz"), snap.RootfsPath)
+	}
+	if err == nil {
+		memBytes, err = s.blob.PutSparse(ctx, snapObj(snap.ID, "mem.sz"), snap.MemPath)
 	}
 	if err == nil {
 		_, err = s.blob.PutSparse(ctx, snapObj(snap.ID, "state.sz"), snap.StatePath)
 	}
-	if err == nil {
-		var meta []byte
-		if meta, err = json.Marshal(snap); err == nil {
-			err = s.blob.PutBytes(ctx, snapObj(snap.ID, "meta.json"), meta)
+	if err != nil {
+		return err
+	}
+	snap.Upload = nil // host-local delivery status is not transferable metadata
+	meta, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	_, err = s.blob.PutBytesIfGenerationMatch(ctx, snapObj(snap.ID, "meta.json"), meta, 0)
+	if errors.Is(err, gcsblob.ErrPreconditionFailed) {
+		// A lost response may hide our successful commit. A tombstone, however,
+		// permanently wins over publication and must never count as success.
+		committed, err = s.snapshotCommitted(ctx, snap.ID)
+		if err == nil && !committed {
+			return errors.New("snapshot commit disappeared after publication conflict")
 		}
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[snapshot %s] upload failed (snapshot stays host-local): %v\n", snap.ID, err)
-		return
-	}
-	if err := s.reg.SetSnapshotDurability(ctx, snap.ID, "durable"); err != nil {
-		fmt.Fprintf(os.Stderr, "[snapshot %s] record durability: %v\n", snap.ID, err)
+		return err
 	}
 	fmt.Fprintf(os.Stderr, "[snapshot %s] uploaded to gs://%s (%s): mem=%dMiB rootfs=%dMiB payload in %s\n",
 		snap.ID, s.blob.Bucket(), snap.Format, memBytes>>20, rootfsBytes>>20, time.Since(t0).Round(time.Millisecond))
-}
-
-// startSnapshotUpload registers the uploader before returning the freshly
-// created snapshot to the caller. Delete can therefore always cancel and join
-// it before removing files or the durable commit marker.
-func (s *Server) startSnapshotUpload(snap registry.Snapshot) {
-	ctx, cancel := context.WithTimeout(context.Background(), uploadTimeout)
-	up := &backgroundUpload{cancel: cancel, done: make(chan struct{})}
-	s.snapshotUpMu.Lock()
-	s.snapshotUploads[snap.ID] = up
-	s.snapshotUpMu.Unlock()
-	go func() {
-		defer cancel()
-		defer func() {
-			close(up.done)
-			s.snapshotUpMu.Lock()
-			if s.snapshotUploads[snap.ID] == up {
-				delete(s.snapshotUploads, snap.ID)
-			}
-			s.snapshotUpMu.Unlock()
-		}()
-		s.uploadSnapshot(ctx, snap)
-	}()
-}
-
-func (s *Server) cancelSnapshotUpload(id string) {
-	s.snapshotUpMu.Lock()
-	up := s.snapshotUploads[id]
-	s.snapshotUpMu.Unlock()
-	if up == nil {
-		return
-	}
-	up.cancel()
-	<-up.done
+	return nil
 }
 
 // snapshotLock serializes all local consumers and deletion of one snapshot.
@@ -154,15 +133,24 @@ func (s *Server) baseUploaded(id string) bool {
 // base template, once. The "complete" marker commits it; meta.json of any
 // snapshot referencing the base is only uploaded after this returns.
 func (s *Server) ensureBaseUploaded(ctx context.Context, base registry.Snapshot) error {
+	select {
+	case s.baseUploadGate <- struct{}{}:
+		defer func() { <-s.baseUploadGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	s.baseUpMu.Lock()
-	defer s.baseUpMu.Unlock()
-	if s.basesUploaded[base.ID] {
+	uploaded := s.basesUploaded[base.ID]
+	s.baseUpMu.Unlock()
+	if uploaded {
 		return nil
 	}
 	if ok, err := s.blob.Exists(ctx, baseObj(base.ID, "complete")); err != nil {
 		return err
 	} else if ok {
+		s.baseUpMu.Lock()
 		s.basesUploaded[base.ID] = true
+		s.baseUpMu.Unlock()
 		return nil
 	}
 
@@ -180,7 +168,9 @@ func (s *Server) ensureBaseUploaded(ctx context.Context, base registry.Snapshot)
 	if err := s.blob.PutBytes(ctx, baseObj(base.ID, "complete"), meta); err != nil {
 		return fmt.Errorf("commit base: %w", err)
 	}
+	s.baseUpMu.Lock()
 	s.basesUploaded[base.ID] = true
+	s.baseUpMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[base %s] uploaded: mem=%dMiB rootfs=%dMiB payload in %s\n",
 		base.ID, memBytes>>20, rootfsBytes>>20, time.Since(t0).Round(time.Millisecond))
 	return nil
@@ -197,6 +187,8 @@ func (s *Server) pullLock(key string) *keyedMutex {
 // from GCS onto this host first when it isn't known locally — the path that
 // makes any live host able to restore any snapshot, including ones whose
 // creating host is gone.
+var errSnapshotNotFound = errors.New("snapshot not found")
+
 func (s *Server) ensureSnapshotLocal(ctx context.Context, snapID string) (registry.Snapshot, error) {
 	return s.ensureSnapshotLocalFrom(ctx, snapID, "")
 }
@@ -209,8 +201,11 @@ func (s *Server) ensureSnapshotLocalFrom(ctx context.Context, snapID, peer strin
 	if err == nil {
 		return snap, err
 	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return registry.Snapshot{}, err
+	}
 	if s.blob == nil && peer == "" {
-		return snap, err
+		return registry.Snapshot{}, errSnapshotNotFound
 	}
 
 	mu := s.pullLock("snap:" + snapID)
@@ -219,6 +214,8 @@ func (s *Server) ensureSnapshotLocalFrom(ctx context.Context, snapID, peer strin
 	// Another request may have completed the pull while we waited.
 	if snap, err := s.reg.GetSnapshot(ctx, snapID); err == nil {
 		return snap, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return registry.Snapshot{}, err
 	}
 	if peer != "" {
 		t0 := time.Now()
@@ -243,12 +240,16 @@ func (s *Server) ensureSnapshotLocalFrom(ctx context.Context, snapID, peer strin
 	metaBytes, err := s.blob.GetBytes(ctx, snapObj(snapID, "meta.json"))
 	if err != nil {
 		if errors.Is(err, gcsblob.ErrNotExist) {
+			// An unavailable peer may still hold an unfinished upload.
+			if peer == "" {
+				return registry.Snapshot{}, errSnapshotNotFound
+			}
 			return registry.Snapshot{}, fmt.Errorf("not in local registry or gs://%s", s.blob.Bucket())
 		}
 		return registry.Snapshot{}, fmt.Errorf("fetch snapshot meta: %w", err)
 	}
-	var meta registry.Snapshot
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+	meta, err := decodeSnapshotCommit(metaBytes, snapID)
+	if err != nil {
 		return registry.Snapshot{}, fmt.Errorf("decode snapshot meta: %w", err)
 	}
 

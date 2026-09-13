@@ -63,8 +63,10 @@ func (s *Server) ensureGolden(ctx context.Context) {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "golden snapshot %s is stale or broken; rebuilding\n", snap.ID)
-	_ = s.reg.DeleteSnapshot(ctx, snap.ID)
-	_ = s.cfg.Provisioner.CleanupSnapshot(snap.ID)
+	if err := s.reg.RetireGoldenSnapshot(ctx, snap.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "retire golden snapshot %s: %v\n", snap.ID, err)
+		return
+	}
 	s.buildGolden(ctx)
 }
 
