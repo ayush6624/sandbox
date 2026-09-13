@@ -181,6 +181,7 @@ function heartbeat(): Heartbeat {
 }
 
 async function verify(expectedRunId: string | undefined): Promise<void> {
+  const started = performance.now()
   if (!existsSync(join(ROOT, 'ready'))) throw new Error('ready marker is missing')
   const manifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8')) as Manifest
   if (expectedRunId && manifest.runId !== expectedRunId) {
@@ -203,14 +204,17 @@ async function verify(expectedRunId: string | undefined): Promise<void> {
     lastCycle = heartbeat().cycle
   }
   if (lastCycle <= firstCycle) throw new Error('restored process did not complete another memory sweep')
+  const memoryChecked = performance.now()
 
   const diskSha256 = await sha256File(join(ROOT, 'dirty.bin'))
   if (diskSha256 !== manifest.diskSha256) throw new Error('large-file checksum mismatch')
+  const diskChecked = performance.now()
 
   const smallFiles = readdirSync(join(ROOT, 'small')).length
   if (smallFiles !== manifest.smallFiles) {
     throw new Error(`small-file count mismatch: got ${smallFiles}, expected ${manifest.smallFiles}`)
   }
+  const smallFilesChecked = performance.now()
 
   const db = new DatabaseSync(join(ROOT, 'state.db'))
   const integrity = String((db.prepare('PRAGMA integrity_check').get() as Record<string, unknown>).integrity_check)
@@ -228,6 +232,13 @@ async function verify(expectedRunId: string | undefined): Promise<void> {
     sqliteRows,
     memoryCycleBefore: firstCycle,
     memoryCycleAfter: lastCycle,
+    verificationMs: {
+      memoryProgress: memoryChecked - started,
+      diskHash: diskChecked - memoryChecked,
+      smallFileCount: smallFilesChecked - diskChecked,
+      sqlite: performance.now() - smallFilesChecked,
+      total: performance.now() - started,
+    },
   }))
 }
 

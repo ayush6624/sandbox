@@ -1,7 +1,11 @@
 /** Compare batch create-to-command-ready latency for an existing template. */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { SandboxClient, type ClientSandbox } from '../src/index.js'
+import { benchmarkMetadata, benchmarkResourceMetadata, observeBuilds } from './metadata.js'
+import { observeBatch } from './observe-batch.js'
+import { cleanupRunSandboxes } from './snapshot-batch-bench.js'
 
 interface Args {
   templateId: string
@@ -37,82 +41,96 @@ const percentile = (values: number[], p: number) => {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!
 }
 
-async function terminateAll(sandboxes: ClientSandbox[]): Promise<string[]> {
-  const results = await Promise.all(sandboxes.map(async (sandbox) => {
-    try {
-      await sandbox.terminate({ timeoutMs: 30_000 })
-      return undefined
-    } catch (error) {
-      return `${sandbox.id}: ${String((error as Error)?.message ?? error)}`
-    }
-  }))
-  return results.filter((error): error is string => error !== undefined)
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const client = new SandboxClient({ requestTimeoutMs: 10 * 60_000 })
-  const rows: Array<Record<string, unknown>> = []
-  let failed = false
+  const metadata = benchmarkMetadata('template-warm', {
+    template_id: args.templateId, count: args.count, rounds: args.rounds,
+    round_delay_ms: args.roundDelayMs, poll_interval_ms: 100,
+    command_probe_ms: 'maximum individual probe duration',
+  })
+  if (process.env.SANDBOX_API_URL && process.env.SANDBOX_API_KEY) {
+    await observeBuilds(metadata, process.env.SANDBOX_API_URL, process.env.SANDBOX_API_KEY)
+  }
+  const resourceMetadata = benchmarkResourceMetadata(metadata)
+  const tracked = new Map<string, ClientSandbox>()
+  const rows = []
+  const cleanupErrors: string[] = []
+  let failure: string | undefined
 
-  console.log(`Template warm benchmark: template=${args.templateId} count=${args.count} rounds=${args.rounds}`)
-  for (let round = 1; round <= args.rounds; round++) {
-    const started = Date.now()
-    const operation = await client.sandboxes.createMany({
-      count: args.count,
-      maxParallelism: Math.min(args.count, 32),
-      source: { templateId: args.templateId },
-      requestTimeoutMs: 10 * 60_000,
-      metadata: { benchmark: 'template-warm', benchmark_round: String(round) },
-    })
-    const state = await operation.wait({ timeoutMs: 10 * 60_000, pollIntervalMs: 100 })
-    const operationMs = Date.now() - started
-    const sandboxes = state.results.flatMap((result) => result.value ? [result.value] : [])
-
-    const readyStarted = Date.now()
-    const probes = await Promise.all(sandboxes.map(async (sandbox) => {
+  try {
+    for (let round = 1; round <= args.rounds; round++) {
+      const started = performance.now()
+      const items: Array<{ index: number; sandbox_id: string; command_ready_ms?: number; probe_ms: number; error?: string }> = []
+      const operation = await client.sandboxes.createMany({
+        count: args.count,
+        maxParallelism: Math.min(args.count, 32),
+        source: { templateId: args.templateId },
+        requestTimeoutMs: 10 * 60_000,
+        metadata: { ...resourceMetadata, benchmark_round: String(round) },
+      })
+      const acceptedMs = performance.now() - started
+      let operationMs: number | undefined
+      let operationError: string | undefined
       try {
-        const result = await sandbox.commands.run('echo benchmark-ready', { timeoutMs: 30_000 })
-        return result.stdout.trim() === 'benchmark-ready' ? undefined : `unexpected output from ${sandbox.id}`
+        operationMs = acceptedMs + await observeBatch({
+          operation, timeoutMs: 10 * 60_000,
+          onSandbox: async (sandbox, index) => {
+            tracked.set(sandbox.id, sandbox)
+            const probeStarted = performance.now()
+            try {
+              const result = await sandbox.commands.run('echo benchmark-ready', { timeoutMs: 30_000 })
+              if (result.stdout.trim() !== 'benchmark-ready') throw new Error('unexpected readiness output')
+              items.push({ index, sandbox_id: sandbox.id, command_ready_ms: performance.now() - started, probe_ms: performance.now() - probeStarted })
+            } catch (error) {
+              items.push({ index, sandbox_id: sandbox.id, probe_ms: performance.now() - probeStarted, error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        })
       } catch (error) {
-        return `${sandbox.id}: ${String((error as Error)?.message ?? error)}`
+        operationError = error instanceof Error ? error.message : String(error)
       }
-    }))
-    const readyMs = Date.now() - started
-    const probeErrors = probes.filter((error): error is string => error !== undefined)
-    const cleanupErrors = await terminateAll(sandboxes)
-    const passed = state.status === 'succeeded' && state.succeeded === args.count && probeErrors.length === 0 && cleanupErrors.length === 0
-    failed ||= !passed
-    rows.push({
-      round, operation_ms: operationMs, command_ready_ms: readyMs,
-      per_sandbox_ms: readyMs / args.count, succeeded: state.succeeded,
-      failed: state.failed, probe_errors: probeErrors, cleanup_errors: cleanupErrors,
-      command_probe_ms: Date.now() - readyStarted,
-    })
-    console.log(`  round=${round} operation=${operationMs}ms command-ready=${readyMs}ms per-sandbox=${(readyMs / args.count).toFixed(1)}ms ok=${state.succeeded}/${args.count}`)
-    if (round < args.rounds && args.roundDelayMs > 0) await sleep(args.roundDelayMs)
-  }
+      const ready = items.flatMap((item) => item.command_ready_ms === undefined ? [] : [item.command_ready_ms])
+      const readyMs = ready.length === args.count ? Math.max(...ready) : undefined
+      const cleanupStarted = performance.now()
+      const roundCleanup = await cleanupRunSandboxes(client, tracked, resourceMetadata)
+      cleanupErrors.push(...roundCleanup)
+      const passed = operationError === undefined && operation.state.status === 'succeeded' && readyMs !== undefined && roundCleanup.length === 0
+      rows.push({
+        round, passed, operation_id: operation.id, accepted_ms: acceptedMs, operation_ms: operationMs,
+        command_ready_ms: readyMs, amortized_ms_per_sandbox: readyMs === undefined ? undefined : readyMs / args.count,
+        command_probe_ms: items.length ? Math.max(...items.map((item) => item.probe_ms)) : undefined,
+        cleanup_ms: performance.now() - cleanupStarted, cleanup_errors: roundCleanup,
+        operation_error: operationError, operation_status: operation.state.status, operation_results: operation.state.results.map((result) => ({ index: result.index, error: result.error })), items: items.sort((a, b) => a.index - b.index),
+      })
+      if (!passed) throw new Error(`template round ${round} failed; inspect operation and items`)
+      if (round < args.rounds) await sleep(args.roundDelayMs)
+    }
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error)
+  } finally {
+    cleanupErrors.push(...await cleanupRunSandboxes(client, tracked, resourceMetadata))
+    if (process.env.SANDBOX_API_URL && process.env.SANDBOX_API_KEY) {
+      await observeBuilds(metadata, process.env.SANDBOX_API_URL, process.env.SANDBOX_API_KEY)
+    }
 
-  const samples = rows.map((row) => Number(row.command_ready_ms))
-  const report = {
-    template_id: args.templateId,
-    count: args.count,
-    rounds: args.rounds,
-    release: process.env.SANDBOX_RELEASE ?? 'unknown',
-    command_ready_ms: {
-      mean: samples.reduce((sum, value) => sum + value, 0) / samples.length,
-      p50: percentile(samples, 0.50), p95: percentile(samples, 0.95), samples,
-    },
-    rows,
+    const samples = rows.flatMap((row) => row.passed && row.command_ready_ms !== undefined ? [row.command_ready_ms] : [])
+    const report = {
+      metadata,
+      passed: failure === undefined && cleanupErrors.length === 0 && rows.length === args.rounds,
+      template_id: args.templateId, count: args.count, rounds: args.rounds,
+      command_ready_ms: samples.length ? {
+        mean: samples.reduce((sum, value) => sum + value, 0) / samples.length,
+        p50: percentile(samples, 0.50), p95: percentile(samples, 0.95), samples,
+      } : null,
+      rows, cleanupErrors, error: failure,
+    }
+    const output = resolve(args.output ?? fileURLToPath(new URL(`./results/template_warm_${Date.now()}.json`, import.meta.url)))
+    mkdirSync(dirname(output), { recursive: true })
+    writeFileSync(output, JSON.stringify(report, null, 2) + '\n')
+    console.log(`Saved ${output}`)
+    if (!report.passed) process.exitCode = 1
   }
-  console.log(JSON.stringify(report.command_ready_ms))
-  if (args.output) {
-    const path = resolve(args.output)
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, JSON.stringify(report, null, 2) + '\n')
-    console.log(`Wrote ${path}`)
-  }
-  if (failed) process.exitCode = 1
 }
 
 await main()

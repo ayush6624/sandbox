@@ -18,7 +18,8 @@ import {
   type ClientSandbox,
   type ProblemDetails,
 } from '../src/index.js'
-import { benchmarkMetadata, benchmarkResourceMetadata } from './metadata.js'
+import { benchmarkMetadata, benchmarkResourceMetadata, observeBuilds } from './metadata.js'
+import { observeBatch } from './observe-batch.js'
 import {
   cleanupRunSandboxes,
   deleteSnapshotWithRetry,
@@ -116,20 +117,6 @@ function errorMessage(error: unknown): string {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const fmt = (value: number | undefined) => value === undefined ? 'n/a' : `${value.toFixed(1)}ms`
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const index = next++
-      if (index >= items.length) return
-      results[index] = await fn(items[index]!, index)
-    }
-  })
-  await Promise.all(workers)
-  return results
-}
-
 function percentile(values: number[], fraction: number): number | undefined {
   if (values.length === 0) return undefined
   const ordered = [...values].sort((a, b) => a - b)
@@ -144,6 +131,13 @@ interface Verification {
   sqliteRows: number
   memoryCycleBefore: number
   memoryCycleAfter: number
+  verificationMs?: {
+    memoryProgress: number
+    diskHash: number
+    smallFileCount: number
+    sqlite: number
+    total: number
+  }
 }
 
 interface ItemResult {
@@ -159,6 +153,7 @@ interface ItemResult {
 }
 
 interface BatchRow {
+  passed: boolean
   round: number
   count: number
   maxParallelism: number
@@ -187,7 +182,7 @@ interface SourceStats {
 
 async function prepareSource(source: ClientSandbox, args: Args, runId: string): Promise<{ setupMs: number; guest: SourceStats['guest'] }> {
   await source.files.write(GUEST_PATH, readFileSync(GUEST_SOURCE, 'utf8'))
-  const setupStarted = Date.now()
+  const setupStarted = performance.now()
   const holderArgs = [args.memoryMiB, args.diskMiB, args.smallFiles, args.sqliteMiB, runId]
     .map((value) => shellQuote(String(value)))
     .join(' ')
@@ -197,7 +192,7 @@ async function prepareSource(source: ClientSandbox, args: Args, runId: string): 
     `cat ${LOG_PATH}; exit 1`,
     { timeoutMs: 150_000 },
   )
-  const setupMs = Date.now() - setupStarted
+  const setupMs = performance.now() - setupStarted
   const stats = await source.commands.run(
     `du -sm ${ROOT} | cut -f1; awk '/MemAvailable/ {print $2}' /proc/meminfo; cat ${ROOT}/heartbeat.json`,
     { timeoutMs: 15_000 },
@@ -213,7 +208,7 @@ async function prepareSource(source: ClientSandbox, args: Args, runId: string): 
   }
 }
 
-async function runBatch(
+export async function runBatch(
   client: SandboxClient,
   snapshotId: string,
   count: number,
@@ -223,7 +218,7 @@ async function runBatch(
   resourceMetadata: Record<string, string>,
   tracked: Map<string, ClientSandbox>,
 ): Promise<BatchRow> {
-  const started = Date.now()
+  const started = performance.now()
   const maxParallelism = Math.min(count, args.maxParallelism)
   const operation = await client.sandboxes.createMany({
     count,
@@ -232,65 +227,51 @@ async function runBatch(
     metadata: resourceMetadata,
     requestTimeoutMs: 30 * 60_000,
   })
-  let state = operation.state
+  const acceptedMs = performance.now() - started
+  const items: ItemResult[] = []
   let operationError: string | undefined
+  let operationWallMs = acceptedMs
   try {
-    state = await operation.wait({ timeoutMs: 30 * 60_000 })
+    operationWallMs += await observeBatch({
+      operation, timeoutMs: 30 * 60_000,
+      onSandbox: async (sandbox, index) => {
+        tracked.set(sandbox.id, sandbox)
+        const item: ItemResult = { index, sandboxId: sandbox.id, ok: false }
+        items.push(item)
+        try {
+          const ready = await sandbox.commands.run(
+            `test -f ${ROOT}/ready && kill -0 $(cat ${PID_PATH}) && printf working-set-ready`,
+            { timeoutMs: args.readinessTimeoutMs },
+          )
+          if (ready.stdout.trim() !== 'working-set-ready') {
+            throw new Error(`unexpected readiness output: ${JSON.stringify(ready.stdout.trim())}`)
+          }
+          item.commandReadyMs = performance.now() - started
+          const verificationStarted = performance.now()
+          const result = await sandbox.commands.run(
+            `node --no-warnings ${GUEST_PATH} verify ${shellQuote(runId)}`,
+            { timeoutMs: args.hydrationTimeoutMs },
+          )
+          item.verification = JSON.parse(result.stdout.trim()) as Verification
+          item.verificationMs = performance.now() - verificationStarted
+          item.hydrationMs = performance.now() - started
+          item.ok = true
+        } catch (error) {
+          item.error = errorMessage(error)
+        }
+      },
+    })
   } catch (error) {
     operationError = errorMessage(error)
-    await operation.refresh().catch(() => {})
-    state = operation.state
+    operationWallMs = performance.now() - started
   }
-  const operationWallMs = Date.now() - started
-  for (const result of state.results) {
-    if (result.value) tracked.set(result.value.id, result.value)
+  const state = operation.state
+  for (let index = 0; index < count; index++) {
+    if (items.some((item) => item.index === index)) continue
+    const result = state.results.find((result) => result.index === index)
+    items.push({ index, ok: false, ...(result?.error ? { operationError: result.error } : { error: 'operation returned no sandbox or error' }) })
   }
-
-  const items = await mapLimit(state.results, 32, async (result, position): Promise<ItemResult> => {
-    if (!result.value) {
-      return {
-        index: result.error ? result.index : position,
-        ...(result.error ? { operationError: result.error } : { error: 'operation returned no sandbox or error' }),
-        ok: false,
-      }
-    }
-    const item: ItemResult = { index: result.index, sandboxId: result.value.id, ok: false }
-    try {
-      const ready = await result.value.commands.run(
-        `test -f ${ROOT}/ready && kill -0 $(cat ${PID_PATH}) && printf working-set-ready`,
-        { timeoutMs: args.readinessTimeoutMs },
-      )
-      if (ready.stdout.trim() !== 'working-set-ready') {
-        throw new Error(`unexpected readiness output: ${JSON.stringify(ready.stdout.trim())}`)
-      }
-      item.commandReadyMs = Date.now() - started
-    } catch (error) {
-      item.error = errorMessage(error)
-    }
-    return item
-  })
-
-  await mapLimit(items, 32, async (item) => {
-    if (item.error || !item.sandboxId) return
-    const sandbox = tracked.get(item.sandboxId)
-    if (!sandbox) {
-      item.error = 'sandbox disappeared from the tracked set'
-      return
-    }
-    const verificationStarted = Date.now()
-    try {
-      const result = await sandbox.commands.run(
-        `node --no-warnings ${GUEST_PATH} verify ${shellQuote(runId)}`,
-        { timeoutMs: args.hydrationTimeoutMs },
-      )
-      item.verification = JSON.parse(result.stdout.trim()) as Verification
-      item.verificationMs = Date.now() - verificationStarted
-      item.hydrationMs = Date.now() - started
-      item.ok = true
-    } catch (error) {
-      item.error = errorMessage(error)
-    }
-  })
+  items.sort((a, b) => a.index - b.index)
 
   const created = state.results.flatMap((result) => result.value ? [result.value] : [])
   const cleanupErrors = await terminateTracked(created)
@@ -302,6 +283,7 @@ async function runBatch(
   const hydrated = items.flatMap((item) => item.hydrationMs === undefined ? [] : [item.hydrationMs])
   const ok = items.filter((item) => item.ok).length
   const row: BatchRow = {
+    passed: operationError === undefined && state.status === 'succeeded' && ok === count && cleanupErrors.length === 0,
     round,
     count,
     maxParallelism,
@@ -344,7 +326,13 @@ async function main(): Promise<void> {
     hydration_timeout_ms: args.hydrationTimeoutMs,
     settle_ms: args.settleMs,
     order: 'ascending-then-descending',
+    probe_schedule: 'per-item-on-first-observation',
+    hydration_schedule: 'per-item-after-command-ready',
+    poll_interval_ms: 100,
   })
+  if (process.env.SANDBOX_API_URL && process.env.SANDBOX_API_KEY) {
+    await observeBuilds(metadata, process.env.SANDBOX_API_URL, process.env.SANDBOX_API_KEY)
+  }
   const resourceMetadata = benchmarkResourceMetadata(metadata)
   const tracked = new Map<string, ClientSandbox>()
   const rows: BatchRow[] = []
@@ -361,21 +349,21 @@ async function main(): Promise<void> {
       `Snapshot working-set benchmark on ${process.env.SANDBOX_API_URL}: ` +
       `${args.memoryMiB} MiB memory + ${args.diskMiB} MiB file + ${args.smallFiles} small files`,
     )
-    const sourceStarted = Date.now()
+    const sourceStarted = performance.now()
     source = await client.sandboxes.create({
       metadata: resourceMetadata,
       requestTimeoutMs: 10 * 60_000,
       ...(args.guestMemoryMiB === undefined ? {} : { memMib: args.guestMemoryMiB }),
     })
-    sourceStats.createMs = Date.now() - sourceStarted
+    sourceStats.createMs = performance.now() - sourceStarted
     tracked.set(source.id, source)
 
     const prepared = await prepareSource(source, args, metadata.run_id)
     sourceStats.setupMs = prepared.setupMs
     sourceStats.guest = prepared.guest
-    const snapshotStarted = Date.now()
+    const snapshotStarted = performance.now()
     snapshotId = (await source.createSnapshot()).id
-    sourceStats.snapshotMs = Date.now() - snapshotStarted
+    sourceStats.snapshotMs = performance.now() - snapshotStarted
 
     const sourceCleanup = await terminateTracked([source])
     if (sourceCleanup.length) throw new Error(`source cleanup failed: ${sourceCleanup.join('; ')}`)
@@ -389,7 +377,7 @@ async function main(): Promise<void> {
     )
     for (let round = 1; round <= args.rounds; round++) {
       for (const count of countOrder(args.counts, round)) {
-        rows.push(await runBatch(
+        const row = await runBatch(
           client,
           snapshotId,
           count,
@@ -398,8 +386,9 @@ async function main(): Promise<void> {
           metadata.run_id,
           resourceMetadata,
           tracked,
-        ))
-        if (rows.at(-1)!.failed > 0 || rows.at(-1)!.cleanupErrors.length > 0) {
+        )
+        rows.push(row)
+        if (!row.passed) {
           throw new Error(`round ${round} count ${count} failed; inspect result items`)
         }
         await sleep(args.settleMs)
@@ -419,9 +408,13 @@ async function main(): Promise<void> {
       if (error) cleanupErrors.push(error)
     }
 
+    if (process.env.SANDBOX_API_URL && process.env.SANDBOX_API_KEY) {
+      await observeBuilds(metadata, process.env.SANDBOX_API_URL, process.env.SANDBOX_API_KEY)
+    }
+
     const passed = failure === undefined && cleanupErrors.length === 0 &&
       rows.length === args.counts.length * args.rounds &&
-      rows.every((row) => row.ok === row.count && row.cleanupErrors.length === 0)
+      rows.every((row) => row.passed)
     mkdirSync(dirname(output), { recursive: true })
     writeFileSync(output, JSON.stringify({
       metadata,

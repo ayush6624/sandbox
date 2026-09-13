@@ -1,18 +1,21 @@
 /**
  * Cross-host snapshot transport benchmark.
  *
- * A source worker owns a continuously dirtied sandbox. Every measured case
- * takes a fresh snapshot, waits for its GCS commit marker, and asks a second
- * worker to fan it out. The target is cold for that snapshot ID, so omitting
+ * Direct transport cases take a fresh snapshot, wait for its GCS commit marker,
+ * and ask a second worker to fan it out. The target is cold for that snapshot ID, so omitting
  * X-Sandbox-Snapshot-Peer measures GCS while including it measures direct
  * worker-to-worker streaming. Raw fan-out calls are chunked at eight, exactly
  * like createMany(), while the worker-wide create semaphore remains global.
+ * gateway-pending instead submits through the public gateway while the source
+ * is alive and upload is pending, then verifies placement and peer counters.
  */
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { SandboxClient, type ClientSandbox } from '../src/index.js'
-import { benchmarkMetadata } from './metadata.js'
+import { NotFoundError, SandboxClient, type ClientSandbox } from '../src/index.js'
+import { benchmarkMetadata, benchmarkResourceMetadata, observeBuilds, redactTarget, type BenchmarkMetadata } from './metadata.js'
+import { observeBatch } from './observe-batch.js'
+import { cleanupRunSandboxes, deleteSnapshotWithRetry } from './snapshot-batch-bench.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const RESULTS_DIR = join(HERE, 'results')
@@ -21,17 +24,23 @@ const GUEST_PATH = '/tmp/snapshot-working-set-guest.ts'
 const ROOT = '/tmp/snapshot-working-set'
 const PID_PATH = '/tmp/snapshot-working-set.pid'
 const RAW_FANOUT_LIMIT = 8
+const FILLER_MEMORY_MIB = 256
 
 type Mode = 'gcs' | 'peer'
+type CaseMode = Mode | 'gateway-pending'
 
 interface Args {
   sourceUrl: string
+  gatewayUrl?: string
+  modes: CaseMode[]
   targetUrl: string
   peerUrl: string
   apiKey: string
+  gatewayApiKey: string
   workerKey: string
   counts: number[]
   rounds: number
+  sourceFillers: number
   memoryMiB: number
   diskMiB: number
   smallFiles: number
@@ -81,7 +90,9 @@ function required(raw: string | undefined, flag: string): string {
 function parseArgs(argv: string[]): Args {
   const values: Partial<Args> = {
     counts: [1, 8, 16],
+    modes: ['gcs', 'peer'],
     rounds: 2,
+    sourceFillers: 0,
     memoryMiB: 384,
     diskMiB: 384,
     smallFiles: 5_000,
@@ -90,13 +101,21 @@ function parseArgs(argv: string[]): Args {
   }
   for (let index = 0; index < argv.length; index++) {
     const flag = argv[index]
-    if (flag === '--source-url') values.sourceUrl = argv[++index]
+    if (flag === '--gateway-url') values.gatewayUrl = argv[++index]
+    else if (flag === '--modes') {
+      values.modes = (argv[++index] ?? '').split(',').map((value): CaseMode => {
+        if (value === 'gcs' || value === 'peer' || value === 'gateway-pending') return value
+        throw new Error('--modes must contain gcs, peer, or gateway-pending')
+      })
+    } else if (flag === '--source-url') values.sourceUrl = argv[++index]
     else if (flag === '--target-url') values.targetUrl = argv[++index]
     else if (flag === '--peer-url') values.peerUrl = argv[++index]
     else if (flag === '--api-key') values.apiKey = argv[++index]
+    else if (flag === '--gateway-api-key') values.gatewayApiKey = argv[++index]
     else if (flag === '--worker-key') values.workerKey = argv[++index]
     else if (flag === '--counts') values.counts = argv[++index]!.split(',').map((raw) => integer(raw, flag, 1, 48))
     else if (flag === '--rounds') values.rounds = integer(argv[++index], flag, 1)
+    else if (flag === '--source-fillers') values.sourceFillers = integer(argv[++index], flag, 0, 47)
     else if (flag === '--memory-mib') values.memoryMiB = integer(argv[++index], flag, 1)
     else if (flag === '--disk-mib') values.diskMiB = integer(argv[++index], flag, 1)
     else if (flag === '--small-files') values.smallFiles = integer(argv[++index], flag, 1)
@@ -105,14 +124,20 @@ function parseArgs(argv: string[]): Args {
     else if (flag === '--output') values.output = argv[++index]
     else throw new Error(`unknown argument: ${flag}`)
   }
+  if (values.modes?.includes('gateway-pending') && !values.gatewayUrl) throw new Error('--gateway-url is required for gateway-pending')
   return {
+    gatewayUrl: values.gatewayUrl,
+    modes: values.modes!,
     sourceUrl: required(values.sourceUrl, '--source-url'),
     targetUrl: required(values.targetUrl, '--target-url'),
-    peerUrl: required(values.peerUrl, '--peer-url'),
-    apiKey: required(values.apiKey, '--api-key'),
-    workerKey: required(values.workerKey, '--worker-key'),
+    peerUrl: values.modes?.includes('peer') ? required(values.peerUrl, '--peer-url') : '',
+    apiKey: required(values.apiKey ?? process.env.SANDBOX_API_KEY, '--api-key or SANDBOX_API_KEY'),
+    gatewayApiKey: values.gatewayApiKey ?? process.env.SANDBOX_GATEWAY_API_KEY ?? values.apiKey ?? process.env.SANDBOX_API_KEY ?? '',
+    workerKey: values.modes?.some((mode) => mode !== 'gateway-pending')
+      ? required(values.workerKey ?? process.env.SANDBOX_CONTROL_KEY, '--worker-key or SANDBOX_CONTROL_KEY') : '',
     counts: values.counts!,
     rounds: values.rounds!,
+    sourceFillers: values.sourceFillers!,
     memoryMiB: values.memoryMiB!,
     diskMiB: values.diskMiB!,
     smallFiles: values.smallFiles!,
@@ -189,7 +214,11 @@ async function metrics(args: Args, baseUrl: string): Promise<Map<string, number>
 }
 
 function delta(after: Map<string, number>, before: Map<string, number>, name: string): number {
-  return (after.get(name) ?? 0) - (before.get(name) ?? 0)
+  const previous = before.get(name)
+  const current = after.get(name)
+  if (previous === undefined || current === undefined) throw new Error(`missing path counter ${name}`)
+  if (current < previous) throw new Error(`path counter ${name} reset during the case`)
+  return current - previous
 }
 
 async function fanout(args: Args, mode: Mode, snapshotId: string, count: number): Promise<RawSandbox[]> {
@@ -300,36 +329,183 @@ async function runCase(
   }
 }
 
+interface PendingRow {
+  round: number
+  order: number
+  mode: 'gateway-pending'
+  count: number
+  passed: boolean
+  snapshotId?: string
+  snapshotStateAtRequest?: 'local' | 'durable'
+  snapshotCreateMs?: number
+  acceptedMs?: number
+  operationMs?: number
+  operationId?: string
+  snapshotToHydratedMs?: number
+  peerPulls?: number
+  peerPullFailures?: number
+  gcsFallbacks?: number
+  peerPayloadBytes?: number
+  items: Array<{ index: number; sandboxId: string; commandReadyMs?: number; hydratedMs?: number; destinationVerified?: boolean; error?: string }>
+  cleanupErrors: string[]
+  error?: string
+}
+
+async function runPendingCase(
+  args: Args, source: SandboxClient, target: SandboxClient, metadata: BenchmarkMetadata,
+  round: number, order: number, count: number,
+): Promise<PendingRow> {
+  if (!args.gatewayUrl) throw new Error('gateway-pending requires --gateway-url')
+  const gateway = new SandboxClient({ baseUrl: args.gatewayUrl, apiKey: args.gatewayApiKey })
+  const labels = { ...benchmarkResourceMetadata(metadata), benchmark_case: `${round}-${order}`, benchmark_role: 'clone' }
+  const sourceLabels = { ...labels, benchmark_role: 'source' }
+  const tracked = new Map<string, ClientSandbox>()
+  const row: PendingRow = { round, order, mode: 'gateway-pending', count, passed: false, items: [], cleanupErrors: [] }
+  let sandbox: ClientSandbox | undefined
+  try {
+    sandbox = await source.sandboxes.create({ metadata: sourceLabels, idleTimeoutMs: 0 })
+    await prepareSource(sandbox, args, metadata.run_id)
+    const discoveryDeadline = performance.now() + 15_000
+    let gatewaySource: ClientSandbox
+    for (;;) {
+      try {
+        gatewaySource = await gateway.sandboxes.get(sandbox.id, AbortSignal.timeout(5_000))
+        break
+      } catch (error) {
+        if (!(error instanceof NotFoundError) || performance.now() >= discoveryDeadline) throw error
+        await sleep(250)
+      }
+    }
+    const [targetBefore, sourceBefore] = await Promise.all([metrics(args, args.targetUrl), metrics(args, args.sourceUrl)])
+    const snapshotStarted = performance.now()
+    const snapshot = await gatewaySource.createSnapshot()
+    row.snapshotId = snapshot.id
+    row.snapshotCreateMs = performance.now() - snapshotStarted
+    row.snapshotStateAtRequest = (await source.snapshots.get(snapshot.id)).state
+    if (row.snapshotStateAtRequest !== 'local') throw new Error('snapshot is already durable; upload-pending precondition was not observed')
+    const started = performance.now()
+    const operation = await gateway.sandboxes.createMany({
+      count, maxParallelism: Math.min(count, 32), source: { snapshotId: snapshot.id }, metadata: labels, idleTimeoutMs: 0,
+    })
+    row.acceptedMs = performance.now() - started
+    row.operationId = operation.id
+    row.operationMs = row.acceptedMs + await observeBatch({
+      operation, timeoutMs: 15 * 60_000,
+      onSandbox: async (clone, index) => {
+        tracked.set(clone.id, clone)
+        const item: PendingRow['items'][number] = { index, sandboxId: clone.id }
+        row.items.push(item)
+        try {
+          const ready = await clone.commands.run('echo benchmark-ready', { timeoutMs: 30_000 })
+          if (ready.stdout.trim() !== 'benchmark-ready') throw new Error('unexpected command readiness output')
+          item.commandReadyMs = performance.now() - started
+          await clone.commands.run(`node --no-warnings ${GUEST_PATH} verify ${shellQuote(metadata.run_id)}`, { timeoutMs: 180_000 })
+          item.hydratedMs = performance.now() - started
+        } catch (error) {
+          item.error = error instanceof Error ? error.message : String(error)
+        }
+      },
+    })
+    row.snapshotToHydratedMs = row.items.length === count && row.items.every((item) => item.hydratedMs !== undefined)
+      ? started - snapshotStarted + Math.max(...row.items.map((item) => item.hydratedMs ?? 0)) : undefined
+    if (operation.state.status !== 'succeeded' || row.items.length !== count || row.items.some((item) => item.error)) {
+      throw new Error('gateway batch or workload failed')
+    }
+    // These direct reads prove placement after the gateway-facing workload timer ends.
+    for (const item of row.items) {
+      await target.sandboxes.get(item.sandboxId)
+      item.destinationVerified = true
+    }
+    const [targetAfter, sourceAfter] = await Promise.all([metrics(args, args.targetUrl), metrics(args, args.sourceUrl)])
+    row.peerPulls = delta(targetAfter, targetBefore, 'sandbox_snapshot_peer_pulls_total')
+    row.gcsFallbacks = delta(targetAfter, targetBefore, 'sandbox_snapshot_gcs_fallbacks_total')
+    row.peerPayloadBytes = delta(sourceAfter, sourceBefore, 'sandbox_snapshot_peer_payload_bytes_total')
+    row.peerPullFailures = delta(targetAfter, targetBefore, 'sandbox_snapshot_peer_pull_failures_total')
+    if (row.peerPulls !== 1 || row.gcsFallbacks !== 0 || row.peerPullFailures !== 0 || row.peerPayloadBytes <= 0) {
+      throw new Error('gateway did not use exactly one peer population on the intended target with zero fallback; check disposable fleet placement and snapshot advertisement')
+    }
+    row.passed = true
+  } catch (error) {
+    row.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    // Discover creations whose HTTP responses or operation polls were lost.
+    const cleanupResults = await Promise.all([
+      cleanupRunSandboxes(gateway, tracked, labels),
+      cleanupRunSandboxes(source, new Map(sandbox ? [[sandbox.id, sandbox]] : []), sourceLabels),
+    ])
+    row.cleanupErrors.push(...cleanupResults.flat())
+    if (row.snapshotId) {
+      // Local replicas must both be removed; the source call also joins its uploader.
+      for (const client of [source, target]) {
+        const error = await deleteSnapshotWithRetry(client, row.snapshotId)
+        if (error) row.cleanupErrors.push(error)
+      }
+    }
+    row.items.sort((a, b) => a.index - b.index)
+    row.passed &&= row.cleanupErrors.length === 0
+  }
+  return row
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const metadata = benchmarkMetadata('snapshot-peer-transfer', {
     counts: args.counts,
     rounds: args.rounds,
+    source_fillers: args.sourceFillers,
+    source_filler_memory_mib: args.sourceFillers > 0 ? FILLER_MEMORY_MIB : undefined,
     memory_mib: args.memoryMiB,
     disk_mib: args.diskMiB,
     small_files: args.smallFiles,
     sqlite_mib: args.sqliteMiB,
     raw_fanout_limit: RAW_FANOUT_LIMIT,
-  })
+    modes: args.modes,
+    source: redactTarget(args.sourceUrl),
+    target: redactTarget(args.targetUrl),
+    gateway: args.gatewayUrl ? redactTarget(args.gatewayUrl) : undefined,
+  }, args.gatewayUrl ?? args.targetUrl)
+  await observeBuilds(metadata, args.sourceUrl, args.apiKey)
+  await observeBuilds(metadata, args.targetUrl, args.apiKey)
+  if (args.gatewayUrl) await observeBuilds(metadata, args.gatewayUrl, args.gatewayApiKey)
   const sourceClient = new SandboxClient({ baseUrl: args.sourceUrl, apiKey: args.apiKey })
   const targetClient = new SandboxClient({ baseUrl: args.targetUrl, apiKey: args.apiKey })
-  const rows: Row[] = []
+  const rows: Array<Row | PendingRow> = []
+  const fillers = new Map<string, ClientSandbox>()
+  const fillerLabels = { ...benchmarkResourceMetadata(metadata), benchmark_role: 'filler' }
   let failure: unknown
   try {
+    for (let i = 0; i < args.sourceFillers; i++) {
+      const filler = await sourceClient.sandboxes.create({
+        metadata: fillerLabels, idleTimeoutMs: 0, resources: { vcpus: 1, memoryMib: FILLER_MEMORY_MIB },
+      })
+      fillers.set(filler.id, filler)
+    }
+    if (fillers.size) console.log(`reserved ${fillers.size} idle source sandboxes for placement`)
     for (let round = 1; round <= args.rounds; round++) {
-      const modes: Mode[] = round % 2 === 1 ? ['gcs', 'peer'] : ['peer', 'gcs']
+      const modes = round % 2 === 1 ? args.modes : [...args.modes].reverse()
       let order = 0
       for (const count of args.counts) {
-        for (const mode of modes) rows.push(await runCase(args, sourceClient, targetClient, metadata.run_id, round, ++order, mode, count))
+        for (const mode of modes) {
+          if (mode === 'gateway-pending') {
+            const row = await runPendingCase(args, sourceClient, targetClient, metadata, round, ++order, count)
+            rows.push(row)
+            if (!row.passed) throw new Error(row.error ?? `gateway-pending cleanup failed: ${row.cleanupErrors.join('; ')}`)
+          } else rows.push(await runCase(args, sourceClient, targetClient, metadata.run_id, round, ++order, mode, count))
+        }
       }
     }
   } catch (error) {
     failure = error
   } finally {
+    const cleanupErrors = args.sourceFillers > 0 ? await cleanupRunSandboxes(sourceClient, fillers, fillerLabels) : []
+    if (cleanupErrors.length && failure === undefined) failure = new Error(`source filler cleanup failed: ${cleanupErrors.join('; ')}`)
+    await observeBuilds(metadata, args.sourceUrl, args.apiKey)
+    await observeBuilds(metadata, args.targetUrl, args.apiKey)
+    if (args.gatewayUrl) await observeBuilds(metadata, args.gatewayUrl, args.gatewayApiKey)
     const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_')
     const output = args.output ?? join(RESULTS_DIR, `snapshot_peer_transfer_${timestamp}.json`)
     mkdirSync(dirname(output), { recursive: true })
-    writeFileSync(output, JSON.stringify({ metadata, passed: failure === undefined, rows,
+    writeFileSync(output, JSON.stringify({ metadata, passed: failure === undefined, rows, cleanupErrors,
       ...(failure === undefined ? {} : { error: String((failure as Error)?.stack ?? failure) }) }, null, 2))
     console.log(`saved ${output}`)
     if (failure !== undefined) throw failure

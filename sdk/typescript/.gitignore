@@ -3,3 +3,4 @@ dist/
 benchmarks/results/*
 !benchmarks/results/README.md
 !benchmarks/results/production_*.json
+!benchmarks/results/development_*.json

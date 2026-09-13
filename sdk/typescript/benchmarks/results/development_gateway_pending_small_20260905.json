@@ -1,0 +1,241 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "snapshot-peer-transfer",
+    "workload": {
+      "counts": [
+        1,
+        8
+      ],
+      "rounds": 1,
+      "source_fillers": 39,
+      "source_filler_memory_mib": 256,
+      "memory_mib": 256,
+      "disk_mib": 384,
+      "small_files": 5000,
+      "sqlite_mib": 32,
+      "raw_fanout_limit": 8,
+      "modes": [
+        "gateway-pending"
+      ],
+      "source": "http://10.128.0.28:8080",
+      "target": "http://10.128.0.35:8080",
+      "gateway": "http://10.128.0.100:9090"
+    },
+    "run_id": "dev-canary-20260905-pending-small",
+    "started_at": "2026-09-05T18:40:22.660Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260905182000",
+    "release_source": "environment",
+    "target": "http://10.128.0.100:9090",
+    "builds": [
+      {
+        "target": "http://10.128.0.28:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:40:22.661Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.35:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:40:22.720Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:40:22.730Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:40:22.735Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.28:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:44:54.543Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.35:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:44:54.547Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:44:54.550Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:44:54.553Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "fresh-snapshot-id-cold-target-source-39-small-idle-fillers"
+    }
+  },
+  "passed": true,
+  "rows": [
+    {
+      "round": 1,
+      "order": 1,
+      "mode": "gateway-pending",
+      "count": 1,
+      "passed": true,
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "9b15e6a3-9961-45c1-a8c9-73465aa57b2e",
+          "commandReadyMs": 13144.076518999995,
+          "hydratedMs": 33072.391615
+        }
+      ],
+      "cleanupErrors": [],
+      "snapshotId": "7cb00b9c-7118-4a6a-a474-5086483ce8e1",
+      "snapshotCreateMs": 2025.276639000018,
+      "snapshotStateAtRequest": "local",
+      "acceptedMs": 3.01807199997711,
+      "operationId": "4f555838-7e3b-4a5f-bed5-b5a7a4b8bee0",
+      "operationMs": 13055.90209399999,
+      "snapshotToHydratedMs": 35101.60919000002,
+      "peerPulls": 1,
+      "gcsFallbacks": 0,
+      "peerPayloadBytes": 1374787996
+    },
+    {
+      "round": 1,
+      "order": 2,
+      "mode": "gateway-pending",
+      "count": 8,
+      "passed": true,
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "565582da-68a0-4e5a-8bf8-51e2eccdc044",
+          "commandReadyMs": 13819.50378,
+          "hydratedMs": 45232.861466
+        },
+        {
+          "index": 1,
+          "sandboxId": "6e3920a9-ae72-4ea9-8a48-62fd49b53bba",
+          "commandReadyMs": 13728.490087000013,
+          "hydratedMs": 45310.62108400001
+        },
+        {
+          "index": 2,
+          "sandboxId": "ba3b005f-513d-4163-862f-4d4f5b88ac14",
+          "commandReadyMs": 13788.173594000022,
+          "hydratedMs": 45228.755194
+        },
+        {
+          "index": 3,
+          "sandboxId": "89b601dd-c1e5-46eb-ae23-7c8ba8383565",
+          "commandReadyMs": 13821.140408000007,
+          "hydratedMs": 45116.812139000016
+        },
+        {
+          "index": 4,
+          "sandboxId": "63b917d1-1935-4b84-a99c-03328d029ffb",
+          "commandReadyMs": 13772.86994600002,
+          "hydratedMs": 45109.180563
+        },
+        {
+          "index": 5,
+          "sandboxId": "1c866be6-a559-4d52-9f9d-344d2e8b6a1b",
+          "commandReadyMs": 13786.314023000014,
+          "hydratedMs": 45108.451741000026
+        },
+        {
+          "index": 6,
+          "sandboxId": "c3be507d-dc7f-473f-a98f-146e5a0ede6b",
+          "commandReadyMs": 13803.136536000005,
+          "hydratedMs": 45119.74366300003
+        },
+        {
+          "index": 7,
+          "sandboxId": "a2f54f27-a5fc-4bab-8d3e-162db75249aa",
+          "commandReadyMs": 13782.089519000001,
+          "hydratedMs": 45120.29823300001
+        }
+      ],
+      "cleanupErrors": [],
+      "snapshotId": "efe75a60-c709-4495-be8e-10434f0eedcc",
+      "snapshotCreateMs": 3006.202812000003,
+      "snapshotStateAtRequest": "local",
+      "acceptedMs": 3.9796410000126343,
+      "operationId": "be4579d9-d259-48cc-accd-356b86eedb94",
+      "operationMs": 13581.927913000021,
+      "snapshotToHydratedMs": 48320.191575000004,
+      "peerPulls": 1,
+      "gcsFallbacks": 0,
+      "peerPayloadBytes": 1381603740
+    }
+  ],
+  "cleanupErrors": []
+}

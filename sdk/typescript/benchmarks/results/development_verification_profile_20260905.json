@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "snapshot-working-set",
+    "workload": {
+      "counts": [
+        1
+      ],
+      "rounds": 1,
+      "max_parallelism": 32,
+      "guest_memory_mib": "template-default",
+      "memory_mib": 256,
+      "disk_mib": 384,
+      "small_files": 5000,
+      "sqlite_mib": 32,
+      "readiness_timeout_ms": 30000,
+      "hydration_timeout_ms": 180000,
+      "settle_ms": 1000,
+      "order": "ascending-then-descending",
+      "probe_schedule": "per-item-on-first-observation",
+      "hydration_schedule": "per-item-after-command-ready",
+      "poll_interval_ms": 100
+    },
+    "run_id": "dev-canary-20260905-profile",
+    "started_at": "2026-09-05T18:46:14.298Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260905182000",
+    "release_source": "environment",
+    "target": "http://10.128.0.100:9090",
+    "builds": [
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:46:14.300Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:46:14.357Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:46:54.035Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:46:54.038Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "warm-fleet-stage-timing-diagnostic"
+    }
+  },
+  "passed": true,
+  "source": {
+    "createMs": 23.5060289999999,
+    "setupMs": 9860.978421,
+    "guest": {
+      "diskUsedMiB": 470,
+      "memoryAvailableKiB": 517568,
+      "heartbeat": {
+        "cycle": 4,
+        "timeNs": "1407459668226"
+      }
+    },
+    "snapshotMs": 2992.1616649999996
+  },
+  "snapshotId": "af1adca5-f138-4e6c-b38f-78e7005920d2",
+  "rows": [
+    {
+      "passed": true,
+      "round": 1,
+      "count": 1,
+      "maxParallelism": 1,
+      "operationId": "261ddc19-c708-47c0-93b1-76a03302ce65",
+      "operationStatus": "succeeded",
+      "operationWallMs": 4129.492512999997,
+      "commandReadyMakespanMs": 4224.974795999999,
+      "commandReadyP50Ms": 4224.974795999999,
+      "commandReadyP95Ms": 4224.974795999999,
+      "hydratedMakespanMs": 23327.720556,
+      "hydratedP50Ms": 23327.720556,
+      "hydratedP95Ms": 23327.720556,
+      "ok": 1,
+      "failed": 0,
+      "cleanupErrors": [],
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "adff9e64-f521-48ce-8d03-f06d21ee142d",
+          "ok": true,
+          "commandReadyMs": 4224.974795999999,
+          "verification": {
+            "runId": "dev-canary-20260905-profile",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16612,
+            "memoryCycleBefore": 4,
+            "memoryCycleAfter": 5,
+            "verificationMs": {
+              "memoryProgress": 4116.422586,
+              "diskHash": 4399.063733999999,
+              "smallFileCount": 11.462094000000434,
+              "sqlite": 9337.350314000001,
+              "total": 17864.302822
+            }
+          },
+          "verificationMs": 19102.71239,
+          "hydrationMs": 23327.720556
+        }
+      ]
+    }
+  ],
+  "cleanupErrors": []
+}

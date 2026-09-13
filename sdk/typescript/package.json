@@ -42,7 +42,10 @@
     "example:lifecycle": "tsx examples/lifecycle.ts",
     "example:speed": "tsx examples/speed.ts",
     "example:create-many": "tsx examples/create-many.ts",
+    "example:workspace": "tsx examples/prepared-workspace.ts",
+    "example:workspace:reuse": "tsx examples/workspace/reuse.ts",
     "example:fanout": "tsx examples/fanout.ts",
+    "bench:validate": "tsx benchmarks/validate-report.ts",
     "bench": "tsx benchmarks/run-bench.ts",
     "bench:snapshot-source": "tsx benchmarks/snapshot-source-bench.ts",
     "bench:snapshot-batch": "tsx benchmarks/snapshot-batch-bench.ts",
@@ -53,8 +56,11 @@
     "bench:burst": "tsx benchmarks/burst-bench.ts",
     "bench:fleet": "tsx benchmarks/fleet-bench.ts",
     "bench:lifecycle": "tsx benchmarks/lifecycle-bench.ts",
+    "bench:create-paths": "tsx benchmarks/create-paths-bench.ts",
+    "bench:open-loop": "tsx benchmarks/open-loop-bench.ts",
     "bench:snapshot-paths": "tsx benchmarks/snapshot-paths-bench.ts",
-    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts benchmarks/metadata.test.ts benchmarks/fleet-bench.test.ts benchmarks/snapshot-batch-bench.test.ts benchmarks/snapshot-working-set-bench.test.ts"
+    "test": "tsx --test test/smoke.test.ts test/pty.test.ts test/v1.test.ts test/operation-progress.test.ts test/single-create.test.ts test/create-options.test.ts benchmarks/metadata.test.ts benchmarks/runners.test.ts benchmarks/fleet-bench.test.ts benchmarks/snapshot-batch-bench.test.ts benchmarks/snapshot-working-set-bench.test.ts benchmarks/open-loop-arrivals.test.ts examples/workspace/attempts.test.ts examples/workspace/attempts-journal.test.ts",
+    "example:workspace:attempts": "tsx examples/workspace-attempts.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

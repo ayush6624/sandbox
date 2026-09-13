@@ -70,6 +70,48 @@ await sandbox.resume()
 await sandbox.terminate()
 ```
 
+Create resource overrides are independent. For example,
+`resources: { vcpus: 4 }` keeps the chosen worker's default memory. Omitted or zero
+values use that worker's defaults; returned sandbox resources always include
+both effective values. A positive override forces a cold create. Empty or
+all-zero overrides preserve warm eligibility. Snapshot sources keep their saved
+resources and reject positive overrides.
+
+Use `idleTimeoutMs: -1` to disable automatic idle hibernation during create or
+update. Zero uses the host default. Positive values remain milliseconds. A TTL
+update preserves an existing disabled-idle setting.
+
+To receive a recoverable handle before one sandbox is ready, use `createAsync`:
+
+```ts
+const pending = await client.sandboxes.createAsync({
+  name: 'preview',
+  idempotencyKey: 'preview-42',
+})
+console.log(pending.id)
+const completed = await pending.wait({ timeoutMs: 120_000 })
+const created = completed.results[0]
+if (created?.value) console.log(created.value.id)
+else console.error(created?.error)
+
+// Another process can recover the same handle by ID.
+const recovered = await client.operations.get(pending.id)
+```
+
+`Sandbox.createAsync()` exposes the same flow through the static facade.
+The new `/v1/sandbox-creations` endpoint must be supported by the server. Existing
+`create()` continues to wait for a ready sandbox. Async acceptance always replays
+the original receipt; refresh reads current state. A failed member appears in
+`results`, matching batch behavior.
+
+Keep the same options and idempotency key when retrying a lost acceptance.
+`CreateAcceptanceError.idempotencyKey` exposes an automatically generated key
+when acceptance is uncertain. For recovery across processes, supply and persist
+your own key before submitting. Keys are scoped to an endpoint, so changing to
+`create()` represents another operation. The SDK never makes that switch or
+follows a redirect during async creation. Canceling or timing out local waiting
+does not cancel accepted work.
+
 Create several independent sandboxes from one reusable snapshot with a typed
 operation. Every requested index has either a sandbox or structured problem
 details; partial success is never represented by a mysteriously short array.
@@ -91,6 +133,47 @@ for (const item of result.results) {
   else console.error(item.index, item.error?.code)
 }
 ```
+
+Refresh an operation to inspect dispatch and worker progress before it completes:
+
+```ts
+await operation.refresh()
+for (const item of operation.state.results) {
+  const progress = item.progress
+  if (!progress) continue
+  console.log(item.index, progress.coordination.phase)
+  if (progress.worker) {
+    console.log(progress.worker.current.stage, progress.worker.current.startedAt)
+    console.log('last completed', progress.worker.lastCompleted?.stage)
+  }
+}
+```
+
+Progress requires a server with create-stage delivery support. Older servers omit
+it. The coordinator can be `retrying` while the worker's last observation still
+shows an earlier stage. Worker observations can lag execution, and a worker's
+`succeeded` condition does not complete the operation. Use `operation.done` or
+`operation.wait()` for completion. Nested timestamps are `Date` values, and
+`operation.state.requestId` identifies the original accepted request. Stage
+strings can grow as servers add observations; preserve unfamiliar values.
+
+Snapshot capture returns when local files are saved. When object storage is
+configured, the capturing worker persists its upload job and retries failures,
+including after a restart with its disk intact. Wait for remote durability
+before relying on recovery without that worker:
+
+```ts
+const checkpoint = await prepared.createSnapshot()
+await client.snapshots.waitForDurable(checkpoint.id, {
+  timeoutMs: 120_000,
+  signal: abortController.signal,
+})
+```
+
+`checkpoint.state` is `local` or `durable`. Polling with `snapshots.get()` also
+exposes `upload` progress while the creator's job is unfinished. A failed job
+causes the wait to throw `SandboxError` with code `snapshot_upload_failed`.
+Timeout or abort stops waiting; the background upload continues.
 
 Collections can be streamed without manually handling page tokens:
 
@@ -572,6 +655,7 @@ Each script in `examples/` runs against a live server; all read the
 | `npm run example:ports` | Start a server in the guest, `exposePort`, reach it via `getHost`, `listPorts` |
 | `npm run example:lifecycle` | `create({ timeoutMs })`, `setTimeout`, `Sandbox.list`, `Sandbox.connect` by id, `kill` |
 | `npm run example:speed` | Hot-create latency: sequential + concurrent creates, first exec round-trip |
+| `npm run example:workspace` | [Prepare a pinned repository, run 297 tests, and verify independent snapshot attempts](examples/workspace/README.md) through the public gateway |
 | `npm run example:fanout` | Snapshot → fan out N clones: shared prepared state, surviving processes, isolated writes (needs a host URL, not a gateway) |
 
 ```bash

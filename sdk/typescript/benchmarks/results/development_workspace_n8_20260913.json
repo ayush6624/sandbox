@@ -1,0 +1,258 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "prepared-workspace",
+    "workload": {
+      "repository": "https://github.com/pallets/itsdangerous",
+      "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+      "count": 8
+    },
+    "run_id": "b2061225-520c-4871-824d-896b7b598871",
+    "started_at": "2026-09-13T10:44:46.922Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260906174946",
+    "release_source": "environment",
+    "target": "http://10.128.0.100:9090",
+    "builds": [
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-13T10:44:46.924Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260906174946"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-13T10:44:47.052Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-13T10:45:17.859Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260906174946"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-13T10:45:17.862Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "eight warm VMs per worker; fresh repository download; durable snapshot then same-fleet batch; no forced cache eviction"
+    }
+  },
+  "passed": true,
+  "stage": "complete",
+  "source_id": "810a08b2-72ea-4ba0-9a01-8afec5e18018",
+  "snapshot_id": "544df9cf-4902-4539-9908-3e30da27bfc3",
+  "operation_id": "1799e29d-9696-4e38-b36c-5234af09e309",
+  "snapshot_retained": true,
+  "timings_ms": {
+    "fresh_create": 42.11672592163086,
+    "fresh_first_command": 176.79790902137756,
+    "prepare": 10446.750303030014,
+    "source_tests": 1603.7092230319977,
+    "fresh_through_tests": 12228.166676044464,
+    "snapshot_capture": 902.5269629955292,
+    "snapshot_durability": 6141.288175821304,
+    "all_attempts_tests": 6097.53519487381
+  },
+  "attempts": [
+    {
+      "index": 1,
+      "sandbox_id": "0a866f54-6de4-4a34-8a7e-38e942087022",
+      "first_command_ms": 2842.5846009254456,
+      "tests_complete_ms": 5860.113616943359,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 5,
+      "sandbox_id": "5e86d8de-de89-4420-ae6f-665b6dba7c31",
+      "first_command_ms": 2850.5499629974365,
+      "tests_complete_ms": 5862.326313972473,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 4,
+      "sandbox_id": "f4184aaf-6952-409b-a646-c89d6f8b42e6",
+      "first_command_ms": 2857.663162946701,
+      "tests_complete_ms": 5865.300241947174,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 2,
+      "sandbox_id": "b4dafddd-f3ab-459c-98bf-d0165f6582ae",
+      "first_command_ms": 2855.4019968509674,
+      "tests_complete_ms": 5869.717815876007,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 6,
+      "sandbox_id": "acf40b5b-a139-42c3-8029-f31826a33dbd",
+      "first_command_ms": 2859.851907014847,
+      "tests_complete_ms": 5871.533628940582,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 7,
+      "sandbox_id": "34d2c2f3-a379-46e6-a601-ce84c09787e1",
+      "first_command_ms": 2853.268926858902,
+      "tests_complete_ms": 5896.709699869156,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 0,
+      "sandbox_id": "641293c3-27a6-49f7-8f82-0918b9f16c93",
+      "first_command_ms": 2839.2787659168243,
+      "tests_complete_ms": 5918.383242845535,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 3,
+      "sandbox_id": "85f9c045-3efc-4730-920d-f77ca17b5bdd",
+      "first_command_ms": 2848.2449748516083,
+      "tests_complete_ms": 6097.033979892731,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    }
+  ],
+  "failures": [],
+  "cleanup_errors": [],
+  "baseline": {
+    "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+    "tests": 297,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+    "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+    "workspace_allocated_bytes": 20209664
+  },
+  "isolation": {
+    "changed_sandbox_id": "0a866f54-6de4-4a34-8a7e-38e942087022",
+    "changed_files_sha256": "5f8942773c94ea3d6e0eab72e5eb180d467be47d59f451ed43244df5754c9005",
+    "unchanged_sibling_ids": [
+      "5e86d8de-de89-4420-ae6f-665b6dba7c31",
+      "f4184aaf-6952-409b-a646-c89d6f8b42e6",
+      "b4dafddd-f3ab-459c-98bf-d0165f6582ae",
+      "acf40b5b-a139-42c3-8029-f31826a33dbd",
+      "34d2c2f3-a379-46e6-a601-ce84c09787e1",
+      "641293c3-27a6-49f7-8f82-0918b9f16c93",
+      "85f9c045-3efc-4730-920d-f77ca17b5bdd"
+    ],
+    "source_unchanged": true,
+    "snapshot_probe_id": "89a71182-a23f-4af4-be63-a070a2212337",
+    "snapshot_files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8"
+  }
+}

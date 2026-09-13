@@ -1,0 +1,503 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "snapshot-working-set",
+    "workload": {
+      "counts": [
+        1,
+        8
+      ],
+      "rounds": 2,
+      "max_parallelism": 32,
+      "guest_memory_mib": "template-default",
+      "memory_mib": 256,
+      "disk_mib": 384,
+      "small_files": 5000,
+      "sqlite_mib": 32,
+      "readiness_timeout_ms": 30000,
+      "hydration_timeout_ms": 180000,
+      "settle_ms": 1000,
+      "order": "ascending-then-descending",
+      "probe_schedule": "per-item-on-first-observation",
+      "hydration_schedule": "per-item-after-command-ready",
+      "poll_interval_ms": 100
+    },
+    "run_id": "dev-canary-20260905-working-set",
+    "started_at": "2026-09-05T18:25:30.834Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260905182000",
+    "release_source": "environment",
+    "target": "http://10.128.0.100:9090",
+    "builds": [
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:25:30.835Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:25:30.891Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:27:37.890Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:27:37.893Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "warm-pool-8-after-lifecycle"
+    }
+  },
+  "passed": true,
+  "source": {
+    "createMs": 21.870677999999998,
+    "setupMs": 9881.569996999999,
+    "guest": {
+      "diskUsedMiB": 470,
+      "memoryAvailableKiB": 510004,
+      "heartbeat": {
+        "cycle": 5,
+        "timeNs": "165982470400"
+      }
+    },
+    "snapshotMs": 3008.095809999999
+  },
+  "snapshotId": "629be83b-d291-4862-a65b-db09c5816eb3",
+  "rows": [
+    {
+      "passed": true,
+      "round": 1,
+      "count": 1,
+      "maxParallelism": 1,
+      "operationId": "5524f0b7-afea-47f3-835e-201c7a261e65",
+      "operationStatus": "succeeded",
+      "operationWallMs": 4031.183745999999,
+      "commandReadyMakespanMs": 4142.794787999997,
+      "commandReadyP50Ms": 4142.794787999997,
+      "commandReadyP95Ms": 4142.794787999997,
+      "hydratedMakespanMs": 24211.417410999995,
+      "hydratedP50Ms": 24211.417410999995,
+      "hydratedP95Ms": 24211.417410999995,
+      "ok": 1,
+      "failed": 0,
+      "cleanupErrors": [],
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "d64c3f59-b6a1-4b0b-a405-8282149861e3",
+          "ok": true,
+          "commandReadyMs": 4142.794787999997,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16621,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 20068.613798000002,
+          "hydrationMs": 24211.417410999995
+        }
+      ]
+    },
+    {
+      "passed": true,
+      "round": 1,
+      "count": 8,
+      "maxParallelism": 8,
+      "operationId": "a4559198-7a55-47fd-ac7e-02019136a641",
+      "operationStatus": "succeeded",
+      "operationWallMs": 1044.1719759999978,
+      "commandReadyMakespanMs": 1249.9918099999995,
+      "commandReadyP50Ms": 1230.5447490000006,
+      "commandReadyP95Ms": 1249.9918099999995,
+      "hydratedMakespanMs": 32022.096386000005,
+      "hydratedP50Ms": 31872.590874,
+      "hydratedP95Ms": 32022.096386000005,
+      "ok": 8,
+      "failed": 0,
+      "cleanupErrors": [],
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "2ec0f578-6393-4a8c-854b-98d9a065477a",
+          "ok": true,
+          "commandReadyMs": 1226.4056990000026,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16618,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30774.757636000002,
+          "hydrationMs": 32001.172707000005
+        },
+        {
+          "index": 1,
+          "sandboxId": "9427739c-1822-4195-9982-8fcddaa45ae0",
+          "ok": true,
+          "commandReadyMs": 1230.5447490000006,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16615,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30671.424406000006,
+          "hydrationMs": 31901.972624999995
+        },
+        {
+          "index": 2,
+          "sandboxId": "7df8db27-58ca-492d-87b8-d9a99ecb1129",
+          "ok": true,
+          "commandReadyMs": 1228.296841000003,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16609,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30256.533390000004,
+          "hydrationMs": 31484.833331
+        },
+        {
+          "index": 3,
+          "sandboxId": "516a9ec0-72d4-48b0-a303-54b1734d9f9b",
+          "ok": true,
+          "commandReadyMs": 1243.186913999998,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16622,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30778.905024,
+          "hydrationMs": 32022.096386000005
+        },
+        {
+          "index": 4,
+          "sandboxId": "eee71db4-9b3b-40b1-b2c6-4bb5c1bc43c4",
+          "ok": true,
+          "commandReadyMs": 1222.8307740000018,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16617,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30498.917417000004,
+          "hydrationMs": 31721.75211
+        },
+        {
+          "index": 5,
+          "sandboxId": "d21c418e-2612-48b8-ae81-d1a9a898ef6d",
+          "ok": true,
+          "commandReadyMs": 1241.274126000004,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16614,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30631.310690000006,
+          "hydrationMs": 31872.590874
+        },
+        {
+          "index": 6,
+          "sandboxId": "bb27a094-35ff-49e8-a027-7eb3aa95dd31",
+          "ok": true,
+          "commandReadyMs": 1249.9918099999995,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16622,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30716.141830999994,
+          "hydrationMs": 31966.1382
+        },
+        {
+          "index": 7,
+          "sandboxId": "301bb1a8-fff2-40ff-8bd7-f898a04542ee",
+          "ok": true,
+          "commandReadyMs": 1235.2118919999994,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16613,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 30314.709111999997,
+          "hydrationMs": 31549.925684999995
+        }
+      ]
+    },
+    {
+      "passed": true,
+      "round": 2,
+      "count": 8,
+      "maxParallelism": 8,
+      "operationId": "d0cc1a8d-3bb3-4838-87da-7a84fcd67efd",
+      "operationStatus": "succeeded",
+      "operationWallMs": 1032.5493499999866,
+      "commandReadyMakespanMs": 1359.8565700000036,
+      "commandReadyP50Ms": 1206.6411150000058,
+      "commandReadyP95Ms": 1359.8565700000036,
+      "hydratedMakespanMs": 31050.648548000012,
+      "hydratedP50Ms": 30527.223920000004,
+      "hydratedP95Ms": 31050.648548000012,
+      "ok": 8,
+      "failed": 0,
+      "cleanupErrors": [],
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "3e3cca58-464b-4785-8c52-db2dbe3c3dcc",
+          "ok": true,
+          "commandReadyMs": 1204.7502410000016,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16623,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29345.931823000006,
+          "hydrationMs": 30550.684708
+        },
+        {
+          "index": 1,
+          "sandboxId": "6f1323fb-8cf2-4065-b419-b62f67d5c0a5",
+          "ok": true,
+          "commandReadyMs": 1234.7964540000103,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16633,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29520.675814999995,
+          "hydrationMs": 30755.474792000008
+        },
+        {
+          "index": 2,
+          "sandboxId": "08bbb2dd-2c53-42c2-998f-517a19e6e126",
+          "ok": true,
+          "commandReadyMs": 1206.6411150000058,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16628,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29230.717696000007,
+          "hydrationMs": 30437.360664000007
+        },
+        {
+          "index": 3,
+          "sandboxId": "e72e5bbd-12af-4e7f-ad10-1ca1e5293055",
+          "ok": true,
+          "commandReadyMs": 1275.3922420000017,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16621,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29153.129535,
+          "hydrationMs": 30428.52409800001
+        },
+        {
+          "index": 4,
+          "sandboxId": "f2776a91-1b42-4705-a1b7-1061efa350d5",
+          "ok": true,
+          "commandReadyMs": 1192.651527000009,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16633,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29805.150255999994,
+          "hydrationMs": 30997.80359200001
+        },
+        {
+          "index": 5,
+          "sandboxId": "9c857aa9-25a7-4971-b2fc-49385e1f7afc",
+          "ok": true,
+          "commandReadyMs": 1190.0318190000107,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16635,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29075.74788299999,
+          "hydrationMs": 30265.785963000002
+        },
+        {
+          "index": 6,
+          "sandboxId": "cb76d154-5f91-42b3-902b-050bdd6fd533",
+          "ok": true,
+          "commandReadyMs": 1359.8565700000036,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16624,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29167.36473900001,
+          "hydrationMs": 30527.223920000004
+        },
+        {
+          "index": 7,
+          "sandboxId": "3ba5d36c-e0d4-43a3-841d-027ab29fe08d",
+          "ok": true,
+          "commandReadyMs": 1238.6603850000101,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16633,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 29811.986059999996,
+          "hydrationMs": 31050.648548000012
+        }
+      ]
+    },
+    {
+      "passed": true,
+      "round": 2,
+      "count": 1,
+      "maxParallelism": 1,
+      "operationId": "a748f03d-d8c0-4e6d-a879-c4041db2031a",
+      "operationStatus": "succeeded",
+      "operationWallMs": 416.0212249999895,
+      "commandReadyMakespanMs": 482.8835160000017,
+      "commandReadyP50Ms": 482.8835160000017,
+      "commandReadyP95Ms": 482.8835160000017,
+      "hydratedMakespanMs": 19380.103059,
+      "hydratedP50Ms": 19380.103059,
+      "hydratedP95Ms": 19380.103059,
+      "ok": 1,
+      "failed": 0,
+      "cleanupErrors": [],
+      "items": [
+        {
+          "index": 0,
+          "sandboxId": "d07d2d93-cf3d-41b2-af3a-6da310c7fe18",
+          "ok": true,
+          "commandReadyMs": 482.8835160000017,
+          "verification": {
+            "runId": "dev-canary-20260905-working-set",
+            "memoryMiB": 256,
+            "diskMiB": 384,
+            "smallFiles": 5000,
+            "sqliteRows": 16633,
+            "memoryCycleBefore": 6,
+            "memoryCycleAfter": 7
+          },
+          "verificationMs": 18897.216854,
+          "hydrationMs": 19380.103059
+        }
+      ]
+    }
+  ],
+  "cleanupErrors": []
+}

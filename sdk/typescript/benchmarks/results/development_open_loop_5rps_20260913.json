@@ -1,0 +1,1037 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "open-loop-create",
+    "workload": {
+      "count": 60,
+      "arrivals_per_second": 5,
+      "hold_ms": 2000,
+      "retries": 0,
+      "command": "printf benchmark-ready",
+      "source": "default",
+      "timing": "schedule delay and client elapsed times; transport included; per-request server queue time unavailable"
+    },
+    "run_id": "4e174a63-0be4-4d9b-82b6-3cf08924bc58",
+    "started_at": "2026-09-13T13:50:42.109Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260906174946",
+    "release_source": "environment",
+    "target": "http://127.0.0.1:19090",
+    "builds": [
+      {
+        "target": "http://127.0.0.1:19090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-13T13:50:42.110Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260906174946"
+          }
+        ]
+      },
+      {
+        "target": "http://127.0.0.1:19090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-13T13:50:42.246Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://127.0.0.1:19090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-13T13:51:01.538Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260906174946"
+          }
+        ]
+      },
+      {
+        "target": "http://127.0.0.1:19090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-13T13:51:01.599Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "user-workstation-via-SSH-to-us-central1-control",
+      "cache_state": "existing default warm pool; no cache reset; guest hash from the same-session create-paths report"
+    }
+  },
+  "passed": true,
+  "succeeded": 60,
+  "peak_in_flight": 14,
+  "records": [
+    {
+      "index": 0,
+      "scheduled_ms": 0,
+      "dispatched_ms": 0.0016669999999976426,
+      "schedule_delay_ms": 0.0016669999999976426,
+      "sandbox_id": "a83d066b-9c6a-44d2-9de9-61980032879f",
+      "create_ms": 90.40379099999996,
+      "command_ready_ms": 169.33274999999992,
+      "total_ms": 2372.463291
+    },
+    {
+      "index": 1,
+      "scheduled_ms": 200,
+      "dispatched_ms": 200.87704199999996,
+      "schedule_delay_ms": 0.8770419999999604,
+      "sandbox_id": "4b17068c-a603-4e2d-b4cc-d050c20f0e3a",
+      "create_ms": 86.953125,
+      "command_ready_ms": 165.8090840000001,
+      "total_ms": 2344.378209
+    },
+    {
+      "index": 2,
+      "scheduled_ms": 400,
+      "dispatched_ms": 402.110042,
+      "schedule_delay_ms": 2.1100420000000213,
+      "sandbox_id": "67de90f0-8663-45ca-90f5-885a259beb7c",
+      "create_ms": 86.41966700000012,
+      "command_ready_ms": 167.98612500000013,
+      "total_ms": 2354.886334
+    },
+    {
+      "index": 3,
+      "scheduled_ms": 600,
+      "dispatched_ms": 601.266375,
+      "schedule_delay_ms": 1.266375000000039,
+      "sandbox_id": "b6b855e9-19b4-43dc-a725-f32afab2b333",
+      "create_ms": 83.6440419999999,
+      "command_ready_ms": 164.41479200000003,
+      "total_ms": 2341.0685839999996
+    },
+    {
+      "index": 4,
+      "scheduled_ms": 800,
+      "dispatched_ms": 800.8446250000001,
+      "schedule_delay_ms": 0.8446250000000646,
+      "sandbox_id": "13c6e104-95da-4180-a4d7-9c0b99a47f9f",
+      "create_ms": 79.81500000000005,
+      "command_ready_ms": 179.83945799999992,
+      "total_ms": 2363.107333
+    },
+    {
+      "index": 5,
+      "scheduled_ms": 1000,
+      "dispatched_ms": 1001.992083,
+      "schedule_delay_ms": 1.9920829999999796,
+      "sandbox_id": "4129f21e-a4f4-4519-839e-42e522ac9bc8",
+      "create_ms": 90.69137499999988,
+      "command_ready_ms": 247.150167,
+      "total_ms": 2435.505
+    },
+    {
+      "index": 6,
+      "scheduled_ms": 1200,
+      "dispatched_ms": 1200.6934999999999,
+      "schedule_delay_ms": 0.6934999999998581,
+      "sandbox_id": "c28701c8-634f-4667-80ee-ae12b29a46bf",
+      "create_ms": 80.25966700000004,
+      "command_ready_ms": 160.32925,
+      "total_ms": 2344.600584
+    },
+    {
+      "index": 7,
+      "scheduled_ms": 1400,
+      "dispatched_ms": 1402.226792,
+      "schedule_delay_ms": 2.226791999999932,
+      "sandbox_id": "842a01f1-c323-4387-ba5d-e1468e03d33d",
+      "create_ms": 85.4797500000002,
+      "command_ready_ms": 170.76583300000016,
+      "total_ms": 2338.026291
+    },
+    {
+      "index": 8,
+      "scheduled_ms": 1600,
+      "dispatched_ms": 1601.350833,
+      "schedule_delay_ms": 1.350832999999966,
+      "sandbox_id": "b14858e6-669a-4ebb-af95-29194b869bdb",
+      "create_ms": 84.80095799999981,
+      "command_ready_ms": 179.39795800000002,
+      "total_ms": 2343.1011249999997
+    },
+    {
+      "index": 9,
+      "scheduled_ms": 1800,
+      "dispatched_ms": 1801.431,
+      "schedule_delay_ms": 1.43100000000004,
+      "sandbox_id": "a043d80b-1993-4163-ab32-20e44f002c97",
+      "create_ms": 85.44966699999986,
+      "command_ready_ms": 187.24462499999981,
+      "total_ms": 2366.304375
+    },
+    {
+      "index": 10,
+      "scheduled_ms": 2000,
+      "dispatched_ms": 2001.2378329999997,
+      "schedule_delay_ms": 1.2378329999996822,
+      "sandbox_id": "a86fe5df-7dbc-4519-b1e1-73793311cb97",
+      "create_ms": 90.0373340000001,
+      "command_ready_ms": 165.75787500000024,
+      "total_ms": 2395.9793339999997
+    },
+    {
+      "index": 11,
+      "scheduled_ms": 2200,
+      "dispatched_ms": 2201.1819579999997,
+      "schedule_delay_ms": 1.1819579999996677,
+      "sandbox_id": "93b16ad8-a0c1-40d2-ad8c-fc960adc59dd",
+      "create_ms": 86.7529999999997,
+      "command_ready_ms": 171.66237499999988,
+      "total_ms": 2521.0355419999996
+    },
+    {
+      "index": 12,
+      "scheduled_ms": 2400,
+      "dispatched_ms": 2402.578917,
+      "schedule_delay_ms": 2.5789169999998194,
+      "sandbox_id": "f85e709c-bc5b-4d13-93d0-e9f12f070da6",
+      "create_ms": 81.64016700000002,
+      "command_ready_ms": 156.3144169999996,
+      "total_ms": 2451.57
+    },
+    {
+      "index": 13,
+      "scheduled_ms": 2600,
+      "dispatched_ms": 2601.753792,
+      "schedule_delay_ms": 1.7537919999999758,
+      "sandbox_id": "5076a077-db5c-4593-b09e-3a13fedb29d8",
+      "create_ms": 86.60300000000007,
+      "command_ready_ms": 171.17820800000027,
+      "total_ms": 2398.2272080000002
+    },
+    {
+      "index": 14,
+      "scheduled_ms": 2800,
+      "dispatched_ms": 2800.141083,
+      "schedule_delay_ms": 0.14108299999998053,
+      "sandbox_id": "15f6ed85-eaa3-4ec0-ad4d-1194d564b801",
+      "create_ms": 84.12429100000008,
+      "command_ready_ms": 170.3305409999998,
+      "total_ms": 2413.305291
+    },
+    {
+      "index": 15,
+      "scheduled_ms": 3000,
+      "dispatched_ms": 3001.6779579999998,
+      "schedule_delay_ms": 1.6779579999997623,
+      "sandbox_id": "ab7b7778-7fa8-4e11-adbe-9886919f4bfd",
+      "create_ms": 84.95658300000014,
+      "command_ready_ms": 162.93704100000014,
+      "total_ms": 2385.525625
+    },
+    {
+      "index": 16,
+      "scheduled_ms": 3200,
+      "dispatched_ms": 3201.62225,
+      "schedule_delay_ms": 1.6222499999998945,
+      "sandbox_id": "d581b3ea-7191-466f-af78-92d417d6d10d",
+      "create_ms": 84.23216599999978,
+      "command_ready_ms": 163.6037080000001,
+      "total_ms": 2418.807666
+    },
+    {
+      "index": 17,
+      "scheduled_ms": 3400,
+      "dispatched_ms": 3403.0037079999997,
+      "schedule_delay_ms": 3.003707999999733,
+      "sandbox_id": "5bb7e886-a476-46a1-9875-7b76a3f4cf78",
+      "create_ms": 142.41679099999965,
+      "command_ready_ms": 218.55779100000018,
+      "total_ms": 2631.372375
+    },
+    {
+      "index": 18,
+      "scheduled_ms": 3600,
+      "dispatched_ms": 3600.900958,
+      "schedule_delay_ms": 0.9009580000001733,
+      "sandbox_id": "c2482a12-464c-4540-80f7-6682279fd61e",
+      "create_ms": 86.16829200000029,
+      "command_ready_ms": 170.63408299999992,
+      "total_ms": 2528.9751669999996
+    },
+    {
+      "index": 19,
+      "scheduled_ms": 3800,
+      "dispatched_ms": 3802.27325,
+      "schedule_delay_ms": 2.273250000000189,
+      "sandbox_id": "bae03465-1b41-42ae-ad83-faee69451fba",
+      "create_ms": 81.50312499999927,
+      "command_ready_ms": 171.20479199999954,
+      "total_ms": 2469.813583
+    },
+    {
+      "index": 20,
+      "scheduled_ms": 4000,
+      "dispatched_ms": 4001.08875,
+      "schedule_delay_ms": 1.0887499999998909,
+      "sandbox_id": "6313259d-e50b-4999-a8e3-71a260453d71",
+      "create_ms": 92.0054999999993,
+      "command_ready_ms": 183.8417499999996,
+      "total_ms": 2408.595875
+    },
+    {
+      "index": 21,
+      "scheduled_ms": 4200,
+      "dispatched_ms": 4200.757875,
+      "schedule_delay_ms": 0.7578750000002401,
+      "sandbox_id": "6724d610-0f72-442c-a7e6-36992883cd02",
+      "create_ms": 83.742209,
+      "command_ready_ms": 177.5955840000006,
+      "total_ms": 2369.0892920000006
+    },
+    {
+      "index": 22,
+      "scheduled_ms": 4400,
+      "dispatched_ms": 4401.262833,
+      "schedule_delay_ms": 1.2628329999997732,
+      "sandbox_id": "981392a7-d07d-4eb3-8bea-c415045df3de",
+      "create_ms": 84.68041600000015,
+      "command_ready_ms": 218.6629579999999,
+      "total_ms": 2433.3428750000003
+    },
+    {
+      "index": 23,
+      "scheduled_ms": 4600,
+      "dispatched_ms": 4601.476417,
+      "schedule_delay_ms": 1.4764169999998558,
+      "sandbox_id": "0af97b55-0c1e-4843-b10f-cd9f1c14d0a7",
+      "create_ms": 84.65283399999953,
+      "command_ready_ms": 182.25716699999975,
+      "total_ms": 2331.118834
+    },
+    {
+      "index": 24,
+      "scheduled_ms": 4800,
+      "dispatched_ms": 4800.986417,
+      "schedule_delay_ms": 0.986417000000074,
+      "sandbox_id": "59f31f55-758b-4508-9670-4f17a920e37b",
+      "create_ms": 85.63216700000066,
+      "command_ready_ms": 189.07095900000058,
+      "total_ms": 2353.5201670000006
+    },
+    {
+      "index": 25,
+      "scheduled_ms": 5000,
+      "dispatched_ms": 5000.152125,
+      "schedule_delay_ms": 0.15212499999961437,
+      "sandbox_id": "420b3f5d-759f-413a-9cdf-66ce4ad61f3a",
+      "create_ms": 87.94154199999957,
+      "command_ready_ms": 192.0861670000004,
+      "total_ms": 2361.3954590000003
+    },
+    {
+      "index": 26,
+      "scheduled_ms": 5200,
+      "dispatched_ms": 5201.226958,
+      "schedule_delay_ms": 1.2269580000001952,
+      "sandbox_id": "599d420a-1915-4e1b-824e-dd87d8d63509",
+      "create_ms": 85.05887499999972,
+      "command_ready_ms": 213.55912499999977,
+      "total_ms": 2387.1870419999996
+    },
+    {
+      "index": 27,
+      "scheduled_ms": 5400,
+      "dispatched_ms": 5401.699583,
+      "schedule_delay_ms": 1.6995829999996204,
+      "sandbox_id": "1c32b93d-f0ca-41de-a49d-5b6fd170d3bc",
+      "create_ms": 85.1899999999996,
+      "command_ready_ms": 171.78654199999983,
+      "total_ms": 2350.5042079999994
+    },
+    {
+      "index": 28,
+      "scheduled_ms": 5600,
+      "dispatched_ms": 5601.844375,
+      "schedule_delay_ms": 1.8443749999996726,
+      "sandbox_id": "b59db813-10ab-434d-ab20-bd0e820bfa5a",
+      "create_ms": 105.88145900000018,
+      "command_ready_ms": 258.2150840000004,
+      "total_ms": 2442.914334
+    },
+    {
+      "index": 29,
+      "scheduled_ms": 5800,
+      "dispatched_ms": 5802.681833,
+      "schedule_delay_ms": 2.681832999999642,
+      "sandbox_id": "2bf4ea5d-ad8b-4b83-ab04-a9ceb80a5d3b",
+      "create_ms": 82.78941699999996,
+      "command_ready_ms": 169.8915420000003,
+      "total_ms": 2343.8851670000004
+    },
+    {
+      "index": 30,
+      "scheduled_ms": 6000,
+      "dispatched_ms": 6000.2615829999995,
+      "schedule_delay_ms": 0.2615829999995185,
+      "sandbox_id": "c3cb82dd-d427-4b04-8596-5eeb038c6856",
+      "create_ms": 86.27854200000002,
+      "command_ready_ms": 176.60249999999996,
+      "total_ms": 2356.294417
+    },
+    {
+      "index": 31,
+      "scheduled_ms": 6200,
+      "dispatched_ms": 6201.355917,
+      "schedule_delay_ms": 1.355916999999863,
+      "sandbox_id": "c27d59b0-cb71-446e-982e-ab5bb2e7b7ba",
+      "create_ms": 79.40370799999982,
+      "command_ready_ms": 172.2141670000001,
+      "total_ms": 2353.215625
+    },
+    {
+      "index": 32,
+      "scheduled_ms": 6400,
+      "dispatched_ms": 6401.219958,
+      "schedule_delay_ms": 1.2199579999996786,
+      "sandbox_id": "cdd7e0f7-983c-45b4-baa3-8d2560bc407d",
+      "create_ms": 85.20987500000047,
+      "command_ready_ms": 181.94337499999983,
+      "total_ms": 2359.1940000000004
+    },
+    {
+      "index": 33,
+      "scheduled_ms": 6600,
+      "dispatched_ms": 6600.738542,
+      "schedule_delay_ms": 0.7385420000000522,
+      "sandbox_id": "ba46169b-6bf2-45f6-ac56-d633525bba4b",
+      "create_ms": 82.75895800000035,
+      "command_ready_ms": 180.7132499999998,
+      "total_ms": 2389.5862500000003
+    },
+    {
+      "index": 34,
+      "scheduled_ms": 6800,
+      "dispatched_ms": 6801.0449579999995,
+      "schedule_delay_ms": 1.0449579999994967,
+      "sandbox_id": "16bd48d9-1d7f-4037-9337-5addaa356fcf",
+      "create_ms": 84.47516700000051,
+      "command_ready_ms": 185.8473329999997,
+      "total_ms": 2357.282292
+    },
+    {
+      "index": 35,
+      "scheduled_ms": 7000,
+      "dispatched_ms": 7001.594167,
+      "schedule_delay_ms": 1.5941670000001977,
+      "sandbox_id": "1bd11401-8fc0-4c79-974c-334d59bbb07e",
+      "create_ms": 86.97004199999992,
+      "command_ready_ms": 180.08037499999955,
+      "total_ms": 2346.2160829999993
+    },
+    {
+      "index": 36,
+      "scheduled_ms": 7200,
+      "dispatched_ms": 7201.8382919999995,
+      "schedule_delay_ms": 1.8382919999994556,
+      "sandbox_id": "0e6c54cf-e35b-4ff7-9093-62d040f08a4e",
+      "create_ms": 85.87012499999946,
+      "command_ready_ms": 187.55816700000014,
+      "total_ms": 2361.0084580000002
+    },
+    {
+      "index": 37,
+      "scheduled_ms": 7400,
+      "dispatched_ms": 7402.546208,
+      "schedule_delay_ms": 2.5462079999997513,
+      "sandbox_id": "cc7650cf-8f1b-4388-9ef8-a7b73d2dfca5",
+      "create_ms": 84.2967920000001,
+      "command_ready_ms": 166.94587500000034,
+      "total_ms": 2349.740666999999
+    },
+    {
+      "index": 38,
+      "scheduled_ms": 7600,
+      "dispatched_ms": 7601.017875,
+      "schedule_delay_ms": 1.017874999999549,
+      "sandbox_id": "87e4bed2-e29a-4123-a25b-84fc0319a7c2",
+      "create_ms": 85.65866600000027,
+      "command_ready_ms": 165.79274999999961,
+      "total_ms": 2342.528083
+    },
+    {
+      "index": 39,
+      "scheduled_ms": 7800,
+      "dispatched_ms": 7800.111792,
+      "schedule_delay_ms": 0.11179199999969569,
+      "sandbox_id": "49832e79-8754-4a3d-a44a-c9315e59810d",
+      "create_ms": 85.12095900000168,
+      "command_ready_ms": 164.19412499999999,
+      "total_ms": 2322.638667000001
+    },
+    {
+      "index": 40,
+      "scheduled_ms": 8000,
+      "dispatched_ms": 8001.539957999999,
+      "schedule_delay_ms": 1.5399579999993875,
+      "sandbox_id": "c6855063-3bd9-465a-9ac0-7680eb229a35",
+      "create_ms": 90.10129199999938,
+      "command_ready_ms": 181.3733339999999,
+      "total_ms": 2376.6144999999997
+    },
+    {
+      "index": 41,
+      "scheduled_ms": 8200,
+      "dispatched_ms": 8201.679167,
+      "schedule_delay_ms": 1.6791670000002341,
+      "sandbox_id": "6f48b388-7170-4e5e-9eee-881c1d2e3ce1",
+      "create_ms": 84.96716699999888,
+      "command_ready_ms": 161.92362499999945,
+      "total_ms": 2338.338416999999
+    },
+    {
+      "index": 42,
+      "scheduled_ms": 8400,
+      "dispatched_ms": 8402.478375,
+      "schedule_delay_ms": 2.4783750000005966,
+      "sandbox_id": "3f07a6cf-b509-40cc-be51-54a26fd1af43",
+      "create_ms": 85.03087500000038,
+      "command_ready_ms": 174.47141600000032,
+      "total_ms": 2373.8683330000003
+    },
+    {
+      "index": 43,
+      "scheduled_ms": 8600,
+      "dispatched_ms": 8602.310375,
+      "schedule_delay_ms": 2.3103749999991123,
+      "sandbox_id": "be8f6cae-28de-4d1f-a1ee-6f22ca54e83c",
+      "create_ms": 100.34683399999994,
+      "command_ready_ms": 194.95449999999983,
+      "total_ms": 2385.277542
+    },
+    {
+      "index": 44,
+      "scheduled_ms": 8800,
+      "dispatched_ms": 8800.039208,
+      "schedule_delay_ms": 0.03920800000014424,
+      "sandbox_id": "82db515d-7543-4fe8-ba05-f0b579360889",
+      "create_ms": 88.27487499999916,
+      "command_ready_ms": 171.18687499999942,
+      "total_ms": 2337.868875
+    },
+    {
+      "index": 45,
+      "scheduled_ms": 9000,
+      "dispatched_ms": 9001.17525,
+      "schedule_delay_ms": 1.1752500000002328,
+      "sandbox_id": "32c759bc-c456-4b13-86b4-cde5b21d2237",
+      "create_ms": 89.62524999999914,
+      "command_ready_ms": 188.23391699999956,
+      "total_ms": 2360.117624999999
+    },
+    {
+      "index": 46,
+      "scheduled_ms": 9200,
+      "dispatched_ms": 9201.007083,
+      "schedule_delay_ms": 1.0070830000004207,
+      "sandbox_id": "4651ac39-cb60-416f-8ee5-3e03ee54d4d2",
+      "create_ms": 90.45799999999872,
+      "command_ready_ms": 183.52954099999988,
+      "total_ms": 2342.3098329999993
+    },
+    {
+      "index": 47,
+      "scheduled_ms": 9400,
+      "dispatched_ms": 9401.52075,
+      "schedule_delay_ms": 1.5207499999996799,
+      "sandbox_id": "2d121510-83e6-44dd-8fb4-27a06435f37a",
+      "create_ms": 87.0755420000005,
+      "command_ready_ms": 181.1090839999997,
+      "total_ms": 2354.6417920000004
+    },
+    {
+      "index": 48,
+      "scheduled_ms": 9600,
+      "dispatched_ms": 9600.310707999999,
+      "schedule_delay_ms": 0.3107079999990674,
+      "sandbox_id": "02177c06-0684-4d46-9a91-1b5e8dc03237",
+      "create_ms": 81.28354200000103,
+      "command_ready_ms": 215.97845899999993,
+      "total_ms": 2441.4394170000014
+    },
+    {
+      "index": 49,
+      "scheduled_ms": 9800,
+      "dispatched_ms": 9801.3675,
+      "schedule_delay_ms": 1.367500000000291,
+      "sandbox_id": "ce308be2-2545-457e-aebe-6d2c1877d1aa",
+      "create_ms": 85.45474999999897,
+      "command_ready_ms": 180.84962499999892,
+      "total_ms": 2361.557084
+    },
+    {
+      "index": 50,
+      "scheduled_ms": 10000,
+      "dispatched_ms": 10001.264208,
+      "schedule_delay_ms": 1.264208000000508,
+      "sandbox_id": "e2133483-3027-4669-8040-3a7ada1cc8f6",
+      "create_ms": 103.02941700000156,
+      "command_ready_ms": 237.30895800000144,
+      "total_ms": 2397.3769170000014
+    },
+    {
+      "index": 51,
+      "scheduled_ms": 10200,
+      "dispatched_ms": 10201.24725,
+      "schedule_delay_ms": 1.2472500000003492,
+      "sandbox_id": "07068b0e-20f8-4e65-a62a-b13e7853fd91",
+      "create_ms": 86.69150000000081,
+      "command_ready_ms": 195.44029200000114,
+      "total_ms": 2387.788208
+    },
+    {
+      "index": 52,
+      "scheduled_ms": 10400,
+      "dispatched_ms": 10400.869125,
+      "schedule_delay_ms": 0.8691249999992579,
+      "sandbox_id": "177f795b-ba73-4562-952d-165fce701561",
+      "create_ms": 84.62304099999892,
+      "command_ready_ms": 199.2489999999998,
+      "total_ms": 2377.2044159999987
+    },
+    {
+      "index": 53,
+      "scheduled_ms": 10600,
+      "dispatched_ms": 10600.322167,
+      "schedule_delay_ms": 0.3221670000002632,
+      "sandbox_id": "a4f5ca90-211d-4e8b-b089-d83f7c7cdf91",
+      "create_ms": 82.18183300000055,
+      "command_ready_ms": 189.28520799999933,
+      "total_ms": 2363.2910410000004
+    },
+    {
+      "index": 54,
+      "scheduled_ms": 10800,
+      "dispatched_ms": 10800.313958,
+      "schedule_delay_ms": 0.313958000000639,
+      "sandbox_id": "46884a87-cf2d-4526-b6b0-1b26ed935a87",
+      "create_ms": 85.9481250000008,
+      "command_ready_ms": 176.49983299999985,
+      "total_ms": 2350.7449579999993
+    },
+    {
+      "index": 55,
+      "scheduled_ms": 11000,
+      "dispatched_ms": 11000.760125,
+      "schedule_delay_ms": 0.7601250000006985,
+      "sandbox_id": "f40adb1c-cf55-40aa-bbae-be5ae0b27ca9",
+      "create_ms": 87.0266249999986,
+      "command_ready_ms": 176.14566699999887,
+      "total_ms": 2355.620166999999
+    },
+    {
+      "index": 56,
+      "scheduled_ms": 11200,
+      "dispatched_ms": 11202.418708,
+      "schedule_delay_ms": 2.418707999999242,
+      "sandbox_id": "1493e682-b827-46ce-bb30-07e03837d2b9",
+      "create_ms": 82.17500000000109,
+      "command_ready_ms": 171.007834,
+      "total_ms": 2339.626542
+    },
+    {
+      "index": 57,
+      "scheduled_ms": 11400,
+      "dispatched_ms": 11400.470708,
+      "schedule_delay_ms": 0.47070800000074087,
+      "sandbox_id": "5f1eb16a-1431-4312-85c5-1d87e6ce5023",
+      "create_ms": 96.79700000000048,
+      "command_ready_ms": 188.4887920000001,
+      "total_ms": 2344.520917
+    },
+    {
+      "index": 58,
+      "scheduled_ms": 11600,
+      "dispatched_ms": 11601.044375,
+      "schedule_delay_ms": 1.0443749999994907,
+      "sandbox_id": "f2ac5145-063c-446d-91b7-cc2173ef5a4e",
+      "create_ms": 85.5721250000006,
+      "command_ready_ms": 187.19137500000033,
+      "total_ms": 2410.856916999999
+    },
+    {
+      "index": 59,
+      "scheduled_ms": 11800,
+      "dispatched_ms": 11801.165875,
+      "schedule_delay_ms": 1.1658750000005966,
+      "sandbox_id": "e0c7df8d-1404-4071-b83e-73a6ace98ae6",
+      "create_ms": 81.84520800000064,
+      "command_ready_ms": 186.0619999999999,
+      "total_ms": 2346.4392499999994
+    }
+  ],
+  "metrics": [
+    {
+      "elapsed_ms": 375.78475000000003,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 0\nsandbox_slots_committed 0\nsandbox_slots_demand 2\nsandbox_slots_free 80\nsandbox_warm_ready 16\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 64\nsandbox_placement_candidates_total{result=\"inspected\"} 128\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 12\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 52\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 58\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 64\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 64\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 64\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 64\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 64\nsandbox_placement_duration_microseconds_sum 353\nsandbox_placement_duration_microseconds_count 64\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 441.89300000000003,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 12\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 127\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 1009.1488340000001,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 3\nsandbox_slots_committed 3\nsandbox_slots_demand 5\nsandbox_slots_free 80\nsandbox_warm_ready 13\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 67\nsandbox_placement_candidates_total{result=\"inspected\"} 134\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 15\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 55\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 61\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 67\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 67\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 67\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 67\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 67\nsandbox_placement_duration_microseconds_sum 368\nsandbox_placement_duration_microseconds_count 67\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 1014.117459,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 11800\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 3\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 38\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 15\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 127\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 1581.815875,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 6\nsandbox_slots_committed 6\nsandbox_slots_demand 8\nsandbox_slots_free 77\nsandbox_warm_ready 12\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 70\nsandbox_placement_candidates_total{result=\"inspected\"} 140\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 18\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 58\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 64\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 70\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 70\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 70\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 70\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 70\nsandbox_placement_duration_microseconds_sum 382\nsandbox_placement_duration_microseconds_count 70\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 1587.770125,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 15340\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 35\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 18\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 127\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 5\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 2154.764584,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 9\nsandbox_slots_committed 9\nsandbox_slots_demand 11\nsandbox_slots_free 77\nsandbox_warm_ready 9\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 73\nsandbox_placement_candidates_total{result=\"inspected\"} 146\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 21\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 60\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 67\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 73\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 73\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 73\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 73\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 73\nsandbox_placement_duration_microseconds_sum 399\nsandbox_placement_duration_microseconds_count 73\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 2162.968084,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 17700\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 15\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 15\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 33\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 21\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 127\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 4\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 2726.196417,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 12\nsandbox_slots_committed 12\nsandbox_slots_demand 14\nsandbox_slots_free 77\nsandbox_warm_ready 6\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 76\nsandbox_placement_candidates_total{result=\"inspected\"} 152\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 24\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 62\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 70\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 76\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 76\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 76\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 76\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 76\nsandbox_placement_duration_microseconds_sum 415\nsandbox_placement_duration_microseconds_count 76\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 2739.223375,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 17700\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 10620\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 15\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 15\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 9\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 9\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 33\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 39\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 129\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 4\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 6"
+    },
+    {
+      "elapsed_ms": 3301.296125,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 14\nsandbox_slots_committed 14\nsandbox_slots_demand 16\nsandbox_slots_free 77\nsandbox_warm_ready 4\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 78\nsandbox_placement_candidates_total{result=\"inspected\"} 156\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 26\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 64\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 72\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 78\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 78\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 78\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 78\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 78\nsandbox_placement_duration_microseconds_sum 425\nsandbox_placement_duration_microseconds_count 78\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 3307.197459,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 14160\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 14160\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 12\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 12\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 12\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 12\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 7\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 4\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 36\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 131\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 4\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 6"
+    },
+    {
+      "elapsed_ms": 3873.207084,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 17\nsandbox_slots_committed 17\nsandbox_slots_demand 19\nsandbox_slots_free 71\nsandbox_warm_ready 5\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 81\nsandbox_placement_candidates_total{result=\"inspected\"} 162\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 29\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 67\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 75\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 81\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 81\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 81\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 81\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 81\nsandbox_placement_duration_microseconds_sum 438\nsandbox_placement_duration_microseconds_count 81\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 3880.105917,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 15340\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16520\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 4\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 7\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 35\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 34\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 134\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 5"
+    },
+    {
+      "elapsed_ms": 4442.977,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 20\nsandbox_slots_committed 20\nsandbox_slots_demand 22\nsandbox_slots_free 71\nsandbox_warm_ready 2\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 84\nsandbox_placement_candidates_total{result=\"inspected\"} 168\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 32\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 34\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 69\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 78\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 84\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 84\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 84\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 84\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 84\nsandbox_placement_duration_microseconds_sum 454\nsandbox_placement_duration_microseconds_count 84\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 4449.855875,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 10620\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 21240\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 9\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 9\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 18\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 18\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 10\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 39\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 30\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 137\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 5"
+    },
+    {
+      "elapsed_ms": 5011.519625,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 23\nsandbox_slots_committed 23\nsandbox_slots_demand 25\nsandbox_slots_free 70\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 87\nsandbox_placement_candidates_total{result=\"inspected\"} 174\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 34\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 35\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 70\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 81\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 87\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 87\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 87\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 87\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 87\nsandbox_placement_duration_microseconds_sum 471\nsandbox_placement_duration_microseconds_count 87\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 5018.735584,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 22420\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 29\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 140\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 5"
+    },
+    {
+      "elapsed_ms": 5580.101,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 26\nsandbox_slots_committed 26\nsandbox_slots_demand 28\nsandbox_slots_free 67\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 90\nsandbox_placement_candidates_total{result=\"inspected\"} 180\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 34\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 38\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 73\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 84\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 90\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 90\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 90\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 90\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 90\nsandbox_placement_duration_microseconds_sum 485\nsandbox_placement_duration_microseconds_count 90\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 5591.519959,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 22420\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 29\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 143\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 4"
+    },
+    {
+      "elapsed_ms": 6156.097167,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 29\nsandbox_slots_committed 29\nsandbox_slots_demand 31\nsandbox_slots_free 64\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 93\nsandbox_placement_candidates_total{result=\"inspected\"} 186\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 34\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 41\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 75\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 87\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 93\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 93\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 93\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 93\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 93\nsandbox_placement_duration_microseconds_sum 502\nsandbox_placement_duration_microseconds_count 93\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 6162.394459,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 22420\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 29\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 22\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 146\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 4"
+    },
+    {
+      "elapsed_ms": 6722.711417,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 22\nsandbox_slots_committed 22\nsandbox_slots_demand 24\nsandbox_slots_free 67\nsandbox_warm_ready 5\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 96\nsandbox_placement_candidates_total{result=\"inspected\"} 192\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 37\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 41\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 78\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 90\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 96\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 96\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 96\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 96\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 96\nsandbox_placement_duration_microseconds_sum 515\nsandbox_placement_duration_microseconds_count 96\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 6731.412875,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 11800\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 18880\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 16\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 16\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 3\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 38\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 32\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 25\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 146\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 4"
+    },
+    {
+      "elapsed_ms": 7294.263625,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 24\nsandbox_slots_committed 24\nsandbox_slots_demand 26\nsandbox_slots_free 67\nsandbox_warm_ready 3\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 98\nsandbox_placement_candidates_total{result=\"inspected\"} 196\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 39\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 41\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 79\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 92\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 98\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 98\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 98\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 98\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 98\nsandbox_placement_duration_microseconds_sum 529\nsandbox_placement_duration_microseconds_count 98\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 7313.7405420000005,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 14160\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16520\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 12\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 12\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 5\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 6\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 34\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 27\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 146\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 5\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 7879.097209,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 27\nsandbox_slots_committed 27\nsandbox_slots_demand 29\nsandbox_slots_free 67\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 101\nsandbox_placement_candidates_total{result=\"inspected\"} 202\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 42\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 41\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 81\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 95\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 101\nsandbox_placement_duration_microseconds_sum 543\nsandbox_placement_duration_microseconds_count 101\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 7885.504125,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 18880\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 12980\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 16\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 16\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 11\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 11\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 32\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 37\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 30\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 146\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 8448.891,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 30\nsandbox_slots_committed 30\nsandbox_slots_demand 32\nsandbox_slots_free 64\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 104\nsandbox_placement_candidates_total{result=\"inspected\"} 208\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 42\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 44\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 84\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 98\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 104\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 104\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 104\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 104\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 104\nsandbox_placement_duration_microseconds_sum 557\nsandbox_placement_duration_microseconds_count 104\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 8460.965792,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 18880\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 12980\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 16\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 16\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 11\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 11\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 32\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 37\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 30\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 149\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 6"
+    },
+    {
+      "elapsed_ms": 9022.758,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 14\nsandbox_slots_committed 14\nsandbox_slots_demand 16\nsandbox_slots_free 76\nsandbox_warm_ready 4\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 107\nsandbox_placement_candidates_total{result=\"inspected\"} 214\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 43\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 46\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 86\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 100\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 107\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 107\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 107\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 107\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 107\nsandbox_placement_duration_microseconds_sum 600\nsandbox_placement_duration_microseconds_count 107\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 9031.894334,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 15340\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16520\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 5\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 6\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 35\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 34\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 30\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 152\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 6"
+    },
+    {
+      "elapsed_ms": 9599.972917,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 17\nsandbox_slots_committed 17\nsandbox_slots_demand 19\nsandbox_slots_free 76\nsandbox_warm_ready 1\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 110\nsandbox_placement_candidates_total{result=\"inspected\"} 220\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 46\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 46\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 89\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 103\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 110\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 110\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 110\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 110\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 110\nsandbox_placement_duration_microseconds_sum 614\nsandbox_placement_duration_microseconds_count 110\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 9613.811459,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 11800\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 18880\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 16\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 16\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 38\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 32\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 30\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 155\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 5"
+    },
+    {
+      "elapsed_ms": 10178.534917,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 20\nsandbox_slots_committed 20\nsandbox_slots_demand 22\nsandbox_slots_free 74\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 113\nsandbox_placement_candidates_total{result=\"inspected\"} 226\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 47\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 48\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 91\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 106\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 113\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 113\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 113\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 113\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 113\nsandbox_placement_duration_microseconds_sum 630\nsandbox_placement_duration_microseconds_count 113\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 10194.178875,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 22420\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 29\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 158\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 30\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 4\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8"
+    },
+    {
+      "elapsed_ms": 10756.696417,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 23\nsandbox_slots_committed 23\nsandbox_slots_demand 25\nsandbox_slots_free 71\nsandbox_warm_ready 0\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 116\nsandbox_placement_candidates_total{result=\"inspected\"} 232\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 47\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 51\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 94\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 109\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 116\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 116\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 116\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 116\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 116\nsandbox_placement_duration_microseconds_sum 644\nsandbox_placement_duration_microseconds_count 116\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 10763.628209,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 22420\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 29\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 30\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 161\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 4"
+    },
+    {
+      "elapsed_ms": 11327.951084,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 18\nsandbox_slots_committed 18\nsandbox_slots_demand 20\nsandbox_slots_free 69\nsandbox_warm_ready 7\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 119\nsandbox_placement_candidates_total{result=\"inspected\"} 238\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 48\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 97\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 112\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 119\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 119\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 119\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 119\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 119\nsandbox_placement_duration_microseconds_sum 657\nsandbox_placement_duration_microseconds_count 119\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 11334.185209,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 22420\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 10620\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 19\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 9\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 9\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 29\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 39\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 31\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 3\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 5\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 7"
+    },
+    {
+      "elapsed_ms": 11897.304667,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 20\nsandbox_slots_committed 20\nsandbox_slots_demand 22\nsandbox_slots_free 69\nsandbox_warm_ready 5\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 121\nsandbox_placement_candidates_total{result=\"inspected\"} 242\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 50\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 98\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 114\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 121\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 121\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 121\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 121\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 121\nsandbox_placement_duration_microseconds_sum 667\nsandbox_placement_duration_microseconds_count 121\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 11914.193,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 11800\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 18880\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 16\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 16\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 3\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 38\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 32\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 33\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 7"
+    },
+    {
+      "elapsed_ms": 12478.499,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 23\nsandbox_slots_committed 23\nsandbox_slots_demand 25\nsandbox_slots_free 69\nsandbox_warm_ready 2\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 124\nsandbox_placement_candidates_total{result=\"inspected\"} 248\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 53\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 117\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 124\nsandbox_placement_duration_microseconds_sum 681\nsandbox_placement_duration_microseconds_count 124\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 12483.273042,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16520\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16520\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 14\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 14\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 14\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 5\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 34\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 34\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6"
+    },
+    {
+      "elapsed_ms": 13043.0835,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 23\nsandbox_slots_committed 23\nsandbox_slots_demand 25\nsandbox_slots_free 69\nsandbox_warm_ready 2\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 124\nsandbox_placement_candidates_total{result=\"inspected\"} 248\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 53\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 117\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 124\nsandbox_placement_duration_microseconds_sum 681\nsandbox_placement_duration_microseconds_count 124\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 13052.749917,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16520\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 11800\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 14\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 14\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 10\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 10\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 6\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 2\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 34\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 38\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 13616.39875,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 23\nsandbox_slots_committed 23\nsandbox_slots_demand 25\nsandbox_slots_free 69\nsandbox_warm_ready 2\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 124\nsandbox_placement_candidates_total{result=\"inspected\"} 248\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 53\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 117\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 124\nsandbox_placement_duration_microseconds_sum 681\nsandbox_placement_duration_microseconds_count 124\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 13627.005875,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 15340\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 13\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 5\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 35\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 14187.824542,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 6\nsandbox_slots_committed 6\nsandbox_slots_demand 8\nsandbox_slots_free 80\nsandbox_warm_ready 10\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 124\nsandbox_placement_candidates_total{result=\"inspected\"} 248\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 53\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 117\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 124\nsandbox_placement_duration_microseconds_sum 681\nsandbox_placement_duration_microseconds_count 124\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 14196.419792,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 11800\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 10\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 2\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 38\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8"
+    },
+    {
+      "elapsed_ms": 19622.152459,
+      "endpoint": "/metrics",
+      "text": "sandbox_build_info{component=\"gateway\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_hosts_live 2\nsandbox_slots_total 96\nsandbox_slots_used 0\nsandbox_slots_committed 0\nsandbox_slots_demand 2\nsandbox_slots_free 80\nsandbox_warm_ready 16\nsandbox_create_rejected_total 0\nsandbox_placement_requests_total 124\nsandbox_placement_candidates_total{result=\"inspected\"} 248\nsandbox_placement_candidates_total{result=\"excluded\"} 0\nsandbox_placement_candidates_total{result=\"stale\"} 0\nsandbox_placement_candidates_total{result=\"penalized\"} 0\nsandbox_placement_candidates_total{result=\"draining\"} 0\nsandbox_placement_candidates_total{result=\"capacity\"} 0\nsandbox_placement_selected_total{affinity=\"warm\"} 53\nsandbox_placement_selected_total{affinity=\"snapshot_local\"} 18\nsandbox_placement_selected_total{affinity=\"binpack\"} 53\nsandbox_placement_duration_microseconds_bucket{le=\"1\"} 0\nsandbox_placement_duration_microseconds_bucket{le=\"5\"} 101\nsandbox_placement_duration_microseconds_bucket{le=\"10\"} 117\nsandbox_placement_duration_microseconds_bucket{le=\"50\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"100\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"500\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"1000\"} 124\nsandbox_placement_duration_microseconds_bucket{le=\"+Inf\"} 124\nsandbox_placement_duration_microseconds_sum 681\nsandbox_placement_duration_microseconds_count 124\nsandbox_hosts_draining 0\nsandbox_create_queue_depth 0\nsandbox_create_queue_demand_slots 0"
+    },
+    {
+      "elapsed_ms": 19681.850167,
+      "endpoint": "/metrics/hosts",
+      "text": "sandbox_build_info{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_build_info{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",component=\"worker\",release=\"fb09662-dev-20260906174946\"} 1\nsandbox_committed_mem_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 9440\nsandbox_committed_mem_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 9440\nsandbox_create_concurrency{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 16\nsandbox_create_concurrency{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 16\nsandbox_create_inflight{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_create_inflight{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_host_scrape_ok{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 1\nsandbox_host_scrape_ok{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 1\nsandbox_mem_budget_mib{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 56640\nsandbox_mem_budget_mib{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 56640\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 500\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 48\nsandbox_pool_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 500\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\",pool=\"port\"} 0\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"tap\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"ip\"} 8\nsandbox_pool_used{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\",pool=\"port\"} 0\nsandbox_running{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_running{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_slots_free{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 40\nsandbox_slots_free{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 40\nsandbox_starting{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_starting{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_stopping{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_stopping{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_build_failures_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_build_failures_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warm_claims_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 163\nsandbox_warm_claims_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 36\nsandbox_warm_misses_total{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_misses_total{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 51\nsandbox_warm_preparing{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 0\nsandbox_warm_preparing{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 0\nsandbox_warming{host=\"90723a19-8a1d-5a3a-82ee-1d99a177ee91\"} 8\nsandbox_warming{host=\"4b9f7820-b1ea-a494-e9f0-7974d744e61c\"} 8"
+    }
+  ],
+  "failures": [],
+  "cleanupErrors": [],
+  "cleanup": {
+    "sandbox_ids_checked_absent": [
+      "a83d066b-9c6a-44d2-9de9-61980032879f",
+      "4b17068c-a603-4e2d-b4cc-d050c20f0e3a",
+      "67de90f0-8663-45ca-90f5-885a259beb7c",
+      "b6b855e9-19b4-43dc-a725-f32afab2b333",
+      "13c6e104-95da-4180-a4d7-9c0b99a47f9f",
+      "4129f21e-a4f4-4519-839e-42e522ac9bc8",
+      "c28701c8-634f-4667-80ee-ae12b29a46bf",
+      "842a01f1-c323-4387-ba5d-e1468e03d33d",
+      "b14858e6-669a-4ebb-af95-29194b869bdb",
+      "a043d80b-1993-4163-ab32-20e44f002c97",
+      "a86fe5df-7dbc-4519-b1e1-73793311cb97",
+      "93b16ad8-a0c1-40d2-ad8c-fc960adc59dd",
+      "f85e709c-bc5b-4d13-93d0-e9f12f070da6",
+      "5076a077-db5c-4593-b09e-3a13fedb29d8",
+      "15f6ed85-eaa3-4ec0-ad4d-1194d564b801",
+      "ab7b7778-7fa8-4e11-adbe-9886919f4bfd",
+      "d581b3ea-7191-466f-af78-92d417d6d10d",
+      "5bb7e886-a476-46a1-9875-7b76a3f4cf78",
+      "c2482a12-464c-4540-80f7-6682279fd61e",
+      "bae03465-1b41-42ae-ad83-faee69451fba",
+      "6313259d-e50b-4999-a8e3-71a260453d71",
+      "6724d610-0f72-442c-a7e6-36992883cd02",
+      "981392a7-d07d-4eb3-8bea-c415045df3de",
+      "0af97b55-0c1e-4843-b10f-cd9f1c14d0a7",
+      "59f31f55-758b-4508-9670-4f17a920e37b",
+      "420b3f5d-759f-413a-9cdf-66ce4ad61f3a",
+      "599d420a-1915-4e1b-824e-dd87d8d63509",
+      "1c32b93d-f0ca-41de-a49d-5b6fd170d3bc",
+      "b59db813-10ab-434d-ab20-bd0e820bfa5a",
+      "2bf4ea5d-ad8b-4b83-ab04-a9ceb80a5d3b",
+      "c3cb82dd-d427-4b04-8596-5eeb038c6856",
+      "c27d59b0-cb71-446e-982e-ab5bb2e7b7ba",
+      "cdd7e0f7-983c-45b4-baa3-8d2560bc407d",
+      "ba46169b-6bf2-45f6-ac56-d633525bba4b",
+      "16bd48d9-1d7f-4037-9337-5addaa356fcf",
+      "1bd11401-8fc0-4c79-974c-334d59bbb07e",
+      "0e6c54cf-e35b-4ff7-9093-62d040f08a4e",
+      "cc7650cf-8f1b-4388-9ef8-a7b73d2dfca5",
+      "87e4bed2-e29a-4123-a25b-84fc0319a7c2",
+      "49832e79-8754-4a3d-a44a-c9315e59810d",
+      "c6855063-3bd9-465a-9ac0-7680eb229a35",
+      "6f48b388-7170-4e5e-9eee-881c1d2e3ce1",
+      "3f07a6cf-b509-40cc-be51-54a26fd1af43",
+      "be8f6cae-28de-4d1f-a1ee-6f22ca54e83c",
+      "82db515d-7543-4fe8-ba05-f0b579360889",
+      "32c759bc-c456-4b13-86b4-cde5b21d2237",
+      "4651ac39-cb60-416f-8ee5-3e03ee54d4d2",
+      "2d121510-83e6-44dd-8fb4-27a06435f37a",
+      "02177c06-0684-4d46-9a91-1b5e8dc03237",
+      "ce308be2-2545-457e-aebe-6d2c1877d1aa",
+      "e2133483-3027-4669-8040-3a7ada1cc8f6",
+      "07068b0e-20f8-4e65-a62a-b13e7853fd91",
+      "177f795b-ba73-4562-952d-165fce701561",
+      "a4f5ca90-211d-4e8b-b089-d83f7c7cdf91",
+      "46884a87-cf2d-4526-b6b0-1b26ed935a87",
+      "f40adb1c-cf55-40aa-bbae-be5ae0b27ca9",
+      "1493e682-b827-46ce-bb30-07e03837d2b9",
+      "5f1eb16a-1431-4312-85c5-1d87e6ce5023",
+      "f2ac5145-063c-446d-91b7-cc2173ef5a4e",
+      "e0c7df8d-1404-4071-b83e-73a6ace98ae6"
+    ]
+  },
+  "guest_image_observation": {
+    "recorded_at": "2026-09-13T13:47:22.862541+00:00",
+    "method": "Post-run read-only SSH sha256sum on both workers; no rollout or guest changes during run",
+    "path": "/mnt/sandbox-data/base/devbox-rootfs.ext4",
+    "workers": [
+      {
+        "address": "10.128.0.28",
+        "sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3"
+      },
+      {
+        "address": "10.128.0.35",
+        "sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3"
+      }
+    ],
+    "source_report": "development_create_paths_20260913.json"
+  }
+}

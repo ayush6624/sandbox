@@ -1,0 +1,282 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "snapshot-peer-transfer",
+    "workload": {
+      "counts": [
+        1,
+        8
+      ],
+      "rounds": 2,
+      "source_fillers": 0,
+      "memory_mib": 256,
+      "disk_mib": 384,
+      "small_files": 5000,
+      "sqlite_mib": 32,
+      "raw_fanout_limit": 8,
+      "modes": [
+        "gcs",
+        "peer"
+      ],
+      "source": "http://10.128.0.28:8080",
+      "target": "http://10.128.0.35:8080"
+    },
+    "run_id": "dev-canary-20260905-transport",
+    "started_at": "2026-09-05T18:28:03.184Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260905182000",
+    "release_source": "environment",
+    "target": "http://10.128.0.35:8080",
+    "builds": [
+      {
+        "target": "http://10.128.0.28:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:28:03.185Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.35:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:28:03.239Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.28:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:36:50.467Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.35:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:36:50.473Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "fresh-snapshot-id-cold-target-base-warm"
+    }
+  },
+  "passed": true,
+  "rows": [
+    {
+      "round": 1,
+      "order": 1,
+      "mode": "gcs",
+      "count": 1,
+      "chunks": [
+        1
+      ],
+      "snapshotId": "a1bd10c5-f8e3-463a-bdf0-88d2cf7c16fb",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 20,
+      "sourceSetupMs": 9446,
+      "snapshotCreateMs": 2486,
+      "durableMs": 14196,
+      "fanoutMs": 12043,
+      "hydratedMs": 32651,
+      "cleanupMs": 157,
+      "peerPulls": 0,
+      "peerPullFailures": 0,
+      "peerServes": 0,
+      "peerPayloadBytes": 0,
+      "gcsFallbacks": 0,
+      "ok": 1
+    },
+    {
+      "round": 1,
+      "order": 2,
+      "mode": "peer",
+      "count": 1,
+      "chunks": [
+        1
+      ],
+      "snapshotId": "9f576d38-55db-4de7-a21b-479c8bb3c043",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 14,
+      "sourceSetupMs": 9841,
+      "snapshotCreateMs": 2932,
+      "durableMs": 14438,
+      "fanoutMs": 10921,
+      "hydratedMs": 30876,
+      "cleanupMs": 156,
+      "peerPulls": 1,
+      "peerPullFailures": 0,
+      "peerServes": 3,
+      "peerPayloadBytes": 1382316443,
+      "gcsFallbacks": 0,
+      "ok": 1
+    },
+    {
+      "round": 1,
+      "order": 3,
+      "mode": "gcs",
+      "count": 8,
+      "chunks": [
+        8
+      ],
+      "snapshotId": "faeb5dec-d5ad-489a-8643-8a8801dc1973",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 13,
+      "sourceSetupMs": 10958,
+      "snapshotCreateMs": 3847,
+      "durableMs": 18242,
+      "fanoutMs": 13442,
+      "hydratedMs": 45355,
+      "cleanupMs": 409,
+      "peerPulls": 0,
+      "peerPullFailures": 0,
+      "peerServes": 0,
+      "peerPayloadBytes": 0,
+      "gcsFallbacks": 0,
+      "ok": 8
+    },
+    {
+      "round": 1,
+      "order": 4,
+      "mode": "peer",
+      "count": 8,
+      "chunks": [
+        8
+      ],
+      "snapshotId": "eb1500ae-68a6-4d79-8e2f-c29dcf09c627",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 13,
+      "sourceSetupMs": 9491,
+      "snapshotCreateMs": 2415,
+      "durableMs": 13944,
+      "fanoutMs": 11214,
+      "hydratedMs": 42910,
+      "cleanupMs": 392,
+      "peerPulls": 1,
+      "peerPullFailures": 0,
+      "peerServes": 3,
+      "peerPayloadBytes": 1382570395,
+      "gcsFallbacks": 0,
+      "ok": 8
+    },
+    {
+      "round": 2,
+      "order": 1,
+      "mode": "peer",
+      "count": 1,
+      "chunks": [
+        1
+      ],
+      "snapshotId": "96a5beed-c80f-495c-b67f-6d898223542b",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 14,
+      "sourceSetupMs": 10230,
+      "snapshotCreateMs": 3021,
+      "durableMs": 14922,
+      "fanoutMs": 11000,
+      "hydratedMs": 31455,
+      "cleanupMs": 174,
+      "peerPulls": 1,
+      "peerPullFailures": 0,
+      "peerServes": 3,
+      "peerPayloadBytes": 1385089435,
+      "gcsFallbacks": 0,
+      "ok": 1
+    },
+    {
+      "round": 2,
+      "order": 2,
+      "mode": "gcs",
+      "count": 1,
+      "chunks": [
+        1
+      ],
+      "snapshotId": "2c36b6df-2eaf-4e17-8f68-ab62330027ce",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 13,
+      "sourceSetupMs": 9658,
+      "snapshotCreateMs": 2542,
+      "durableMs": 13170,
+      "fanoutMs": 11879,
+      "hydratedMs": 31783,
+      "cleanupMs": 117,
+      "peerPulls": 0,
+      "peerPullFailures": 0,
+      "peerServes": 0,
+      "peerPayloadBytes": 0,
+      "gcsFallbacks": 0,
+      "ok": 1
+    },
+    {
+      "round": 2,
+      "order": 3,
+      "mode": "peer",
+      "count": 8,
+      "chunks": [
+        8
+      ],
+      "snapshotId": "f928cc61-94f2-4324-aa1a-f52ea9eda65a",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 12,
+      "sourceSetupMs": 10988,
+      "snapshotCreateMs": 1934,
+      "durableMs": 12912,
+      "fanoutMs": 11624,
+      "hydratedMs": 42225,
+      "cleanupMs": 392,
+      "peerPulls": 1,
+      "peerPullFailures": 0,
+      "peerServes": 3,
+      "peerPayloadBytes": 1408817562,
+      "gcsFallbacks": 0,
+      "ok": 8
+    },
+    {
+      "round": 2,
+      "order": 4,
+      "mode": "gcs",
+      "count": 8,
+      "chunks": [
+        8
+      ],
+      "snapshotId": "94039481-826f-46bb-a510-a025a31366d7",
+      "snapshotFormat": "diff",
+      "sourceCreateMs": 13,
+      "sourceSetupMs": 10634,
+      "snapshotCreateMs": 3757,
+      "durableMs": 13172,
+      "fanoutMs": 13110,
+      "hydratedMs": 44093,
+      "cleanupMs": 383,
+      "peerPulls": 0,
+      "peerPullFailures": 0,
+      "peerServes": 0,
+      "peerPayloadBytes": 0,
+      "gcsFallbacks": 0,
+      "ok": 8
+    }
+  ],
+  "cleanupErrors": []
+}

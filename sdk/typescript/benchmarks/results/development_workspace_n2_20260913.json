@@ -1,0 +1,156 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "prepared-workspace",
+    "workload": {
+      "repository": "https://github.com/pallets/itsdangerous",
+      "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+      "count": 2
+    },
+    "run_id": "959bdfae-3324-4682-84a7-55ebf179d043",
+    "started_at": "2026-09-13T10:47:29.296Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260906174946",
+    "release_source": "environment",
+    "target": "http://10.128.0.100:9090",
+    "builds": [
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-13T10:47:29.298Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260906174946"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-13T10:47:29.426Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-13T10:47:57.478Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260906174946"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-13T10:47:57.481Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260906174946",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "eight warm VMs per worker; fresh repository download; durable snapshot then same-fleet batch; no forced cache eviction"
+    }
+  },
+  "passed": true,
+  "stage": "complete",
+  "source_id": "c5eb4f2a-738f-4e59-9d65-08c59a4af1ab",
+  "snapshot_id": "11b8b7f3-b4c0-476d-8d9d-febaef04f793",
+  "operation_id": "ffde16e9-c291-417d-b219-c86380196bc3",
+  "snapshot_retained": false,
+  "timings_ms": {
+    "fresh_create": 43.92788481712341,
+    "fresh_first_command": 158.370285987854,
+    "prepare": 10192.900805950165,
+    "source_tests": 1617.9792840480804,
+    "fresh_through_tests": 11970.321629047394,
+    "snapshot_capture": 912.1127941608429,
+    "snapshot_durability": 5634.489374876022,
+    "all_attempts_tests": 4212.468590021133
+  },
+  "attempts": [
+    {
+      "index": 0,
+      "sandbox_id": "7901e449-26a7-4374-baa8-0bc61ef792b5",
+      "first_command_ms": 1572.246659040451,
+      "tests_complete_ms": 4209.88246011734,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    },
+    {
+      "index": 1,
+      "sandbox_id": "dc89dadb-418e-4b21-94ca-cff7b7516d58",
+      "first_command_ms": 1590.645877122879,
+      "tests_complete_ms": 4212.003947019577,
+      "checked": {
+        "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+        "tests": 297,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+        "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+        "workspace_allocated_bytes": 20209664
+      }
+    }
+  ],
+  "failures": [],
+  "cleanup_errors": [],
+  "baseline": {
+    "revision": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+    "tests": 297,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8",
+    "dependencies_sha256": "c2a6b02b65affe2d9c39564284ee2fb19fd1d472bf1cc06d0ab7fd52c0db9cba",
+    "workspace_allocated_bytes": 20209664
+  },
+  "isolation": {
+    "changed_sandbox_id": "7901e449-26a7-4374-baa8-0bc61ef792b5",
+    "changed_files_sha256": "5f8942773c94ea3d6e0eab72e5eb180d467be47d59f451ed43244df5754c9005",
+    "unchanged_sibling_ids": [
+      "dc89dadb-418e-4b21-94ca-cff7b7516d58"
+    ],
+    "source_unchanged": true,
+    "snapshot_probe_id": "64d758f2-53dd-4306-8840-def17ebe7fb5",
+    "snapshot_files_sha256": "39cd36f413db1b2afec8d2e78106de3dac15b87fddc8f05143f2cc8933c180d8"
+  }
+}

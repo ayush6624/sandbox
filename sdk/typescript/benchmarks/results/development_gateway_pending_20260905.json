@@ -1,0 +1,157 @@
+{
+  "metadata": {
+    "schema_version": 2,
+    "benchmark": "snapshot-peer-transfer",
+    "workload": {
+      "counts": [
+        1,
+        8
+      ],
+      "rounds": 1,
+      "source_fillers": 39,
+      "memory_mib": 256,
+      "disk_mib": 384,
+      "small_files": 5000,
+      "sqlite_mib": 32,
+      "raw_fanout_limit": 8,
+      "modes": [
+        "gateway-pending"
+      ],
+      "source": "http://10.128.0.28:8080",
+      "target": "http://10.128.0.35:8080",
+      "gateway": "http://10.128.0.100:9090"
+    },
+    "run_id": "dev-canary-20260905-pending",
+    "started_at": "2026-09-05T18:37:29.755Z",
+    "api_version": "v1",
+    "sdk": {
+      "name": "sandbox",
+      "version": "2.9.1"
+    },
+    "release": "fb09662-dev-20260905182000",
+    "release_source": "environment",
+    "target": "http://10.128.0.100:9090",
+    "builds": [
+      {
+        "target": "http://10.128.0.28:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:37:29.756Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.35:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:37:29.815Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:37:29.826Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:37:29.832Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.28:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:37:51.740Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.35:8080",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:37:51.743Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics",
+        "captured_at": "2026-09-05T18:37:51.746Z",
+        "releases": [
+          {
+            "component": "gateway",
+            "release": "fb09662-dev-20260905182000"
+          }
+        ]
+      },
+      {
+        "target": "http://10.128.0.100:9090",
+        "endpoint": "/metrics/hosts",
+        "captured_at": "2026-09-05T18:37:51.749Z",
+        "releases": [
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "4b9f7820-b1ea-a494-e9f0-7974d744e61c"
+          },
+          {
+            "component": "worker",
+            "release": "fb09662-dev-20260905182000",
+            "host": "90723a19-8a1d-5a3a-82ee-1d99a177ee91"
+          }
+        ]
+      }
+    ],
+    "environment": {
+      "guest_image_sha256": "f128719bdcbdcb61533b9a127c4e83b73d8225e17c7b248d96c90975bdcc2fa3",
+      "runner_region": "us-central1",
+      "cache_state": "fresh-snapshot-id-cold-target-source-39-idle-fillers"
+    }
+  },
+  "passed": false,
+  "rows": [
+    {
+      "round": 1,
+      "order": 1,
+      "mode": "gateway-pending",
+      "count": 1,
+      "passed": false,
+      "items": [],
+      "cleanupErrors": [],
+      "error": "POST /v1/sandboxes/c4233d3d-78b6-438d-b761-85256e7c4ad8/snapshots failed with status 500: create snapshot: snapshot needs 1087 MiB beyond this VM's 1180 MiB limit but only 0 MiB is unreserved in the host task cgroup: refusing rather than risking an OOM of serve and every VM (see docs/cgroup-memory-model.md)"
+    }
+  ],
+  "cleanupErrors": [],
+  "error": "Error: POST /v1/sandboxes/c4233d3d-78b6-438d-b761-85256e7c4ad8/snapshots failed with status 500: create snapshot: snapshot needs 1087 MiB beyond this VM's 1180 MiB limit but only 0 MiB is unreserved in the host task cgroup: refusing rather than risking an OOM of serve and every VM (see docs/cgroup-memory-model.md)\n    at main (/home/ayush/sandbox-src/sdk/typescript/benchmarks/snapshot-peer-transfer-bench.ts:483:36)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)"
+}

@@ -26,6 +26,14 @@ zero npm dependencies, no Python, no native addons.
   throughput and create/exec/terminate churn through the v1 client.
 - **`lifecycle-bench.ts`** — measures typed create, pause, resume-to-usable, and
   terminate latencies.
+- `create-paths-bench.ts` separates default-source warm claims, disposable
+  snapshot pool misses, and concurrent forks using metrics around each phase.
+  It records command readiness and verifies cleanup. See the
+  [September 13 baseline](../../../docs/create-paths-2026-09-13.md).
+- `open-loop-bench.ts` dispatches creates on a fixed schedule, independently of
+  earlier completions, and captures command readiness, queue and pool metrics,
+  failures, and verified cleanup. See the
+  [fixed-arrival report](../../../docs/open-loop-2026-09-13.md).
 
 ## What it measures
 
@@ -149,6 +157,86 @@ file, enumerate the small files, and pass `PRAGMA integrity_check`. Counts run
 ascending in odd rounds and descending in even rounds so cache warming does not
 always benefit the largest fan-out. Use `--memory-mib`, `--disk-mib`,
 `--small-files`, and `--sqlite-mib` to scale the working set.
+
+Template-warm and working-set runs poll batch progress every 100 ms and start
+each child's probe when its result first appears. Readiness therefore includes
+polling delay, but it no longer waits for the last sibling. Working-set
+verification starts immediately after that child's readiness probe, so earlier
+children can hydrate while later children are still being created. The metadata
+records this schedule; compare older runs separately.
+
+Guest verification also returns stage times for memory progress, large-file
+hashing, small-file enumeration, and SQLite checks. The working-set report
+retains these under each item's `verification.verificationMs`; the surrounding
+`verificationMs` includes command startup and transport as well.
+
+Lifecycle reports keep `create` as API-return latency and add `create_ready`
+for create through a successful `echo ready`. Empty sample sets are `null`.
+Failed stages, partial samples, and cleanup errors are written before a nonzero
+exit. Template-warm runs also write a report on failure and discover resources
+by their unique run labels. Their `command_probe_ms` is the maximum individual
+probe duration, excluding cleanup. `amortized_ms_per_sandbox` replaces
+`per_sandbox_ms`: batch makespan divided by count is not an individual latency.
+
+The peer-transfer suite retains the direct-worker `gcs` and `peer` transport
+cases. To measure a public batch submitted while snapshot upload is pending,
+use the new `gateway-pending` case on a disposable fleet:
+
+```bash
+export SANDBOX_API_KEY=<worker-management-key>
+export SANDBOX_GATEWAY_API_KEY=<gateway-client-key>
+npm run bench:snapshot-peer-transfer -- \
+  --source-url http://<source-worker>:8080 \
+  --target-url http://<destination-worker>:8080 \
+  --gateway-url http://<gateway>:9090 \
+  --modes gateway-pending --counts 8 --rounds 2 \
+  --output benchmarks/results/gateway-pending.json
+```
+
+Arrange capacity so the gateway places the whole batch on the destination. The runner
+does not drain hosts or change placement configuration. Each case uses a fresh
+snapshot ID, keeps the source sandbox alive through the measured work, and
+waits for gateway discovery of the source sandbox before capturing its snapshot
+through the gateway, which records snapshot ownership immediately. It
+checks `state=local` immediately before submitting the public request. It never
+injects a private peer-routing header. It then verifies every child's workload
+through the gateway, checks destination ownership, and requires exactly one
+peer population with positive transferred bytes and zero GCS fallback. Run on
+quiet workers because these path counters are worker-wide.
+
+On a development fleet, `--source-fillers N` holds N idle sandboxes on the
+source before running cases and removes them afterward, including on failure.
+Each filler is a cold-booted 1-vCPU, 256-MiB guest, leaving memory headroom
+for snapshot capture while occupying a placement slot.
+Choose N to leave capacity for the source workload but no snapshot clones.
+The report records N and filler memory because source occupancy changes the
+benchmark conditions. The default is zero.
+
+An already-durable snapshot, wrong destination, missing or reset counter, or
+fallback fails the case and retains its diagnostics. The pending-state read
+establishes the precondition immediately before submission; upload may finish
+while the request or workload runs. No speedup is inferred from this check
+alone. `snapshotToHydratedMs` includes capture through the last verified child;
+per-child command and hydration times start at public batch submission. Source
+preparation and cleanup are outside these timings. Gateway calls use
+`SANDBOX_GATEWAY_API_KEY`, defaulting to `SANDBOX_API_KEY` for setups sharing
+one key. Source and target calls use `SANDBOX_API_KEY`; private-proxy fleet
+workers require their worker management credential here. Direct-worker `gcs` and `peer` cases also need
+`SANDBOX_CONTROL_KEY`; `peer` needs `--peer-url`.
+
+Metadata reads the SDK version from its package manifest and generates a UUID
+when `BENCH_RUN_ID` is omitted. The release from `SANDBOX_RELEASE` or
+`BENCH_RELEASE` remains explicitly declared. The four runners above additionally
+observe `/metrics` and, for gateways, `/metrics/hosts` before and after the run.
+Unavailable build evidence is recorded without discarding exploratory results.
+Other runners do not yet collect this build evidence.
+
+For a report intended for promotion, also set `BENCH_GUEST_IMAGE_SHA256`,
+`BENCH_RUNNER_REGION`, and `BENCH_CACHE_STATE` from the actual run configuration.
+Those fields are declarations, not independently observed guest identity. Run
+`npm run bench:validate -- <report.json>` to check a passing verdict, observed
+release agreement, and required provenance. The validator does not replace the
+statistical or workload review.
 
 ## Implementation notes
 
