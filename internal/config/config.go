@@ -146,13 +146,9 @@ type Config struct {
 	// suspended time, so a resumed suspended standby is immediately eligible.
 	// 0 disables the gate.
 	PlacementDelaySec int `json:"placement_delay_sec"`
-	// UFFDRestore makes same-identity hibernation wakes restore the guest with
-	// Firecracker's userfaultfd memory backend: the guest resumes before its
-	// RAM is paged in and faults its working set from the mem file on demand,
-	// cutting wake latency (and wake I/O) roughly to the working set instead of
-	// the whole guest. Off = the eager File backend (whole-RAM fault-in before
-	// resume). Only the same-identity restore path is UFFD-backed; the
-	// clone-path wake still uses File. See docs/uffd-roadmap.md.
+	// UFFDRestore uses userfaultfd for same-identity hibernation wake and
+	// chunked cross-host adoption. Memory faults are served on demand. Disabled
+	// restores and legacy diff adoption records use the File backend.
 	UFFDRestore bool `json:"uffd_restore"`
 	// UFFDChunkKiB selects the UFFD page source when UFFDRestore is on: 0 (default)
 	// serves faults from a whole-file mmap of the mem image; >0 reads the mem file
@@ -161,21 +157,22 @@ type Config struct {
 	// (GCS) memory source will reuse for cross-host wake (roadmap Phase B). Rounded
 	// down to a 4 KiB multiple, floored at one page. Typical: 1024 or 2048.
 	UFFDChunkKiB int `json:"uffd_chunk_kib"`
-	// UFFDChunkGCS turns the chunk source into a GCS-backed remote memory source
-	// (roadmap Phase B2), requires a snapshot bucket and UFFDRestore. When on: a
-	// FULL hibernation freeze uploads its mem image as content-addressed,
-	// gzip-compressed chunks + a manifest to the bucket (dedup: unchanged chunks
-	// are skipped), and a same-identity wake faults pages lazily from a local
-	// chunk cache → GCS instead of the local mem file — so wake I/O tracks the
-	// working set, not the whole guest, and works even off the creating host. Off
-	// = local mem file (whole-file or local-chunk per UFFDChunkKiB). Diff freezes
-	// are not chunk-uploaded (they hold only dirty pages); those wake locally.
+	// UFFDChunkGCS publishes durable hibernations to the snapshot bucket as
+	// content-addressed compressed memory chunks. Diff freezes are normalized
+	// against their local base before publication. Same-identity UFFD wakes
+	// prefer these chunks when the current generation's manifest is available.
 	UFFDChunkGCS bool `json:"uffd_chunk_gcs"`
 	// UFFDChunkPrefetch is the chunk-level fault-ahead window for the GCS source:
 	// on a fault it kicks off background fetches of the next N chunks to hide the
 	// per-chunk RTT behind sequential access. 0 = default (4). Ignored unless
 	// UFFDChunkGCS is on.
 	UFFDChunkPrefetch int `json:"uffd_chunk_prefetch"`
+	// UFFDChunkCacheMIB caps disk cache payload plus temporary/reserved bytes.
+	// Zero selects 4096 MiB; -1 disables disk caching.
+	UFFDChunkCacheMIB int64 `json:"uffd_chunk_cache_mib"`
+	// OwnedHandoffStorage requires reader support on every receiving worker.
+	// It isolates new handoff payloads; automatic collection remains disabled.
+	OwnedHandoffStorage bool `json:"owned_handoff_storage"`
 	// MemBudgetMIB caps the SUM of committed guest memory (each running
 	// sandbox's effective mem_mib + per-VM firecracker overhead) so mem_mib
 	// overrides can't oversubscribe the host past its cgroup/RAM — admission
@@ -371,6 +368,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	c.Defaults()
+	if c.OwnedHandoffStorage && (!c.UFFDChunkGCS || c.SnapshotBucket == "") {
+		return nil, fmt.Errorf("decode %s: owned_handoff_storage requires uffd_chunk_gcs and snapshot_bucket", path)
+	}
+	if c.UFFDChunkCacheMIB > (1<<63-1)>>20 || c.UFFDChunkCacheMIB < -1 {
+		return nil, fmt.Errorf("decode %s: uffd_chunk_cache_mib must be -1, 0, or a positive MiB count that fits int64 bytes", path)
+	}
 	if c.PlacementDelaySec < 0 {
 		return nil, fmt.Errorf("decode %s: placement_delay_sec must be >= 0", path)
 	}
