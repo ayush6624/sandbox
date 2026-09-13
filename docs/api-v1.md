@@ -29,10 +29,22 @@ log correlation or allow the server to generate one.
 Every public mutation requires `Idempotency-Key`. A key is scoped to the HTTP
 method and resource path. Repeating an identical request replays the original
 status, headers, and body and adds `Idempotency-Replayed: true`. Reusing a key
-with another body returns `409 idempotency_key_reused`. Completed entries are
-kept for up to 24 hours in the serving process; a gateway restart currently
-clears them, so durable cross-restart replay remains an operational-readiness
-follow-up.
+with another body returns `409 idempotency_key_reused`.
+
+Single sandbox creates and sandbox batches persist their request identity and
+results across gateway or worker process restart with the database intact.
+Their replay records are retained indefinitely for now. Other mutations retain
+the process-local cache for up to 24 hours. Create replay returns the historical
+result even after the sandbox is deleted; it never creates a replacement.
+See [create operation recovery](create-operation-recovery.md) for assignment,
+failure, and storage boundaries.
+
+New durable creates retain the original `X-Request-Id` with acceptance. Their
+error bodies and replay responses carry that original identifier; batch item
+errors also retain it when read through a later operation poll. The poll itself
+has its own HTTP request ID. Gateway logs connect the accepted request ID to the
+operation ID. Historical operations accepted before this field was recorded can
+still have an empty identifier; their stored responses are not rewritten.
 
 Errors use RFC 9457 `application/problem+json`. The standard members are
 extended with a stable `code`, the response `request_id`, and optional field
@@ -42,9 +54,18 @@ Collection methods return resource-shaped envelopes such as
 `{"sandboxes":[...],"next_page_token":"..."}`. `page_token` is opaque and must
 be returned unchanged. The default page size is 50 and the maximum is 100.
 
+Operation pages return newest creations first, with operation ID breaking equal
+timestamps. Their continuation token anchors to the last returned operation, so
+newer creates between requests do not repeat items on later pages. Each page is
+a fresh read; operation status can change between requests. Existing numeric
+operation tokens remain accepted, and new responses return the current opaque
+token format. Listing decodes only the requested operations.
+
 ## Creation sources
 
-`POST /v1/sandboxes` is the only single-sandbox creation method:
+`POST /v1/sandboxes` waits for a single-sandbox create result.
+`POST /v1/sandbox-creations` accepts the same request body and returns a durable
+operation handle with HTTP 202. Both methods use the same creation sources:
 
 ```json
 {
@@ -61,6 +82,12 @@ with a snapshot ID. Runtime placement, process IDs, tap devices, guest
 addresses, socket paths, rootfs paths, and artifact paths are deliberately not
 part of public objects.
 
+A missing or deleted snapshot/template source returns `404 source_not_found`.
+Batch creates retain that error for each failed item. Repeating the create with
+the same idempotency key replays the recorded failure. Storage corruption and
+an unavailable peer whose snapshot is not yet durable remain server failures;
+they do not establish that the source is absent.
+
 ## Lifecycle
 
 - `POST /v1/sandboxes/{id}:pause` preserves the sandbox identity while
@@ -72,14 +99,30 @@ part of public objects.
 Snapshot creation is `POST /v1/sandboxes/{id}/snapshots`. A snapshot can be
 used by many independent creates while its source sandbox continues running.
 
+The snapshot's `state` is `local` until its object-store metadata commits, then
+`durable`. When object storage is configured, the capturing worker commits an
+upload job with the snapshot row and resumes it after a restart with its disk
+intact. The optional `upload` object exposes `state`, `attempts`,
+`next_attempt_at`, and `error`. Upload states are `pending`, `uploading`,
+`retrying`, and `failed`; successful completion removes the upload object.
+Transient storage failures retry automatically. Missing local artifacts fail
+with an inspectable error. Copies fetched from another worker do not acquire
+that worker's upload job.
+
+TypeScript clients can call `client.snapshots.waitForDurable(id, options)`.
+Timeout and cancellation stop the wait while the background upload continues.
+See [snapshot recovery](snapshot-upload-recovery.md) for the persistence and
+deletion boundaries.
+
 ## Batch creation
 
 `POST /v1/sandbox-batches` accepts `count`, a normal sandbox creation payload,
 and `max_parallelism`. It returns `202 Accepted` plus a location under
 `/v1/operations/{id}`. A completed operation always has one result for every
 requested index, including structured problem details for failures. Operations
-are retained in the serving process for up to 24 hours. Operation persistence
-across a gateway restart belongs with the transactional storage work in P3.
+and their original acceptance responses persist in SQLite. After restart,
+unfinished members retry their recorded worker database; they are not placed
+elsewhere when a previous response is unknown.
 
 ## Billable usage
 

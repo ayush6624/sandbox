@@ -20,6 +20,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/sandbox-creations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Accept one durable sandbox create and return its original operation receipt. Read the operation to obtain current progress and the terminal result. Replays retain the original 202 receipt after completion. Idempotency is scoped to this endpoint; reusing a key on a different create endpoint represents a different operation. Clients must recover through this same endpoint and key, never fall back to another create endpoint after an error. */
+        post: operations["createSandboxAsync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sandboxes/{sandbox_id}": {
         parameters: {
             query?: never;
@@ -342,17 +359,23 @@ export interface components {
         };
         Lifecycle: {
             ttl_seconds?: number;
+            /** @description Seconds of inactivity before automatic hibernation. -1 disables it; 0 uses the host default. */
             idle_timeout_seconds?: number;
         };
         Resources: {
             vcpu: number;
             memory_mib: number;
         };
+        /** @description Independent resource overrides for a default-source create. Missing or zero values use the selected worker's template defaults. A positive override forces a cold create. Empty or all-zero overrides preserve warm eligibility. Snapshot sources retain their captured resources and reject positive overrides. */
+        ResourceOverrides: {
+            vcpu?: number;
+            memory_mib?: number & (0 | unknown);
+        };
         CreateSandboxRequest: {
             name?: string;
             source?: components["schemas"]["Source"];
             lifecycle?: components["schemas"]["Lifecycle"];
-            resources?: components["schemas"]["Resources"];
+            resources?: components["schemas"]["ResourceOverrides"];
             metadata?: {
                 [key: string]: string;
             };
@@ -386,10 +409,19 @@ export interface components {
             source_sandbox_id: string;
             /** @enum {string} */
             state: "local" | "durable";
+            upload?: components["schemas"]["SnapshotUpload"];
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             expires_at?: string;
+        };
+        SnapshotUpload: {
+            /** @enum {string} */
+            state: "pending" | "uploading" | "retrying" | "failed";
+            attempts: number;
+            /** Format: date-time */
+            next_attempt_at?: string;
+            error?: string;
         };
         Template: {
             id: string;
@@ -425,15 +457,60 @@ export interface components {
             /** @constant */
             status: "active";
         };
+        /** @description Coordinator dispatch state, independent of the last worker observation. */
+        CreateCoordination: {
+            /** @enum {string} */
+            phase: "queued" | "placing" | "assigned" | "retrying" | "completed";
+            /**
+             * Format: date-time
+             * @description When this phase began. Absent for operations recorded before dispatch observations were supported.
+             */
+            updated_at?: string;
+        };
+        CreateStageMark: {
+            /** @description Observed worker stage. Known values are worker_admission, source_preparation, sandbox_preparation, vm_start, guest_network, guest_agent, guest_identity, and ready. A last-completed mark can also be allocated. Clients must preserve unknown values. Stages have no universal ordering, and a warm claim can skip startup stages. */
+            stage: string;
+            /** Format: int64 */
+            attempt: number;
+            /** Format: date-time */
+            started_at: string;
+            /** Format: date-time */
+            completed_at?: string;
+        };
+        CreateCompletedStageMark: components["schemas"]["CreateStageMark"] & {
+            /** Format: date-time */
+            completed_at: string;
+        };
+        /** @description Last durably delivered worker observation. It may lag execution. A succeeded observation does not complete the operation until the coordinator records the result after checking current routability. Timestamps describe events; sequence orders observations even when a clock changes. */
+        CreateWorkerProgress: {
+            /** Format: int64 */
+            attempt: number;
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            condition: "active" | "tearing_down" | "succeeded" | "failed";
+            current: components["schemas"]["CreateStageMark"];
+            last_completed?: components["schemas"]["CreateCompletedStageMark"];
+            /** Format: date-time */
+            observed_at: string;
+        };
+        CreateProgress: {
+            coordination: components["schemas"]["CreateCoordination"];
+            /** @description Absent until a worker stage observation has been delivered. Legacy workers do not deliver stages. */
+            worker?: components["schemas"]["CreateWorkerProgress"];
+        };
         BatchItem: {
             index: number;
             sandbox?: components["schemas"]["Sandbox"];
             error?: components["schemas"]["Problem"];
+            progress?: components["schemas"]["CreateProgress"];
         };
         Operation: {
             id: string;
-            /** @constant */
-            type: "sandbox_batch_create";
+            /** @enum {string} */
+            type: "sandbox_create" | "sandbox_batch_create";
+            /** @description Request ID retained when this operation was accepted. */
+            request_id?: string;
             /** @enum {string} */
             status: "pending" | "running" | "succeeded" | "partially_succeeded" | "failed";
             requested: number;
@@ -690,6 +767,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Sandbox"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    createSandboxAsync: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSandboxRequest"];
+            };
+        };
+        responses: {
+            /** @description Single create durably accepted. */
+            202: {
+                headers: {
+                    /** @description Relative operation URL for polling. */
+                    Location?: string;
+                    /** @description Original accepted request ID. */
+                    "X-Request-Id"?: string;
+                    /** @description Present as true when returning a retained receipt. */
+                    "Idempotency-Replayed"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
                 };
             };
             default: components["responses"]["Problem"];

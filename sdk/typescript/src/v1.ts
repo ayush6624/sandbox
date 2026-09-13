@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { ApiClient, CREATE_REQUEST_TIMEOUT_MS } from './client.js'
 import { Commands } from './commands.js'
+import { CreateAcceptanceError, SandboxError, TimeoutError } from './errors.js'
 import type { ProblemDetails } from './errors.js'
 import { Files } from './files.js'
 import { Pty } from './pty.js'
@@ -11,6 +12,8 @@ type ApiSandbox = components['schemas']['Sandbox']
 type ApiSnapshot = components['schemas']['Snapshot']
 type ApiTemplate = components['schemas']['Template']
 type ApiOperation = components['schemas']['Operation']
+type ApiCreateProgress = components['schemas']['CreateProgress']
+type ApiCreateStageMark = components['schemas']['CreateStageMark']
 type ApiPortForward = components['schemas']['PortForward']
 type ApiCreate = components['schemas']['CreateSandboxRequest']
 type ApiUpdate = components['schemas']['UpdateSandboxRequest']
@@ -36,12 +39,18 @@ export interface SandboxResources {
   memoryMib: number
 }
 
+type ApiResourceOverrides = components['schemas']['ResourceOverrides']
+
+export type SandboxResourceOverrides = {
+  [Key in keyof ApiResourceOverrides as Key extends 'vcpu' ? 'vcpus' : 'memoryMib']: ApiResourceOverrides[Key]
+}
+
 export interface CreateSandboxOptions {
   name?: string
   source?: SandboxSource
   ttlMs?: number
   idleTimeoutMs?: number
-  resources?: SandboxResources
+  resources?: SandboxResourceOverrides
   metadata?: Record<string, string>
   requestTimeoutMs?: number
   idempotencyKey?: string
@@ -95,8 +104,15 @@ export interface SnapshotResource {
   name?: string
   sourceSandboxId: string
   state: 'local' | 'durable'
+  /** Present only on the host that owns an unfinished original capture. */
+  upload?: SnapshotUploadResource
   createdAt: Date
   expiresAt?: Date
+}
+
+/** Progress for an original snapshot capture becoming durable. */
+export type SnapshotUploadResource = Omit<NonNullable<ApiSnapshot['upload']>, 'next_attempt_at'> & {
+  nextAttemptAt?: Date
 }
 
 export interface TemplateResource {
@@ -145,15 +161,41 @@ export interface PortForwardCreateOptions extends RequestControl {
   mode?: 'raw'
 }
 
+export interface CreateCoordination extends Omit<components['schemas']['CreateCoordination'], 'updated_at'> {
+  updatedAt?: Date
+}
+
+export interface CreateStageMark extends Omit<ApiCreateStageMark, 'started_at' | 'completed_at'> {
+  startedAt: Date
+  completedAt?: Date
+}
+
+export interface CreateCompletedStageMark extends Omit<CreateStageMark, 'completedAt'> {
+  completedAt: Date
+}
+
+export interface CreateWorkerProgress extends Omit<components['schemas']['CreateWorkerProgress'], 'current' | 'last_completed' | 'observed_at'> {
+  current: CreateStageMark
+  lastCompleted?: CreateCompletedStageMark
+  observedAt: Date
+}
+
+export interface CreateProgress extends Omit<ApiCreateProgress, 'coordination' | 'worker'> {
+  coordination: CreateCoordination
+  worker?: CreateWorkerProgress
+}
+
 export interface BatchResult<T> {
   index: number
   value?: T
   error?: ProblemDetails
+  progress?: CreateProgress
 }
 
 export interface OperationState<T> {
   id: string
-  type: 'sandbox_batch_create'
+  type: ApiOperation['type']
+  requestId?: ApiOperation['request_id']
   status: 'pending' | 'running' | 'succeeded' | 'partially_succeeded' | 'failed'
   requested: number
   succeeded: number
@@ -278,13 +320,78 @@ class V1Transport {
     this.maxRetries = options.maxRetries ?? 2
   }
 
-  async get<T>(path: string, query: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
-    const response = await this.http.request('GET', path, {
-      query,
-      signal,
-      retries: this.maxRetries,
-    })
-    return response.json() as Promise<T>
+  async get<T>(path: string, query: Record<string, string> = {}, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
+    signal?.throwIfAborted()
+    if (timeoutMs === undefined) {
+      const response = await this.http.request('GET', path, { query, signal, retries: this.maxRetries })
+      return response.json() as Promise<T>
+    }
+
+    // ApiClient bounds individual fetch attempts. This outer signal bounds the
+    // complete poll instead: retry delays and JSON body consumption included.
+    const deadline = new AbortController()
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      deadline.abort()
+    }, timeoutMs)
+    const relayAbort = () => deadline.abort(signal?.reason)
+    signal?.addEventListener('abort', relayAbort, { once: true })
+    let response: Response | undefined
+    try {
+      response = await this.http.request('GET', path, {
+        query,
+        signal: deadline.signal,
+        timeoutMs,
+        retries: this.maxRetries,
+      })
+      return await readJSONWithinDeadline<T>(response, deadline.signal)
+    } catch (error) {
+      // A response can have resolved its headers while its JSON body stalls.
+      // Cancel it explicitly so its socket/stream is not retained after the
+      // deadline aborts the enclosing poll.
+      await response?.body?.cancel().catch(() => {})
+      if (timedOut) throw new TimeoutError(`Request timed out after ${timeoutMs} ms: GET ${path}`)
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', relayAbort)
+    }
+  }
+
+  async createAsync(body: ApiCreate, control: RequestControl): Promise<ApiOperation> {
+    control.signal?.throwIfAborted()
+    const idempotencyKey = control.idempotencyKey ?? randomUUID()
+    const timeoutMs = control.timeoutMs ?? CREATE_REQUEST_TIMEOUT_MS
+    const deadline = new AbortController()
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      deadline.abort()
+    }, timeoutMs)
+    const relayAbort = () => deadline.abort(control.signal?.reason)
+    control.signal?.addEventListener('abort', relayAbort, { once: true })
+    let response: Response | undefined
+    try {
+      response = await this.http.request('POST', '/v1/sandbox-creations', {
+        json: body,
+        headers: { 'Idempotency-Key': idempotencyKey },
+        redirect: 'manual',
+        timeoutMs,
+        signal: deadline.signal,
+        retries: this.maxRetries,
+      })
+      if (response.status !== 202) throw new SandboxError(`Expected HTTP 202 acceptance, received ${response.status}`)
+      return parseCreateAcceptance(await readJSONWithinDeadline<unknown>(response, deadline.signal))
+    } catch (error) {
+      void response?.body?.cancel().catch(() => {})
+      if (error instanceof SandboxError && error.status !== undefined && error.status >= 400 && error.status < 500) throw error
+      const cause = timedOut ? new TimeoutError(`Create acceptance timed out after ${timeoutMs} ms`) : error
+      throw new CreateAcceptanceError(idempotencyKey, cause)
+    } finally {
+      clearTimeout(timer)
+      control.signal?.removeEventListener('abort', relayAbort)
+    }
   }
 
   async mutate<T>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body: unknown, control: RequestControl = {}): Promise<T> {
@@ -328,7 +435,8 @@ export class ClientSandbox {
     return this.raw.lifecycle.ttl_seconds === undefined ? undefined : this.raw.lifecycle.ttl_seconds * 1000
   }
   get idleTimeoutMs(): number | undefined {
-    return this.raw.lifecycle.idle_timeout_seconds === undefined ? undefined : this.raw.lifecycle.idle_timeout_seconds * 1000
+    const seconds = this.raw.lifecycle.idle_timeout_seconds
+    return seconds === undefined || seconds === -1 ? seconds : seconds * 1000
   }
   get createdAt(): Date { return new Date(this.raw.created_at) }
   get expiresAt(): Date | undefined { return this.raw.expires_at ? new Date(this.raw.expires_at) : undefined }
@@ -356,7 +464,7 @@ export class ClientSandbox {
     if (options.ttlMs !== undefined || options.idleTimeoutMs !== undefined) {
       body.lifecycle = {}
       if (options.ttlMs !== undefined) body.lifecycle.ttl_seconds = millisecondsToSeconds(options.ttlMs, 'ttlMs')
-      if (options.idleTimeoutMs !== undefined) body.lifecycle.idle_timeout_seconds = millisecondsToSeconds(options.idleTimeoutMs, 'idleTimeoutMs')
+      if (options.idleTimeoutMs !== undefined) body.lifecycle.idle_timeout_seconds = idleMillisecondsToSeconds(options.idleTimeoutMs)
     }
     this.raw = await this.transport.mutate<ApiSandbox>('PATCH', `/v1/sandboxes/${encodeURIComponent(this.id)}`, body, options)
     return this
@@ -456,9 +564,15 @@ export class Operation<T> {
     const timeoutMs = options.timeoutMs ?? CREATE_REQUEST_TIMEOUT_MS
     const started = Date.now()
     while (!this.done) {
-      if (Date.now() - started >= timeoutMs) throw new Error(`Operation ${this.id} did not complete within ${timeoutMs} ms`)
-      await wait(Math.min(pollIntervalMs, timeoutMs - (Date.now() - started)), options.signal)
-      await this.refresh(options.signal)
+      options.signal?.throwIfAborted()
+      const remaining = timeoutMs - (Date.now() - started)
+      if (remaining <= 0) throw new TimeoutError(`Operation ${this.id} did not complete within ${timeoutMs} ms`)
+      await wait(Math.min(pollIntervalMs, remaining), options.signal)
+      const requestTimeoutMs = timeoutMs - (Date.now() - started)
+      if (requestTimeoutMs <= 0) throw new TimeoutError(`Operation ${this.id} did not complete within ${timeoutMs} ms`)
+      this.raw = await this.transport.get<ApiOperation>(
+        `/v1/operations/${encodeURIComponent(this.id)}`, {}, options.signal, requestTimeoutMs,
+      )
     }
     return this.state
   }
@@ -531,6 +645,15 @@ export class SandboxesCollection {
     return new ClientSandbox(this.transport, raw)
   }
 
+  async createAsync(options: CreateSandboxOptions = {}): Promise<Operation<ClientSandbox>> {
+    const raw = await this.transport.createAsync(createBody(options), {
+      timeoutMs: options.requestTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS,
+      signal: options.signal,
+      idempotencyKey: options.idempotencyKey,
+    })
+    return new Operation(this.transport, raw, (sandbox) => new ClientSandbox(this.transport, sandbox))
+  }
+
   async get(id: string, signal?: AbortSignal): Promise<ClientSandbox> {
     return new ClientSandbox(this.transport, await this.transport.get<ApiSandbox>(`/v1/sandboxes/${encodeURIComponent(id)}`, {}, signal))
   }
@@ -577,6 +700,38 @@ export class SnapshotsCollection {
       )
       return { items: page.snapshots.map(snapshotFromApi), nextPageToken: page.next_page_token }
     })
+  }
+
+  /**
+   * Waits until the snapshot's artifacts are committed to durable storage.
+   * A local snapshot without upload details remains waitable: it may be a
+   * peer cache whose creator is still publishing elsewhere.
+   */
+  async waitForDurable(id: string, options: WaitOptions = {}): Promise<SnapshotResource> {
+    const pollIntervalMs = options.pollIntervalMs ?? 500
+    const timeoutMs = options.timeoutMs ?? CREATE_REQUEST_TIMEOUT_MS
+    const started = Date.now()
+    for (;;) {
+      const elapsed = Date.now() - started
+      const remaining = timeoutMs - elapsed
+      if (remaining <= 0) throw new TimeoutError(`Snapshot ${id} did not become durable within ${timeoutMs} ms`)
+      const raw = await this.transport.get<ApiSnapshot>(
+        `/v1/snapshots/${encodeURIComponent(id)}`, {}, options.signal, remaining,
+      )
+      const snapshot = snapshotFromApi(raw)
+      if (snapshot.state === 'durable') return snapshot
+      if (snapshot.upload?.state === 'failed') {
+        throw new SandboxError(
+          `Snapshot ${id} upload failed${snapshot.upload.error ? `: ${snapshot.upload.error}` : ''}`,
+          undefined,
+          { code: 'snapshot_upload_failed' },
+        )
+      }
+      const afterGet = Date.now() - started
+      const waitMs = timeoutMs - afterGet
+      if (waitMs <= 0) throw new TimeoutError(`Snapshot ${id} did not become durable within ${timeoutMs} ms`)
+      await wait(Math.min(pollIntervalMs, waitMs), options.signal)
+    }
   }
   async delete(id: string, control: RequestControl = {}): Promise<void> {
     await this.transport.mutate<void>('DELETE', `/v1/snapshots/${encodeURIComponent(id)}`, undefined, control)
@@ -659,12 +814,23 @@ function createBody(options: CreateSandboxOptions): ApiCreate {
   if (options.source !== undefined) body.source = sourceToApi(options.source)
   if (options.metadata !== undefined) body.metadata = options.metadata
   if (options.resources !== undefined) {
-    body.resources = { vcpu: options.resources.vcpus, memory_mib: options.resources.memoryMib }
+    const { vcpus, memoryMib } = options.resources
+    if (vcpus !== undefined && (!Number.isInteger(vcpus) || vcpus < 0)) {
+      throw new Error('resources.vcpus must be a non-negative finite integer')
+    }
+    if (memoryMib !== undefined && (!Number.isInteger(memoryMib) || memoryMib < 0 || (memoryMib > 0 && memoryMib < 128))) {
+      throw new Error('resources.memoryMib must be zero or a finite integer of at least 128')
+    }
+    const fromSnapshot = body.source?.type === 'snapshot' || (body.source?.type === 'template' && body.source.id !== 'default')
+    if (fromSnapshot && ((vcpus ?? 0) > 0 || (memoryMib ?? 0) > 0)) {
+      throw new Error('snapshot resources cannot be overridden')
+    }
+    body.resources = { vcpu: vcpus, memory_mib: memoryMib }
   }
   if (options.ttlMs !== undefined || options.idleTimeoutMs !== undefined) {
     body.lifecycle = {}
     if (options.ttlMs !== undefined) body.lifecycle.ttl_seconds = millisecondsToSeconds(options.ttlMs, 'ttlMs')
-    if (options.idleTimeoutMs !== undefined) body.lifecycle.idle_timeout_seconds = millisecondsToSeconds(options.idleTimeoutMs, 'idleTimeoutMs')
+    if (options.idleTimeoutMs !== undefined) body.lifecycle.idle_timeout_seconds = idleMillisecondsToSeconds(options.idleTimeoutMs)
   }
   return body
 }
@@ -677,7 +843,7 @@ function sourceToApi(source: SandboxSource): components['schemas']['Source'] {
 }
 
 function snapshotFromApi(raw: ApiSnapshot): SnapshotResource {
-  return {
+  const snapshot: SnapshotResource = {
     id: raw.id,
     ...(raw.name === undefined ? {} : { name: raw.name }),
     sourceSandboxId: raw.source_sandbox_id,
@@ -685,6 +851,15 @@ function snapshotFromApi(raw: ApiSnapshot): SnapshotResource {
     createdAt: new Date(raw.created_at),
     ...(raw.expires_at === undefined ? {} : { expiresAt: new Date(raw.expires_at) }),
   }
+  if (raw.upload !== undefined) {
+    snapshot.upload = {
+      state: raw.upload.state,
+      attempts: raw.upload.attempts,
+      ...(raw.upload.next_attempt_at === undefined ? {} : { nextAttemptAt: new Date(raw.upload.next_attempt_at) }),
+      ...(raw.upload.error === undefined ? {} : { error: raw.upload.error }),
+    }
+  }
+  return snapshot
 }
 
 function usageQuery(options: UsageQueryOptions & { pageToken?: string }): Record<string, string> {
@@ -777,10 +952,66 @@ function portForwardBody(guestPort: number, opts: PortForwardCreateOptions): unk
   return { guest_port: guestPort, host_port: opts.hostPort }
 }
 
+function stageMarkFromApi(raw: ApiCreateStageMark): CreateStageMark {
+  return {
+    stage: raw.stage,
+    attempt: raw.attempt,
+    startedAt: new Date(raw.started_at),
+    ...(raw.completed_at === undefined ? {} : { completedAt: new Date(raw.completed_at) }),
+  }
+}
+
+function createProgressFromApi(raw: ApiCreateProgress): CreateProgress {
+  return {
+    coordination: {
+      phase: raw.coordination.phase,
+      ...(raw.coordination.updated_at === undefined ? {} : { updatedAt: new Date(raw.coordination.updated_at) }),
+    },
+    ...(raw.worker === undefined ? {} : {
+      worker: {
+        attempt: raw.worker.attempt,
+        sequence: raw.worker.sequence,
+        condition: raw.worker.condition,
+        current: stageMarkFromApi(raw.worker.current),
+        ...(raw.worker.last_completed === undefined ? {} : {
+          lastCompleted: {
+            ...stageMarkFromApi(raw.worker.last_completed),
+            completedAt: new Date(raw.worker.last_completed.completed_at),
+          },
+        }),
+        observedAt: new Date(raw.worker.observed_at),
+      },
+    }),
+  }
+}
+
+function parseCreateAcceptance(value: unknown): ApiOperation {
+  if (typeof value !== 'object' || value === null ||
+    !('id' in value) || typeof value.id !== 'string' || value.id.trim() === '' ||
+    !('type' in value) || value.type !== 'sandbox_create' ||
+    !('status' in value) || value.status !== 'pending' ||
+    !('requested' in value) || value.requested !== 1 ||
+    !('succeeded' in value) || value.succeeded !== 0 ||
+    !('failed' in value) || value.failed !== 0 ||
+    !('created_at' in value) || typeof value.created_at !== 'string' || !Number.isFinite(Date.parse(value.created_at)) ||
+    ('completed_at' in value && value.completed_at !== undefined) ||
+    ('results' in value && (!Array.isArray(value.results) || value.results.length !== 0)) ||
+    ('request_id' in value && typeof value.request_id !== 'string')) {
+    throw new SandboxError('Invalid single-create operation acceptance')
+  }
+  return {
+    id: value.id, type: value.type, status: value.status,
+    requested: value.requested, succeeded: value.succeeded, failed: value.failed,
+    created_at: value.created_at,
+    ...('request_id' in value && typeof value.request_id === 'string' ? { request_id: value.request_id } : {}),
+  }
+}
+
 function operationFromApi<T>(raw: ApiOperation, mapValue: (raw: ApiSandbox) => T): OperationState<T> {
   return {
     id: raw.id,
     type: raw.type,
+    ...(raw.request_id === undefined ? {} : { requestId: raw.request_id }),
     status: raw.status,
     requested: raw.requested,
     succeeded: raw.succeeded,
@@ -789,10 +1020,16 @@ function operationFromApi<T>(raw: ApiOperation, mapValue: (raw: ApiSandbox) => T
       index: item.index,
       ...(item.sandbox === undefined ? {} : { value: mapValue(item.sandbox) }),
       ...(item.error === undefined ? {} : { error: item.error }),
+      ...(item.progress === undefined ? {} : { progress: createProgressFromApi(item.progress) }),
     })),
     createdAt: new Date(raw.created_at),
     ...(raw.completed_at === undefined ? {} : { completedAt: new Date(raw.completed_at) }),
   }
+}
+
+function idleMillisecondsToSeconds(value: number): number {
+  if (value === -1) return -1
+  return millisecondsToSeconds(value, 'idleTimeoutMs')
 }
 
 function millisecondsToSeconds(value: number, name: string): number {
@@ -820,10 +1057,50 @@ async function* paginated<T>(load: (pageToken?: string) => Promise<Page<T>>): As
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Operation wait aborted'))
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener('abort', () => {
+    const onAbort = () => {
       clearTimeout(timer)
-      reject(signal.reason ?? new Error('Operation wait aborted'))
-    }, { once: true })
+      reject(signal?.reason ?? new Error('Operation wait aborted'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
+}
+
+// Response.json() has no signal parameter. Read the stream ourselves so an
+// enclosing durable-wait deadline can also interrupt a body that stalls after
+// HTTP headers, then cancel the reader to release the underlying transport.
+async function readJSONWithinDeadline<T>(response: Response, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  const reader = response.body?.getReader()
+  if (reader === undefined) return response.json() as Promise<T>
+
+  let rejectAbort: ((reason: Error) => void) | undefined
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = reject
+  })
+  const onAbort = () => {
+    rejectAbort?.(signal.reason instanceof Error ? signal.reason : new SandboxError('Request aborted'))
+    void reader.cancel().catch(() => {})
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+
+  const decoder = new TextDecoder()
+  let text = ''
+  try {
+    for (;;) {
+      const chunk = await Promise.race([reader.read(), aborted])
+      signal.throwIfAborted()
+      if (chunk.done) break
+      text += decoder.decode(chunk.value, { stream: true })
+    }
+    text += decoder.decode()
+    return JSON.parse(text)
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    void reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
 }

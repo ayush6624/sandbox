@@ -3,13 +3,15 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { after, before, test } from 'node:test'
 
-import { NotFoundError, Sandbox, SandboxClient } from '../src/index.js'
+import { NotFoundError, Sandbox, SandboxClient, SandboxError, TimeoutError } from '../src/index.js'
 
 const API_KEY = 'v1-test-key'
 const sandboxes = new Map<string, Record<string, unknown>>()
 const mutationKeys: string[] = []
 let createAttempts = 0
 let operationPolls = 0
+let snapshotPolls = 0
+let snapshotPollResponses: Array<Record<string, unknown> | 'hang' | 'headers' | 'retry'> = []
 let server: http.Server
 let baseUrl: string
 
@@ -126,6 +128,27 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       id: 'snapshot-1', name: input.name, source_sandbox_id: snapshotMatch[1], state: 'durable',
       created_at: '2026-07-26T00:01:00Z',
     })
+    return
+  }
+
+  const snapshotPollMatch = url.pathname.match(/^\/v1\/snapshots\/([^/]+)$/)
+  if (req.method === 'GET' && snapshotPollMatch) {
+    snapshotPolls++
+    const response = snapshotPollResponses.shift() ?? {
+      id: snapshotPollMatch[1], source_sandbox_id: 'sandbox-1', state: 'durable', created_at: '2026-07-26T00:01:00Z',
+    }
+    if (response === 'hang') return
+    if (response === 'headers') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Request-Id': 'req-test' })
+      res.write('{"id":')
+      return
+    }
+    if (response === 'retry') {
+      res.setHeader('Retry-After', '1')
+      problem(res, 503, 'capacity_unavailable', 'retry later')
+      return
+    }
+    json(res, 200, response)
     return
   }
 
@@ -348,6 +371,87 @@ test('batch operations poll and retain indexed per-item errors', async () => {
   assert.equal(completed.status, 'partially_succeeded')
   assert.equal(completed.results[0]?.value?.id, 'batch-1')
   assert.equal(completed.results[1]?.error?.code, 'capacity_unavailable')
+})
+
+test('snapshot durable wait polls real HTTP status through completion', async () => {
+  snapshotPolls = 0
+  snapshotPollResponses = [
+    {
+      id: 'snapshot-wait', source_sandbox_id: 'sandbox-1', state: 'local', created_at: '2026-07-26T00:01:00Z',
+      upload: { state: 'retrying', attempts: 2, next_attempt_at: '2026-07-26T00:01:01Z' },
+    },
+    { id: 'snapshot-wait', source_sandbox_id: 'sandbox-1', state: 'durable', created_at: '2026-07-26T00:01:00Z' },
+  ]
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY, maxRetries: 0 })
+  const snapshot = await client.snapshots.waitForDurable('snapshot-wait', { pollIntervalMs: 1, timeoutMs: 1_000 })
+  assert.equal(snapshot.state, 'durable')
+  assert.equal(snapshotPolls, 2)
+})
+
+test('snapshot durable wait stops on terminal upload failure', async () => {
+  snapshotPollResponses = [{
+    id: 'snapshot-failed', source_sandbox_id: 'sandbox-1', state: 'local', created_at: '2026-07-26T00:01:00Z',
+    upload: { state: 'failed', attempts: 3, error: 'missing local artifact' },
+  }]
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY, maxRetries: 0 })
+  await assert.rejects(
+    client.snapshots.waitForDurable('snapshot-failed', { timeoutMs: 1_000 }),
+    (error: unknown) => error instanceof SandboxError && error.code === 'snapshot_upload_failed' && /missing local artifact/.test(error.message),
+  )
+})
+
+test('snapshot durable wait deadline aborts a hanging HTTP poll', async () => {
+  snapshotPollResponses = ['hang']
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY, maxRetries: 0 })
+  await assert.rejects(
+    client.snapshots.waitForDurable('snapshot-hang', { timeoutMs: 25 }),
+    (error: unknown) => error instanceof TimeoutError,
+  )
+})
+
+test('snapshot durable wait deadline aborts a JSON body that stalls after 200 headers', async () => {
+  snapshotPollResponses = ['headers']
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY, maxRetries: 0 })
+  await assert.rejects(
+    client.snapshots.waitForDurable('snapshot-header-stall', { timeoutMs: 25 }),
+    (error: unknown) => error instanceof TimeoutError,
+  )
+})
+
+test('snapshot durable wait deadline includes Retry-After backoff', async () => {
+  snapshotPollResponses = ['retry', 'retry', 'retry']
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY })
+  const started = Date.now()
+  await assert.rejects(
+    client.snapshots.waitForDurable('snapshot-retry', { timeoutMs: 25 }),
+    (error: unknown) => error instanceof TimeoutError,
+  )
+  assert.ok(Date.now() - started < 250, 'deadline must interrupt Retry-After rather than sleep one second')
+})
+
+test('snapshot durable wait forwards AbortSignal into a hanging HTTP poll', async () => {
+  snapshotPollResponses = ['hang']
+  const controller = new AbortController()
+  const reason = new Error('caller cancelled snapshot wait')
+  setTimeout(() => controller.abort(reason), 10)
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY, maxRetries: 0 })
+  await assert.rejects(
+    client.snapshots.waitForDurable('snapshot-abort', { timeoutMs: 1_000, signal: controller.signal }),
+    (error: unknown) => error === reason,
+  )
+})
+
+test('snapshot durable wait rejects an already-aborted signal without polling', async () => {
+  snapshotPolls = 0
+  const controller = new AbortController()
+  const reason = new Error('caller cancelled before snapshot wait')
+  controller.abort(reason)
+  const client = new SandboxClient({ baseUrl, apiKey: API_KEY, maxRetries: 0 })
+  await assert.rejects(
+    client.snapshots.waitForDurable('snapshot-pre-abort', { timeoutMs: 1_000, signal: controller.signal }),
+    (error: unknown) => error === reason,
+  )
+  assert.equal(snapshotPolls, 0)
 })
 
 test('static facade supports source creation and createMany migration', async () => {

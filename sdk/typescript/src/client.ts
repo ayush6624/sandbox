@@ -40,6 +40,8 @@ export interface RequestOpts {
   retries?: number
   /** Override the JSON media type (PATCH uses application/merge-patch+json). */
   jsonContentType?: string
+  /** Override fetch redirect handling for requests that must stay on one endpoint. */
+  redirect?: NonNullable<Parameters<typeof fetch>[1]>['redirect']
 }
 
 /**
@@ -147,7 +149,7 @@ export class ApiClient {
       const onAbort = () => controller.abort(opts.signal?.reason)
       opts.signal?.addEventListener('abort', onAbort, { once: true })
       try {
-        const res = await fetch(url.toString(), { method, headers, body, signal: controller.signal })
+        const res = await fetch(url.toString(), { method, headers, body, signal: controller.signal, redirect: opts.redirect })
         if (res.ok) return res
         if (attempt < retries && (res.status === 429 || res.status === 503)) {
           const delay = retryAfterMs(res.headers.get('Retry-After')) ?? Math.min(250 * 2 ** attempt, 2_000)

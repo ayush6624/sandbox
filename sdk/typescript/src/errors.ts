@@ -146,3 +146,16 @@ export class CommandExitError extends SandboxError {
     return this.result.stderr
   }
 }
+
+/** Acceptance was not confirmed. Replay the same options with this key to recover it. */
+export class CreateAcceptanceError extends SandboxError {
+  readonly idempotencyKey: string
+  override readonly cause: unknown
+
+  constructor(idempotencyKey: string, cause: unknown) {
+    super(`Create acceptance is unknown. Retry the same options with idempotency key ${idempotencyKey}.`)
+    this.name = 'CreateAcceptanceError'
+    this.idempotencyKey = idempotencyKey
+    this.cause = cause
+  }
+}

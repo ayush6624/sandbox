@@ -45,6 +45,30 @@ paths:
           description: Sandbox created and ready.
           content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}
         default: {$ref: '#/components/responses/Problem'}
+  /v1/sandbox-creations:
+    post:
+      tags: [Sandboxes, Operations]
+      operationId: createSandboxAsync
+      description: >-
+        Accept one durable sandbox create and return its original operation receipt.
+        Read the operation to obtain current progress and the terminal result.
+        Replays retain the original 202 receipt after completion. Idempotency is
+        scoped to this endpoint; reusing a key on a different create endpoint
+        represents a different operation. Clients must recover through this same
+        endpoint and key, never fall back to another create endpoint after an error.
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateSandboxRequest'}}}
+      responses:
+        '202':
+          description: Single create durably accepted.
+          headers:
+            Location: {description: Relative operation URL for polling., schema: {type: string}}
+            X-Request-Id: {description: Original accepted request ID., schema: {type: string}}
+            Idempotency-Replayed: {description: Present as true when returning a retained receipt., schema: {type: string}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Operation'}}}
+        default: {$ref: '#/components/responses/Problem'}
   /v1/sandboxes/{sandbox_id}:
     parameters: [{$ref: '#/components/parameters/SandboxId'}]
     get:
@@ -368,7 +392,7 @@ components:
       type: object
       properties:
         ttl_seconds: {type: integer, minimum: 0}
-        idle_timeout_seconds: {type: integer, minimum: 0}
+        idle_timeout_seconds: {type: integer, minimum: -1, description: "Seconds of inactivity before automatic hibernation. -1 disables it; 0 uses the host default."}
       additionalProperties: false
     Resources:
       type: object
@@ -377,13 +401,28 @@ components:
         vcpu: {type: integer, minimum: 1}
         memory_mib: {type: integer, minimum: 128}
       additionalProperties: false
+    ResourceOverrides:
+      type: object
+      description: >-
+        Independent resource overrides for a default-source create. Missing or
+        zero values use the selected worker's template defaults. A positive override
+        forces a cold create. Empty or all-zero overrides preserve warm eligibility.
+        Snapshot sources retain their captured resources and reject positive overrides.
+      properties:
+        vcpu: {type: integer, minimum: 0}
+        memory_mib:
+          type: integer
+          oneOf:
+            - {const: 0}
+            - {minimum: 128}
+      additionalProperties: false
     CreateSandboxRequest:
       type: object
       properties:
         name: {type: string, maxLength: 64}
         source: {$ref: '#/components/schemas/Source'}
         lifecycle: {$ref: '#/components/schemas/Lifecycle'}
-        resources: {$ref: '#/components/schemas/Resources'}
+        resources: {$ref: '#/components/schemas/ResourceOverrides'}
         metadata: {type: object, additionalProperties: {type: string}, maxProperties: 64}
       additionalProperties: false
     UpdateSandboxRequest:
@@ -414,8 +453,18 @@ components:
         name: {type: string}
         source_sandbox_id: {type: string}
         state: {type: string, enum: [local, durable]}
+        upload:
+          $ref: '#/components/schemas/SnapshotUpload'
         created_at: {type: string, format: date-time}
         expires_at: {type: string, format: date-time}
+    SnapshotUpload:
+      type: object
+      required: [state, attempts]
+      properties:
+        state: {type: string, enum: [pending, uploading, retrying, failed]}
+        attempts: {type: integer, minimum: 0}
+        next_attempt_at: {type: string, format: date-time}
+        error: {type: string}
     Template:
       type: object
       required: [id, revision, resources, warm_target]
@@ -451,6 +500,61 @@ components:
           type: string
           description: Fleet-wide public hostname; present when a raw TCP address is allocated.
         status: {const: active}
+    CreateCoordination:
+      type: object
+      required: [phase]
+      description: Coordinator dispatch state, independent of the last worker observation.
+      properties:
+        phase: {type: string, enum: [queued, placing, assigned, retrying, completed]}
+        updated_at:
+          type: string
+          format: date-time
+          description: When this phase began. Absent for operations recorded before dispatch observations were supported.
+    CreateStageMark:
+      type: object
+      required: [stage, attempt, started_at]
+      properties:
+        stage:
+          type: string
+          description: >-
+            Observed worker stage. Known values are worker_admission, source_preparation,
+            sandbox_preparation, vm_start, guest_network, guest_agent, guest_identity,
+            and ready. A last-completed mark can also be allocated. Clients must
+            preserve unknown values. Stages have no universal ordering, and a warm
+            claim can skip startup stages.
+        attempt: {type: integer, format: int64, minimum: 1}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+    CreateCompletedStageMark:
+      allOf:
+        - {$ref: '#/components/schemas/CreateStageMark'}
+        - type: object
+          required: [completed_at]
+          properties:
+            completed_at: {type: string, format: date-time}
+    CreateWorkerProgress:
+      type: object
+      required: [attempt, sequence, condition, current, observed_at]
+      description: >-
+        Last durably delivered worker observation. It may lag execution. A succeeded
+        observation does not complete the operation until the coordinator records
+        the result after checking current routability. Timestamps describe events;
+        sequence orders observations even when a clock changes.
+      properties:
+        attempt: {type: integer, format: int64, minimum: 1}
+        sequence: {type: integer, format: int64, minimum: 1}
+        condition: {type: string, enum: [active, tearing_down, succeeded, failed]}
+        current: {$ref: '#/components/schemas/CreateStageMark'}
+        last_completed: {$ref: '#/components/schemas/CreateCompletedStageMark'}
+        observed_at: {type: string, format: date-time}
+    CreateProgress:
+      type: object
+      required: [coordination]
+      properties:
+        coordination: {$ref: '#/components/schemas/CreateCoordination'}
+        worker:
+          $ref: '#/components/schemas/CreateWorkerProgress'
+          description: Absent until a worker stage observation has been delivered. Legacy workers do not deliver stages.
     BatchItem:
       type: object
       required: [index]
@@ -458,12 +562,14 @@ components:
         index: {type: integer}
         sandbox: {$ref: '#/components/schemas/Sandbox'}
         error: {$ref: '#/components/schemas/Problem'}
+        progress: {$ref: '#/components/schemas/CreateProgress'}
     Operation:
       type: object
       required: [id, type, status, requested, succeeded, failed, created_at]
       properties:
         id: {type: string}
-        type: {const: sandbox_batch_create}
+        type: {type: string, enum: [sandbox_create, sandbox_batch_create]}
+        request_id: {type: string, description: Request ID retained when this operation was accepted.}
         status: {type: string, enum: [pending, running, succeeded, partially_succeeded, failed]}
         requested: {type: integer}
         succeeded: {type: integer}

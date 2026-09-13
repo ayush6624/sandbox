@@ -158,6 +158,18 @@ export class Sandbox {
     return client.sandboxes.create({ ...opts, source });
   }
 
+  /** Accepts a durable single-create operation before the sandbox is ready. */
+  static async createAsync(
+    opts: CreateSandboxOptions & SandboxOpts = {},
+  ): Promise<Operation<ClientSandbox>> {
+    const client = new SandboxClient({
+      baseUrl: opts.apiUrl,
+      apiKey: opts.apiKey,
+      requestTimeoutMs: opts.requestTimeoutMs,
+    });
+    return client.sandboxes.createAsync(opts);
+  }
+
   /** Starts a typed batch-create operation through the v1 API. */
   static async createMany(
     opts: CreateManyOptions & SandboxOpts,
