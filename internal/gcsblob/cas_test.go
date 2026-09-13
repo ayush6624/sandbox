@@ -74,10 +74,23 @@ func (f *fakeGCS) handler() http.Handler {
 		}
 		name := parts[1]
 		f.mu.Lock()
+		defer f.mu.Unlock()
 		obj, ok := f.objects[name]
-		f.mu.Unlock()
 		if !ok {
 			w.WriteHeader(404)
+			return
+		}
+		if want := r.URL.Query().Get("ifGenerationMatch"); want != "" && want != strconv.FormatInt(obj.gen, 10) {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			delete(f.objects, name)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Query().Get("alt") != "media" {
+			fmt.Fprintf(w, `{"name":%q,"generation":"%d","size":"%d"}`, name, obj.gen, len(obj.data))
 			return
 		}
 		w.Header().Set("X-Goog-Generation", strconv.FormatInt(obj.gen, 10))
@@ -178,5 +191,28 @@ func TestGetBytesGenMissing(t *testing.T) {
 	}
 	if gen != 0 {
 		t.Fatalf("expected gen 0 for missing object, got %d", gen)
+	}
+}
+
+func TestGenerationResponsesMustBePositive(t *testing.T) {
+	for _, generation := range []string{"", "0", "-1", "bad", "9223372036854775808"} {
+		t.Run(generation, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Goog-Generation", generation)
+				fmt.Fprintf(w, `{"generation":%q}`, generation)
+			}))
+			defer srv.Close()
+			c := testClient(t, srv)
+			if _, _, err := c.GetBytesGen(context.Background(), "object"); err == nil {
+				t.Fatal("read accepted invalid generation")
+			}
+			resp, err := http.Get(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.parseCASResponse("object", resp); err == nil {
+				t.Fatal("write accepted invalid generation")
+			}
+		})
 	}
 }

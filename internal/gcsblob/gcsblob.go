@@ -56,7 +56,7 @@ const (
 	putAttempts = 3
 )
 
-// ErrPreconditionFailed is returned by PutBytesIfGenerationMatch when the
+// ErrPreconditionFailed is returned by a generation-conditioned mutation when the
 // object's live generation no longer matches the one the caller expected —
 // another writer got there first. It is a definitive CAS loss, NOT a transient
 // error: callers re-read and re-decide, they must not blindly retry.
@@ -85,9 +85,14 @@ type Client struct {
 
 // New returns a client for bucket. No network I/O happens until first use.
 func New(bucket string) *Client {
+	return NewWithHTTPClient(bucket, &http.Client{})
+}
+
+// NewWithHTTPClient uses the supplied HTTP client for storage and metadata requests.
+func NewWithHTTPClient(bucket string, hc *http.Client) *Client {
 	return &Client{
 		bucket:      bucket,
-		hc:          &http.Client{},
+		hc:          hc,
 		storageBase: defaultStorageBase,
 		uploadBase:  defaultUploadBase,
 	}
@@ -204,8 +209,8 @@ func (c *Client) GetBytesGen(ctx context.Context, object string) ([]byte, int64,
 		if err != nil {
 			return nil, 0, err
 		}
-		gen, _ := strconv.ParseInt(resp.Header.Get("X-Goog-Generation"), 10, 64)
-		return b, gen, nil
+		gen, err := parseGeneration(resp.Header.Get("X-Goog-Generation"))
+		return b, gen, err
 	case 404:
 		return nil, 0, ErrNotExist
 	default:
@@ -268,13 +273,20 @@ func (c *Client) parseCASResponse(object string, resp *http.Response) (int64, er
 		if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
 			return 0, fmt.Errorf("decode cas upload response for %s: %w", object, err)
 		}
-		gen, _ := strconv.ParseInt(meta.Generation, 10, 64)
-		return gen, nil
+		return parseGeneration(meta.Generation)
 	case http.StatusPreconditionFailed:
 		return 0, ErrPreconditionFailed
 	default:
 		return 0, fmt.Errorf("cas upload %s: HTTP %d", object, resp.StatusCode)
 	}
+}
+
+func parseGeneration(value string) (int64, error) {
+	gen, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || gen <= 0 {
+		return 0, fmt.Errorf("invalid GCS object generation %q", value)
+	}
+	return gen, nil
 }
 
 // GetBytes downloads object. Returns ErrNotExist for a missing object.
@@ -349,7 +361,8 @@ func (c *Client) PutSparse(ctx context.Context, object, path string) (int64, err
 	if err != nil {
 		return 0, fmt.Errorf("enumerate data ranges of %s: %w", path, err)
 	}
-	return c.putRanges(ctx, object, f, ranges)
+	payload, _, err := c.putRanges(ctx, object, f, ranges, nil)
+	return payload, err
 }
 
 // WriteSparse writes path to w using the same sparse-stream representation as
@@ -400,35 +413,49 @@ func (c *Client) PutRanges(ctx context.Context, object, path string, ranges []Ra
 		return 0, err
 	}
 	defer f.Close()
-	return c.putRanges(ctx, object, f, ranges)
+	payload, _, err := c.putRanges(ctx, object, f, ranges, nil)
+	return payload, err
 }
 
-func (c *Client) putRanges(ctx context.Context, object string, f *os.File, ranges []Range) (int64, error) {
+func (c *Client) putRanges(ctx context.Context, object string, f *os.File, ranges []Range, expected *int64) (int64, int64, error) {
 	fi, err := f.Stat()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	var payload int64
 	for _, r := range ranges {
 		payload += r.Len
 	}
 
+	var generation int64
 	err = c.retry(ctx, func() error {
 		pr, pw := io.Pipe()
+		encoded := make(chan struct{})
+		defer func() {
+			_ = pr.Close()
+			<-encoded
+		}()
 		// Encoder goroutine: frames → gzip → pipe → HTTP body.
 		go func() {
+			defer close(encoded)
 			pw.CloseWithError(encodeSparse(pw, f, fi.Size(), ranges))
 		}()
 		u := fmt.Sprintf("%s/b/%s/o?uploadType=media&name=%s",
 			c.uploadBase, url.PathEscape(c.bucket), url.QueryEscape(object))
+		if expected != nil {
+			u += "&ifGenerationMatch=" + strconv.FormatInt(*expected, 10)
+		}
 		req, err := c.newReq(ctx, "POST", u, pr)
 		if err != nil {
-			pr.Close()
 			return err
 		}
 		req.Header.Set("Content-Type", "application/octet-stream")
 		resp, err := c.hc.Do(req)
 		if err != nil {
+			return err
+		}
+		if expected != nil {
+			generation, err = c.parseCASResponse(object, resp)
 			return err
 		}
 		defer drainClose(resp)
@@ -437,7 +464,7 @@ func (c *Client) putRanges(ctx context.Context, object string, f *os.File, range
 		}
 		return nil
 	})
-	return payload, err
+	return payload, generation, err
 }
 
 // GetSparse downloads a sparse-stream object into path: the file is created if
@@ -578,6 +605,9 @@ func (c *Client) retry(ctx context.Context, op func() error) error {
 	for i := 0; i < putAttempts; i++ {
 		if err = op(); err == nil {
 			return nil
+		}
+		if errors.Is(err, ErrPreconditionFailed) {
+			return err
 		}
 		select {
 		case <-ctx.Done():
